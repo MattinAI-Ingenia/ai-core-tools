@@ -1,4 +1,5 @@
 // API Service - Think of this like your backend services!
+import { Logger } from 'oidc-client-ts';
 import { configService } from '../core/ConfigService';
 
 class ApiService {
@@ -198,8 +199,11 @@ class ApiService {
     });
   }
 
-  async resetAgentConversation(appId: number, agentId: number) {
-    return this.request(`/internal/apps/${appId}/agents/${agentId}/reset`, {
+  async resetAgentConversation(appId: number, agentId: number, conversationId?: number) {
+    const url = conversationId 
+      ? `/internal/apps/${appId}/agents/${agentId}/reset?conversation_id=${conversationId}`
+      : `/internal/apps/${appId}/agents/${agentId}/reset`;
+    return this.request(url, {
       method: 'POST',
     });
   }
@@ -854,6 +858,67 @@ class ApiService {
       : `/internal/apps/${appId}/agents/${agentId}/files/${fileId}`;
     return this.request(url, {
       method: 'DELETE',
+    });
+  }
+
+  async processAttachedVideo(
+    appId: number,
+    agentId: number,
+    fileId: string,
+    conversationId?: number | null,
+    config?: {
+      forced_language?: string;
+      chunk_min_duration?: number;
+      chunk_max_duration?: number;
+      chunk_overlap?: number;
+    }
+  ) {
+    // Process video: transcribe and create temp silo with chunks
+    Logger.info('API: Processing attached video with fileId:', fileId, 'conversationId:', conversationId, 'config:', config);
+    
+    // Build query params
+    const params = new URLSearchParams();
+    if (conversationId) params.append('conversation_id', conversationId.toString());
+    if (config?.forced_language) params.append('forced_language', config.forced_language);
+    if (config?.chunk_min_duration) params.append('chunk_min_duration', config.chunk_min_duration.toString());
+    if (config?.chunk_max_duration) params.append('chunk_max_duration', config.chunk_max_duration.toString());
+    if (config?.chunk_overlap) params.append('chunk_overlap', config.chunk_overlap.toString());
+    
+    const queryString = params.toString();
+    const url = `/internal/apps/${appId}/agents/${agentId}/files/${fileId}/process-video${queryString ? '?' + queryString : ''}`;
+    
+    return this.request(url, {
+      method: 'POST',
+    });
+  }
+
+  async addYouTubeForChat(
+    appId: number,
+    agentId: number,
+    youtubeUrl: string,
+    conversationId?: number | null,
+    config?: {
+      forced_language?: string;
+      chunk_min_duration?: number;
+      chunk_max_duration?: number;
+      chunk_overlap?: number;
+    }
+  ) {
+    // Add YouTube video: download, transcribe and create temp silo with chunks
+    Logger.info('API: Adding YouTube video for chat:', youtubeUrl, 'conversationId:', conversationId, 'config:', config);
+    const formData = new FormData();
+    formData.append('url', youtubeUrl);
+    if (conversationId) {
+      formData.append('conversation_id', conversationId.toString());
+    }
+    if (config?.forced_language) formData.append('forced_language', config.forced_language);
+    if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
+    if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
+    if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
+    
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/youtube`, {
+      method: 'POST',
+      body: formData,
     });
   }
 

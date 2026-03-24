@@ -1,8 +1,27 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { apiService } from '../../services/api';
 import MessageContent from './MessageContent';
+import VideoPlayer from './VideoPlayer';
 import SearchFilters from './SearchFilters';
 import type { SearchFilterMetadataField } from './SearchFilters';
+import Modal from '../ui/Modal';
+
+interface AIService {
+  service_id: number;
+  name: string;
+}
+
+interface VideoReference {
+  file_id: string;
+  filename: string;
+  start_time: number;
+  end_time: number;
+  start_formatted: string;
+  end_formatted: string;
+  text_preview: string;
+  video_url: string;
+  is_agent_cited?: boolean;  // True if agent explicitly cited this timestamp
+}
 
 interface Message {
   id: string;
@@ -10,6 +29,7 @@ interface Message {
   content: string;
   timestamp: Date;
   files?: string[];
+  videoReferences?: VideoReference[];
 }
 
 interface ChatInterfaceProps {
@@ -46,6 +66,20 @@ function ChatInterface({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const filterPanelId = `metadata-filters-${agentId}`;
 
+  // Media upload state
+  const [showMediaUploadModal, setShowMediaUploadModal] = useState(false);
+  const [mediaFiles, setMediaFiles] = useState<File[]>([]);
+  const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [aiServices, setAiServices] = useState<AIService[]>([]);
+  const [selectedTranscriptionServiceId, setSelectedTranscriptionServiceId] = useState<number | null>(null);
+  const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+  const [mediaConfig, setMediaConfig] = useState({
+    forced_language: '',
+    chunk_min_duration: 30,
+    chunk_max_duration: 120,
+    chunk_overlap: 5
+  });
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -53,6 +87,19 @@ function ChatInterface({
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Load AI services for transcription
+  useEffect(() => {
+    const loadAIServices = async () => {
+      try {
+        const services = await apiService.getAIServices(appId);
+        setAiServices(services || []);
+      } catch (error) {
+        console.error('Error loading AI services:', error);
+      }
+    };
+    loadAIServices();
+  }, [appId]);
 
   // Update current conversation ID when prop changes
   useEffect(() => {
@@ -173,7 +220,8 @@ function ChatInterface({
         id: (Date.now() + 1).toString(),
         type: 'agent',
         content: responseContent,
-        timestamp: new Date()
+        timestamp: new Date(),
+        videoReferences: response.video_references || undefined
       };
 
       setMessages(prev => [...prev, agentMessage]);
@@ -205,7 +253,13 @@ function ChatInterface({
 
   const handleResetConversation = async () => {
     try {
-      await apiService.resetAgentConversation(appId, agentId);
+      // Stop all video polling before reset to prevent race conditions
+      pollingIntervalsRef.current.forEach(interval => clearInterval(interval));
+      pollingIntervalsRef.current.clear();
+      setProcessingVideoFiles(new Set());
+      
+      // Pass conversation_id to properly clean up attached files for this specific conversation
+      await apiService.resetAgentConversation(appId, agentId, currentConversationId || undefined);
       setMessages([]);
       setPersistentFiles([]);
       setFilterMetadata(undefined);
@@ -234,7 +288,7 @@ function ChatInterface({
         setCurrentConversationId(targetConversationId);
         
         // Notify parent component about the new conversation
-        if (onConversationCreated) {
+        if (onConversationCreated && targetConversationId) {
           onConversationCreated(targetConversationId);
         }
         console.log(`Created conversation ${targetConversationId} for file attachment`);
@@ -271,6 +325,80 @@ function ChatInterface({
     event.target.value = '';
   };
 
+  const handleMediaUpload = async () => {
+    // Need either files or YouTube URL
+    if (mediaFiles.length === 0 && !youtubeUrl.trim()) return;
+    
+    setIsUploadingMedia(true);
+    
+    // Ensure we have a conversation
+    let targetConversationId = currentConversationId;
+    
+    if (!targetConversationId) {
+      try {
+        console.log('No conversation exists, creating one for media upload...');
+        const convResponse = await apiService.createConversation(agentId);
+        targetConversationId = convResponse.conversation_id;
+        setCurrentConversationId(targetConversationId);
+        
+        if (onConversationCreated && targetConversationId) {
+          onConversationCreated(targetConversationId);
+        }
+        console.log(`Created conversation ${targetConversationId} for media upload`);
+      } catch (convError) {
+        console.error('Error creating conversation for media upload:', convError);
+        setIsUploadingMedia(false);
+        return;
+      }
+    }
+    
+    // Upload each media file
+    for (const file of mediaFiles) {
+      try {
+        const uploadResponse = await apiService.uploadFileForChat(appId, agentId, file, targetConversationId);
+        console.log(`Uploaded media: ${file.name}`, uploadResponse);
+      } catch (error) {
+        console.error(`Error uploading media ${file.name}:`, error);
+      }
+    }
+    
+    // Add YouTube video if URL provided
+    if (youtubeUrl.trim()) {
+      try {
+        const youtubeResponse = await apiService.addYouTubeForChat(appId, agentId, youtubeUrl.trim(), targetConversationId, {
+          forced_language: mediaConfig.forced_language || undefined,
+          chunk_min_duration: mediaConfig.chunk_min_duration,
+          chunk_max_duration: mediaConfig.chunk_max_duration,
+          chunk_overlap: mediaConfig.chunk_overlap
+        });
+        console.log(`Added YouTube video: ${youtubeUrl}`, youtubeResponse);
+        
+        // Start polling for the YouTube video processing
+        if (youtubeResponse.file_id) {
+          startVideoPolling(youtubeResponse.file_id);
+        }
+      } catch (error) {
+        console.error(`Error adding YouTube video ${youtubeUrl}:`, error);
+        alert('Error adding YouTube video. Please check the URL and try again.');
+      }
+    }
+    
+    // Reload persistent files
+    try {
+      const response = await apiService.listAttachedFiles(appId, agentId, targetConversationId);
+      setPersistentFiles(response.files || []);
+    } catch (error) {
+      console.error('Error reloading persistent files:', error);
+    } finally {
+      setIsUploadingMedia(false);
+    }
+    
+    // Close modal and reset state
+    setShowMediaUploadModal(false);
+    setMediaFiles([]);
+    setYoutubeUrl('');
+  };
+
   const handleRemovePersistentFile = async (fileId: string) => {
     try {
       await apiService.removeAttachedFile(appId, agentId, fileId, currentConversationId);
@@ -281,6 +409,92 @@ function ChatInterface({
       setPersistentFiles(response.files || []);
     } catch (error) {
       console.error(`Error removing file ${fileId}:`, error);
+    }
+  };
+
+  // State for video processing
+  const [processingVideoFiles, setProcessingVideoFiles] = useState<Set<string>>(new Set());
+  const pollingIntervalsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+  // Start polling for video processing status
+  const startVideoPolling = (fileId: string) => {
+    if (pollingIntervalsRef.current.has(fileId)) return;
+    
+    const interval = setInterval(async () => {
+      try {
+        const response = await apiService.listAttachedFiles(appId, agentId, currentConversationId);
+        const files = response.files || [];
+        const file = files.find((f: { file_id: string }) => f.file_id === fileId);
+        
+        if (file) {
+          setPersistentFiles(files);
+          
+          // Stop polling when processing is complete
+          if (file.processing_status === 'ready' || file.processing_status === 'error') {
+            stopVideoPolling(fileId);
+            setProcessingVideoFiles(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(fileId);
+              return newSet;
+            });
+            console.log(`Video ${fileId} processing finished: ${file.processing_status}`);
+          }
+        }
+      } catch (err) {
+        console.error('Video polling error:', err);
+        stopVideoPolling(fileId);
+      }
+    }, 2000); // Poll every 2 seconds
+    
+    pollingIntervalsRef.current.set(fileId, interval);
+  };
+
+  const stopVideoPolling = (fileId: string) => {
+    const interval = pollingIntervalsRef.current.get(fileId);
+    if (interval) {
+      clearInterval(interval);
+      pollingIntervalsRef.current.delete(fileId);
+    }
+  };
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      pollingIntervalsRef.current.forEach(interval => clearInterval(interval));
+    };
+  }, []);
+
+  const handleProcessVideo = async (fileId: string) => {
+    try {
+      // Mark as processing
+      setProcessingVideoFiles(prev => new Set(prev).add(fileId));
+      
+      console.log(`Starting video processing: ${fileId} with config:`, mediaConfig);
+      const result = await apiService.processAttachedVideo(appId, agentId, fileId, currentConversationId, {
+        forced_language: mediaConfig.forced_language || undefined,
+        chunk_min_duration: mediaConfig.chunk_min_duration,
+        chunk_max_duration: mediaConfig.chunk_max_duration,
+        chunk_overlap: mediaConfig.chunk_overlap
+      });
+      console.log('Video processing started:', result);
+      
+      // Update file status to processing immediately
+      setPersistentFiles(prev => prev.map(f => 
+        f.file_id === fileId ? { ...f, processing_status: 'processing' } : f
+      ));
+      
+      // Start polling for completion
+      startVideoPolling(fileId);
+      
+    } catch (error) {
+      console.error(`Error starting video processing ${fileId}:`, error);
+      alert('Error processing video. Check console for details.');
+      // Remove from processing set on error
+      setProcessingVideoFiles(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(fileId);
+        return newSet;
+      });
     }
   };
 
@@ -377,7 +591,7 @@ function ChatInterface({
                 }
 
                 return (
-                  <div key={message.id} className={`flex ${alignmentClass}`}>
+                  <div key={message.id} className={`flex flex-col ${alignmentClass}`}>
                     <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${bubbleClass}`}>
                       <div className="text-sm font-medium mb-1">{senderLabel}</div>
                       <div>
@@ -392,6 +606,12 @@ function ChatInterface({
                         {message.timestamp.toLocaleTimeString()}
                       </div>
                     </div>
+                    {/* Video Player for relevant segments */}
+                    {message.videoReferences && message.videoReferences.length > 0 && (
+                      <div className="mt-2 max-w-2xl">
+                        <VideoPlayer videoReferences={message.videoReferences} />
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -413,7 +633,7 @@ function ChatInterface({
         {/* Input Area */}
         <div className="p-4 border-t bg-gray-50">
           {/* File Upload */}
-          <div className="mb-3">
+          <div className="mb-3 flex gap-2">
             <input
               type="file"
               multiple
@@ -428,6 +648,14 @@ function ChatInterface({
             >
               📎 Attach File
             </label>
+            
+            {/* Media Upload */}
+            <button
+              onClick={() => setShowMediaUploadModal(true)}
+              className="inline-flex items-center px-3 py-2 border border-purple-300 rounded-lg text-sm font-medium text-purple-700 bg-purple-50 hover:bg-purple-100"
+            >
+              🎥 Upload Video/Audio
+            </button>
           </div>
 
           {/* Persistent Files with Visual Feedback */}
@@ -457,7 +685,9 @@ function ChatInterface({
                         {file.file_type === 'image' && '🖼️'}
                         {file.file_type === 'text' && '📝'}
                         {file.file_type === 'document' && '📑'}
-                        {!['pdf', 'image', 'text', 'document'].includes(file.file_type) && '📁'}
+                        {file.file_type === 'video' && (file.filename?.includes('YouTube') ? '📺' : '🎥')}
+                        {file.file_type === 'audio' && '🎵'}
+                        {!['pdf', 'image', 'text', 'document', 'video', 'audio'].includes(file.file_type) && '📁'}
                       </span>
                       
                       {/* File Info */}
@@ -479,22 +709,30 @@ function ChatInterface({
                               {file.processing_status === 'error' && '✗ Error'}
                               {file.processing_status === 'uploaded' && '⏳ Uploaded'}
                               {file.processing_status === 'processing' && '⏳ Processing'}
+                              {file.processing_status === 'transcribing' && '🎙️ Transcribing'}
+                              {file.processing_status === 'indexing' && '📑 Indexing'}
+                              {file.processing_status === 'pending' && '⏳ Pending'}
+                              {file.processing_status === 'downloading' && '⬇️ Downloading'}
                             </span>
                           )}
                         </div>
                         <div className="flex items-center space-x-2 text-xs text-gray-500">
-                          {/* File Size */}
-                          {file.file_size_display && (
+                          {/* File Size - don't show 0B for YouTube videos */}
+                          {file.file_size_display && file.file_size_display !== '0B' && file.file_size_display !== '0 B' && (
                             <span>{file.file_size_display}</span>
                           )}
-                          {/* Content Extraction Status */}
+                          {/* Content Extraction Status - only show for non-video/audio files or when ready */}
                           {file.has_extractable_content !== undefined && (
                             <span className={file.has_extractable_content || file.file_type === 'image' ? 'text-green-600' : 'text-gray-400'}>
                               {file.file_type === 'image' 
                                 ? '• Vision ready' 
-                                : file.has_extractable_content 
-                                  ? '• Text extracted' 
-                                  : '• No text'}
+                                : (file.file_type === 'video' || file.file_type === 'audio')
+                                  ? file.processing_status === 'ready' 
+                                    ? '• Transcribed'
+                                    : '' // Don't show redundant status text - the badge already shows the status
+                                  : file.has_extractable_content 
+                                    ? '• Text extracted' 
+                                    : '• No text'}
                             </span>
                           )}
                         </div>
@@ -507,14 +745,38 @@ function ChatInterface({
                       </div>
                     </div>
                     
-                    {/* Remove Button */}
-                    <button
-                      onClick={() => handleRemovePersistentFile(file.file_id)}
-                      className="text-red-600 hover:text-red-800 text-sm ml-2 flex-shrink-0 p-1 rounded hover:bg-red-50"
-                      title="Remove file"
-                    >
-                      ✕
-                    </button>
+                    {/* Action Buttons */}
+                    <div className="flex items-center space-x-1 ml-2 flex-shrink-0">
+                      {/* Process Video/Audio Button - show for unprocessed media that are not downloading or already processing */}
+                      {(file.file_type === 'video' || file.file_type === 'audio') && 
+                       file.processing_status !== 'ready' && 
+                       file.processing_status !== 'downloading' &&
+                       file.processing_status !== 'processing' &&
+                       file.processing_status !== 'transcribing' &&
+                       file.processing_status !== 'indexing' && (
+                        <button
+                          onClick={() => handleProcessVideo(file.file_id)}
+                          disabled={processingVideoFiles.has(file.file_id)}
+                          className={`text-xs px-2 py-1 rounded font-medium ${
+                            processingVideoFiles.has(file.file_id)
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                          }`}
+                          title="Process media: transcribe and create searchable chunks"
+                        >
+                          {processingVideoFiles.has(file.file_id) ? '⏳ Processing...' : '🔄 Process'}
+                        </button>
+                      )}
+                      
+                      {/* Remove Button */}
+                      <button
+                        onClick={() => handleRemovePersistentFile(file.file_id)}
+                        className="text-red-600 hover:text-red-800 text-sm p-1 rounded hover:bg-red-50"
+                        title="Remove file"
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -533,7 +795,16 @@ function ChatInterface({
             />
             <button
               onClick={handleSendMessage}
-              disabled={isLoading || (!inputMessage.trim() && persistentFiles.length === 0)}
+              disabled={
+                isLoading || 
+                (!inputMessage.trim() && persistentFiles.length === 0) ||
+                persistentFiles.some(f => (f.file_type === 'video' || f.file_type === 'audio') && f.processing_status !== 'ready')
+              }
+              title={
+                persistentFiles.some(f => (f.file_type === 'video' || f.file_type === 'audio') && f.processing_status !== 'ready')
+                  ? 'Process attached media before sending'
+                  : undefined
+              }
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Send
@@ -541,6 +812,168 @@ function ChatInterface({
           </div>
         </div>
       </div>
+
+      {/* Media Upload Modal */}
+      <Modal
+        isOpen={showMediaUploadModal}
+        onClose={() => {
+          setShowMediaUploadModal(false);
+          setMediaFiles([]);
+          setYoutubeUrl('');
+        }}
+        title="Upload Video/Audio"
+      >
+        <div className="space-y-4">
+          {/* File Upload */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select Video/Audio Files
+            </label>
+            <input
+              type="file"
+              multiple
+              accept="video/*,audio/*"
+              onChange={(e) => setMediaFiles(Array.from(e.target.files || []))}
+              className="w-full"
+              disabled={!!youtubeUrl.trim()}
+            />
+            {mediaFiles.length > 0 && (
+              <p className="text-sm text-gray-600 mt-2">{mediaFiles.length} file(s) selected</p>
+            )}
+          </div>
+
+          {/* OR Separator */}
+          <div className="flex items-center gap-4">
+            <div className="flex-1 border-t border-gray-300"></div>
+            <span className="text-sm text-gray-500 font-medium">OR</span>
+            <div className="flex-1 border-t border-gray-300"></div>
+          </div>
+
+          {/* YouTube URL */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              YouTube URL
+            </label>
+            <input
+              type="url"
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=..."
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+              disabled={mediaFiles.length > 0}
+            />
+            {youtubeUrl && (
+              <p className="text-sm text-gray-500 mt-1">
+                The video will be downloaded and transcribed automatically.
+              </p>
+            )}
+          </div>
+
+          {/* Configuration */}
+          <div className="border-t pt-4">
+            <h3 className="font-medium mb-3">Processing Options (for file uploads)</h3>
+            
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Transcription Service</label>
+                {aiServices.length === 0 ? (
+                  <div className="text-sm text-yellow-600 bg-yellow-50 p-2 rounded">
+                    Note: YouTube videos use the system's default transcription service.
+                  </div>
+                ) : (
+                  <select
+                    value={selectedTranscriptionServiceId || ''}
+                    onChange={(e) => setSelectedTranscriptionServiceId(e.target.value ? parseInt(e.target.value) : null)}
+                    className="w-full px-3 py-2 border rounded-md text-sm"
+                  >
+                    <option value="">-- Select a Transcription Service --</option>
+                    {aiServices.map(service => (
+                      <option key={service.service_id} value={service.service_id}>
+                        {service.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-700 mb-1">Language (optional)</label>
+                <select
+                  value={mediaConfig.forced_language}
+                  onChange={(e) => setMediaConfig({...mediaConfig, forced_language: e.target.value})}
+                  className="w-full px-3 py-2 border rounded-md text-sm"
+                >
+                  <option value="">Auto-detect</option>
+                  <option value="es">Spanish</option>
+                  <option value="en">English</option>
+                  <option value="eu">Basque</option>
+                  <option value="fr">French</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-xs text-gray-700 mb-1">Min Chunk (s)</label>
+                  <input
+                    type="number"
+                    value={mediaConfig.chunk_min_duration}
+                    onChange={(e) => setMediaConfig({...mediaConfig, chunk_min_duration: parseInt(e.target.value)})}
+                    className="w-full px-2 py-1 border rounded text-sm"
+                    min="10"
+                    max="60"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-700 mb-1">Max Chunk (s)</label>
+                  <input
+                    type="number"
+                    value={mediaConfig.chunk_max_duration}
+                    onChange={(e) => setMediaConfig({...mediaConfig, chunk_max_duration: parseInt(e.target.value)})}
+                    className="w-full px-2 py-1 border rounded text-sm"
+                    min="60"
+                    max="300"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-700 mb-1">Overlap (s)</label>
+                  <input
+                    type="number"
+                    value={mediaConfig.chunk_overlap}
+                    onChange={(e) => setMediaConfig({...mediaConfig, chunk_overlap: parseInt(e.target.value)})}
+                    className="w-full px-2 py-1 border rounded text-sm"
+                    min="0"
+                    max="20"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <button
+              onClick={() => {
+                setShowMediaUploadModal(false);
+                setYoutubeUrl('');
+                setMediaFiles([]);
+              }}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleMediaUpload}
+              disabled={
+                (mediaFiles.length === 0 && !youtubeUrl.trim()) ||
+                isUploadingMedia
+              }
+              className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 disabled:opacity-50"
+            >
+              {isUploadingMedia ? 'Processing...' : youtubeUrl.trim() ? 'Add YouTube' : 'Upload'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

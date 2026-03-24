@@ -323,6 +323,7 @@ function AgentPlaygroundPage() {
         appId={parseInt(appId!)}
         agentId={parseInt(agentId!)}
         agentName={agent.name}
+        conversationId={currentConversationId || undefined}
         initialSystemPrompt={agent.system_prompt || ''}
         initialPromptTemplate={agent.prompt_template || ''}
         onPromptUpdate={handlePromptUpdate}
