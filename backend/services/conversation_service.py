@@ -245,6 +245,49 @@ class ConversationService:
         except Exception as e:
             logger.error(f"Error deleting chat history: {e}")
         
+        # Clean up temporary video chunks from pgvector
+        try:
+            from services.temporary_media_service import TemporaryMediaService
+            from repositories.embedding_service_repository import EmbeddingServiceRepository
+            
+            user_id = user_context.get('user_id', 'anonymous')
+            session_key = f"{conversation.agent_id}_{user_id}_{conversation_id}"
+            temp_session_id = hashlib.sha256(session_key.encode()).hexdigest()[:16]
+            
+            logger.info(f"delete_conversation - Attempting to clean up video chunks:")
+            logger.info(f"  agent_id={conversation.agent_id}, user_id={user_id}, conversation_id={conversation_id}")
+            logger.info(f"  session_key={session_key}")
+            logger.info(f"  temp_session_id={temp_session_id}")
+            logger.info(f"  full collection name: temp_session_{temp_session_id}")
+            
+            exists = TemporaryMediaService.temp_collection_exists(temp_session_id)
+            logger.info(f"  Collection exists: {exists}")
+            
+            if exists:
+                # Get embedding service - first from agent's silo, then fallback
+                embedding_service = None
+                agent = db.query(Agent).filter(Agent.agent_id == conversation.agent_id).first()
+                if agent:
+                    if agent.silo and agent.silo.embedding_service:
+                        embedding_service = agent.silo.embedding_service
+                        logger.info(f"  Using embedding service from agent's silo: {embedding_service.name}")
+                    else:
+                        # Fallback: use any available embedding service from the app
+                        app_embedding_services = EmbeddingServiceRepository.get_by_app_id(db, agent.app_id)
+                        if app_embedding_services:
+                            embedding_service = app_embedding_services[0]
+                            logger.info(f"  Using fallback embedding service: {embedding_service.name}")
+                
+                success = TemporaryMediaService.cleanup_session(temp_session_id, embedding_service)
+                if success:
+                    logger.info(f"Cleaned up video chunks for conversation {conversation_id} (temp_session_{temp_session_id})")
+                else:
+                    logger.warning(f"Failed to clean up video chunks for conversation {conversation_id}")
+            else:
+                logger.info(f"No video chunks to clean up for conversation {conversation_id} (temp_session_{temp_session_id})")
+        except Exception as e:
+            logger.error(f"Error cleaning up video chunks: {e}")
+        
         # Delete the conversation record
         db.delete(conversation)
         db.commit()

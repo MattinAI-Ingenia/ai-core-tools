@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, Form, BackgroundTasks, Query
 from typing import List, Optional
 from lks_idprovider import AuthContext
 from sqlalchemy.orm import Session
 import json
+import os
+import hashlib
 
 from services.agent_service import AgentService
 from services.mcp_server_service import MCPServerService
@@ -29,6 +31,101 @@ INTERNAL_SERVER_ERROR = "Internal server error"
 def get_agent_service() -> AgentService:
     """Dependency to get AgentService instance"""
     return AgentService()
+
+
+# ==================== VIDEO PROCESSING HELPERS ====================
+
+def generate_temp_session_id(
+    agent_id: int,
+    user_id: int,
+    conversation_id: Optional[int],
+    log_prefix: str = "video"
+) -> str:
+    """
+    Generate a deterministic temp_session_id for video chunk collection.
+    
+    Args:
+        agent_id: Agent ID
+        user_id: User ID
+        conversation_id: Conversation ID (or None)
+        log_prefix: Prefix for log messages
+        
+    Returns:
+        16-character hex string for temp_session_id
+    """
+    session_key_str = f"{agent_id}_{user_id}_{conversation_id or 'no_conv'}"
+    temp_session_id = hashlib.sha256(session_key_str.encode()).hexdigest()[:16]
+    
+    logger.info(f"{log_prefix} - Creating temp session:")
+    logger.info(f"  agent_id={agent_id}, user_id={user_id}, conversation_id={conversation_id}")
+    logger.info(f"  session_key_str={session_key_str}")
+    logger.info(f"  temp_session_id={temp_session_id}")
+    logger.info(f"  full collection name: temp_session_{temp_session_id}")
+    
+    return temp_session_id
+
+
+def get_video_processing_services(
+    db: Session,
+    app_id: int,
+    agent_id: int,
+    agent_service: AgentService
+) -> tuple:
+    """
+    Get embedding service and AI service for video processing.
+    
+    Args:
+        db: Database session
+        app_id: App ID
+        agent_id: Agent ID
+        agent_service: AgentService instance
+        
+    Returns:
+        Tuple of (embedding_service, ai_service_id)
+        
+    Raises:
+        HTTPException if services not available
+    """
+    from repositories.embedding_service_repository import EmbeddingServiceRepository
+    from repositories.ai_service_repository import AIServiceRepository
+    
+    # Get agent
+    agent = agent_service.get_agent(db, app_id, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Get embedding service - try agent's silo first, then app-level fallback
+    embedding_service = None
+    if agent.silo and agent.silo.embedding_service:
+        embedding_service = agent.silo.embedding_service
+        logger.info(f"Using embedding service from agent's silo: {embedding_service.name}")
+    else:
+        app_embedding_services = EmbeddingServiceRepository.get_by_app_id(db, app_id)
+        if app_embedding_services:
+            embedding_service = app_embedding_services[0]
+            logger.info(f"Using fallback app-level embedding service: {embedding_service.name}")
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="No embedding service available for video processing"
+            )
+    
+    # Get AI service for transcription (OpenAI with Whisper)
+    ai_service_id = None
+    ai_services = AIServiceRepository.get_by_app_id(db, app_id)
+    for service in ai_services:
+        if service.provider == 'OpenAI':
+            ai_service_id = service.service_id
+            break
+    
+    if not ai_service_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="No OpenAI AI service found for transcription"
+        )
+    
+    return embedding_service, ai_service_id
+
 
 #AGENT MANAGEMENT
 
@@ -419,7 +516,10 @@ async def chat_with_agent(
                     filename=file_data['filename'],
                     file_type=file_data['file_type'],
                     content=file_data['content'],
-                    file_path=file_data.get('file_path')
+                    file_path=file_data.get('file_path'),
+                    temp_session_id=file_data.get('temp_session_id'),
+                    temp_media_id=file_data.get('temp_media_id'),
+                    processing_status=file_data.get('processing_status')
                 )
                 all_file_references.append(file_ref)
         
@@ -452,18 +552,23 @@ async def chat_with_agent(
 async def reset_conversation(
     app_id: int,
     agent_id: int,
+    conversation_id: Optional[int] = Query(None, description="Conversation ID to reset (required to properly clean up attached files)"),
     auth_context: AuthContext = Depends(get_current_user_oauth),
     db: Session = Depends(get_db)
 ):
     """
     Internal API: Reset conversation for playground (OAuth authentication)
+    
+    Args:
+        conversation_id: Specific conversation to reset. Required to properly clean up attached files.
     """
     try:
         # Create user context for OAuth user
         user_context = {
             "user_id": int(auth_context.identity.id),
             "oauth": True,
-            "app_id": app_id
+            "app_id": app_id,
+            "conversation_id": str(conversation_id) if conversation_id else None
         }
         
         # Use unified service layer
@@ -683,4 +788,276 @@ async def remove_attached_file(
             
     except Exception as e:
         logger.error(f"Error in remove file endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to remove file") 
+        raise HTTPException(status_code=500, detail="Failed to remove file")
+
+
+@agents_router.post("/{agent_id}/youtube",
+                   summary="Add YouTube video for chat",
+                   tags=["Agents"])
+async def add_youtube_for_chat(
+    app_id: int,
+    agent_id: int,
+    background_tasks: BackgroundTasks,
+    url: str = Form(...),
+    conversation_id: Optional[int] = Form(None),
+    forced_language: Optional[str] = Form(None, description="Force transcription language (e.g., 'es', 'en', 'fr'). Leave empty for auto-detect."),
+    chunk_min_duration: Optional[int] = Form(None, description="Minimum chunk duration in seconds (default: 30)"),
+    chunk_max_duration: Optional[int] = Form(None, description="Maximum chunk duration in seconds (default: 120)"),
+    chunk_overlap: Optional[int] = Form(None, description="Overlap between chunks in seconds (default: 5)"),
+    auth_context: AuthContext = Depends(get_current_user_oauth),
+    db: Session = Depends(get_db),
+    agent_service: AgentService = Depends(get_agent_service)
+):
+    """
+    Add YouTube video for chat: download, transcribe and create temporary silo.
+    
+    The video will be:
+    1. Downloaded from YouTube
+    2. Audio extracted and normalized
+    3. Transcribed using Whisper
+    4. Chunked into segments
+    5. Indexed in temporary collection for the conversation
+    
+    When the conversation is cleared or ended, the video context will be removed.
+    
+    Configuration:
+    - forced_language: Force transcription language (e.g., 'es', 'en', 'fr'). Leave empty for auto-detect.
+    - chunk_min_duration: Minimum chunk duration in seconds (default: 30)
+    - chunk_max_duration: Maximum chunk duration in seconds (default: 120)
+    - chunk_overlap: Overlap between chunks in seconds (default: 5)
+    
+    Args:
+        url: YouTube URL (youtube.com or youtu.be)
+        conversation_id: Conversation ID to associate the video with
+    """
+    from repositories.embedding_service_repository import EmbeddingServiceRepository
+    from repositories.ai_service_repository import AIServiceRepository
+    from utils.config import get_app_config
+    from tasks.media_tasks import process_playground_youtube_task
+    import uuid
+    import re
+    
+    try:
+        # Validate YouTube URL
+        youtube_pattern = r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+'
+        if not re.match(youtube_pattern, url):
+            raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+        
+        # Create user context
+        user_id = int(auth_context.identity.id)
+        user_context = {
+            "user_id": user_id,
+            "oauth": True,
+            "app_id": app_id
+        }
+        
+        # Generate unique IDs
+        file_id = str(uuid.uuid4())
+        media_id = file_id[:8]
+        
+        # Get configuration
+        app_config = get_app_config()
+        tmp_base_folder = app_config['TMP_BASE_FOLDER']
+        
+        # Generate session ID for temp collection (based on conversation)
+        file_service = FileManagementService()
+        file_session_key = file_service._get_session_key(agent_id, user_context, str(conversation_id) if conversation_id else None)
+        temp_session_id = generate_temp_session_id(agent_id, user_id, conversation_id, "youtube")
+        
+        # Get embedding and AI services for video processing
+        embedding_service, ai_service_id = get_video_processing_services(db, app_id, agent_id, agent_service)
+        
+        # Create a file reference for the YouTube video
+        file_ref = FileReference(
+            file_id=file_id,
+            filename=f"YouTube: {url[:50]}...",
+            file_type="video",
+            content="__YOUTUBE_PENDING_PROCESSING__",
+            file_path=None,
+            file_size_bytes=0,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            processing_status="downloading"
+        )
+        
+        # Initialize session if not exists and save file reference
+        if file_session_key not in file_service._files:
+            file_service._files[file_session_key] = {}
+        file_service._files[file_session_key][file_id] = file_ref
+        
+        # Save to disk for persistence
+        await file_service._save_youtube_file_to_disk(file_session_key, file_id, file_ref, url)
+        
+        logger.info(f"Created YouTube file reference: {file_id}")
+        
+        # Schedule background task for YouTube download and processing
+        background_tasks.add_task(
+            process_playground_youtube_task,
+            youtube_url=url,
+            session_id=temp_session_id,
+            embedding_service_id=embedding_service.service_id,
+            ai_service_id=ai_service_id,
+            media_id=media_id,
+            file_id=file_id,
+            session_key=file_session_key,
+            tmp_base_folder=tmp_base_folder,
+            forced_language=forced_language,
+            chunk_min_duration=chunk_min_duration,
+            chunk_max_duration=chunk_max_duration,
+            chunk_overlap=chunk_overlap
+        )
+        
+        logger.info(f"Scheduled background YouTube processing for {file_id}")
+        
+        # Return immediately - frontend will poll for status
+        return {
+            "success": True,
+            "message": "YouTube video download and processing started",
+            "file_id": file_id,
+            "filename": file_ref.filename,
+            "file_type": "video",
+            "processing_status": "downloading",
+            "session_id": temp_session_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting YouTube processing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"YouTube processing failed: {str(e)}")
+
+
+@agents_router.post("/{agent_id}/files/{file_id}/process-video",
+                   summary="Process attached video or audio",
+                   tags=["Agents"])
+async def process_attached_video(
+    app_id: int,
+    agent_id: int,
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    conversation_id: Optional[int] = None,
+    forced_language: Optional[str] = Query(None, description="Force transcription language (e.g., 'es', 'en', 'fr'). Leave empty for auto-detect."),
+    chunk_min_duration: Optional[int] = Query(None, description="Minimum chunk duration in seconds (default: 30)"),
+    chunk_max_duration: Optional[int] = Query(None, description="Maximum chunk duration in seconds (default: 120)"),
+    chunk_overlap: Optional[int] = Query(None, description="Overlap between chunks in seconds (default: 5)"),
+    auth_context: AuthContext = Depends(get_current_user_oauth),
+    db: Session = Depends(get_db),
+    agent_service: AgentService = Depends(get_agent_service)
+):
+    """
+    Process an attached video or audio file: transcribe and create a temporary silo.
+    
+    Supported formats:
+    - Video: mp4, webm, mov, avi, mkv, m4v
+    - Audio: mp3, wav, m4a, ogg, flac, aac, wma
+    
+    This endpoint schedules background processing and returns immediately.
+    The frontend should poll the file status to know when processing is complete.
+    
+    Configuration:
+    - forced_language: Force transcription language (e.g., 'es', 'en', 'fr'). Leave empty for auto-detect.
+    - chunk_min_duration: Minimum chunk duration in seconds (default: 30)
+    - chunk_max_duration: Maximum chunk duration in seconds (default: 120)
+    - chunk_overlap: Overlap between chunks in seconds (default: 5)
+    
+    Args:
+        conversation_id: Conversation ID to associate the temp silo with
+    """
+    from repositories.embedding_service_repository import EmbeddingServiceRepository
+    from repositories.ai_service_repository import AIServiceRepository
+    from utils.config import get_app_config
+    from tasks.media_tasks import process_playground_video_task
+    
+    try:
+        # Create user context
+        user_id = int(auth_context.identity.id)
+        user_context = {
+            "user_id": user_id,
+            "oauth": True,
+            "app_id": app_id
+        }
+        
+        # Get the file reference
+        file_service = FileManagementService()
+        file_ref = await file_service.get_file(
+            file_id=file_id,
+            agent_id=agent_id,
+            user_context=user_context,
+            conversation_id=str(conversation_id) if conversation_id else None
+        )
+        
+        if not file_ref:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Verify it's a video or audio file (both support transcription)
+        if file_ref.file_type not in ('video', 'audio'):
+            raise HTTPException(status_code=400, detail="File is not a video or audio file")
+        
+        # Get video path - try content first (for __VIDEO_PENDING_PROCESSING__:path format)
+        # or construct from file_path relative to TMP_BASE_FOLDER
+        video_path = None
+        app_config = get_app_config()
+        tmp_base_folder = app_config['TMP_BASE_FOLDER']
+        
+        if file_ref.content and file_ref.content.startswith("__VIDEO_PENDING_PROCESSING__:"):
+            # Extract absolute path from content
+            video_path = file_ref.content.replace("__VIDEO_PENDING_PROCESSING__:", "")
+        elif file_ref.file_path:
+            # Construct absolute path from relative path
+            video_path = os.path.join(tmp_base_folder, file_ref.file_path)
+        
+        logger.info(f"Video path resolved: {video_path}")
+        
+        if not video_path or not os.path.exists(video_path):
+            raise HTTPException(status_code=400, detail=f"Video file not accessible: {video_path}")
+        
+        # Generate session ID for temp collection (based on conversation)
+        file_session_key = file_service._get_session_key(agent_id, user_context, str(conversation_id) if conversation_id else None)
+        temp_session_id = generate_temp_session_id(agent_id, user_id, conversation_id, "process-video")
+        
+        # Get embedding and AI services for video processing
+        embedding_service, ai_service_id = get_video_processing_services(db, app_id, agent_id, agent_service)
+        
+        media_id = file_id[:8]  # Use first 8 chars of file_id
+        
+        # Update status to 'processing' immediately
+        await file_service.update_file_metadata(
+            agent_id=agent_id,
+            file_id=file_id,
+            user_context=user_context,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            updates={'processing_status': 'processing'}
+        )
+        logger.info(f"Set file {file_id} status to 'processing'")
+        
+        # Schedule background task for video processing
+        background_tasks.add_task(
+            process_playground_video_task,
+            video_path=video_path,
+            session_id=temp_session_id,
+            embedding_service_id=embedding_service.service_id,
+            ai_service_id=ai_service_id,
+            filename=file_ref.filename,
+            media_id=media_id,
+            file_id=file_id,
+            session_key=file_session_key,
+            forced_language=forced_language,
+            chunk_min_duration=chunk_min_duration,
+            chunk_max_duration=chunk_max_duration,
+            chunk_overlap=chunk_overlap
+        )
+        
+        logger.info(f"Scheduled background video processing for {file_id}")
+        
+        # Return immediately - frontend will poll for status
+        return {
+            "success": True,
+            "message": "Video processing started",
+            "status": "processing",
+            "session_id": temp_session_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting video processing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Video processing failed: {str(e)}")

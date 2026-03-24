@@ -44,3 +44,26 @@ def verify_signature(path: str, username: str, signature: str) -> bool:
         
     expected_signature = generate_signature(path, username)
     return hmac.compare_digest(expected_signature, signature)
+
+
+def generate_signed_url(file_path: str, username: str, base_url: str = None) -> str:
+    """
+    Generate a signed URL for accessing a static file.
+    
+    Args:
+        file_path: Relative path to the file within TMP_BASE_FOLDER
+        username: Username for signature generation
+        base_url: Optional base URL (defaults to empty for relative URLs)
+        
+    Returns:
+        Signed URL string
+    """
+    # Normalize path
+    file_path = file_path.replace('\\', '/')
+    if file_path.startswith('/'):
+        file_path = file_path[1:]
+    
+    signature = generate_signature(file_path, username)
+    
+    base = base_url or ''
+    return f"{base}/static/{file_path}?user={username}&sig={signature}"

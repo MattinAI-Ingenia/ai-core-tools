@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -136,8 +137,20 @@ async def get_static_file(file_path: str, user: str = None, sig: str = None):
 
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="File not found")
-        
-    return FileResponse(full_path)
+    
+    # Determine media type for video files to ensure proper streaming
+    import mimetypes
+    media_type, _ = mimetypes.guess_type(full_path)
+    
+    # Return with appropriate media type and support for range requests (video seeking)
+    return FileResponse(
+        full_path, 
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
 
 
 # ==================== CORS MIDDLEWARE ====================

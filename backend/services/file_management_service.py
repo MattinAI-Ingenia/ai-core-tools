@@ -2,6 +2,7 @@ import os
 import uuid
 import tempfile
 import logging
+import hashlib
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from fastapi import UploadFile, HTTPException
@@ -41,7 +42,10 @@ class FileReference:
         content: str, 
         file_path: str = None,
         file_size_bytes: int = None,
-        conversation_id: str = None
+        conversation_id: str = None,
+        temp_session_id: str = None,
+        temp_media_id: str = None,
+        processing_status: str = None  # Override calculated status when loading from disk
     ):
         self.file_id = file_id
         self.filename = filename
@@ -52,11 +56,16 @@ class FileReference:
         self.conversation_id = conversation_id
         self.uploaded_at = datetime.utcnow()
         
+        # Temporary video processing tracking
+        self.temp_session_id = temp_session_id  # Session ID for temp vector collection
+        self.temp_media_id = temp_media_id  # Media ID for chunks in temp collection
+        
         # Determine MIME type
         self.mime_type = self._get_mime_type()
         
         # Calculate processing status and content info
-        self.processing_status = self._get_processing_status()
+        # Use provided processing_status if given (when loading from disk), otherwise calculate
+        self.processing_status = processing_status if processing_status else self._get_processing_status()
         self.has_extractable_content = self._has_extractable_content()
         self.content_preview = self._get_content_preview()
     
@@ -73,6 +82,17 @@ class FileReference:
             return "error"
         if self.content.startswith("Error"):
             return "error"
+        # Video/audio files have special processing states
+        if self.file_type in ("video", "audio"):
+            if self.content.startswith("__YOUTUBE_PENDING_PROCESSING__"):
+                return "downloading"  # YouTube video being downloaded
+            if self.content.startswith("__VIDEO_PENDING_PROCESSING__:"):
+                return "pending"  # Uploaded, waiting for transcription
+            if self.content.startswith("__VIDEO_PROCESSING__:"):
+                return "processing"  # Transcription in progress
+            if self.content.startswith("__VIDEO_READY__:"):
+                return "ready"  # Transcription complete
+            return "ready"  # Legacy content or already processed
         # Images are always "ready" - they're sent directly to vision models
         # No text extraction needed for images
         if self.file_type == "image":
@@ -86,18 +106,42 @@ class FileReference:
         """Check if meaningful content was extracted"""
         if not self.content:
             return False
+        # Video/audio files - check processing state
+        if self.file_type in ("video", "audio"):
+            # Only ready videos/audios have extractable content
+            return self.content.startswith("__VIDEO_READY__:")
         # Check for placeholder messages
         placeholder_indicators = [
             "not implemented",
             "Error processing",
             "Image file:",
             "Document file:",
-            "File:"
+            "File:",
+            "__VIDEO_PENDING_PROCESSING__:",
+            "__VIDEO_PROCESSING__:",
+            "__YOUTUBE_PENDING_PROCESSING__",
+            "__YOUTUBE_PENDING__:"
         ]
         return not any(indicator in self.content for indicator in placeholder_indicators)
     
     def _get_content_preview(self, max_length: int = 200) -> Optional[str]:
         """Get preview of extracted content"""
+        # Video/audio files - only show preview when ready, not status messages
+        if self.file_type in ("video", "audio"):
+            if self.content.startswith("__YOUTUBE_PENDING_PROCESSING__"):
+                return None  # Status shown in badge, no need for redundant text
+            if self.content.startswith("__YOUTUBE_PENDING__:"):
+                return None  # Status shown in badge
+            if self.content.startswith("__VIDEO_PENDING_PROCESSING__:"):
+                return None  # Status shown in badge
+            if self.content.startswith("__VIDEO_PROCESSING__:"):
+                return None  # Status shown in badge
+            if self.content.startswith("__VIDEO_READY__:"):
+                # Extract actual transcript preview
+                transcript = self.content.replace("__VIDEO_READY__:", "", 1)
+                if len(transcript) <= max_length:
+                    return transcript
+                return transcript[:max_length] + "..."
         if not self.has_extractable_content:
             return None
         if len(self.content) <= max_length:
@@ -134,7 +178,10 @@ class FileReference:
             "content_preview": self.content_preview,
             "has_extractable_content": self.has_extractable_content,
             "mime_type": self.mime_type,
-            "conversation_id": self.conversation_id
+            "conversation_id": self.conversation_id,
+            # Temporary video processing fields
+            "temp_session_id": self.temp_session_id,
+            "temp_media_id": self.temp_media_id
         }
 
 
@@ -190,6 +237,7 @@ class FileManagementService:
             
             # Determine file type
             file_type = self._get_file_type(file.filename)
+            logger.info(f"Uploading file: {file.filename}, determined type: {file_type}")
             
             # Process file based on type (also returns file size)
             content, temp_path, file_size = await self._process_file_content(file, file_type)
@@ -214,6 +262,7 @@ class FileManagementService:
                 self._files[session_key] = {}
             
             # Save file to disk for persistence (including original file)
+            # Note: This also updates file_ref.content for videos to use persistent path
             await self._save_file_to_disk(session_key, file_id, file_ref, temp_path, conversation_id)
             
             # Store file reference in session (after file_path is set)
@@ -276,6 +325,43 @@ class FileManagementService:
         """
         return self._files.get(file_id)
     
+    async def get_file(
+        self, 
+        file_id: str, 
+        agent_id: int,
+        user_context: Dict = None,
+        conversation_id: str = None
+    ) -> Optional[FileReference]:
+        """
+        Get file reference for a specific session.
+        
+        Args:
+            file_id: File ID
+            agent_id: ID of the agent
+            user_context: User context
+            conversation_id: Optional conversation ID
+            
+        Returns:
+            FileReference or None if not found
+        """
+        try:
+            # Get session key for this agent, user, and optionally conversation
+            session_key = self._get_session_key(agent_id, user_context, conversation_id)
+            
+            # Load files for this session if not already loaded
+            if session_key not in self._files:
+                self._load_session_files(session_key)
+            
+            # Return file from this session
+            if session_key in self._files and file_id in self._files[session_key]:
+                return self._files[session_key][file_id]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting file: {str(e)}")
+            return None
+    
     async def list_attached_files(
         self, 
         agent_id: int, 
@@ -297,9 +383,9 @@ class FileManagementService:
             # Get session key for this agent, user, and optionally conversation
             session_key = self._get_session_key(agent_id, user_context, conversation_id)
             
-            # Load files for this session if not already loaded
-            if session_key not in self._files:
-                self._load_session_files(session_key)
+            # Always reload from disk to get latest status updates from background tasks
+            # (background tasks run in separate instances and update disk directly)
+            self._load_session_files(session_key)
             
             # Return files for this session
             if session_key in self._files:
@@ -343,6 +429,23 @@ class FileManagementService:
                 self._load_session_files(session_key)
             
             if session_key in self._files and file_id in self._files[session_key]:
+                file_ref = self._files[session_key][file_id]
+                
+                # If this is a processed video/audio, clean up its chunks from temp collection
+                if file_ref.file_type in ("video", "audio") and file_ref.temp_session_id and file_ref.temp_media_id:
+                    await self._cleanup_video_chunks(file_ref.temp_session_id, file_ref.temp_media_id)
+                # If video is still processing, also try to clean up any partial chunks
+                elif file_ref.file_type in ("video", "audio") and file_ref.processing_status == 'processing':
+                    # Calculate temp_session_id the same way as during processing
+                    user_id = user_context.get('user_id', 'anonymous') if user_context else 'anonymous'
+                    conv_id = conversation_id or file_ref.conversation_id or 'no_conv'
+                    session_key_str = f"{agent_id}_{user_id}_{conv_id}"
+                    temp_session_id = hashlib.sha256(session_key_str.encode()).hexdigest()[:16]
+                    temp_media_id = file_id[:8]  # Same as used during processing
+                    
+                    logger.info(f"Video in progress, attempting cleanup: temp_session_{temp_session_id}, media_id={temp_media_id}")
+                    await self._cleanup_video_chunks(temp_session_id, temp_media_id)
+                
                 del self._files[session_key][file_id]
                 
                 # Also remove from disk
@@ -358,6 +461,131 @@ class FileManagementService:
             logger.error(f"Error removing file: {str(e)}")
             return False
     
+    async def update_file_metadata(
+        self,
+        agent_id: int,
+        file_id: str,
+        user_context: Dict = None,
+        conversation_id: str = None,
+        updates: Dict = None
+    ) -> bool:
+        """
+        Update metadata for a file reference.
+        
+        Args:
+            agent_id: ID of the agent
+            file_id: File ID to update
+            user_context: User context
+            conversation_id: Optional conversation ID
+            updates: Dictionary of fields to update
+            
+        Returns:
+            True if updated successfully
+        """
+        if not updates:
+            return True
+            
+        try:
+            session_key = self._get_session_key(agent_id, user_context, conversation_id)
+            
+            # Load files for this session if not already loaded
+            if session_key not in self._files:
+                self._load_session_files(session_key)
+            
+            if session_key not in self._files or file_id not in self._files[session_key]:
+                logger.warning(f"File {file_id} not found for update in session {session_key}")
+                return False
+            
+            file_ref = self._files[session_key][file_id]
+            
+            # Update allowed fields
+            for key, value in updates.items():
+                if hasattr(file_ref, key):
+                    setattr(file_ref, key, value)
+            
+            # Update the metadata file on disk
+            session_dir = os.path.join(self._persistent_dir, session_key)
+            metadata_file = os.path.join(session_dir, f"{file_id}.json")
+            
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'w') as f:
+                    import json
+                    json.dump(file_ref.to_dict(), f, indent=2)
+            
+            # Also update the content file if content was updated
+            if 'content' in updates:
+                content_file = os.path.join(session_dir, f"{file_id}.content")
+                with open(content_file, 'w', encoding='utf-8') as f:
+                    f.write(updates['content'])
+                logger.info(f"Updated content file for {file_id}")
+            
+            logger.info(f"Updated file {file_id} metadata: {list(updates.keys())}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating file metadata: {str(e)}")
+            return False
+
+    async def update_file_metadata_by_session_key(
+        self,
+        session_key: str,
+        file_id: str,
+        updates: Dict = None
+    ) -> bool:
+        """
+        Update metadata for a file reference using session_key directly.
+        Used by background tasks that don't have user_context.
+        
+        Args:
+            session_key: Session key (e.g., agent_1_user_1_app_1_conv_14)
+            file_id: File ID to update
+            updates: Dictionary of fields to update
+            
+        Returns:
+            True if updated successfully
+        """
+        logger.info(f"update_file_metadata_by_session_key called - session_key: {session_key}, file_id: {file_id}, updates: {updates}")
+        
+        if not updates:
+            return True
+            
+        try:
+            # Load files for this session if not already loaded
+            if session_key not in self._files:
+                logger.info(f"Session {session_key} not in memory, loading from disk...")
+                self._load_session_files(session_key)
+            
+            logger.info(f"Checking if file {file_id} exists in session. Available files: {list(self._files.get(session_key, {}).keys())}")
+            
+            if session_key not in self._files or file_id not in self._files[session_key]:
+                logger.warning(f"File {file_id} not found for update in session {session_key}")
+                return False
+            
+            file_ref = self._files[session_key][file_id]
+            
+            # Update allowed fields
+            for key, value in updates.items():
+                if hasattr(file_ref, key):
+                    setattr(file_ref, key, value)
+            
+            # Update the metadata file on disk
+            session_dir = os.path.join(self._persistent_dir, session_key)
+            metadata_file = os.path.join(session_dir, f"{file_id}.json")
+            
+            # Always write the metadata file (create if not exists)
+            os.makedirs(session_dir, exist_ok=True)
+            with open(metadata_file, 'w') as f:
+                import json
+                json.dump(file_ref.to_dict(), f, indent=2)
+            logger.info(f"Wrote metadata to disk: {metadata_file} with processing_status={file_ref.processing_status}")
+            
+            logger.info(f"Updated file {file_id} metadata by session_key: {list(updates.keys())}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating file metadata by session_key: {str(e)}")
+            return False
+
     def _get_file_type(self, filename: str) -> str:
         """Get file type from filename"""
         if not filename:
@@ -380,6 +608,14 @@ class FileManagementService:
         # Document files
         elif ext in ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']:
             return "document"
+        
+        # Video files - for transcription and temporal indexing
+        elif ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v']:
+            return "video"
+        
+        # Audio files - for transcription and temporal indexing (same processing as video)
+        elif ext in ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma']:
+            return "audio"
         
         else:
             return "unknown"
@@ -423,6 +659,12 @@ class FileManagementService:
                 elif file_type == "document":
                     # For documents, return basic info (in production, use document processing)
                     content = f"Document file: {file.filename} (Document processing not implemented)"
+                    return content, temp_path, file_size
+                
+                elif file_type in ("video", "audio"):
+                    # For video/audio files, mark for temporal processing
+                    # The actual transcription will be done asynchronously by TemporaryMediaService
+                    content = f"__VIDEO_PENDING_PROCESSING__:{temp_path}"
                     return content, temp_path, file_size
                 
                 else:
@@ -483,17 +725,22 @@ class FileManagementService:
             
             if conv_id:
                 # Conversation-specific file storage
-                return f"agent_{agent_id}_user_{user_id}_app_{app_id}_conv_{conv_id}"
+                session_key = f"agent_{agent_id}_user_{user_id}_app_{app_id}_conv_{conv_id}"
             else:
                 # Global agent session (files shared across all conversations)
-                return f"agent_{agent_id}_user_{user_id}_app_{app_id}"
+                session_key = f"agent_{agent_id}_user_{user_id}_app_{app_id}"
+            
+            logger.debug(f"_get_session_key: agent_id={agent_id}, user_id={user_id}, conv_id={conv_id} -> {session_key}")
+            return session_key
         else:
             return f"agent_{agent_id}_anonymous"
 
     async def _save_file_to_disk(self, session_key: str, file_id: str, file_ref: FileReference, original_file_path: str = None, conversation_id: Optional[int] = None):
         """Save file reference to disk for persistence"""
+        logger.info(f"_save_file_to_disk called: session_key={session_key}, file_id={file_id}")
         try:
             session_dir = os.path.join(self._persistent_dir, session_key)
+            logger.info(f"Creating session dir: {session_dir}")
             os.makedirs(session_dir, exist_ok=True)
             
             # Save original file FIRST (to set file_path before saving metadata)
@@ -521,12 +768,19 @@ class FileManagementService:
                 
                 logger.info(f"Saved original file {original_filename} to {original_file} (relative: {relative_path})")
                 logger.info(f"FileReference file_path set to: {file_ref.file_path}")
+                
+                # For video/audio files, update content to use the persistent file path
+                if file_ref.file_type in ("video", "audio"):
+                    file_ref.content = f"__VIDEO_PENDING_PROCESSING__:{original_file}"
+                    logger.info(f"Updated video/audio content to persistent path: {original_file}")
             
             # Save file metadata AFTER setting file_path
             metadata_file = os.path.join(session_dir, f"{file_id}.json")
+            logger.info(f"Saving metadata to: {metadata_file}")
             with open(metadata_file, 'w') as f:
                 import json
                 json.dump(file_ref.to_dict(), f, indent=2)
+            logger.info(f"Metadata saved successfully to {metadata_file}")
             
             # Save file content (extracted text)
             content_file = os.path.join(session_dir, f"{file_id}.content")
@@ -537,6 +791,36 @@ class FileManagementService:
             
         except Exception as e:
             logger.error(f"Error saving file to disk: {str(e)}")
+
+    async def _save_youtube_file_to_disk(self, session_key: str, file_id: str, file_ref: FileReference, youtube_url: str):
+        """Save YouTube file reference to disk for persistence (without the actual video file yet)"""
+        logger.info(f"_save_youtube_file_to_disk called: session_key={session_key}, file_id={file_id}, url={youtube_url}")
+        try:
+            session_dir = os.path.join(self._persistent_dir, session_key)
+            logger.info(f"Creating session dir: {session_dir}")
+            os.makedirs(session_dir, exist_ok=True)
+            
+            # Save file metadata with youtube URL
+            metadata = file_ref.to_dict()
+            metadata['source_type'] = 'youtube'
+            metadata['source_url'] = youtube_url
+            
+            metadata_file = os.path.join(session_dir, f"{file_id}.json")
+            logger.info(f"Saving YouTube metadata to: {metadata_file}")
+            with open(metadata_file, 'w') as f:
+                import json
+                json.dump(metadata, f, indent=2)
+            logger.info(f"YouTube metadata saved successfully to {metadata_file}")
+            
+            # Save placeholder content
+            content_file = os.path.join(session_dir, f"{file_id}.content")
+            with open(content_file, 'w', encoding='utf-8') as f:
+                f.write(f"__YOUTUBE_PENDING__:{youtube_url}")
+                
+            logger.info(f"Saved YouTube file reference {file_id} to disk: {session_dir}")
+            
+        except Exception as e:
+            logger.error(f"Error saving YouTube file to disk: {str(e)}")
 
     def _load_session_files(self, session_key: str):
         """Load existing files from disk for a specific session"""
@@ -576,10 +860,15 @@ class FileManagementService:
                                 content=content,
                                 file_path=metadata.get('file_path'),
                                 file_size_bytes=metadata.get('file_size_bytes'),
-                                conversation_id=metadata.get('conversation_id')
+                                conversation_id=metadata.get('conversation_id'),
+                                temp_session_id=metadata.get('temp_session_id'),
+                                temp_media_id=metadata.get('temp_media_id'),
+                                processing_status=metadata.get('processing_status', 'pending')
                             )
                             
-                            # If file_path is missing, try to regenerate it
+                            logger.info(f"Loaded persistent file {file_id} for session {session_key}")
+                            logger.info(f"Loaded file_path: {file_ref.file_path}")
+                            logger.info(f"Loaded processing_status: {file_ref.processing_status}")
                             if not file_ref.file_path:
                                 # Look for the original file in the session directory
                                 for filename in os.listdir(session_path):
@@ -600,8 +889,6 @@ class FileManagementService:
                                             break
                             
                             self._files[session_key][file_id] = file_ref
-                            logger.info(f"Loaded persistent file {file_id} for session {session_key}")
-                            logger.info(f"Loaded file_path: {file_ref.file_path}")
                             
                         except Exception as e:
                             logger.error(f"Error loading file {file_id}: {str(e)}")
@@ -636,6 +923,24 @@ class FileManagementService:
             
         except Exception as e:
             logger.error(f"Error removing file from disk: {str(e)}")
+
+    async def _cleanup_video_chunks(self, temp_session_id: str, temp_media_id: str):
+        """
+        Clean up video chunks from temporary vector collection.
+        
+        Args:
+            temp_session_id: Temporary session ID for the collection
+            temp_media_id: Media ID to identify chunks to delete
+        """
+        try:
+            from services.temporary_media_service import TemporaryMediaService
+            
+            # Delete only chunks for this specific media_id
+            TemporaryMediaService.delete_media_chunks(temp_session_id, temp_media_id)
+            logger.info(f"Cleaned up video chunks for media {temp_media_id} from session {temp_session_id}")
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up video chunks: {str(e)}")
 
     def get_file_stats(self) -> Dict[str, Any]:
         """Get file management statistics"""

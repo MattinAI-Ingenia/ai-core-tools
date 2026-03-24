@@ -17,11 +17,16 @@ from services.agent_cache_service import CheckpointerCacheService
 from services.memory_management_service import MemoryManagementService
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
-from langchain.callbacks.tracers import LangChainTracer
+# Use langchain_core.tracers for newer langchain versions
+try:
+    from langchain_core.tracers.langchain import LangChainTracer
+except ImportError:
+    from langchain.callbacks.tracers import LangChainTracer
 from langsmith import Client
 from langsmith.run_helpers import traceable
 import json
 import asyncio
+import os
 from utils.logger import get_logger
 from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_context
 from tools.skill_tools import create_skill_loader_tool, generate_skills_system_prompt_section
@@ -291,8 +296,11 @@ def setup_tracer(agent):
     """Setup tracer if configured."""
     tracer = None
     if agent.app.langsmith_api_key:
-        client = Client(api_key=agent.app.langsmith_api_key)
-        tracer = LangChainTracer(client=client, project_name=agent.app.name)
+        project_name = os.environ.get("LANGSMITH_PROJECT", agent.app.name)
+        api_url = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+        client = Client(api_key=agent.app.langsmith_api_key, api_url=api_url)
+        tracer = LangChainTracer(client=client, project_name=project_name)
+        logger.info(f"LangSmith tracer configured for project: {project_name} (endpoint: {api_url})")
     return tracer
 
 
