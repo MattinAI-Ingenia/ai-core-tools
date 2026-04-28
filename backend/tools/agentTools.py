@@ -110,7 +110,7 @@ class MCPClientManager:
         if self._client is not None:
             self._client = None
 
-async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None):
+async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None, temp_silo_ids: Optional[List[int]] = None):
     """Create a new agent instance with cached checkpointer if memory is enabled.
     
     Args:
@@ -118,6 +118,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         search_params: Optional search parameters for silo-based retrieval
         session_id: Optional session ID for memory-enabled agents (used to cache checkpointer)
         user_context: Optional user context containing authentication tokens for MCP
+        temp_silo_ids: Optional list of temporary silo IDs (e.g. playground media) to include as extra retrievers
     """
     llm = get_llm(agent)
     if llm is None:
@@ -245,6 +246,77 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         )
         if retriever_tool is not None:
             tools.append(retriever_tool)
+
+    # Add temp silo retrievers (e.g. playground media/file uploads)
+    has_temp_retrievers = False
+    has_media_content = False
+    has_file_content = False
+    if temp_silo_ids:
+        from repositories.silo_repository import SiloRepository
+        from models.media import Media
+        from db.database import SessionLocal
+        temp_db = SessionLocal()
+        try:
+            for idx, temp_silo_id in enumerate(temp_silo_ids):
+                temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
+                if temp_silo:
+                    temp_tool = get_retriever_tool(temp_silo, search_params)
+                    if temp_tool:
+                        temp_tool.name = f"playground_content_retriever_{idx}"
+                        temp_tool.description = (
+                            "Use this tool to search for information from content uploaded "
+                            "in this conversation (documents, PDFs, text files, video/audio "
+                            "transcriptions). Always use this when the user asks about "
+                            "attached or uploaded content."
+                        )
+                        tools.append(temp_tool)
+                        has_temp_retrievers = True
+
+                        # Check if silo contains media content (for timestamp instructions)
+                        if temp_silo.repository:
+                            repo_list = temp_silo.repository if isinstance(temp_silo.repository, list) else [temp_silo.repository]
+                            for repo in repo_list:
+                                if temp_db.query(Media).filter(Media.repository_id == repo.repository_id).first():
+                                    has_media_content = True
+                                    break
+
+                        logger.info(f"Added temp silo retriever {temp_silo_id} for agent {agent.agent_id}")
+        finally:
+            temp_db.close()
+
+        # Check if files were vectorized by looking at silo content
+        if has_temp_retrievers:
+            has_file_content = True  # files are always possible when temp retrievers exist
+
+    # Inject timestamp citation instruction when media content is in the silo
+    if has_media_content:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<media_timestamp_instructions>\n"
+            + "The user has uploaded video/audio media. When answering questions about media content, "
+            + "you MUST include timestamps from the retrieved chunks metadata.\n"
+            + "Format timestamps as [MM:SS] or [HH:MM:SS] in your response.\n"
+            + "When referencing specific moments, always include the start and end time like: "
+            + "[MM:SS - MM:SS].\n"
+            + "The retrieved chunks contain 'start_time' and 'end_time' fields in their metadata "
+            + "(in seconds). Convert them to MM:SS format.\n"
+            + "Example: If a chunk has start_time=125 and end_time=180, cite it as [02:05 - 03:00].\n"
+            + "Always cite the relevant timestamps so the user can navigate to those moments in the video.\n"
+            + "</media_timestamp_instructions>"
+        )
+
+    # Inject file retriever instruction when files have been vectorized
+    if has_file_content:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<uploaded_files_instructions>\n"
+            + "The user has uploaded documents (PDFs, text files) in this conversation. "
+            + "Their content has been indexed for semantic search.\n"
+            + "When the user asks about or references attached files, you MUST use the "
+            + "playground_content_retriever tool to search for relevant information.\n"
+            + "Always cite the source filename from the retrieved chunk metadata.\n"
+            + "</uploaded_files_instructions>"
+        )
 
     if agent.enable_code_interpreter and working_dir:
         os.makedirs(working_dir, exist_ok=True)
