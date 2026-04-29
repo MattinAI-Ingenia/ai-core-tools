@@ -115,10 +115,11 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     
     Args:
         agent: The agent to create
-        search_params: Optional search parameters for silo-based retrieval
+        search_params: Optional per-call retrieval overrides (highest priority)
         session_id: Optional session ID for memory-enabled agents (used to cache checkpointer)
         user_context: Optional user context containing authentication tokens for MCP
     """
+    retrieval_config = getattr(agent, 'retrieval_config', None)
     llm = get_llm(agent)
     if llm is None:
         raise ValueError("No LLM found for agent")
@@ -237,7 +238,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
 
     if agent.silo_id is not None:
 
-        retriever_tool = get_retriever_tool(agent.silo, search_params)
+        retriever_tool = get_retriever_tool(agent.silo, search_params, retrieval_config=retrieval_config)
         if retriever_tool is not None:
             tools.append(retriever_tool)
 
@@ -521,7 +522,8 @@ class IACTTool(BaseTool):
         
         # Add silo retriever if configured
         if agent.silo_id is not None:
-            retriever_tool = get_retriever_tool(agent.silo)
+            sub_retrieval_config = getattr(agent, 'retrieval_config', None)
+            retriever_tool = get_retriever_tool(agent.silo, retrieval_config=sub_retrieval_config)
             if retriever_tool is not None:
                 tools.append(retriever_tool)
         
@@ -664,14 +666,14 @@ def convert_search_params_to_types(search_params: dict, metadata_definition) -> 
             
     return converted_params
 
-def get_retriever_tool(silo: Silo, search_params=None):
+def get_retriever_tool(silo: Silo, search_params=None, retrieval_config: Optional[dict] = None):
     
     if silo.silo_id is not None:
         # Convert search parameters to proper types based on metadata definition
         if search_params:
             search_params = convert_search_params_to_types(search_params, silo.metadata_definition)
 
-        retriever = SiloService.get_silo_retriever(silo.silo_id, search_params)
+        retriever = SiloService.get_silo_retriever(silo.silo_id, search_params, retrieval_config=retrieval_config)
         name = "silo_retriever"
         description = "Use this tool to search for documents in the pgvector collection."
         if silo.silo_type == SiloType.REPO:
