@@ -32,6 +32,11 @@ TEMP_REPO_PREFIX = "_playground_"
 # File types that should be vectorized instead of injected into context
 VECTORIZABLE_FILE_TYPES = {"pdf", "text"}
 
+# In-process cache of file IDs already vectorized per session.
+# Key: (app_id, agent_id, session_id) -> set of file_id strings.
+# Cleared when the playground media is cleaned up.
+_indexed_file_ids_cache: Dict[tuple, Set[str]] = {}
+
 
 def _temp_repo_name(agent_id: int, session_id: str) -> str:
     return f"{TEMP_REPO_PREFIX}{agent_id}_{session_id}"
@@ -257,6 +262,10 @@ class PlaygroundMediaService:
             session_id,
         )
         RepositoryService.delete_repository(repo, db)
+
+        # Clear indexed file IDs cache for this session
+        _indexed_file_ids_cache.pop((app_id, agent_id, session_id), None)
+
         return True
 
     @staticmethod
@@ -316,6 +325,17 @@ class PlaygroundMediaService:
 
         if not vectorizable:
             return set()
+
+        # Skip files already indexed in this session to prevent duplicate vectors
+        cache_key = (app_id, agent_id, session_id)
+        already_indexed = _indexed_file_ids_cache.get(cache_key, set())
+        vectorizable = [
+            f for f in vectorizable
+            if f.get("file_id") not in already_indexed
+        ]
+
+        if not vectorizable:
+            return already_indexed
 
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id, agent_id, session_id, db,
@@ -388,4 +408,9 @@ class PlaygroundMediaService:
             except Exception as exc:
                 logger.error("Error vectorizing file %s: %s", file_data.get("filename"), exc)
 
-        return vectorized_ids
+        # Update cache with newly vectorized file IDs
+        if vectorized_ids:
+            _indexed_file_ids_cache.setdefault(cache_key, set()).update(vectorized_ids)
+
+        # Return all indexed IDs (previously cached + newly vectorized)
+        return already_indexed | vectorized_ids
