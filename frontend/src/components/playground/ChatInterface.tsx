@@ -255,37 +255,56 @@ function ChatInterface({
   }, [appId, agentId, currentConversationId, currentSessionId]);
 
   // Poll for media processing status updates
-  // Uses a ref-based approach so the interval is NOT recreated on every state change.
-  useEffect(() => {
-    const hasProcessing = playgroundMedia.some(
-      (m) => m.status !== 'ready' && m.status !== 'error'
-    );
+  // Keep the interval alive across playgroundMedia updates by depending on a stable boolean.
+  const playgroundMediaRef = useRef(playgroundMedia);
+  const hasProcessingMediaForPolling = playgroundMedia.some(
+    (m) => m.status !== 'ready' && m.status !== 'error'
+  );
 
-    if (hasProcessing && currentSessionId && !pollingRef.current) {
-      // Start polling only when there is processing media and no interval is active
-      pollingRef.current = setInterval(async () => {
-        try {
-          const media = await apiService.listPlaygroundMedia(appId, agentId, currentSessionId);
-          const list = Array.isArray(media) ? media : [];
-          setPlaygroundMedia(list);
-          // Stop polling if all done
-          if (list.every((m: { status: string }) => m.status === 'ready' || m.status === 'error')) {
-            if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
-          }
-        } catch {
-          // keep polling — transient network errors should not kill the status display
-        }
-      }, 3000);
-    } else if ((!hasProcessing || !currentSessionId) && pollingRef.current) {
-      // All media finished or session gone — stop polling
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
+  useEffect(() => {
+    playgroundMediaRef.current = playgroundMedia;
+  }, [playgroundMedia]);
+
+  useEffect(() => {
+    if (!currentSessionId || !hasProcessingMediaForPolling) {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+      return;
     }
 
+    if (pollingRef.current) {
+      return;
+    }
+
+    // Start polling only when there is processing media and no interval is active
+    pollingRef.current = setInterval(async () => {
+      try {
+        const media = await apiService.listPlaygroundMedia(appId, agentId, currentSessionId);
+        const list = Array.isArray(media) ? media : [];
+        playgroundMediaRef.current = list;
+        setPlaygroundMedia(list);
+
+        // Stop polling if all done
+        if (list.every((m: { status: string }) => m.status === 'ready' || m.status === 'error')) {
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+          }
+        }
+      } catch {
+        // keep polling — transient network errors should not kill the status display
+      }
+    }, 3000);
+
     return () => {
-      if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
     };
-  }, [playgroundMedia, appId, agentId, currentSessionId]);
+  }, [appId, agentId, currentSessionId, hasProcessingMediaForPolling]);
 
   useEffect(() => {
     if ((!metadataFields || metadataFields.length === 0) && filterMetadata !== undefined) {
@@ -477,8 +496,16 @@ function ChatInterface({
   };
 
   const handleRemovePersistentFile = async (fileId: string) => {
-    // Handle media item removal
+    // Media items are currently stored in a single playground media repo for the
+    // session, so removing any individual media entry deletes all uploaded media.
+    // Make that scope explicit to avoid a surprising destructive action.
     if (fileId.startsWith('media_')) {
+      const confirmed = window.confirm(
+        'Removing this media item will delete all uploaded media for this playground session. Do you want to continue?'
+      );
+      if (!confirmed) {
+        return;
+      }
       await handleDeletePlaygroundMedia();
       return;
     }
@@ -505,7 +532,7 @@ function ChatInterface({
         const convResponse = await apiService.createConversation(agentId);
         convId = convResponse.conversation_id;
         setCurrentConversationId(convId);
-        setCurrentSessionId(convResponse.session_id);
+        setCurrentSessionId(convResponse.session_id ?? null);
         if (onConversationCreated && convId) {
           onConversationCreated(convId);
         }
@@ -588,7 +615,10 @@ function ChatInterface({
     })),
   ];
 
-  const canSend = !isStreaming && (inputMessage.trim().length > 0 || persistentFiles.length > 0);
+  const hasMediaProcessing = playgroundMedia.some(
+    (m) => m.status !== 'ready' && m.status !== 'error'
+  );
+  const canSend = !isStreaming && !hasMediaProcessing && (inputMessage.trim().length > 0 || persistentFiles.length > 0);
 
   // ─── Video timestamp parsing ──────────────────────────────────────────────────
 

@@ -313,7 +313,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             + "The user has uploaded documents (PDFs, text files) in this conversation. "
             + "Their content has been indexed for semantic search.\n"
             + "When the user asks about or references attached files, you MUST use the "
-            + "playground_content_retriever tool to search for relevant information.\n"
+            + "uploaded-file semantic search retriever tool available in this conversation "
+            + "to search for relevant information.\n"
             + "Always cite the source filename from the retrieved chunk metadata.\n"
             + "</uploaded_files_instructions>"
         )
