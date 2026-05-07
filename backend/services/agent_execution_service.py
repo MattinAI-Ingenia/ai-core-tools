@@ -948,9 +948,15 @@ class AgentExecutionService:
             if not app_id or not ctx.processed_files:
                 return temp_silo_ids
 
+            # Resolve embedding service from the agent's silo for consistency
+            embedding_service_id = None
+            if ctx.fresh_agent and getattr(ctx.fresh_agent, 'silo', None):
+                embedding_service_id = ctx.fresh_agent.silo.embedding_service_id
+
             vectorized_ids = PlaygroundMediaService.vectorize_file_references(
                 app_id, agent_id, session_id,
                 ctx.processed_files, db,
+                embedding_service_id=embedding_service_id,
             )
             if not vectorized_ids:
                 return temp_silo_ids

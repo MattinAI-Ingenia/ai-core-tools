@@ -308,7 +308,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             + "The user has uploaded documents (PDFs, text files) in this conversation. "
             + "Their content has been indexed for semantic search.\n"
             + "When the user asks about or references attached files, you MUST use the "
-            + "playground_content_retriever tool to search for relevant information.\n"
+            + "uploaded-file semantic search retriever tool available in this conversation "
+            + "to search for relevant information.\n"
             + "Always cite the source filename from the retrieved chunk metadata.\n"
             + "</uploaded_files_instructions>"
         )
@@ -515,10 +516,6 @@ def build_human_message(
                 )
 
     return HumanMessage(content=content)
-
-
-# Maximum payload size for LangSmith traces (default 20MB, the API limit)
-_LANGSMITH_MAX_PAYLOAD = int(os.getenv("LANGSMITH_MAX_PAYLOAD_SIZE", str(20 * 1024 * 1024)))
 
 
 def _truncate_langsmith_value(value: Any, max_bytes: int = 10_000) -> Any:

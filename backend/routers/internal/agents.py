@@ -1225,6 +1225,7 @@ async def upload_playground_media(
     chunk_min_duration: Annotated[Optional[int], Form()] = None,
     chunk_max_duration: Annotated[Optional[int], Form()] = None,
     chunk_overlap: Annotated[Optional[int], Form()] = None,
+    _: Annotated[None, Depends(enforce_file_size_limit)] = None,
 ):
   
     try:
