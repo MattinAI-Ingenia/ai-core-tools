@@ -967,7 +967,7 @@ function AgentFormPage() {
                           const toggle = () => handleInputChange(
                             'server_tools',
                             active
-                              ? formData.server_tools.filter(t => t === tool.id)
+                              ? formData.server_tools.filter(t => t !== tool.id)
                               : [...formData.server_tools, tool.id]
                           );
                           return (
