@@ -109,6 +109,7 @@ class AgentService:
             tool_ids=associations['tool_ids'],
             mcp_config_ids=associations['mcp_ids'],
             skill_ids=associations['skill_ids'],
+            retrieval_config=getattr(agent, 'retrieval_config', None),
             created_at=agent.create_date,
             request_count=getattr(agent, 'request_count', 0) or 0,
             # OCR-specific fields
@@ -252,6 +253,10 @@ class AgentService:
             agent.memory_max_tokens = data['memory_max_tokens']
         if data.get('memory_summarize_threshold') is not None:
             agent.memory_summarize_threshold = data['memory_summarize_threshold']
+
+        # Retrieval config
+        if 'retrieval_config' in data:
+            agent.retrieval_config = data['retrieval_config']
         
         agent.output_parser_id = data.get('output_parser_id') or None
         

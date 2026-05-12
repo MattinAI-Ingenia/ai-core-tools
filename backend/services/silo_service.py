@@ -58,13 +58,22 @@ class SiloService:
         return SiloRepository.get_by_id(silo_id, db)
     
     @staticmethod
-    def get_silo_retriever(silo_id: int, search_params=None, **kwargs) -> Optional[VectorStoreRetriever]:
+    def get_silo_retriever(
+        silo_id: int,
+        search_params=None,
+        retrieval_config: Optional[dict] = None,
+        use_async: bool = True,
+        **kwargs,
+    ) -> Optional[VectorStoreRetriever]:
         """
-        Get retriever for a silo with its corresponding embedding service
-        
+        Get retriever for a silo with its corresponding embedding service.
+
+        Merge priority (highest wins): runtime search_params > retrieval_config > system defaults.
+
         Args:
             silo_id: ID of the silo
-            search_params: Optional search parameters for filtering
+            search_params: Optional per-call overrides (filter, k, search_type, …)
+            retrieval_config: Optional persisted agent-level retrieval strategy
             
         Returns:
             VectorStoreRetriever if silo exists and has embedding service, None otherwise
@@ -89,16 +98,21 @@ class SiloService:
             logger.debug(f"Getting retriever for silo {silo_id} with embedding service: {silo.embedding_service.name}")
             
             collection_name = COLLECTION_PREFIX + str(silo_id)
-            
-            # Merge search_params with default k value
-            # search_params typically contains 'filter' for metadata filtering
-            merged_search_kwargs = {'k': 30}
-            
+
+            # Known retriever parameters that should not be wrapped in 'filter'
+            known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type'}
+
+            # --- Layer 1: system defaults ---
+            merged_search_kwargs: dict = {'k': 30}
+
+            # --- Layer 2: agent-level retrieval_config (persisted) ---
+            if retrieval_config:
+                for key, value in retrieval_config.items():
+                    if value is not None and key in known_params:
+                        merged_search_kwargs[key] = value
+
+            # --- Layer 3: per-call search_params (highest priority) ---
             if search_params:
-                # Known retriever parameters that should not be wrapped in 'filter'
-                known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type'}
-                
-                # Separate known params from filter fields
                 filter_fields = {}
                 direct_params = {}
                 
@@ -106,30 +120,25 @@ class SiloService:
                     if key in known_params:
                         direct_params[key] = value
                     else:
-                        # Any unknown key is treated as a filter field
+                        # Any unknown key is treated as a metadata filter field
                         filter_fields[key] = value
                 
-                # Update merged_search_kwargs with direct params
                 merged_search_kwargs.update(direct_params)
                 
-                # If there are filter fields, wrap them in 'filter' key
                 if filter_fields:
                     if 'filter' in merged_search_kwargs:
-                        # Merge with existing filter
                         merged_search_kwargs['filter'].update(filter_fields)
                     else:
-                        # Create new filter with these fields
                         merged_search_kwargs['filter'] = filter_fields
                 
-                logger.debug(f"Merged search_kwargs: {merged_search_kwargs}")
+            logger.debug(f"Merged search_kwargs: {merged_search_kwargs}")
             
-            # Use async engine with psycopg (not asyncpg) for async operations
-            # psycopg supports async natively and handles multiple SQL statements properly
+            # use_async=True for LangGraph (async engine), False for sync contexts (playground)
             return _get_vector_store(silo).get_retriever(
-                collection_name, 
-                silo.embedding_service, 
+                collection_name,
+                silo.embedding_service,
                 merged_search_kwargs,
-                use_async=True  # Use async psycopg engine for LangGraph compatibility
+                use_async=use_async,
             )
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
@@ -1272,41 +1281,51 @@ class SiloService:
     
     @staticmethod
     def search_silo_documents_router(
-        silo_id: int, 
-        query: str, 
+        silo_id: int,
+        query: str,
         filter_metadata: Optional[Dict[str, Any]] = None,
-        db: Session = None
+        db: Session = None,
+        retrieval_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Search for documents in a silo using semantic search with optional metadata filtering
+        Search for documents in a silo using semantic search with optional metadata filtering.
+
+        When retrieval_config is provided the search goes through get_silo_retriever so the
+        full 3-layer merge (defaults → retrieval_config → search_params) is applied, supporting
+        MMR, score threshold, and custom k.  Without it the legacy find_docs_in_collection path
+        is used (similarity, hardcoded k).
         """
-        # Get silo to validate it exists
         silo = SiloService.get_silo(silo_id, db)
         if not silo:
             return None
-        
-        # Perform the search with metadata filtering
-        results = SiloService.find_docs_in_collection(
-            silo_id, 
-            query, 
-            filter_metadata=filter_metadata,
-            db=db
-        )
-        
-        # Convert results to response format
+
+        if retrieval_config:
+            search_params = {"filter": filter_metadata} if filter_metadata else None
+            retriever = SiloService.get_silo_retriever(
+                silo_id, search_params, retrieval_config=retrieval_config, use_async=False
+            )
+            results = retriever.invoke(query) if retriever else []
+        else:
+            results = SiloService.find_docs_in_collection(
+                silo_id,
+                query,
+                filter_metadata=filter_metadata,
+                db=db,
+            )
+
         response_results = []
         for doc in results:
-            # Extract score from metadata if available
             score = doc.metadata.pop('_score', None) if '_score' in doc.metadata else None
             response_results.append({
                 "page_content": doc.page_content,
                 "metadata": doc.metadata,
                 "score": score
             })
-        
+
         return {
             "query": query,
             "results": response_results,
             "total_results": len(response_results),
-            "filter_metadata": filter_metadata
+            "filter_metadata": filter_metadata,
+            "retrieval_config": retrieval_config,
         }

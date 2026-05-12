@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Trash2, Search, Info } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Trash2, Search, Info, Settings } from 'lucide-react';
 import { apiService } from '../services/api';
 import SearchFilters from '../components/playground/SearchFilters';
 import type {
@@ -42,6 +42,21 @@ function SiloPlaygroundPage() {
   const [hasSearched, setHasSearched] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [filterMetadata, setFilterMetadata] = useState<Record<string, any> | undefined>(undefined);
+  const [pendingCustomFilter, setPendingCustomFilter] = useState<{ key: string; value: string } | null>(null);
+  const [retrievalConfig, setRetrievalConfig] = useState<{
+    search_type: string;
+    k: number;
+    fetch_k: number;
+    lambda_mult: number;
+    score_threshold: number | null;
+  }>({
+    search_type: 'similarity',
+    k: 10,
+    fetch_k: 50,
+    lambda_mult: 0.5,
+    score_threshold: null,
+  });
+  const [showRetrievalConfig, setShowRetrievalConfig] = useState(false);
 
   // Load silo data
   useEffect(() => {
@@ -79,11 +94,12 @@ function SiloPlaygroundPage() {
       setSearchResults([]);
       setHasSearched(true);
       const response = await apiService.searchSiloDocuments(
-        Number.parseInt(appId), 
-        Number.parseInt(siloId), 
+        Number.parseInt(appId),
+        Number.parseInt(siloId),
         searchQuery,
-        10,
-        filterMetadata
+        retrievalConfig.k,
+        filterMetadata,
+        retrievalConfig,
       );
       
       // Extract _id from metadata and set as top-level id field
@@ -252,7 +268,86 @@ function SiloPlaygroundPage() {
             dbType={systemDBConfig}
             disabled={isSearching}
             onFilterMetadataChange={handleFilterMetadataChange}
+            pendingCustomFilter={pendingCustomFilter}
+            onPendingCustomFilterConsumed={() => setPendingCustomFilter(null)}
           />
+
+          {/* Retrieval Settings */}
+          <div className="border border-gray-200 rounded-xl overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowRetrievalConfig(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-sm font-medium text-gray-700"
+            >
+              <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Retrieval Settings</span>
+              <span className="text-xs text-gray-500">{showRetrievalConfig ? '▲ Hide' : '▼ Show'}</span>
+            </button>
+
+            {showRetrievalConfig && (
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Search Strategy</label>
+                  <select
+                    value={retrievalConfig.search_type}
+                    onChange={(e) => setRetrievalConfig(c => ({ ...c, search_type: e.target.value, score_threshold: e.target.value === 'similarity_score_threshold' ? (c.score_threshold ?? 0.7) : c.score_threshold }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-yellow-500"
+                  >
+                    <option value="similarity">Similarity (default)</option>
+                    <option value="mmr">MMR — Max Marginal Relevance</option>
+                    <option value="similarity_score_threshold">Score Threshold</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Documents (k): {retrievalConfig.k}</label>
+                  <input
+                    type="range" min={1} max={100} step={1}
+                    value={retrievalConfig.k}
+                    onChange={(e) => setRetrievalConfig(c => ({ ...c, k: Number.parseInt(e.target.value) }))}
+                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                  />
+                  <div className="flex justify-between text-xs text-gray-400 mt-1"><span>1</span><span>100</span></div>
+                </div>
+
+                {retrievalConfig.search_type === 'mmr' && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Fetch K (candidate pool)</label>
+                      <input
+                        type="number" min={1}
+                        value={retrievalConfig.fetch_k}
+                        onChange={(e) => setRetrievalConfig(c => ({ ...c, fetch_k: Number.parseInt(e.target.value) }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-yellow-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Diversity (λ): {retrievalConfig.lambda_mult.toFixed(2)}</label>
+                      <input
+                        type="range" min={0} max={1} step={0.05}
+                        value={retrievalConfig.lambda_mult}
+                        onChange={(e) => setRetrievalConfig(c => ({ ...c, lambda_mult: Number.parseFloat(e.target.value) }))}
+                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                      />
+                      <div className="flex justify-between text-xs text-gray-400 mt-1"><span>0 — Max diversity</span><span>1 — Max relevance</span></div>
+                    </div>
+                  </>
+                )}
+
+                {retrievalConfig.search_type === 'similarity_score_threshold' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Score Threshold</label>
+                    <input
+                      type="number" min={0} max={1} step={0.01}
+                      value={retrievalConfig.score_threshold ?? 0.7}
+                      onChange={(e) => setRetrievalConfig(c => ({ ...c, score_threshold: Number.parseFloat(e.target.value) }))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-yellow-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Only return documents with similarity ≥ this value</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Search Query */}
           <div>
@@ -357,11 +452,25 @@ function SiloPlaygroundPage() {
 
                   {result.metadata && Object.keys(result.metadata).length > 0 && (
                     <div>
-                      <h3 className="text-sm font-medium text-gray-700 mb-1">Metadata:</h3>
-                      <div className="bg-gray-50 rounded p-2">
-                        <pre className="text-xs text-gray-600 overflow-x-auto">
-                          {JSON.stringify(result.metadata, null, 2)}
-                        </pre>
+                      <h3 className="text-sm font-medium text-gray-700 mb-1">
+                        Metadata
+                        <span className="text-xs font-normal text-gray-400 ml-1">(click a value to filter)</span>
+                      </h3>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(result.metadata)
+                          .filter(([key]) => key !== '_id')
+                          .map(([key, val]) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => setPendingCustomFilter({ key, value: String(val) })}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 hover:bg-yellow-50 hover:border-yellow-400 border border-gray-200 rounded text-xs text-gray-700 transition-colors"
+                              title={`Filter by ${key} = ${String(val)}`}
+                            >
+                              <span className="font-medium text-gray-500">{key}:</span>
+                              <span className="max-w-[180px] truncate">{String(val)}</span>
+                            </button>
+                          ))}
                       </div>
                     </div>
                   )}

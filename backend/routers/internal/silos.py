@@ -408,10 +408,11 @@ async def search_silo_documents(
         logger.info(f"Getting silo {silo_id} for validation")
         
         result = SiloService.search_silo_documents_router(
-            silo_id, 
-            search_query.query, 
+            silo_id,
+            search_query.query,
             search_query.filter_metadata,
-            db
+            db,
+            retrieval_config=search_query.retrieval_config,
         )
         
         if result is None:

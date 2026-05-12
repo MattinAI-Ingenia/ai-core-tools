@@ -68,3 +68,4 @@ class SiloSearchSchema(BaseModel):
     query: str
     limit: Optional[int] = 10
     filter_metadata: Optional[Dict[str, Any]] = None
+    retrieval_config: Optional[Dict[str, Any]] = None
