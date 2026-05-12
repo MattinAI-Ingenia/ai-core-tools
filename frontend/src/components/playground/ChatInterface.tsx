@@ -72,7 +72,9 @@ function ChatInterface({
     undefined
   );
   const [filtersKey, setFiltersKey] = useState(0);
-  const [isAtBottom, setIsAtBottom] = useState(true);
+  /** UI-only state to render the floating "scroll to bottom" button. Behaviour
+   *  is driven by refs to avoid scroll-handler re-renders racing the streaming flush. */
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // Media upload state
   const [showMediaUploadModal, setShowMediaUploadModal] = useState(false);
@@ -86,10 +88,20 @@ function ChatInterface({
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tracks the ID of the message just committed from streaming — skips entrance animation */
   const lastStreamedMsgIdRef = useRef<string | null>(null);
+  /** True while the user has manually scrolled away from the bottom. Pauses auto-scroll
+   *  during streaming so the wheel/touch input is respected. Resets on send or on reaching bottom. */
+  const userScrolledUpRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
   const filterPanelId = `metadata-filters-${agentId}`;
 
+  const playgroundStream = useCallback(
+    (message: string, opts: Parameters<typeof apiService.chatWithAgentStream>[3]) =>
+      apiService.chatWithAgentStream(appId, agentId, message, opts),
+    [appId, agentId],
+  );
+
   const { streamingContent, activeTools, thinkingMessage, isStreaming, sendMessage, abortStream } =
-    useStreamingChat(appId, agentId);
+    useStreamingChat(playgroundStream);
 
   // Hold streaming content visible briefly after isStreaming flips to false,
   // so the transition to the final committed message is seamless.
@@ -98,39 +110,67 @@ function ChatInterface({
 
   // ─── Scroll helpers ──────────────────────────────────────────────────────────
 
+  /** Scroll the messages container to its bottom. Uses scrollTo on the container
+   *  itself (not scrollIntoView on a child) so the scroll never propagates to
+   *  ancestor scroll containers — critical now that <main> is scrollable. */
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
-    messagesEndRef.current?.scrollIntoView({ behavior });
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior });
   }, []);
 
-  // Track whether the user is at the bottom of the message list
+  /** Reset the scroll-up lock — used when sending a new message or clicking the FAB. */
+  const resetScrollLock = useCallback(() => {
+    userScrolledUpRef.current = false;
+    setShowScrollToBottom(false);
+  }, []);
+
+  // Track scroll direction with refs so streaming flushes never race the state update.
+  // The FAB visibility uses a state but only updates when the boolean actually flips.
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
 
+    const threshold = 80;
+    lastScrollTopRef.current = container.scrollTop;
+
     const handleScroll = () => {
-      const threshold = 80;
-      const atBottom =
-        container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
-      setIsAtBottom(atBottom);
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const atBottom = scrollHeight - scrollTop - clientHeight < threshold;
+      const scrolledUp = scrollTop < lastScrollTopRef.current;
+      lastScrollTopRef.current = scrollTop;
+
+      if (atBottom) {
+        if (userScrolledUpRef.current) {
+          userScrolledUpRef.current = false;
+          setShowScrollToBottom(false);
+        }
+        return;
+      }
+
+      if (scrolledUp && !userScrolledUpRef.current) {
+        userScrolledUpRef.current = true;
+        setShowScrollToBottom(true);
+      }
     };
 
     container.addEventListener('scroll', handleScroll, { passive: true });
     return () => container.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Auto-scroll when new messages arrive (only if already at bottom)
+  // Auto-scroll when new messages arrive (only if user has not scrolled up)
   useEffect(() => {
-    if (isAtBottom) {
+    if (!userScrolledUpRef.current) {
       scrollToBottom();
     }
-  }, [messages, isAtBottom, scrollToBottom]);
+  }, [messages, scrollToBottom]);
 
-  // Auto-scroll while streaming
+  // Auto-scroll while streaming — driven by ref so wheel events win the race
   useEffect(() => {
-    if (isStreaming && isAtBottom) {
+    if (isStreaming && !userScrolledUpRef.current) {
       scrollToBottom('instant');
     }
-  }, [streamingContent, isStreaming, isAtBottom, scrollToBottom]);
+  }, [streamingContent, isStreaming, scrollToBottom]);
 
   // ─── Conversation / file loading ─────────────────────────────────────────────
 
@@ -215,37 +255,56 @@ function ChatInterface({
   }, [appId, agentId, currentConversationId, currentSessionId]);
 
   // Poll for media processing status updates
-  // Uses a ref-based approach so the interval is NOT recreated on every state change.
-  useEffect(() => {
-    const hasProcessing = playgroundMedia.some(
-      (m) => m.status !== 'ready' && m.status !== 'error'
-    );
+  // Keep the interval alive across playgroundMedia updates by depending on a stable boolean.
+  const playgroundMediaRef = useRef(playgroundMedia);
+  const hasProcessingMediaForPolling = playgroundMedia.some(
+    (m) => m.status !== 'ready' && m.status !== 'error'
+  );
 
-    if (hasProcessing && currentSessionId && !pollingRef.current) {
-      // Start polling only when there is processing media and no interval is active
-      pollingRef.current = setInterval(async () => {
-        try {
-          const media = await apiService.listPlaygroundMedia(appId, agentId, currentSessionId);
-          const list = Array.isArray(media) ? media : [];
-          setPlaygroundMedia(list);
-          // Stop polling if all done
-          if (list.every((m: { status: string }) => m.status === 'ready' || m.status === 'error')) {
-            if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
-          }
-        } catch {
-          // keep polling — transient network errors should not kill the status display
-        }
-      }, 3000);
-    } else if ((!hasProcessing || !currentSessionId) && pollingRef.current) {
-      // All media finished or session gone — stop polling
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
+  useEffect(() => {
+    playgroundMediaRef.current = playgroundMedia;
+  }, [playgroundMedia]);
+
+  useEffect(() => {
+    if (!currentSessionId || !hasProcessingMediaForPolling) {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+      return;
     }
 
+    if (pollingRef.current) {
+      return;
+    }
+
+    // Start polling only when there is processing media and no interval is active
+    pollingRef.current = setInterval(async () => {
+      try {
+        const media = await apiService.listPlaygroundMedia(appId, agentId, currentSessionId);
+        const list = Array.isArray(media) ? media : [];
+        playgroundMediaRef.current = list;
+        setPlaygroundMedia(list);
+
+        // Stop polling if all done
+        if (list.every((m: { status: string }) => m.status === 'ready' || m.status === 'error')) {
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+          }
+        }
+      } catch {
+        // keep polling — transient network errors should not kill the status display
+      }
+    }, 3000);
+
     return () => {
-      if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
     };
-  }, [playgroundMedia, appId, agentId, currentSessionId]);
+  }, [appId, agentId, currentSessionId, hasProcessingMediaForPolling]);
 
   useEffect(() => {
     if ((!metadataFields || metadataFields.length === 0) && filterMetadata !== undefined) {
@@ -271,7 +330,7 @@ function ChatInterface({
     const messageText = inputMessage;
     setInputMessage('');
     // Force scroll to bottom so the user sees the streaming response
-    setIsAtBottom(true);
+    resetScrollLock();
     setTimeout(() => scrollToBottom('instant'), 50);
 
     try {
@@ -424,8 +483,16 @@ function ChatInterface({
   };
 
   const handleRemovePersistentFile = async (fileId: string) => {
-    // Handle media item removal
+    // Media items are currently stored in a single playground media repo for the
+    // session, so removing any individual media entry deletes all uploaded media.
+    // Make that scope explicit to avoid a surprising destructive action.
     if (fileId.startsWith('media_')) {
+      const confirmed = window.confirm(
+        'Removing this media item will delete all uploaded media for this playground session. Do you want to continue?'
+      );
+      if (!confirmed) {
+        return;
+      }
       await handleDeletePlaygroundMedia();
       return;
     }
@@ -452,7 +519,7 @@ function ChatInterface({
         const convResponse = await apiService.createConversation(agentId);
         convId = convResponse.conversation_id;
         setCurrentConversationId(convId);
-        setCurrentSessionId(convResponse.session_id);
+        setCurrentSessionId(convResponse.session_id ?? null);
         if (onConversationCreated && convId) {
           onConversationCreated(convId);
         }
@@ -535,7 +602,10 @@ function ChatInterface({
     })),
   ];
 
-  const canSend = !isStreaming && (inputMessage.trim().length > 0 || persistentFiles.length > 0);
+  const hasMediaProcessing = playgroundMedia.some(
+    (m) => m.status !== 'ready' && m.status !== 'error'
+  );
+  const canSend = !isStreaming && !hasMediaProcessing && (inputMessage.trim().length > 0 || persistentFiles.length > 0);
 
   // ─── Video timestamp parsing ──────────────────────────────────────────────────
 
@@ -750,7 +820,7 @@ function ChatInterface({
           {/* Messages container */}
           <div
             ref={messagesContainerRef}
-            className="flex-1 min-h-0 overflow-y-auto px-4 py-2 space-y-3
+            className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-2 space-y-3
                        bg-gradient-to-b from-gray-50/50 to-white/30
                        dark:from-gray-900/50 dark:to-gray-800/30
                        scroll-smooth"
@@ -944,12 +1014,12 @@ function ChatInterface({
           </div>
 
           {/* Scroll-to-bottom FAB */}
-          {!isAtBottom && (
+          {showScrollToBottom && (
             <div className="relative h-0 pointer-events-none">
               <button
                 type="button"
                 onClick={() => {
-                  setIsAtBottom(true);
+                  resetScrollLock();
                   scrollToBottom();
                 }}
                 className="pg-scroll-fab pointer-events-auto"

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Plus, Search, X } from 'lucide-react';
 
-export type MetadataOperator = '$eq' | '$ne' | '$gt' | '$gte' | '$lt' | '$lte';
+export type MetadataOperator = '$eq' | '$ne' | '$gt' | '$gte' | '$lt' | '$lte' | '$in';
 export type SupportedDbType = 'PGVECTOR' | 'QDRANT';
 
 export interface SearchFilterMetadataField {
@@ -82,6 +82,7 @@ const FILTER_OPERATOR_MAPPINGS: Record<SupportedDbType, Record<MetadataOperator,
     $gte: '$gte',
     $lt: '$lt',
     $lte: '$lte',
+    $in: '$in',
   },
   QDRANT: {
     $eq: 'match',
@@ -90,7 +91,18 @@ const FILTER_OPERATOR_MAPPINGS: Record<SupportedDbType, Record<MetadataOperator,
     $gte: 'gte',
     $lt: 'lt',
     $lte: 'lte',
+    $in: 'match_any',
   },
+};
+
+const OPERATOR_LABELS: Record<MetadataOperator, string> = {
+  $eq: 'equals',
+  $ne: 'not equals',
+  $gt: 'greater than',
+  $gte: 'greater than or equal',
+  $lt: 'less than',
+  $lte: 'less than or equal',
+  $in: 'in (any of)',
 };
 
 function normalizeDbType(dbType?: string): SupportedDbType {
@@ -98,6 +110,29 @@ function normalizeDbType(dbType?: string): SupportedDbType {
     return 'QDRANT';
   }
   return DEFAULT_DB_TYPE;
+}
+
+function isStringType(fieldType: string): boolean {
+  return ['string', 'str', 'keyword', 'text'].includes(fieldType.toLowerCase());
+}
+
+function isNumericType(fieldType: string): boolean {
+  return ['int', 'float', 'number'].includes(fieldType.toLowerCase());
+}
+
+function isBoolType(fieldType: string): boolean {
+  return fieldType.toLowerCase() === 'bool';
+}
+
+function getOperatorsForType(fieldType: string): MetadataOperator[] {
+  if (isNumericType(fieldType)) {
+    return ['$eq', '$ne', '$gt', '$gte', '$lt', '$lte'];
+  }
+  if (isBoolType(fieldType)) {
+    return ['$eq', '$ne'];
+  }
+  // string, str, keyword, text, or unknown
+  return ['$eq', '$ne', '$in'];
 }
 
 function buildPgvectorFilter(filters: PreparedFilter[], logicalOperator: '$and' | '$or') {
@@ -132,42 +167,29 @@ function buildQdrantFilter(filters: PreparedFilter[], logicalOperator: '$and' | 
 
     switch (nativeOperator) {
       case 'must_not_match':
-        mustNot.push({
-          key,
-          match: { value },
-        });
+        mustNot.push({ key, match: { value } });
         break;
       case 'match':
-        targetList.push({
-          key,
-          match: { value },
-        });
+        targetList.push({ key, match: { value } });
+        break;
+      case 'match_any':
+        targetList.push({ key, match: { any: value } });
         break;
       case 'gt':
       case 'gte':
       case 'lt':
       case 'lte':
-        targetList.push({
-          key,
-          range: { [nativeOperator]: value },
-        });
+        targetList.push({ key, range: { [nativeOperator]: value } });
         break;
       default:
-        // Unknown operator: fall back to match filter
         targetList.push({ key, match: { value } });
     }
   });
 
   const qdrantFilter: Record<string, unknown> = {};
-  if (must.length > 0) {
-    qdrantFilter.must = must;
-  }
-  if (should.length > 0) {
-    qdrantFilter.should = should;
-  }
-  if (mustNot.length > 0) {
-    qdrantFilter.must_not = mustNot;
-  }
+  if (must.length > 0) qdrantFilter.must = must;
+  if (should.length > 0) qdrantFilter.should = should;
+  if (mustNot.length > 0) qdrantFilter.must_not = mustNot;
 
   return Object.keys(qdrantFilter).length > 0 ? qdrantFilter : undefined;
 }
@@ -199,28 +221,36 @@ function prepareFilters(
 
   Object.entries(metadataFilters).forEach(([fieldName, rawValue]) => {
     const trimmedValue = rawValue.trim();
-    if (!trimmedValue) {
-      return;
-    }
+    if (!trimmedValue) return;
 
     const selectedOperator = filterOperators[fieldName] || '$eq';
     const nativeOperator = operatorMapping[selectedOperator];
-    if (!nativeOperator) {
-      return;
-    }
+    if (!nativeOperator) return;
 
     const fieldDefinition = metadataFields?.find((field) => field.name === fieldName);
-    const convertedValue = fieldDefinition ? convertMetadataValue(fieldDefinition.type, trimmedValue) : trimmedValue;
+    let convertedValue: unknown;
 
-    prepared.push({
-      fieldName,
-      operator: selectedOperator,
-      nativeOperator,
-      value: convertedValue,
-    });
+    if (selectedOperator === '$in') {
+      convertedValue = trimmedValue.split(',').map((v) => v.trim()).filter(Boolean);
+    } else {
+      convertedValue = fieldDefinition
+        ? convertMetadataValue(fieldDefinition.type, trimmedValue)
+        : trimmedValue;
+    }
+
+    prepared.push({ fieldName, operator: selectedOperator, nativeOperator, value: convertedValue });
   });
 
   return prepared;
+}
+
+function loadSavedFilters(key: string): SavedFilter[] {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as SavedFilter[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 export function SearchFilters({
@@ -237,10 +267,34 @@ export function SearchFilters({
   const [customRows, setCustomRows] = useState<CustomFilterRow[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
+  // Autocomplete
+  const [suggestions, setSuggestions] = useState<Record<string, string[]>>({});
+  const [openSuggestionField, setOpenSuggestionField] = useState<string | null>(null);
+  const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  // Saved filters
+  const storageKey = useMemo(
+    () => `silo-saved-filters-${siloStorageKey ?? 'global'}`,
+    [siloStorageKey],
+  );
+  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>(() => loadSavedFilters(storageKey));
+  const [showSaveForm, setShowSaveForm] = useState(false);
+  const [saveFilterName, setSaveFilterName] = useState('');
+  const [loadSelectValue, setLoadSelectValue] = useState('');
+  const [loadedFilterName, setLoadedFilterName] = useState<string | null>(null);
+
+  // Reload saved filters when storage key changes (different silo)
+  useEffect(() => {
+    setSavedFilters(loadSavedFilters(storageKey));
+    setLoadedFilterName(null);
+    setLoadSelectValue('');
+  }, [storageKey]);
+
   useEffect(() => {
     setMetadataFilters({});
     setFilterOperators({});
     setLogicalOperator('$and');
+    setLoadedFilterName(null);
   }, [metadataFields]);
 
   // Consume injected filter (from click-to-filter on result metadata badges)
@@ -468,6 +522,99 @@ export function SearchFilters({
           <Plus className="w-3.5 h-3.5" /> Add custom filter
         </button>
       </div>
+
+      {/* FR-3.5 — Live JSON preview */}
+      {filterMetadata && (
+        <details className="mt-3">
+          <summary className="text-xs text-gray-500 cursor-pointer select-none hover:text-gray-700">
+            Filter JSON preview
+          </summary>
+          <pre className="mt-1 text-xs bg-white border border-gray-200 rounded p-2 overflow-x-auto text-gray-700 leading-relaxed">
+            {JSON.stringify(filterMetadata, null, 2)}
+          </pre>
+        </details>
+      )}
+
+      {/* FR-3.6 — Saved filters */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {filterMetadata && !showSaveForm && (
+          <button
+            type="button"
+            onClick={() => setShowSaveForm(true)}
+            className="text-xs px-2 py-1 border border-amber-300 text-amber-700 rounded hover:bg-amber-50"
+          >
+            Save filter
+          </button>
+        )}
+        {showSaveForm && (
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={saveFilterName}
+              onChange={(e) => setSaveFilterName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSaveFilter();
+                if (e.key === 'Escape') { setShowSaveForm(false); setSaveFilterName(''); }
+              }}
+              placeholder="Filter name..."
+              className="px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={handleSaveFilter}
+              disabled={!saveFilterName.trim()}
+              className="text-xs px-2 py-1 bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => { setShowSaveForm(false); setSaveFilterName(''); }}
+              className="text-xs text-gray-500 hover:text-gray-700 underline"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {savedFilters.length > 0 && (
+          <select
+            value={loadSelectValue}
+            onChange={handleLoadFilter}
+            className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+          >
+            <option value="">Load saved filter…</option>
+            {savedFilters.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* Load banner */}
+      {loadedFilterName && (
+        <div className="mt-2 flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+          <span>
+            Loaded: <strong>{loadedFilterName}</strong>
+          </span>
+          <button
+            type="button"
+            onClick={() => { onFilterMetadataChange(undefined); setLoadedFilterName(null); }}
+            className="underline hover:no-underline"
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            onClick={handleRemoveLoadedFilter}
+            className="underline hover:no-underline text-red-500 hover:text-red-700"
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }

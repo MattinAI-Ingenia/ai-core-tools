@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { Toaster } from 'sonner';
 import { ThemeProvider } from '../themes/ThemeProvider';
 import { AuthProvider } from '../auth/AuthConfig';
 import { UserProvider } from '../contexts/UserContext';
 import { SettingsCacheProvider } from '../contexts/SettingsCacheContext';
+import { ConfirmProvider } from '../contexts/ConfirmContext';
 import { Layout } from '../components/layout/Layout';
 import SettingsLayout from '../components/layout/SettingsLayout';
+import ScrollToTop from '../components/layout/ScrollToTop';
 import { ProtectedLayoutRoute, AdminLayoutRoute } from '../components/ProtectedLayoutRoute';
 import { configService } from './ConfigService';
 import { mergeNavigationConfig } from './NavigationMerger';
@@ -14,7 +17,6 @@ import type { LibraryConfig, ExtraRoute } from './types';
 import { baseTheme } from '../themes/baseTheme';
 
 // Import base pages
-import HomePage from '../pages/HomePage';
 import LandingPage from '../pages/LandingPage';
 import AppsPage from '../pages/AppsPage';
 import AppDashboard from '../pages/AppDashboard';
@@ -56,6 +58,7 @@ import SystemAIServicesPage from '../pages/admin/SystemAIServicesPage';
 import SystemEmbeddingServicesPage from '../pages/admin/SystemEmbeddingServicesPage';
 import TierConfigPage from '../pages/admin/TierConfigPage';
 import { DeploymentModeProvider } from '../contexts/DeploymentModeContext';
+import { CapabilitiesProvider } from '../contexts/CapabilitiesContext';
 import { PlatformChatbotProvider } from '../contexts/PlatformChatbotContext';
 import PlatformChatbotWidget from '../components/platform-chatbot/PlatformChatbotWidget';
 import MCPServersPage from '../pages/MCPServersPage';
@@ -65,6 +68,10 @@ import MarketplacePage from '../pages/MarketplacePage';
 import MarketplaceAgentDetailPage from '../pages/MarketplaceAgentDetailPage';
 import MarketplaceChatPage from '../pages/MarketplaceChatPage';
 import MarketplaceHomePage from '../pages/MarketplaceHomePage';
+import SharePointSourcesPage from '../pages/SharePointSourcesPage';
+import SharePointWizardPage from '../pages/SharePointWizardPage';
+import SharePointSourceDetailPage from '../pages/SharePointSourceDetailPage';
+import EnterpriseFeaturePage from '../pages/EnterpriseFeaturePage';
 
 interface ExtensibleBaseAppProps {
   config: LibraryConfig;
@@ -75,7 +82,6 @@ interface ExtensibleBaseAppProps {
 export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
   config,
   extraRoutes = [],
-  children
 }) => {
   // Merge routes from config and extraRoutes prop
   const allExtraRoutes = [...(config.routes || []), ...extraRoutes];
@@ -101,7 +107,7 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
       headerTitle: config.headerProps?.title || config.name || 'AI Core Tools'
     },
     api: config.apiConfig ? {
-      baseUrl: config.apiConfig.baseUrl || 'http://localhost:8000',
+      baseUrl: config.apiConfig.baseUrl ?? 'http://localhost:8000',
       timeout: config.apiConfig.timeout || 30000,
       retries: config.apiConfig.retries || 3
     } : undefined,
@@ -138,12 +144,16 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
 
   return (
     <ThemeProvider theme={clientConfig.theme}>
+      <Toaster richColors closeButton position="top-right" />
       <AuthProvider config={config.authProps}>
         <UserProvider>
           <SettingsCacheProvider>
             <DeploymentModeProvider>
+            <CapabilitiesProvider>
             <PlatformChatbotProvider>
             <Router>
+              <ScrollToTop />
+              <ConfirmProvider>
               <Routes>
                 {/* Public routes */}
                 <Route path="/login" element={<LoginPage />} />
@@ -278,6 +288,32 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                     <ProtectedLayoutRoute {...commonLayoutProps}>
                       <DomainDetailPage />
                     </ProtectedLayoutRoute>
+                } />
+
+                {/* Enterprise Edition info page */}
+                <Route path="/apps/:appId/enterprise" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <EnterpriseFeaturePage />
+                  </ProtectedLayoutRoute>
+                } />
+
+                {/* SharePoint routes */}
+                <Route path="/apps/:appId/sharepoint" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <SharePointSourcesPage />
+                  </ProtectedLayoutRoute>
+                } />
+
+                <Route path="/apps/:appId/sharepoint/new" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <SharePointWizardPage />
+                  </ProtectedLayoutRoute>
+                } />
+
+                <Route path="/apps/:appId/sharepoint/:sourceId" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <SharePointSourceDetailPage />
+                  </ProtectedLayoutRoute>
                 } />
 
                 {/* MCP Servers routes */}
@@ -448,8 +484,10 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                 <Route path="*" element={<Navigate to="/apps" replace />} />
               </Routes>
               <PlatformChatbotWidget />
+              </ConfirmProvider>
             </Router>
             </PlatformChatbotProvider>
+            </CapabilitiesProvider>
             </DeploymentModeProvider>
           </SettingsCacheProvider>
         </UserProvider>

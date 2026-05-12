@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from schemas.embedding_service_schemas import EmbeddingServiceOptionSchema
@@ -63,9 +63,7 @@ class UpdateSiloSchema(BaseModel):
 CreateUpdateSiloSchema = CreateSiloSchema
 
 
-class SiloSearchSchema(BaseModel):
-    """Schema for searching within a silo"""
-    query: str
-    limit: Optional[int] = 10
+class SiloCountRequestSchema(BaseModel):
+    """Request body for the count-documents endpoint."""
     filter_metadata: Optional[Dict[str, Any]] = None
     retrieval_config: Optional[Dict[str, Any]] = None
