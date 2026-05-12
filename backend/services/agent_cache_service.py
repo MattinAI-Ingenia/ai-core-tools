@@ -74,6 +74,9 @@ class CheckpointerCacheService:
             conninfo=db_uri,
             min_size=2,
             max_size=10,
+            max_lifetime=1800,   # recycle connections after 30 min
+            max_idle=300,        # close connections idle longer than 5 min
+            reconnect_timeout=30,  # retry broken connections for up to 30 s
             kwargs={
                 "autocommit": True,
                 "prepare_threshold": 0,

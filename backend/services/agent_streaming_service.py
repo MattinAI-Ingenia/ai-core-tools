@@ -9,10 +9,15 @@ and tool events to the client.
 
 from typing import AsyncGenerator, Dict, List, Any
 
-import langsmith as ls
+import psycopg.errors
 from sqlalchemy.orm import Session
 
 from tools.agentTools import create_agent, prepare_agent_config, build_human_message
+from tools.langsmith_config import (
+    apply_tracing_to_config,
+    build_tracing_config,
+    resolve_langsmith_settings,
+)
 from tools.streaming_utils import (
     format_sse_event,
     map_stream_event,
@@ -114,7 +119,7 @@ class AgentStreamingService:
             # ----------------------------------------------------------------
             # 3. Build agent chain
             # ----------------------------------------------------------------
-            agent_chain, langsmith_config, mcp_client = await create_agent(
+            agent_chain, mcp_client = await create_agent(
                 ctx.fresh_agent,
                 ctx.search_params,
                 ctx.session_id_for_cache,
@@ -147,49 +152,40 @@ class AgentStreamingService:
             )
 
             # ----------------------------------------------------------------
-            # 5. Attach LangSmith tracer when configured
+            # 5. Attach LangSmith tracer + metadata when configured
             # ----------------------------------------------------------------
-            if langsmith_config:
-                from langchain_core.tracers.langchain import LangChainTracer
-
+            ls_settings = resolve_langsmith_settings(ctx.fresh_agent.app)
+            if ls_settings:
+                tracer, overrides = build_tracing_config(
+                    ls_settings,
+                    agent=ctx.fresh_agent,
+                    user_context=ctx.user_context,
+                    conversation_id=ctx.effective_conv_id,
+                    session_id=ctx.session_id_for_cache,
+                )
+                apply_tracing_to_config(config, tracer, overrides)
                 logger.info(
-                    "LangSmith tracing ENABLED for app '%s'",
-                    langsmith_config["project_name"],
+                    "LangSmith tracing ENABLED — project='%s' source='%s'",
+                    ls_settings.project_name,
+                    ls_settings.source,
                 )
-                per_app_tracer = LangChainTracer(
-                    client=langsmith_config["client"],
-                    project_name=langsmith_config["project_name"],
-                )
-                config.setdefault("callbacks", []).append(per_app_tracer)
 
             # ----------------------------------------------------------------
             # 6. Streaming loop — the only part that stays in this service
             # ----------------------------------------------------------------
             accumulated_content = ""
 
-            if langsmith_config:
-                stream_ctx = ls.tracing_context(
-                    client=langsmith_config["client"],
-                    project_name=langsmith_config["project_name"],
-                    enabled=True,
-                )
-            else:
-                from contextlib import nullcontext
-
-                stream_ctx = nullcontext()
-
-            with stream_ctx:
-                async for mode, chunk in agent_chain.astream(
-                    {"messages": [message_payload]},
-                    config=config,
-                    stream_mode=["messages", "updates"],
-                ):
-                    events = map_stream_event(mode, chunk)
-                    if events:
-                        for event in events:
-                            if event["type"] == SSE_TOKEN:
-                                accumulated_content += event["data"].get("content", "")
-                            yield format_sse_event(event["type"], event["data"])
+            async for mode, chunk in agent_chain.astream(
+                {"messages": [message_payload]},
+                config=config,
+                stream_mode=["messages", "updates"],
+            ):
+                events = map_stream_event(mode, chunk)
+                if events:
+                    for event in events:
+                        if event["type"] == SSE_TOKEN:
+                            accumulated_content += event["data"].get("content", "")
+                        yield format_sse_event(event["type"], event["data"])
 
             # ----------------------------------------------------------------
             # 7. Post-processing phase — delegates to AgentExecutionService
@@ -210,6 +206,20 @@ class AgentStreamingService:
                 },
             )
 
+        except (
+            psycopg.errors.AdminShutdown,
+            psycopg.errors.ConnectionFailure,
+            psycopg.OperationalError,
+        ) as exc:
+            # Stale pool connection terminated by PostgreSQL (e.g. server
+            # restart or pg_terminate_backend). The pool discards the bad
+            # connection automatically; a single retry will receive a fresh one.
+            logger.warning(
+                "Checkpointer connection lost (%s), retrying once: %s",
+                type(exc).__name__,
+                str(exc),
+            )
+            yield format_sse_event("error", {"message": "Connection error, please retry."})
         except Exception as exc:
             logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
             yield format_sse_event("error", {"message": str(exc)})

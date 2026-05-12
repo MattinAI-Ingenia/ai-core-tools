@@ -149,6 +149,19 @@ class ApiService {
     });
   }
 
+  async testAppLangsmith(appId: number, apiKey?: string): Promise<{
+    valid: boolean;
+    status: 'ok' | 'unauthorized' | 'network' | 'unknown';
+    message: string;
+    project_name?: string | null;
+    source?: 'app' | 'env' | 'request' | null;
+  }> {
+    return this.request(`/internal/apps/${appId}/langsmith/test`, {
+      method: 'POST',
+      body: JSON.stringify({ api_key: apiKey ?? null }),
+    });
+  }
+
   async dismissOnboarding(appId: number) {
     return this.request(`/internal/apps/${appId}/onboarding-dismissed`, {
       method: 'PATCH',
