@@ -258,7 +258,7 @@ class ApiService {
   ): Promise<Blob> {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -300,7 +300,7 @@ class ApiService {
 
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -360,7 +360,7 @@ class ApiService {
       method: 'POST',
     });
   }
-  
+
   async deleteAIService(appId: number, serviceId: number) {
     return this.request(`/internal/apps/${appId}/ai-services/${serviceId}`, {
       method: 'DELETE',
@@ -393,7 +393,7 @@ class ApiService {
   async exportAIService(appId: number, serviceId: number): Promise<Blob> {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -424,7 +424,7 @@ class ApiService {
 
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -496,7 +496,7 @@ class ApiService {
   async exportEmbeddingService(appId: number, serviceId: number): Promise<Blob> {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -527,7 +527,7 @@ class ApiService {
 
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -595,7 +595,7 @@ class ApiService {
   async exportMCPConfig(appId: number, configId: number): Promise<Blob> {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -626,7 +626,7 @@ class ApiService {
 
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -645,9 +645,9 @@ class ApiService {
     if (!response.ok) {
       await this.handleResponseError(response);
     }
-  
+
     return response.json();
-}
+  }
   // ==================== SKILLS ====================
   async getSkills(appId: number) {
     return this.request(`/internal/apps/${appId}/skills/`);
@@ -673,6 +673,35 @@ class ApiService {
 
   async deleteSkill(appId: number, skillId: number) {
     return this.request(`/internal/apps/${appId}/skills/${skillId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // ==================== MIDDLEWARES ====================
+  async getMiddlewares(appId: number) {
+    return this.request(`/internal/apps/${appId}/middlewares/`);
+  }
+
+  async getMiddleware(appId: number, middlewareId: number) {
+    return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`);
+  }
+
+  async createMiddleware(appId: number, data: any) {
+    return this.request(`/internal/apps/${appId}/middlewares/0`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateMiddleware(appId: number, middlewareId: number, data: any) {
+    return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteMiddleware(appId: number, middlewareId: number) {
+    return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`, {
       method: 'DELETE',
     });
   }
@@ -788,7 +817,7 @@ class ApiService {
   async exportOutputParser(appId: number, parserId: number): Promise<Blob> {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -819,7 +848,7 @@ class ApiService {
 
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -892,20 +921,20 @@ class ApiService {
   }) {
     const formData = new FormData();
     const headers: Record<string, string> = {};
-    
+
     files.forEach(file => formData.append('files', file));
-    
+
     if (folderId !== undefined && folderId !== null) {
       formData.append('folder_id', folderId.toString());
     }
-    
+
     if (config?.forced_language) formData.append('forced_language', config.forced_language);
     if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
     const token = this.getAuthToken();
-        
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -916,7 +945,7 @@ class ApiService {
       body: formData,
     });
   }
-  
+
   async addYouTube(appId: number, repositoryId: number, url: string, folderId?: number, config?: {
     forced_language?: string;
     chunk_min_duration?: number;
@@ -935,7 +964,7 @@ class ApiService {
     if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
-        
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -961,7 +990,7 @@ class ApiService {
     if (newFolderId !== undefined) {
       formData.append('new_folder_id', newFolderId.toString());
     }
-    
+
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media/${mediaId}/move`, {
       method: 'POST',
       body: formData,
@@ -987,10 +1016,10 @@ class ApiService {
   }) {
     const formData = new FormData();
     const headers: Record<string, string> = {};
-    
+
     files.forEach(file => formData.append('files', file));
     formData.append('session_id', sessionId);
-    
+
     if (config?.transcription_service_id) formData.append('transcription_service_id', config.transcription_service_id.toString());
     if (config?.video_ai_service_id) formData.append('video_ai_service_id', config.video_ai_service_id.toString());
     if (config?.embedding_service_id) formData.append('embedding_service_id', config.embedding_service_id.toString());
@@ -1022,10 +1051,10 @@ class ApiService {
   }) {
     const formData = new FormData();
     const headers: Record<string, string> = {};
-    
+
     formData.append('url', url);
     formData.append('session_id', sessionId);
-    
+
     if (config?.transcription_service_id) formData.append('transcription_service_id', config.transcription_service_id.toString());
     if (config?.video_ai_service_id) formData.append('video_ai_service_id', config.video_ai_service_id.toString());
     if (config?.embedding_service_id) formData.append('embedding_service_id', config.embedding_service_id.toString());
@@ -1106,7 +1135,7 @@ class ApiService {
   async exportSilo(appId: number, siloId: number, includeDependencies: boolean = true): Promise<Blob> {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -1138,7 +1167,7 @@ class ApiService {
 
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -1332,13 +1361,13 @@ class ApiService {
 
   async uploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {
     console.log('API: uploadResources called with:', { appId, repositoryId, filesCount: files.length, folderId });
-    
+
     const formData = new FormData();
     files.forEach(file => {
       formData.append('files', file);
       console.log('API: Added file to FormData:', file.name);
     });
-    
+
     // Add folder_id if provided
     if (folderId !== undefined && folderId !== null) {
       formData.append('folder_id', folderId.toString());
@@ -1350,9 +1379,9 @@ class ApiService {
     // Get the auth token manually for this request
     const token = this.getAuthToken();
     console.log('API: Auth token for upload:', token ? 'Token exists' : 'No token found');
-    
+
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
       console.log('API: Authorization header set for upload');
@@ -1361,7 +1390,7 @@ class ApiService {
     }
 
     console.log('API: Making upload request to:', `/internal/apps/${appId}/repositories/${repositoryId}/resources`);
-    
+
     try {
       const result = await this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
         method: 'POST',
@@ -1389,7 +1418,7 @@ class ApiService {
     if (newFolderId !== undefined) {
       formData.append('new_folder_id', newFolderId.toString());
     }
-    
+
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}/move`, {
       method: 'POST',
       body: formData,
@@ -1399,7 +1428,7 @@ class ApiService {
   async downloadResource(appId: number, repositoryId: number, resourceId: number) {
     const token = this.getAuthToken();
     const headers: Record<string, string> = {};
-    
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -1431,15 +1460,15 @@ class ApiService {
   async chatWithAgent(appId: number, agentId: number, message: string, files?: File[], searchParams?: any, conversationId?: number | null) {
     const formData = new FormData();
     formData.append('message', message);
-    
+
     if (searchParams) {
       formData.append('search_params', JSON.stringify(searchParams));
     }
-    
+
     if (conversationId) {
       formData.append('conversation_id', conversationId.toString());
     }
-    
+
     if (files && files.length > 0) {
       files.forEach((file) => {
         formData.append(`files`, file);
@@ -1544,7 +1573,7 @@ class ApiService {
   async uploadFileForChat(appId: number, agentId: number, file: File, conversationId?: number | null) {
     const formData = new FormData();
     formData.append('file', file);
-    
+
     // Associate file with specific conversation if provided
     if (conversationId) {
       formData.append('conversation_id', conversationId.toString());
@@ -1558,7 +1587,7 @@ class ApiService {
 
   async listAttachedFiles(appId: number, agentId: number, conversationId?: number | null) {
     // Filter files by conversation if provided
-    const url = conversationId 
+    const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files`;
     return this.request(url);
@@ -1763,7 +1792,7 @@ class ApiService {
   }
 
   // ==================== FOLDERS API ====================
-  
+
   async getFolders(appId: number, repositoryId: number) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/`);
   }
@@ -2094,11 +2123,11 @@ class ApiService {
   ): Promise<any> {
     const formData = new FormData();
     formData.append('file', file);
-    
+
     // Build query params
     const params = new URLSearchParams();
     params.append('conflict_mode', conflictMode);
-    
+
     if (newName) {
       params.append('new_name', newName);
     }
@@ -2108,7 +2137,7 @@ class ApiService {
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
-    
+
     // Use fetch directly to avoid issues with FormData
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {

@@ -1,6 +1,9 @@
 from langchain.messages import HumanMessage, SystemMessage, AnyMessage
 from langchain.agents import create_agent as create_langchain_agent, AgentState
 from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware.model_call_limit import ModelCallLimitMiddleware
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
+from langchain.agents.middleware.pii import PIIMiddleware
 from models.agent import Agent
 from models.silo import Silo, SiloType
 from langchain.tools import BaseTool, tool
@@ -16,6 +19,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 import langsmith as ls
 import json
 import asyncio
@@ -109,6 +113,75 @@ class MCPClientManager:
         # The client is managed internally by the library
         if self._client is not None:
             self._client = None
+
+
+def _build_summarization_llm(agent, provider_key: str, model_name: str):
+    """Build a lightweight LLM for summarization using an existing AIService API key.
+
+    Looks for an AIService in the agent's app that matches `provider_key`
+    (case-insensitive: 'openai', 'anthropic', 'mistral'). Falls back to
+    env vars OPENAI_API_KEY / ANTHROPIC_API_KEY / MISTRAL_API_KEY if no
+    matching service is found.
+
+    Args:
+        agent: The Agent ORM instance (needs agent.app.ai_services).
+        provider_key: Lowercase provider identifier ('openai', 'anthropic', 'mistral').
+        model_name: The API model ID (e.g. 'gpt-5.4-mini').
+
+    Returns:
+        A LangChain chat model instance, or the agent's own LLM if the
+        provider is unrecognised.
+    """
+    from langchain_openai import ChatOpenAI
+    from langchain_anthropic import ChatAnthropic
+    from langchain_mistralai import ChatMistralAI
+    from models.ai_service import ProviderEnum
+
+    # Map provider_key → ProviderEnum value string
+    _PROVIDER_MAP = {
+        'openai': ProviderEnum.OpenAI.value,
+        'anthropic': ProviderEnum.Anthropic.value,
+        'mistral': ProviderEnum.MistralAI.value,
+    }
+    provider_enum_val = _PROVIDER_MAP.get(provider_key.lower())
+    if not provider_enum_val:
+        logger.warning(f"Unknown summarization provider '{provider_key}' — using agent LLM")
+        return None
+
+    # Try to find an AIService in the app with the matching provider
+    api_key = None
+    if hasattr(agent, 'app') and agent.app and hasattr(agent.app, 'ai_services'):
+        for svc in agent.app.ai_services:
+            svc_provider = svc.provider.value if hasattr(svc.provider, 'value') else svc.provider
+            if svc_provider == provider_enum_val and svc.api_key:
+                api_key = svc.api_key
+                break
+
+    # Fallback to environment variables
+    if not api_key:
+        env_map = {
+            'openai': 'OPENAI_API_KEY',
+            'anthropic': 'ANTHROPIC_API_KEY',
+            'mistral': 'MISTRAL_API_KEY',
+        }
+        api_key = os.getenv(env_map.get(provider_key.lower(), ''))
+
+    if not api_key:
+        logger.warning(f"No API key found for summarization provider '{provider_key}' — using agent LLM")
+        return None
+
+    if provider_key.lower() == 'openai':
+        summarization_llm = ChatOpenAI(model=model_name, temperature=0, api_key=api_key)
+    elif provider_key.lower() == 'anthropic':
+        summarization_llm = ChatAnthropic(model=model_name, temperature=0, api_key=api_key)
+    elif provider_key.lower() == 'mistral':
+        summarization_llm = ChatMistralAI(model=model_name, temperature=0, api_key=api_key)
+    else:
+        return None
+
+    logger.info(f"Summarization using {provider_key}/{model_name} (key from {'app AIService' if api_key else 'env var'})")
+    return summarization_llm
+
 
 async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None, temp_silo_ids: Optional[List[int]] = None):
     """Create a new agent instance with cached checkpointer if memory is enabled.
@@ -206,6 +279,49 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             f"trigger=('tokens', {max_tokens}), keep=('messages', {max_messages}), "
             f"trim_tokens_to_summarize={trim_tokens}"
         )
+
+    monitoring_handler = None
+    if hasattr(agent, 'middleware_associations') and agent.middleware_associations:
+        for assoc in agent.middleware_associations:
+            if not assoc.middleware:
+                continue
+            mw_type = assoc.middleware.middleware_type.value
+            mw_config = assoc.middleware.config or {}
+            if mw_type == 'monitoring':
+                monitoring_handler = UsageMetadataCallbackHandler()
+                logger.info(f"MonitoringMiddleware (UsageMetadataCallbackHandler) enabled for agent {agent.agent_id}")
+            elif mw_type == 'summarization':
+                # Only add if not already added via has_memory (avoid duplicates)
+                if not agent.has_memory:
+                    # Use a provider model if configured (format: "provider:model_name"), else agent's LLM
+                    summarization_model_value = mw_config.get('summarization_model', 'agent_llm')
+                    if summarization_model_value and summarization_model_value != 'agent_llm' and ':' in summarization_model_value:
+                        provider_key, model_name = summarization_model_value.split(':', 1)
+                        summarization_llm = _build_summarization_llm(agent, provider_key, model_name) or llm
+                    else:
+                        summarization_llm = llm
+                        logger.info(f"Summarization using agent's own LLM")
+                    summarization_mw = SummarizationMiddleware(
+                        model=summarization_llm,
+                        trigger=("tokens", 4000),
+                        keep=("messages", 20),
+                        trim_tokens_to_summarize=4000,
+                    )
+                    middleware.append(summarization_mw)
+                    logger.info(f"SummarizationMiddleware added via middleware entity for agent {agent.agent_id}")
+            elif mw_type == 'model_call_limit':
+                max_calls = mw_config.get('max_calls', 50)
+                middleware.append(ModelCallLimitMiddleware(max_calls=max_calls))
+                logger.info(f"ModelCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
+            elif mw_type == 'tool_call_limit':
+                max_calls = mw_config.get('max_calls', 100)
+                middleware.append(ToolCallLimitMiddleware(max_calls=max_calls))
+                logger.info(f"ToolCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
+            elif mw_type == 'pii':
+                middleware.append(PIIMiddleware())
+                logger.info(f"PIIMiddleware enabled for agent {agent.agent_id}")
+            else:
+                logger.warning(f"Unknown middleware type '{mw_type}' for agent {agent.agent_id} — skipped")
 
     tools = []
 
@@ -368,9 +484,9 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     logger.info(f"Memory enabled: {agent.has_memory}")
     logger.info(f"Output parser: {agent.output_parser_id is not None}")
     logger.info(f"LangSmith configured: {langsmith_config is not None}")
-    
+    logger.info(f"Monitoring enabled: {monitoring_handler is not None}")
 
-    return agent_chain, langsmith_config, mcp_client
+    return agent_chain, langsmith_config, mcp_client, monitoring_handler
 
 
 def prepare_agent_config(agent):

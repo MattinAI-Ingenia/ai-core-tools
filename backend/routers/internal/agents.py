@@ -403,6 +403,7 @@ async def create_or_update_agent(
     agent_service.update_agent_tools(db, created_agent_id, agent_data.tool_ids, {})
     agent_service.update_agent_mcps(db, created_agent_id, agent_data.mcp_config_ids, {})
     agent_service.update_agent_skills(db, created_agent_id, agent_data.skill_ids, {})
+    agent_service.update_agent_middlewares(db, created_agent_id, agent_data.middleware_ids)
 
     # Return updated agent (reuse the GET logic)
     return await get_agent(app_id, created_agent_id, auth_context, role, db, agent_service)
