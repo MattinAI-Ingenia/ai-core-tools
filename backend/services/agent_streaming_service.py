@@ -120,6 +120,26 @@ class AgentStreamingService:
             # 3. Build agent chain
             # ----------------------------------------------------------------
             agent_chain, mcp_client = await create_agent(
+            # Resolve temporary playground media silos
+            temp_silo_ids = None
+            session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
+            if session_id_for_media and effective_db:
+                try:
+                    from services.playground_media_service import PlaygroundMediaService
+                    app_id = user_context.get("app_id") if user_context else None
+                    if app_id:
+                        temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
+                            app_id, agent_id, session_id_for_media, effective_db
+                        )
+                except Exception:
+                    pass
+
+                # Vectorize attached files (PDFs, text) into a temp silo for RAG
+                temp_silo_ids = self.execution_service._vectorize_and_resolve_file_silos(
+                    ctx, agent_id, session_id_for_media, effective_db, temp_silo_ids
+                )
+
+            agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
                 ctx.fresh_agent,
                 ctx.search_params,
                 ctx.session_id_for_cache,
@@ -143,6 +163,10 @@ class AgentStreamingService:
                 )
 
             config["configurable"]["question"] = ctx.enhanced_message
+
+            # Attach monitoring callback if enabled
+            if monitoring_handler is not None:
+                config.setdefault("callbacks", []).append(monitoring_handler)
 
             # ----------------------------------------------------------------
             # 4. Build the HumanMessage payload (handles multimodal images)
@@ -190,6 +214,21 @@ class AgentStreamingService:
             # ----------------------------------------------------------------
             # 7. Post-processing phase — delegates to AgentExecutionService
             # ----------------------------------------------------------------
+
+            # Log usage metrics if monitoring is enabled
+            if monitoring_handler is not None:
+                try:
+                    usage = monitoring_handler.usage_metadata
+                    logger.info(
+                        f"[Monitoring] agent_id={ctx.fresh_agent.agent_id} | "
+                        f"input_tokens={usage.get('input_tokens', 0)} | "
+                        f"output_tokens={usage.get('output_tokens', 0)} | "
+                        f"total_tokens={usage.get('total_tokens', 0)} | "
+                        f"llm_calls={len(monitoring_handler.usage_metadata_list)}"
+                    )
+                except Exception as monitor_err:
+                    logger.warning(f"Error reading monitoring metrics: {monitor_err}")
+
             result = await self.execution_service._finalize_turn(
                 ctx, accumulated_content, effective_db
             )

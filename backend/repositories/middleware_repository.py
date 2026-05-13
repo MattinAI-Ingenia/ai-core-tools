@@ -1,0 +1,67 @@
+from typing import Optional, List
+from sqlalchemy.orm import Session
+from models.middleware import Middleware, AgentMiddleware
+
+
+class MiddlewareRepository:
+    """Repository class for Middleware database operations"""
+
+    @staticmethod
+    def get_all_by_app_id(db: Session, app_id: int) -> List[Middleware]:
+        """Get all middlewares for a specific app"""
+        return db.query(Middleware).filter(Middleware.app_id == app_id).all()
+
+    @staticmethod
+    def get_by_id_and_app_id(db: Session, middleware_id: int, app_id: int) -> Optional[Middleware]:
+        """Get a specific middleware by ID and app ID"""
+        return db.query(Middleware).filter(
+            Middleware.middleware_id == middleware_id,
+            Middleware.app_id == app_id
+        ).first()
+
+    @staticmethod
+    def create(db: Session, middleware: Middleware) -> Middleware:
+        """Create a new middleware"""
+        db.add(middleware)
+        db.commit()
+        db.refresh(middleware)
+        return middleware
+
+    @staticmethod
+    def update(db: Session, middleware: Middleware) -> Middleware:
+        """Update an existing middleware"""
+        db.add(middleware)
+        db.commit()
+        db.refresh(middleware)
+        return middleware
+
+    @staticmethod
+    def delete(db: Session, middleware: Middleware) -> None:
+        """Delete a middleware"""
+        db.query(AgentMiddleware).filter(
+            AgentMiddleware.middleware_id == middleware.middleware_id
+        ).delete(synchronize_session=False)
+        db.delete(middleware)
+        db.commit()
+
+    @staticmethod
+    def delete_by_id_and_app_id(db: Session, middleware_id: int, app_id: int) -> bool:
+        """Delete a middleware by ID and app ID"""
+        middleware = MiddlewareRepository.get_by_id_and_app_id(db, middleware_id, app_id)
+        if middleware:
+            MiddlewareRepository.delete(db, middleware)
+            return True
+        return False
+
+    @staticmethod
+    def get_valid_middleware_ids_for_app(db: Session, middleware_ids: set, app_id: int) -> set:
+        """Get middleware IDs that exist and belong to the specified app"""
+        if not middleware_ids:
+            return set()
+
+        valid = db.query(Middleware.middleware_id).filter(
+            Middleware.middleware_id.in_(middleware_ids),
+            Middleware.app_id == app_id
+        ).all()
+
+        return {m.middleware_id for m in valid}

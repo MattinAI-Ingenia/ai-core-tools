@@ -5,6 +5,8 @@ from models.ocr_agent import OCRAgent
 from schemas.agent_schemas import AgentListItemSchema, AgentDetailSchema
 from repositories.agent_repository import AgentRepository
 from repositories.skill_repository import SkillRepository
+from repositories.middleware_repository import MiddlewareRepository
+from models.middleware import AgentMiddleware
 
 
 def _serialize_marketplace_profile(profile) -> Optional[Dict[str, Any]]:
@@ -109,6 +111,8 @@ class AgentService:
             tool_ids=associations['tool_ids'],
             mcp_config_ids=associations['mcp_ids'],
             skill_ids=associations['skill_ids'],
+            retrieval_config=getattr(agent, 'retrieval_config', None),
+            middleware_ids=associations['middleware_ids'],
             created_at=agent.create_date,
             request_count=getattr(agent, 'request_count', 0) or 0,
             # OCR-specific fields
@@ -125,6 +129,7 @@ class AgentService:
             tools=form_data['tools'],
             mcp_configs=form_data['mcp_configs'],
             skills=form_data['skills'],
+            middlewares=form_data.get('middlewares', []),
             # Marketplace
             marketplace_visibility=(
                 agent.marketplace_visibility.value
@@ -380,6 +385,35 @@ class AgentService:
             else:
                 # Create new association
                 AgentRepository.create_agent_skill_association(db, agent_id, skill_id, description)
+
+        db.commit()
+
+    def update_agent_middlewares(self, db: Session, agent_id: int, middleware_ids: list):
+        """Update agent middleware associations"""
+        agent = AgentRepository.get_by_id(db, agent_id)
+        if not agent:
+            return
+
+        if not isinstance(middleware_ids, list):
+            middleware_ids = []
+
+        # Get existing middleware associations
+        existing = {assoc.middleware_id: assoc for assoc in db.query(AgentMiddleware).filter(AgentMiddleware.agent_id == agent_id).all()}
+
+        # Validate middleware IDs
+        requested = {int(mid) for mid in middleware_ids if mid}
+        valid_ids = MiddlewareRepository.get_valid_middleware_ids_for_app(db, requested, agent.app_id)
+
+        # Remove stale
+        for mid in existing:
+            if mid not in valid_ids:
+                db.delete(existing[mid])
+
+        # Add new
+        for mid in valid_ids:
+            if mid not in existing:
+                assoc = AgentMiddleware(agent_id=agent_id, middleware_id=mid)
+                db.add(assoc)
 
         db.commit()
 

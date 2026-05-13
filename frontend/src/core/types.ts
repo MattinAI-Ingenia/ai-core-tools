@@ -89,6 +89,15 @@ export interface Skill {
   created_at: string;
 }
 
+export interface Middleware {
+  middleware_id: number;
+  name: string;
+  description?: string;
+  middleware_type: string;
+  config?: Record<string, any> | null;
+  created_at: string;
+}
+
 // MCP Server types - for exposing agents as MCP tools
 export interface MCPServerAgent {
   agent_id: number;

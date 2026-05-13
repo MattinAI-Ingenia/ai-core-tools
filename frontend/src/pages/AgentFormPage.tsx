@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
@@ -47,6 +47,7 @@ interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
+  middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string }>;
 }
 
 interface AgentFormData {
@@ -69,6 +70,14 @@ interface AgentFormData {
   tool_ids: number[];
   mcp_config_ids: number[];
   skill_ids: number[];
+  retrieval_config: {
+    search_type: string;
+    k: number;
+    fetch_k: number;
+    lambda_mult: number;
+    score_threshold: number | null;
+  } | null;
+  middleware_ids: number[];
   // OCR-specific fields
   vision_service_id?: number;
   vision_system_prompt?: string;
@@ -198,6 +207,9 @@ function AgentFormPage() {
     tool_ids: [],
     mcp_config_ids: [],
     skill_ids: []
+    skill_ids: [],
+    retrieval_config: null,
+    middleware_ids: []
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
 
@@ -255,6 +267,8 @@ function AgentFormPage() {
         tool_ids: response.tool_ids || [],
         mcp_config_ids: response.mcp_config_ids || [],
         skill_ids: response.skill_ids || [],
+        retrieval_config: response.retrieval_config || null,
+        middleware_ids: response.middleware_ids || [],
         // OCR-specific fields
         vision_service_id: response.vision_service_id || undefined,
         vision_system_prompt: response.vision_system_prompt || '',
@@ -333,6 +347,15 @@ function AgentFormPage() {
       skill_ids: prev.skill_ids.includes(skillId)
         ? prev.skill_ids.filter(id => id !== skillId)
         : [...prev.skill_ids, skillId]
+    }));
+  };
+
+  const handleMiddlewareToggle = (middlewareId: number) => {
+    setFormData(prev => ({
+      ...prev,
+      middleware_ids: prev.middleware_ids.includes(middlewareId)
+        ? prev.middleware_ids.filter(id => id !== middlewareId)
+        : [...prev.middleware_ids, middlewareId]
     }));
   };
 
@@ -424,6 +447,8 @@ function AgentFormPage() {
       tool_ids: formData.tool_ids,
       mcp_config_ids: formData.mcp_config_ids,
       skill_ids: formData.skill_ids,
+      middleware_ids: formData.middleware_ids,
+      retrieval_config: formData.retrieval_config,
       // OCR-specific fields
       vision_service_id: formData.vision_service_id,
       vision_system_prompt: formData.vision_system_prompt,
@@ -437,12 +462,12 @@ function AgentFormPage() {
     setSaving(true);
     const result = await mutate(
       () =>
-        isNew
+        isNewAgent
           ? apiService.createAgent(Number.parseInt(appId), 0, submitData)
           : apiService.updateAgent(Number.parseInt(appId), Number.parseInt(agentId), submitData),
       {
-        loading: isNew ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
-        success: isNew ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
+        loading: isNewAgent ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
+        success: isNewAgent ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
         error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
       },
     );
@@ -529,7 +554,7 @@ function AgentFormPage() {
                 </div>
                 <h3 className="text-xl font-semibold text-gray-900">Basic Information</h3>
               </div>
-              
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
@@ -587,7 +612,7 @@ function AgentFormPage() {
                 </div>
                 <h3 className="text-xl font-semibold text-gray-900">Prompts & Instructions</h3>
               </div>
-              
+
               <div className="space-y-6">
                 <div>
                   <label htmlFor="system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
@@ -637,13 +662,13 @@ function AgentFormPage() {
                         <div>
                           <p className="text-sm text-indigo-800 font-medium">Estrategia Híbrida Automática</p>
                           <p className="text-xs text-indigo-700 mt-1">
-                            El agente aplica automáticamente una estrategia híbrida que elimina mensajes de herramientas, 
+                            El agente aplica automáticamente una estrategia híbrida que elimina mensajes de herramientas,
                             recorta el historial y gestiona los límites de tokens para optimizar el rendimiento y los costos.
                           </p>
                         </div>
                       </div>
                     </div>
-                    
+
                     <div className="space-y-6">
                       <div>
                         <label htmlFor="memory_max_messages" className="block text-sm font-medium text-gray-700 mb-2">
@@ -737,7 +762,7 @@ function AgentFormPage() {
                       </div>
                       <h3 className="text-xl font-semibold text-gray-900">Configuration</h3>
                     </div>
-                    
+
                     {/* No AI Services Warning */}
                     {agent?.ai_services.length === 0 && renderNoAIServicesWarning(false)}
 
@@ -975,11 +1000,10 @@ function AgentFormPage() {
                               key={tool.id}
                               type="button"
                               onClick={toggle}
-                              className={`text-left p-3 rounded-xl border-2 transition-colors ${
-                                active
-                                  ? 'border-blue-500 bg-blue-50'
-                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                              }`}
+                              className={`text-left p-3 rounded-xl border-2 transition-colors ${active
+                                ? 'border-blue-500 bg-blue-50'
+                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                                }`}
                             >
                               <div className="flex items-center gap-2 mb-1">
                                 <span className="text-base">{tool.icon}</span>
@@ -1018,7 +1042,7 @@ function AgentFormPage() {
                     </div>
                     <h3 className="text-xl font-semibold text-gray-900">OCR Configuration</h3>
                   </div>
-                  
+
                   {/* No AI Services Warning */}
                   {agent?.ai_services.length === 0 && renderNoAIServicesWarning(true)}
 
@@ -1114,17 +1138,16 @@ function AgentFormPage() {
                     </div>
                     <h3 className="text-xl font-semibold text-gray-900">Available Tools</h3>
                   </div>
-                  
+
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {agent.tools.map((tool) => (
                       <button
                         key={tool.agent_id}
                         type="button"
-                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
-                          formData.tool_ids.includes(tool.agent_id)
-                            ? 'border-blue-500 bg-blue-50'
-                            : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                        }`}
+                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.tool_ids.includes(tool.agent_id)
+                          ? 'border-blue-500 bg-blue-50'
+                          : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                          }`}
                         onClick={() => handleToolToggle(tool.agent_id)}
                       >
                         <div className="flex items-center justify-between">
@@ -1137,14 +1160,13 @@ function AgentFormPage() {
                             />
                             <span className="ml-3 text-sm font-medium text-gray-900">{tool.name}</span>
                           </div>
-                          <div className={`w-2 h-2 rounded-full ${
-                            formData.tool_ids.includes(tool.agent_id) ? 'bg-blue-500' : 'bg-gray-300'
-                          }`} />
+                          <div className={`w-2 h-2 rounded-full ${formData.tool_ids.includes(tool.agent_id) ? 'bg-blue-500' : 'bg-gray-300'
+                            }`} />
                         </div>
                       </button>
                     ))}
                   </div>
-                  
+
                   {formData.tool_ids.length > 0 && (
                     <div className="mt-4 p-4 bg-blue-50 rounded-xl">
                       <p className="text-sm text-blue-800">
@@ -1167,7 +1189,7 @@ function AgentFormPage() {
                       Model Context Protocol
                     </div>
                   </div>
-                  
+
                   {agent.mcp_configs.length > 0 ? (
                     <>
                       <div className="mb-4 p-4 bg-purple-50 rounded-xl">
@@ -1176,23 +1198,22 @@ function AgentFormPage() {
                           <div>
                             <p className="text-sm text-purple-800 font-medium">What are MCP Servers?</p>
                             <p className="text-xs text-purple-700 mt-1">
-                              MCP (Model Context Protocol) servers allow agents to connect to external tools and data sources. 
+                              MCP (Model Context Protocol) servers allow agents to connect to external tools and data sources.
                               Select the servers this agent should have access to.
                             </p>
                           </div>
                         </div>
                       </div>
-                      
+
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {agent.mcp_configs.map((mcp) => (
                           <button
                             key={mcp.config_id}
                             type="button"
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
-                              formData.mcp_config_ids.includes(mcp.config_id)
-                                ? 'border-purple-500 bg-purple-50'
-                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                            }`}
+                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.mcp_config_ids.includes(mcp.config_id)
+                              ? 'border-purple-500 bg-purple-50'
+                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                              }`}
                             onClick={() => handleMCPToggle(mcp.config_id)}
                           >
                             <div className="flex items-center justify-between">
@@ -1205,14 +1226,13 @@ function AgentFormPage() {
                                 />
                                 <span className="ml-3 text-sm font-medium text-gray-900">{mcp.name}</span>
                               </div>
-                              <div className={`w-2 h-2 rounded-full ${
-                                formData.mcp_config_ids.includes(mcp.config_id) ? 'bg-purple-500' : 'bg-gray-300'
-                              }`} />
+                              <div className={`w-2 h-2 rounded-full ${formData.mcp_config_ids.includes(mcp.config_id) ? 'bg-purple-500' : 'bg-gray-300'
+                                }`} />
                             </div>
                           </button>
                         ))}
                       </div>
-                      
+
                       {formData.mcp_config_ids.length > 0 && (
                         <div className="mt-4 p-4 bg-purple-50 rounded-xl">
                           <p className="text-sm text-purple-800">
@@ -1263,11 +1283,10 @@ function AgentFormPage() {
                           <button
                             key={skill.skill_id}
                             type="button"
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
-                              formData.skill_ids.includes(skill.skill_id)
-                                ? 'border-purple-500 bg-purple-50'
-                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                            }`}
+                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.skill_ids.includes(skill.skill_id)
+                              ? 'border-purple-500 bg-purple-50'
+                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                              }`}
                             onClick={() => handleSkillToggle(skill.skill_id)}
                           >
                             <div className="flex items-center justify-between">
@@ -1280,9 +1299,8 @@ function AgentFormPage() {
                                 />
                                 <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
                               </div>
-                              <div className={`w-2 h-2 rounded-full ${
-                                formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
-                              }`} />
+                              <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
+                                }`} />
                             </div>
                             {skill.description && (
                               <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
@@ -1321,6 +1339,83 @@ function AgentFormPage() {
                   )}
                 </div>
               )}
+
+              {/* Middlewares Card - Only for regular agents */}
+              {agent?.middlewares && formData.type !== 'ocr_agent' && (
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <div>
+                      <h3 className="text-xl font-semibold text-gray-900 flex items-center">
+                        <Layers className="w-5 h-5 mr-3" />
+                        {' '}Middlewares
+                      </h3>
+                      <p className="text-gray-600 mt-1">Attach middlewares to monitor and extend agent execution</p>
+                    </div>
+                  </div>
+
+                  {agent.middlewares.length > 0 ? (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {agent.middlewares.map((mw) => (
+                          <button
+                            key={mw.middleware_id}
+                            type="button"
+                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.middleware_ids.includes(mw.middleware_id)
+                              ? 'border-indigo-500 bg-indigo-50'
+                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                              }`}
+                            onClick={() => handleMiddlewareToggle(mw.middleware_id)}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center">
+                                <input
+                                  type="checkbox"
+                                  checked={formData.middleware_ids.includes(mw.middleware_id)}
+                                  onChange={() => handleMiddlewareToggle(mw.middleware_id)}
+                                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                />
+                                <span className="ml-3 text-sm font-medium text-gray-900">{mw.name}</span>
+                              </div>
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                                {mw.middleware_type}
+                              </span>
+                            </div>
+                            {mw.description && (
+                              <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{mw.description}</p>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+
+                      {formData.middleware_ids.length > 0 && (
+                        <div className="mt-4 p-4 bg-indigo-50 rounded-xl">
+                          <p className="text-sm text-indigo-800">
+                            <span className="font-medium">{formData.middleware_ids.length}</span> middleware{formData.middleware_ids.length === 1 ? '' : 's'} selected.
+                          </p>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-center py-8">
+                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <Layers className="w-8 h-8 text-gray-400" />
+                      </div>
+                      <h4 className="text-lg font-medium text-gray-900 mb-2">No Middlewares Available</h4>
+                      <p className="text-gray-500 mb-4">
+                        You haven't created any middlewares yet. Create middlewares in the settings to add monitoring and other capabilities.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/apps/${appId}/middlewares`)}
+                        className="inline-flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+                      >
+                        <Layers className="w-4 h-4 mr-2" />
+                        {' '}Manage Middlewares
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -1341,146 +1436,146 @@ function AgentFormPage() {
                   <span>Save the agent first to configure marketplace publishing.</span>
                 </div>
               ) : (
-              <>
-              {/* Visibility Control */}
-              <div className="mb-6">
-                <label htmlFor="marketplace-visibility" className="block text-sm font-medium text-gray-700 mb-2">Marketplace Visibility</label>
-                <div className="flex items-center gap-4">
-                  <select
-                    id="marketplace-visibility"
-                    value={marketplaceVisibility}
-                    onChange={(e) => handleVisibilityChange(e.target.value as MarketplaceVisibility)}
-                    disabled={formData.is_tool}
-                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                  >
-                    <option value="unpublished">Unpublished (not listed)</option>
-                    <option value="private">Private (visible to app members only)</option>
-                    <option value="public">Public (visible to all users)</option>
-                  </select>
-                  {formData.is_tool && (
-                    <span className="text-xs text-gray-500 ml-2">Tool agents cannot be published to the marketplace</span>
-                  )}
-                </div>
-              </div>
-
-              {/* Profile Metadata (expandable) */}
-              {showMarketplace && (
-                <div className="space-y-6">
-                  <div>
-                    <label htmlFor="marketplace-display-name" className="block text-sm font-medium text-gray-700 mb-2">Display Name</label>
-                    <input
-                      id="marketplace-display-name"
-                      type="text"
-                      value={marketplaceProfile.display_name ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('display_name', e.target.value)}
-                      maxLength={255}
-                      placeholder="Defaults to agent name if empty"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-short-description" className="block text-sm font-medium text-gray-700 mb-2">Short Description</label>
-                    <textarea
-                      id="marketplace-short-description"
-                      value={marketplaceProfile.short_description ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('short_description', e.target.value)}
-                      maxLength={200}
-                      rows={2}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                    <div className="text-xs text-gray-500 mt-1">
-                      {marketplaceProfile.short_description?.length ?? 0}/200 characters
+                <>
+                  {/* Visibility Control */}
+                  <div className="mb-6">
+                    <label htmlFor="marketplace-visibility" className="block text-sm font-medium text-gray-700 mb-2">Marketplace Visibility</label>
+                    <div className="flex items-center gap-4">
+                      <select
+                        id="marketplace-visibility"
+                        value={marketplaceVisibility}
+                        onChange={(e) => handleVisibilityChange(e.target.value as MarketplaceVisibility)}
+                        disabled={formData.is_tool}
+                        className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      >
+                        <option value="unpublished">Unpublished (not listed)</option>
+                        <option value="private">Private (visible to app members only)</option>
+                        <option value="public">Public (visible to all users)</option>
+                      </select>
+                      {formData.is_tool && (
+                        <span className="text-xs text-gray-500 ml-2">Tool agents cannot be published to the marketplace</span>
+                      )}
                     </div>
                   </div>
-                  <div>
-                    <label htmlFor="marketplace-long-description" className="block text-sm font-medium text-gray-700 mb-2">Long Description</label>
-                    <textarea
-                      id="marketplace-long-description"
-                      value={marketplaceProfile.long_description ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('long_description', e.target.value)}
-                      rows={4}
-                      placeholder="Supports Markdown"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-category" className="block text-sm font-medium text-gray-700 mb-2">Category</label>
-                    <select
-                      id="marketplace-category"
-                      value={marketplaceProfile.category ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('category', e.target.value)}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    >
-                      <option value="">-- Select a category --</option>
-                      {MARKETPLACE_CATEGORIES.map((cat) => (
-                        <option key={cat} value={cat}>{cat}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-tags" className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
-                    <TagInput
-                      id="marketplace-tags"
-                      tags={marketplaceProfile.tags ?? []}
-                      onChange={(tags) => handleMarketplaceProfileChange('tags', tags)}
-                      maxTags={5}
-                      placeholder="Add up to 5 tags"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-icon-url" className="block text-sm font-medium text-gray-700 mb-2">Icon URL</label>
-                    <input
-                      id="marketplace-icon-url"
-                      type="text"
-                      value={marketplaceProfile.icon_url ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('icon_url', e.target.value)}
-                      placeholder="https://..."
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                    {marketplaceProfile.icon_url && (
-                      <img
-                        src={marketplaceProfile.icon_url}
-                        alt="Icon preview"
-                        className="mt-2 w-10 h-10 rounded"
-                        onError={(e) => (e.currentTarget.style.display = 'none')}
-                      />
-                    )}
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-cover-image-url" className="block text-sm font-medium text-gray-700 mb-2">Cover Image URL</label>
-                    <input
-                      id="marketplace-cover-image-url"
-                      type="text"
-                      value={marketplaceProfile.cover_image_url ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('cover_image_url', e.target.value)}
-                      placeholder="https://..."
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                    {marketplaceProfile.cover_image_url && (
-                      <img
-                        src={marketplaceProfile.cover_image_url}
-                        alt="Cover preview"
-                        className="mt-2 w-32 h-16 rounded object-cover"
-                        onError={(e) => (e.currentTarget.style.display = 'none')}
-                      />
-                    )}
-                  </div>
-                  <div className="flex items-center gap-4 mt-4">
-                    <button
-                      type="button"
-                      onClick={handleSaveMarketplaceProfile}
-                      className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                      disabled={savingMarketplace}
-                    >
-                      {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
-                    </button>
-                    {marketplaceSuccess && (
-                      <span className="text-sm text-green-600">{marketplaceSuccess}</span>
-                    )}
-                  </div>
-                </div>
-              )}
-              </>
+
+                  {/* Profile Metadata (expandable) */}
+                  {showMarketplace && (
+                    <div className="space-y-6">
+                      <div>
+                        <label htmlFor="marketplace-display-name" className="block text-sm font-medium text-gray-700 mb-2">Display Name</label>
+                        <input
+                          id="marketplace-display-name"
+                          type="text"
+                          value={marketplaceProfile.display_name ?? ''}
+                          onChange={(e) => handleMarketplaceProfileChange('display_name', e.target.value)}
+                          maxLength={255}
+                          placeholder="Defaults to agent name if empty"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="marketplace-short-description" className="block text-sm font-medium text-gray-700 mb-2">Short Description</label>
+                        <textarea
+                          id="marketplace-short-description"
+                          value={marketplaceProfile.short_description ?? ''}
+                          onChange={(e) => handleMarketplaceProfileChange('short_description', e.target.value)}
+                          maxLength={200}
+                          rows={2}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                        <div className="text-xs text-gray-500 mt-1">
+                          {marketplaceProfile.short_description?.length ?? 0}/200 characters
+                        </div>
+                      </div>
+                      <div>
+                        <label htmlFor="marketplace-long-description" className="block text-sm font-medium text-gray-700 mb-2">Long Description</label>
+                        <textarea
+                          id="marketplace-long-description"
+                          value={marketplaceProfile.long_description ?? ''}
+                          onChange={(e) => handleMarketplaceProfileChange('long_description', e.target.value)}
+                          rows={4}
+                          placeholder="Supports Markdown"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="marketplace-category" className="block text-sm font-medium text-gray-700 mb-2">Category</label>
+                        <select
+                          id="marketplace-category"
+                          value={marketplaceProfile.category ?? ''}
+                          onChange={(e) => handleMarketplaceProfileChange('category', e.target.value)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">-- Select a category --</option>
+                          {MARKETPLACE_CATEGORIES.map((cat) => (
+                            <option key={cat} value={cat}>{cat}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label htmlFor="marketplace-tags" className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
+                        <TagInput
+                          id="marketplace-tags"
+                          tags={marketplaceProfile.tags ?? []}
+                          onChange={(tags) => handleMarketplaceProfileChange('tags', tags)}
+                          maxTags={5}
+                          placeholder="Add up to 5 tags"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="marketplace-icon-url" className="block text-sm font-medium text-gray-700 mb-2">Icon URL</label>
+                        <input
+                          id="marketplace-icon-url"
+                          type="text"
+                          value={marketplaceProfile.icon_url ?? ''}
+                          onChange={(e) => handleMarketplaceProfileChange('icon_url', e.target.value)}
+                          placeholder="https://..."
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                        {marketplaceProfile.icon_url && (
+                          <img
+                            src={marketplaceProfile.icon_url}
+                            alt="Icon preview"
+                            className="mt-2 w-10 h-10 rounded"
+                            onError={(e) => (e.currentTarget.style.display = 'none')}
+                          />
+                        )}
+                      </div>
+                      <div>
+                        <label htmlFor="marketplace-cover-image-url" className="block text-sm font-medium text-gray-700 mb-2">Cover Image URL</label>
+                        <input
+                          id="marketplace-cover-image-url"
+                          type="text"
+                          value={marketplaceProfile.cover_image_url ?? ''}
+                          onChange={(e) => handleMarketplaceProfileChange('cover_image_url', e.target.value)}
+                          placeholder="https://..."
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                        {marketplaceProfile.cover_image_url && (
+                          <img
+                            src={marketplaceProfile.cover_image_url}
+                            alt="Cover preview"
+                            className="mt-2 w-32 h-16 rounded object-cover"
+                            onError={(e) => (e.currentTarget.style.display = 'none')}
+                          />
+                        )}
+                      </div>
+                      <div className="flex items-center gap-4 mt-4">
+                        <button
+                          type="button"
+                          onClick={handleSaveMarketplaceProfile}
+                          className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                          disabled={savingMarketplace}
+                        >
+                          {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
+                        </button>
+                        {marketplaceSuccess && (
+                          <span className="text-sm text-green-600">{marketplaceSuccess}</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
