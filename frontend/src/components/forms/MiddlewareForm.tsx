@@ -547,7 +547,9 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                                                             className="h-4 w-4 rounded border-gray-300 text-indigo-600"
                                                         />
                                                         <span className="text-sm font-medium text-gray-900 truncate">{tool.label}</span>
-                                                        <code className="text-xs text-gray-400 shrink-0">{tool.name}</code>
+                                                        {tool.name !== tool.label && (
+                                                            <code className="text-xs text-gray-400 shrink-0">{tool.name}</code>
+                                                        )}
                                                     </label>
                                                     {isSelected && (
                                                         <div className="flex flex-wrap gap-3 shrink-0">
