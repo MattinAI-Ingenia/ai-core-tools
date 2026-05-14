@@ -11,6 +11,7 @@ class MiddlewareType(enum.Enum):
     MODEL_CALL_LIMIT = "model_call_limit"
     TOOL_CALL_LIMIT = "tool_call_limit"
     PII = "pii"
+    HUMAN_IN_THE_LOOP = "human_in_the_loop"
     CUSTOM = "custom"
 
 

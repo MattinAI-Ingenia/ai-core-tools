@@ -4,6 +4,7 @@ from langchain.agents.middleware import SummarizationMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitMiddleware
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 from langchain.agents.middleware.pii import PIIMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 from models.agent import Agent
 from models.silo import Silo, SiloType
 from langchain.tools import BaseTool, tool
@@ -22,7 +23,6 @@ from langchain_core.documents import Document
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 import langsmith as ls
 import json
-import asyncio
 import os
 import base64
 import mimetypes
@@ -320,6 +320,17 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             elif mw_type == 'pii':
                 middleware.append(PIIMiddleware())
                 logger.info(f"PIIMiddleware enabled for agent {agent.agent_id}")
+            elif mw_type == 'human_in_the_loop':
+                interrupt_on = mw_config.get('interrupt_on', {})
+                if interrupt_on:
+                    description_prefix = mw_config.get('description_prefix', 'Tool execution requires approval')
+                    middleware.append(HumanInTheLoopMiddleware(
+                        interrupt_on=interrupt_on,
+                        description_prefix=description_prefix,
+                    ))
+                    logger.info(f"HumanInTheLoopMiddleware enabled for agent {agent.agent_id} (tools={list(interrupt_on.keys())})")
+                else:
+                    logger.warning(f"HumanInTheLoopMiddleware skipped for agent {agent.agent_id}: 'interrupt_on' config is empty")
             else:
                 logger.warning(f"Unknown middleware type '{mw_type}' for agent {agent.agent_id} — skipped")
 

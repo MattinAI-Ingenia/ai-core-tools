@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import FormActions from './FormActions';
+import { apiService } from '../../services/api';
+import type { MCPConfig } from '../../core/types';
 
 type HookType = 'before_model' | 'after_model' | 'wrap_model' | 'before_tool' | 'after_tool' | 'wrap_tool' | 'callback';
 
@@ -29,8 +31,28 @@ interface MiddlewareItem {
     created_at: string;
 }
 
+interface HitlToolEntry {
+    name: string;
+    decisions: ('approve' | 'edit' | 'reject')[];
+}
+
+interface HitlToolOption {
+    name: string;
+    label: string;
+    description?: string;
+}
+
+interface HitlMcpSource {
+    configId: number;
+    name: string;
+    description: string;
+    tools: HitlToolOption[];
+    error?: string;
+}
+
 interface MiddlewareFormProps {
     middleware?: MiddlewareItem | null;
+    appId?: number | string;
     onSubmit: (data: MiddlewareFormData) => Promise<void>;
     onCancel: () => void;
 }
@@ -82,7 +104,22 @@ const MIDDLEWARE_TYPES: MiddlewareTypeInfo[] = [
         description: 'Detects and redacts personally identifiable information before sending to the LLM, and restores it in responses.',
         hooks: ['before_model', 'after_model'],
     },
+    {
+        value: 'human_in_the_loop',
+        label: 'Human in the Loop',
+        description: 'Pauses agent execution before selected tools run and waits for human approval, edit, or rejection.',
+        hooks: ['after_model'],
+    },
 ];
+
+const BUILTIN_TOOLS: { name: string; label: string }[] = [
+    { name: 'get_current_date', label: 'Get Current Date' },
+    { name: 'python_repl', label: 'Python REPL (code interpreter)' },
+    { name: 'download_url_to_workspace', label: 'Download URL to Workspace' },
+];
+
+const ALL_HITL_DECISIONS = ['approve', 'edit', 'reject'] as const;
+type HitlDecision = typeof ALL_HITL_DECISIONS[number];
 
 type SummarizationModelOption = { value: string; label: string; provider: string | null; description: string };
 
@@ -106,7 +143,7 @@ const SUMMARIZATION_MODEL_PROVIDERS = [
     { label: 'Mistral', values: SUMMARIZATION_MODELS.filter(m => m.provider === 'Mistral') },
 ];
 
-function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareFormProps>) {
+function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<MiddlewareFormProps>) {
     const [formData, setFormData] = useState<MiddlewareFormData>({
         name: '',
         description: '',
@@ -117,6 +154,11 @@ function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareF
     const [summarizationModel, setSummarizationModel] = useState('agent_llm');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [hitlTools, setHitlTools] = useState<HitlToolEntry[]>([]);
+    const [customToolInput, setCustomToolInput] = useState('');
+    const [appAgentTools, setAppAgentTools] = useState<HitlToolOption[]>([]);
+    const [appMcpSources, setAppMcpSources] = useState<HitlMcpSource[]>([]);
+    const [loadingHitlSources, setLoadingHitlSources] = useState(false);
 
     const isEditing = !!middleware && middleware.middleware_id !== 0;
 
@@ -134,8 +176,93 @@ function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareF
             if (middleware.config?.summarization_model) {
                 setSummarizationModel(middleware.config.summarization_model);
             }
+            if (middleware.middleware_type === 'human_in_the_loop' && middleware.config?.interrupt_on) {
+                const entries: HitlToolEntry[] = Object.entries(middleware.config.interrupt_on).map(
+                    ([name, cfg]: [string, any]) => ({
+                        name,
+                        decisions: (cfg?.allowed_decisions ?? ['approve', 'edit', 'reject']) as HitlDecision[],
+                    })
+                );
+                setHitlTools(entries);
+            }
         }
     }, [middleware]);
+
+    useEffect(() => {
+        if (formData.middleware_type !== 'human_in_the_loop' || !appId) return;
+        let cancelled = false;
+
+        const loadHitlSources = async () => {
+            setLoadingHitlSources(true);
+
+            try {
+                const appIdNumber = Number(appId);
+                const [agentsResponse, mcpConfigsResponse] = await Promise.all([
+                    apiService.getAgents(appIdNumber),
+                    apiService.getMCPConfigs(appIdNumber),
+                ]);
+
+                const toolAgents = (agentsResponse as any[])
+                    .filter((agent) => agent.is_tool)
+                    .map((agent) => ({
+                        name: (agent.name as string).replace(/ /g, '_'),
+                        label: agent.name,
+                        description: agent.description || 'Agent exposed as a tool',
+                    }));
+
+                const mcpSources = await Promise.all(
+                    (mcpConfigsResponse as MCPConfig[]).map(async (config) => {
+                        try {
+                            const testResult = await apiService.testMCPConnection(appIdNumber, config.config_id);
+                            const tools = Array.isArray(testResult?.tools)
+                                ? testResult.tools.map((tool: any) => ({
+                                    name: tool.name,
+                                    label: tool.name,
+                                    description: tool.description || '',
+                                }))
+                                : [];
+
+                            return {
+                                configId: config.config_id,
+                                name: config.name,
+                                description: config.description || 'MCP configurado en esta app',
+                                tools,
+                            } as HitlMcpSource;
+                        } catch (loadError) {
+                            return {
+                                configId: config.config_id,
+                                name: config.name,
+                                description: config.description || 'MCP configurado en esta app',
+                                tools: [],
+                                error: loadError instanceof Error ? loadError.message : 'No se pudieron cargar sus tools',
+                            } as HitlMcpSource;
+                        }
+                    })
+                );
+
+                if (!cancelled) {
+                    setAppAgentTools(toolAgents);
+                    setAppMcpSources(mcpSources);
+                }
+            } catch (loadError) {
+                if (!cancelled) {
+                    setAppAgentTools([]);
+                    setAppMcpSources([]);
+                    setError(loadError instanceof Error ? loadError.message : 'Failed to load HITL sources');
+                }
+            } finally {
+                if (!cancelled) {
+                    setLoadingHitlSources(false);
+                }
+            }
+        };
+
+        void loadHitlSources();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [formData.middleware_type, appId]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
@@ -156,6 +283,13 @@ function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareF
             newConfig = { summarization_model: 'agent_llm' };
             setSummarizationModel('agent_llm');
         }
+        if (typeValue === 'human_in_the_loop') {
+            newConfig = { interrupt_on: {} };
+            setHitlTools([]);
+            setCustomToolInput('');
+            setAppAgentTools([]);
+            setAppMcpSources([]);
+        }
         setLimitValue(typeInfo.hasLimit ? (typeInfo.limitDefault ?? '') : '');
         setFormData(prev => ({
             ...prev,
@@ -164,6 +298,36 @@ function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareF
             description: typeInfo.description,
             config: newConfig
         }));
+    };
+
+    // HITL helpers
+    const toggleTool = (toolName: string) => {
+        setHitlTools(prev => {
+            if (prev.find(t => t.name === toolName)) {
+                return prev.filter(t => t.name !== toolName);
+            }
+            return [...prev, { name: toolName, decisions: ['approve', 'edit', 'reject'] }];
+        });
+    };
+
+    const toggleDecision = (toolName: string, decision: HitlDecision) => {
+        setHitlTools(prev => prev.map(t => {
+            if (t.name !== toolName) return t;
+            const has = t.decisions.includes(decision);
+            const next = has ? t.decisions.filter(d => d !== decision) : [...t.decisions, decision];
+            return { ...t, decisions: next };
+        }));
+    };
+
+    const addCustomTool = () => {
+        const name = customToolInput.trim();
+        if (!name || hitlTools.find(t => t.name === name)) return;
+        setHitlTools(prev => [...prev, { name, decisions: ['approve', 'edit', 'reject'] }]);
+        setCustomToolInput('');
+    };
+
+    const removeCustomTool = (toolName: string) => {
+        setHitlTools(prev => prev.filter(t => t.name !== toolName));
     };
 
     const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -192,11 +356,30 @@ function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareF
             return;
         }
 
+        if (formData.middleware_type === 'human_in_the_loop' && hitlTools.length === 0) {
+            setError('Select at least one tool that requires human approval.');
+            return;
+        }
+
+        if (formData.middleware_type === 'human_in_the_loop') {
+            const invalid = hitlTools.filter(t => t.decisions.length === 0);
+            if (invalid.length > 0) {
+                setError(`Tool "${invalid[0].name}" must have at least one allowed decision.`);
+                return;
+            }
+        }
+
         setIsSubmitting(true);
         setError(null);
 
         try {
-            await onSubmit(formData);
+            let submitData = formData;
+            if (formData.middleware_type === 'human_in_the_loop') {
+                const interrupt_on: Record<string, { allowed_decisions: string[] }> = {};
+                hitlTools.forEach(t => { interrupt_on[t.name] = { allowed_decisions: t.decisions }; });
+                submitData = { ...formData, config: { interrupt_on } };
+            }
+            await onSubmit(submitData);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to save middleware');
         } finally {
@@ -317,6 +500,239 @@ function MiddlewareForm({ middleware, onSubmit, onCancel }: Readonly<MiddlewareF
                             Uses the API key of the matching provider AIService configured in this app.
                         </p>
                     )}
+                </div>
+            )}
+
+            {/* Human in the Loop — tool selector */}
+            {formData.middleware_type === 'human_in_the_loop' && (
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Tools requiring approval <span className="text-red-500">*</span>
+                    </label>
+
+                    {loadingHitlSources ? (
+                        <p className="text-sm text-gray-500">Cargando tools y MCPs de la app…</p>
+                    ) : (
+                        <div className="space-y-4">
+                            <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 p-4">
+                                <h4 className="text-sm font-semibold text-gray-900">Tools de la app</h4>
+                                <p className="mt-1 text-xs text-gray-500">Aquí aparecen los agentes marcados como tool en esta app.</p>
+                                <div className="mt-3 space-y-2">
+                                    {appAgentTools.length > 0 ? appAgentTools.map((tool) => {
+                                        const entry = hitlTools.find(t => t.name === tool.name);
+                                        const isSelected = !!entry;
+                                        return (
+                                            <div key={tool.name} className={`rounded-md border px-4 py-3 ${isSelected ? 'border-indigo-300 bg-white' : 'border-indigo-100 bg-white/70'}`}>
+                                                <div className="flex items-center justify-between gap-4">
+                                                    <label className="flex items-center gap-2 cursor-pointer min-w-0">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelected}
+                                                            onChange={() => toggleTool(tool.name)}
+                                                            disabled={isSubmitting}
+                                                            className="h-4 w-4 rounded border-gray-300 text-indigo-600"
+                                                        />
+                                                        <span className="text-sm font-medium text-gray-900 truncate">{tool.label}</span>
+                                                        <code className="text-xs text-gray-400 shrink-0">{tool.name}</code>
+                                                    </label>
+                                                    {isSelected && (
+                                                        <div className="flex flex-wrap gap-3 shrink-0">
+                                                            {ALL_HITL_DECISIONS.map((decision) => (
+                                                                <label key={decision} className="flex items-center gap-1 cursor-pointer">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={entry.decisions.includes(decision)}
+                                                                        onChange={() => toggleDecision(tool.name, decision)}
+                                                                        disabled={isSubmitting}
+                                                                        className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
+                                                                    />
+                                                                    <span className="text-xs capitalize text-gray-600">{decision}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                {tool.description && <p className="mt-1 text-xs text-gray-500">{tool.description}</p>}
+                                            </div>
+                                        );
+                                    }) : (
+                                        <p className="text-sm text-gray-500">No hay agentes configurados como tool en esta app.</p>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 p-4">
+                                <h4 className="text-sm font-semibold text-gray-900">MCPs de la app</h4>
+                                <p className="mt-1 text-xs text-gray-500">Para cada MCP se prueban sus conexiones y se listan las tools que devuelve el servidor.</p>
+                                <div className="mt-3 space-y-3">
+                                    {appMcpSources.length > 0 ? appMcpSources.map((mcp) => (
+                                        <div key={mcp.configId} className="rounded-md border border-indigo-100 bg-white p-4">
+                                            <h5 className="text-sm font-medium text-gray-900">{mcp.name}</h5>
+                                            <p className="mt-1 text-xs text-gray-500">{mcp.description}</p>
+
+                                            {mcp.error ? (
+                                                <p className="mt-3 text-xs text-amber-600">No se pudieron cargar sus tools: {mcp.error}</p>
+                                            ) : mcp.tools.length > 0 ? (
+                                                <div className="mt-3 space-y-2">
+                                                    {mcp.tools.map((tool) => {
+                                                        const entry = hitlTools.find(t => t.name === tool.name);
+                                                        const isSelected = !!entry;
+                                                        return (
+                                                            <div key={tool.name} className={`rounded-md border px-4 py-3 ${isSelected ? 'border-indigo-300 bg-indigo-50' : 'border-gray-200 bg-gray-50'}`}>
+                                                                <div className="flex items-center justify-between gap-4">
+                                                                    <label className="flex items-center gap-2 cursor-pointer min-w-0">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={isSelected}
+                                                                            onChange={() => toggleTool(tool.name)}
+                                                                            disabled={isSubmitting}
+                                                                            className="h-4 w-4 rounded border-gray-300 text-indigo-600"
+                                                                        />
+                                                                        <span className="text-sm text-gray-900 truncate">{tool.label}</span>
+                                                                        <code className="text-xs text-gray-400 shrink-0">{tool.name}</code>
+                                                                    </label>
+                                                                    {isSelected && (
+                                                                        <div className="flex flex-wrap gap-3 shrink-0">
+                                                                            {ALL_HITL_DECISIONS.map((decision) => (
+                                                                                <label key={decision} className="flex items-center gap-1 cursor-pointer">
+                                                                                    <input
+                                                                                        type="checkbox"
+                                                                                        checked={entry.decisions.includes(decision)}
+                                                                                        onChange={() => toggleDecision(tool.name, decision)}
+                                                                                        disabled={isSubmitting}
+                                                                                        className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
+                                                                                    />
+                                                                                    <span className="text-xs capitalize text-gray-600">{decision}</span>
+                                                                                </label>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                                {tool.description && <p className="mt-1 text-xs text-gray-500">{tool.description}</p>}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            ) : (
+                                                <p className="mt-3 text-sm text-gray-500">Este MCP no devolvió tools visibles.</p>
+                                            )}
+                                        </div>
+                                    )) : (
+                                        <p className="text-sm text-gray-500">No hay MCPs configurados en esta app.</p>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="rounded-lg border border-gray-200 bg-white p-4">
+                                <h4 className="text-sm font-semibold text-gray-900">Tools manuales</h4>
+                                <p className="mt-1 text-xs text-gray-500">Úsalo solo si la tool no aparece arriba. Aquí puedes meter MCP tools o tools personalizadas por nombre.</p>
+                                <div className="mt-3 flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={customToolInput}
+                                        onChange={e => setCustomToolInput(e.target.value)}
+                                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTool(); } }}
+                                        placeholder="e.g., web_search, send_email..."
+                                        disabled={isSubmitting}
+                                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={addCustomTool}
+                                        disabled={isSubmitting || !customToolInput.trim()}
+                                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 rounded-md text-sm font-medium"
+                                    >
+                                        Add
+                                    </button>
+                                </div>
+
+                                {hitlTools
+                                    .filter(tool =>
+                                        !appAgentTools.find(a => a.name === tool.name) &&
+                                        !BUILTIN_TOOLS.find(b => b.name === tool.name) &&
+                                        !appMcpSources.some(mcp => mcp.tools.some(mcpTool => mcpTool.name === tool.name))
+                                    )
+                                    .map(entry => (
+                                        <div key={entry.name} className="mt-3 rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
+                                            <div className="flex items-center justify-between gap-4">
+                                                <code className="text-sm text-gray-800">{entry.name}</code>
+                                                <div className="flex items-center gap-3 shrink-0">
+                                                    {ALL_HITL_DECISIONS.map((decision) => (
+                                                        <label key={decision} className="flex items-center gap-1 cursor-pointer">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={entry.decisions.includes(decision)}
+                                                                onChange={() => toggleDecision(entry.name, decision)}
+                                                                disabled={isSubmitting}
+                                                                className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
+                                                            />
+                                                            <span className="text-xs capitalize text-gray-600">{decision}</span>
+                                                        </label>
+                                                    ))}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => removeCustomTool(entry.name)}
+                                                        disabled={isSubmitting}
+                                                        className="ml-1 text-red-400 hover:text-red-600 text-lg leading-none"
+                                                        aria-label={`Remove ${entry.name}`}
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                            </div>
+
+                            <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4">
+                                <h4 className="text-sm font-semibold text-gray-900">Tools internas</h4>
+                                <p className="mt-1 text-xs text-gray-500">Son herramientas globales de la app. Si las quieres bloquear, márcalas también aquí.</p>
+                                <div className="mt-3 space-y-2">
+                                    {BUILTIN_TOOLS.map((tool) => {
+                                        const entry = hitlTools.find(t => t.name === tool.name);
+                                        const isSelected = !!entry;
+                                        return (
+                                            <div key={tool.name} className={`rounded-md border px-4 py-3 ${isSelected ? 'border-indigo-300 bg-white' : 'border-gray-200 bg-white'}`}>
+                                                <div className="flex items-center justify-between gap-4">
+                                                    <label className="flex items-center gap-2 cursor-pointer min-w-0">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelected}
+                                                            onChange={() => toggleTool(tool.name)}
+                                                            disabled={isSubmitting}
+                                                            className="h-4 w-4 rounded border-gray-300 text-indigo-600"
+                                                        />
+                                                        <span className="text-sm text-gray-900 truncate">{tool.label}</span>
+                                                        <code className="text-xs text-gray-400 shrink-0">{tool.name}</code>
+                                                    </label>
+                                                    {isSelected && (
+                                                        <div className="flex flex-wrap gap-3 shrink-0">
+                                                            {ALL_HITL_DECISIONS.map((decision) => (
+                                                                <label key={decision} className="flex items-center gap-1 cursor-pointer">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={entry.decisions.includes(decision)}
+                                                                        onChange={() => toggleDecision(tool.name, decision)}
+                                                                        disabled={isSubmitting}
+                                                                        className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
+                                                                    />
+                                                                    <span className="text-xs capitalize text-gray-600">{decision}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    <p className="mt-2 text-xs text-gray-500">
+                        Cuando una tool seleccionada se vaya a ejecutar, el sistema se para antes y pide la decisión humana.
+                        <strong> Approve</strong> la ejecuta, <strong>Edit</strong> permite cambiar sus argumentos y <strong>Reject</strong> la bloquea.
+                    </p>
                 </div>
             )}
 
