@@ -119,12 +119,6 @@ const MIDDLEWARE_TYPES: MiddlewareTypeInfo[] = [
     },
 ];
 
-const BUILTIN_TOOLS: { name: string; label: string }[] = [
-    { name: 'get_current_date', label: 'Get Current Date' },
-    { name: 'python_repl', label: 'Python REPL (code interpreter)' },
-    { name: 'download_url_to_workspace', label: 'Download URL to Workspace' },
-];
-
 const ALL_HITL_DECISIONS = ['approve', 'edit', 'reject'] as const;
 type HitlDecision = typeof ALL_HITL_DECISIONS[number];
 
@@ -150,7 +144,6 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [hitlTools, setHitlTools] = useState<HitlToolEntry[]>([]);
-    const [customToolInput, setCustomToolInput] = useState('');
     const [appAgentTools, setAppAgentTools] = useState<HitlToolOption[]>([]);
     const [appMcpSources, setAppMcpSources] = useState<HitlMcpSource[]>([]);
     const [loadingHitlSources, setLoadingHitlSources] = useState(false);
@@ -234,16 +227,16 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                             return {
                                 configId: config.config_id,
                                 name: config.name,
-                                description: config.description || 'MCP configurado en esta app',
+                                description: config.description || 'MCP configured in this app',
                                 tools,
                             } as HitlMcpSource;
                         } catch (loadError) {
                             return {
                                 configId: config.config_id,
                                 name: config.name,
-                                description: config.description || 'MCP configurado en esta app',
+                                description: config.description || 'MCP configured in this app',
                                 tools: [],
-                                error: loadError instanceof Error ? loadError.message : 'No se pudieron cargar sus tools',
+                                error: loadError instanceof Error ? loadError.message : 'Could not load tools',
                             } as HitlMcpSource;
                         }
                     })
@@ -298,7 +291,6 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
         if (typeValue === 'human_in_the_loop') {
             newConfig = { interrupt_on: {} };
             setHitlTools([]);
-            setCustomToolInput('');
             setAppAgentTools([]);
             setAppMcpSources([]);
         }
@@ -329,17 +321,6 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
             const next = has ? t.decisions.filter(d => d !== decision) : [...t.decisions, decision];
             return { ...t, decisions: next };
         }));
-    };
-
-    const addCustomTool = () => {
-        const name = customToolInput.trim();
-        if (!name || hitlTools.find(t => t.name === name)) return;
-        setHitlTools(prev => [...prev, { name, decisions: ['approve', 'edit', 'reject'] }]);
-        setCustomToolInput('');
-    };
-
-    const removeCustomTool = (toolName: string) => {
-        setHitlTools(prev => prev.filter(t => t.name !== toolName));
     };
 
     const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -525,12 +506,12 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                     </label>
 
                     {loadingHitlSources ? (
-                        <p className="text-sm text-gray-500">Cargando tools y MCPs de la app…</p>
+                        <p className="text-sm text-gray-500">Loading app tools and MCPs…</p>
                     ) : (
                         <div className="space-y-4">
                             <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 p-4">
-                                <h4 className="text-sm font-semibold text-gray-900">Tools de la app</h4>
-                                <p className="mt-1 text-xs text-gray-500">Aquí aparecen los agentes marcados como tool en esta app.</p>
+                                <h4 className="text-sm font-semibold text-gray-900">App tools</h4>
+                                <p className="mt-1 text-xs text-gray-500">Agents marked as tools in this app appear here.</p>
                                 <div className="mt-3 space-y-2">
                                     {appAgentTools.length > 0 ? appAgentTools.map((tool) => {
                                         const entry = hitlTools.find(t => t.name === tool.name);
@@ -572,14 +553,14 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                                             </div>
                                         );
                                     }) : (
-                                        <p className="text-sm text-gray-500">No hay agentes configurados como tool en esta app.</p>
+                                        <p className="text-sm text-gray-500">No agents configured as tools in this app.</p>
                                     )}
                                 </div>
                             </div>
 
                             <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 p-4">
-                                <h4 className="text-sm font-semibold text-gray-900">MCPs de la app</h4>
-                                <p className="mt-1 text-xs text-gray-500">Para cada MCP se prueban sus conexiones y se listan las tools que devuelve el servidor.</p>
+                                <h4 className="text-sm font-semibold text-gray-900">App MCPs</h4>
+                                <p className="mt-1 text-xs text-gray-500">Connections are tested for each MCP and the tools returned by the server are listed.</p>
                                 <div className="mt-3 space-y-3">
                                     {appMcpSources.length > 0 ? appMcpSources.map((mcp) => (
                                         <div key={mcp.configId} className="rounded-md border border-indigo-100 bg-white p-4">
@@ -587,7 +568,7 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                                             <p className="mt-1 text-xs text-gray-500">{mcp.description}</p>
 
                                             {mcp.error ? (
-                                                <p className="mt-3 text-xs text-amber-600">No se pudieron cargar sus tools: {mcp.error}</p>
+                                                <p className="mt-3 text-xs text-amber-600">Could not load tools: {mcp.error}</p>
                                             ) : mcp.tools.length > 0 ? (
                                                 <div className="mt-3 space-y-2">
                                                     {mcp.tools.map((tool) => {
@@ -630,124 +611,20 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                                                     })}
                                                 </div>
                                             ) : (
-                                                <p className="mt-3 text-sm text-gray-500">Este MCP no devolvió tools visibles.</p>
+                                                <p className="mt-3 text-sm text-gray-500">This MCP returned no visible tools.</p>
                                             )}
                                         </div>
                                     )) : (
-                                        <p className="text-sm text-gray-500">No hay MCPs configurados en esta app.</p>
+                                        <p className="text-sm text-gray-500">No MCPs configured in this app.</p>
                                     )}
                                 </div>
                             </div>
 
-                            <div className="rounded-lg border border-gray-200 bg-white p-4">
-                                <h4 className="text-sm font-semibold text-gray-900">Tools manuales</h4>
-                                <p className="mt-1 text-xs text-gray-500">Úsalo solo si la tool no aparece arriba. Aquí puedes meter MCP tools o tools personalizadas por nombre.</p>
-                                <div className="mt-3 flex gap-2">
-                                    <input
-                                        type="text"
-                                        value={customToolInput}
-                                        onChange={e => setCustomToolInput(e.target.value)}
-                                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTool(); } }}
-                                        placeholder="e.g., web_search, send_email..."
-                                        disabled={isSubmitting}
-                                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={addCustomTool}
-                                        disabled={isSubmitting || !customToolInput.trim()}
-                                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 rounded-md text-sm font-medium"
-                                    >
-                                        Add
-                                    </button>
-                                </div>
-
-                                {hitlTools
-                                    .filter(tool =>
-                                        !appAgentTools.find(a => a.name === tool.name) &&
-                                        !BUILTIN_TOOLS.find(b => b.name === tool.name) &&
-                                        !appMcpSources.some(mcp => mcp.tools.some(mcpTool => mcpTool.name === tool.name))
-                                    )
-                                    .map(entry => (
-                                        <div key={entry.name} className="mt-3 rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
-                                            <div className="flex items-center justify-between gap-4">
-                                                <code className="text-sm text-gray-800">{entry.name}</code>
-                                                <div className="flex items-center gap-3 shrink-0">
-                                                    {ALL_HITL_DECISIONS.map((decision) => (
-                                                        <label key={decision} className="flex items-center gap-1 cursor-pointer">
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={entry.decisions.includes(decision)}
-                                                                onChange={() => toggleDecision(entry.name, decision)}
-                                                                disabled={isSubmitting}
-                                                                className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
-                                                            />
-                                                            <span className="text-xs capitalize text-gray-600">{decision}</span>
-                                                        </label>
-                                                    ))}
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => removeCustomTool(entry.name)}
-                                                        disabled={isSubmitting}
-                                                        className="ml-1 text-red-400 hover:text-red-600 text-lg leading-none"
-                                                        aria-label={`Remove ${entry.name}`}
-                                                    >
-                                                        ×
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
-                            </div>
-
-                            <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4">
-                                <h4 className="text-sm font-semibold text-gray-900">Tools internas</h4>
-                                <p className="mt-1 text-xs text-gray-500">Son herramientas globales de la app. Si las quieres bloquear, márcalas también aquí.</p>
-                                <div className="mt-3 space-y-2">
-                                    {BUILTIN_TOOLS.map((tool) => {
-                                        const entry = hitlTools.find(t => t.name === tool.name);
-                                        const isSelected = !!entry;
-                                        return (
-                                            <div key={tool.name} className={`rounded-md border px-4 py-3 ${isSelected ? 'border-indigo-300 bg-white' : 'border-gray-200 bg-white'}`}>
-                                                <div className="flex items-center justify-between gap-4">
-                                                    <label className="flex items-center gap-2 cursor-pointer min-w-0">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={isSelected}
-                                                            onChange={() => toggleTool(tool.name)}
-                                                            disabled={isSubmitting}
-                                                            className="h-4 w-4 rounded border-gray-300 text-indigo-600"
-                                                        />
-                                                        <span className="text-sm text-gray-900 truncate">{tool.label}</span>
-                                                        <code className="text-xs text-gray-400 shrink-0">{tool.name}</code>
-                                                    </label>
-                                                    {isSelected && (
-                                                        <div className="flex flex-wrap gap-3 shrink-0">
-                                                            {ALL_HITL_DECISIONS.map((decision) => (
-                                                                <label key={decision} className="flex items-center gap-1 cursor-pointer">
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        checked={entry.decisions.includes(decision)}
-                                                                        onChange={() => toggleDecision(tool.name, decision)}
-                                                                        disabled={isSubmitting}
-                                                                        className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
-                                                                    />
-                                                                    <span className="text-xs capitalize text-gray-600">{decision}</span>
-                                                                </label>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
                         </div>
                     )}
                     <p className="mt-2 text-xs text-gray-500">
-                        Cuando una tool seleccionada se vaya a ejecutar, el sistema se para antes y pide la decisión humana.
-                        <strong> Approve</strong> la ejecuta, <strong>Edit</strong> permite cambiar sus argumentos y <strong>Reject</strong> la bloquea.
+                        When a selected tool is about to run, execution pauses and waits for a human decision.
+                        <strong> Approve</strong> runs it, <strong>Edit</strong> allows changing its arguments, and <strong>Reject</strong> blocks it.
                     </p>
                 </div>
             )}
