@@ -21,6 +21,7 @@ const MIDDLEWARE_TYPE_LABELS: Record<string, string> = {
     model_call_limit: 'Model Call Limit',
     tool_call_limit: 'Tool Call Limit',
     pii: 'PII Detection',
+    human_in_the_loop: 'Human in the Loop',
     custom: 'Custom',
 };
 
@@ -305,6 +306,7 @@ function MiddlewaresPage() {
             >
                 <MiddlewareForm
                     middleware={editingMiddleware}
+                    appId={appId ? Number.parseInt(appId) : undefined}
                     onSubmit={handleSaveMiddleware}
                     onCancel={handleCloseModal}
                 />
