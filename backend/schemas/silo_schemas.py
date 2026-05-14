@@ -59,6 +59,13 @@ class UpdateSiloSchema(BaseModel):
     output_parser_id: Optional[int] = None
 
 
+class SiloSearchSchema(BaseModel):
+    """Schema for searching in a silo"""
+    query: str
+    limit: Optional[int] = None
+    filter_metadata: Optional[Dict[str, Any]] = None
+
+
 # Kept for backward compatibility with the public API router
 CreateUpdateSiloSchema = CreateSiloSchema
 
