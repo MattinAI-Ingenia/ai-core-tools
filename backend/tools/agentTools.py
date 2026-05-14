@@ -116,72 +116,28 @@ class MCPClientManager:
 
 async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None):
 
-def _build_summarization_llm(agent, provider_key: str, model_name: str):
-    """Build a lightweight LLM for summarization using an existing AIService API key.
+def _build_summarization_llm_from_service(agent, ai_service_id: int):
+    """Build a summarization LLM from a specific AIService ID.
 
-    Looks for an AIService in the agent's app that matches `provider_key`
-    (case-insensitive: 'openai', 'anthropic', 'mistral'). Falls back to
-    env vars OPENAI_API_KEY / ANTHROPIC_API_KEY / MISTRAL_API_KEY if no
-    matching service is found.
-
-    Args:
-        agent: The Agent ORM instance (needs agent.app.ai_services).
-        provider_key: Lowercase provider identifier ('openai', 'anthropic', 'mistral').
-        model_name: The API model ID (e.g. 'gpt-5.4-mini').
-
-    Returns:
-        A LangChain chat model instance, or the agent's own LLM if the
-        provider is unrecognised.
+    Looks up the AIService by ID within the agent's app and instantiates the
+    appropriate LangChain chat model via :func:`tools.aiServiceTools.create_llm_from_service`.
+    Supports all configured providers (OpenAI, Anthropic, MistralAI, Azure, Google, Custom).
     """
-    from langchain_openai import ChatOpenAI
-    from langchain_anthropic import ChatAnthropic
-    from langchain_mistralai import ChatMistralAI
-    from models.ai_service import ProviderEnum
+    from tools.aiServiceTools import create_llm_from_service
 
-    # Map provider_key → ProviderEnum value string
-    _PROVIDER_MAP = {
-        'openai': ProviderEnum.OpenAI.value,
-        'anthropic': ProviderEnum.Anthropic.value,
-        'mistral': ProviderEnum.MistralAI.value,
-    }
-    provider_enum_val = _PROVIDER_MAP.get(provider_key.lower())
-    if not provider_enum_val:
-        logger.warning(f"Unknown summarization provider '{provider_key}' — using agent LLM")
-        return None
-
-    # Try to find an AIService in the app with the matching provider
-    api_key = None
     if hasattr(agent, 'app') and agent.app and hasattr(agent.app, 'ai_services'):
         for svc in agent.app.ai_services:
-            svc_provider = svc.provider.value if hasattr(svc.provider, 'value') else svc.provider
-            if svc_provider == provider_enum_val and svc.api_key:
-                api_key = svc.api_key
-                break
+            if svc.service_id == ai_service_id:
+                try:
+                    llm = create_llm_from_service(svc, temperature=0)
+                    logger.info(f"Summarization using AIService id={ai_service_id} ({svc.name})")
+                    return llm
+                except Exception as e:
+                    logger.warning(f"Failed to build summarization LLM from service {ai_service_id}: {e}")
+                    return None
 
-    # Fallback to environment variables
-    if not api_key:
-        env_map = {
-            'openai': 'OPENAI_API_KEY',
-            'anthropic': 'ANTHROPIC_API_KEY',
-            'mistral': 'MISTRAL_API_KEY',
-        }
-        api_key = os.getenv(env_map.get(provider_key.lower(), ''))
-
-    if not api_key:
-        logger.warning(f"No API key found for summarization provider '{provider_key}' — using agent LLM")
-        return None
-
-    if provider_key.lower() == 'openai':
-        summarization_llm = ChatOpenAI(model=model_name, temperature=0, api_key=api_key)
-    elif provider_key.lower() == 'anthropic':
-        summarization_llm = ChatAnthropic(model=model_name, temperature=0, api_key=api_key)
-    elif provider_key.lower() == 'mistral':
-        summarization_llm = ChatMistralAI(model=model_name, temperature=0, api_key=api_key)
-    else:
-        return None
-
-    logger.info(f"Summarization using {provider_key}/{model_name} (key from {'app AIService' if api_key else 'env var'})")
-    return summarization_llm
+    logger.warning(f"AIService id={ai_service_id} not found in agent's app — using agent LLM")
+    return None
 
 
 async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None, temp_silo_ids: Optional[List[int]] = None):
@@ -290,13 +246,15 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             elif mw_type == 'summarization':
                 # Only add if not already added via has_memory (avoid duplicates)
                 if not agent.has_memory:
-                    # Use a provider model if configured (format: "provider:model_name"), else agent's LLM
                     summarization_model_value = mw_config.get('summarization_model', 'agent_llm')
-                    if summarization_model_value and summarization_model_value != 'agent_llm' and ':' in summarization_model_value:
-                        provider_key, model_name = summarization_model_value.split(':', 1)
-                        summarization_llm = _build_summarization_llm(agent, provider_key, model_name) or llm
+                    summarization_llm = llm
+                    if summarization_model_value and summarization_model_value != 'agent_llm':
+                        try:
+                            service_id = int(summarization_model_value.split(':', 1)[1])
+                            summarization_llm = _build_summarization_llm_from_service(agent, service_id) or llm
+                        except (ValueError, IndexError):
+                            logger.warning(f"Invalid ai_service format '{summarization_model_value}' — using agent LLM")
                     else:
-                        summarization_llm = llm
                         logger.info(f"Summarization using agent's own LLM")
                     summarization_mw = SummarizationMiddleware(
                         model=summarization_llm,
@@ -315,8 +273,20 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                 middleware.append(ToolCallLimitMiddleware(max_calls=max_calls))
                 logger.info(f"ToolCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
             elif mw_type == 'pii':
-                middleware.append(PIIMiddleware())
-                logger.info(f"PIIMiddleware enabled for agent {agent.agent_id}")
+                pii_types = mw_config.get('pii_types', ['email', 'credit_card', 'ip', 'mac_address', 'url'])
+                strategy = mw_config.get('strategy', 'redact')
+                apply_to_input = mw_config.get('apply_to_input', True)
+                apply_to_output = mw_config.get('apply_to_output', True)
+                apply_to_tool_results = mw_config.get('apply_to_tool_results', True)
+                # Create a single PIIMiddleware instance with all configured types
+                middleware.append(PIIMiddleware(
+                    pii_type=pii_types,
+                    strategy=strategy,
+                    apply_to_input=apply_to_input,
+                    apply_to_output=apply_to_output,
+                    apply_to_tool_results=apply_to_tool_results,
+                ))
+                logger.info(f"PIIMiddleware enabled for agent {agent.agent_id} (types={pii_types}, strategy={strategy})")
             elif mw_type == 'human_in_the_loop':
                 interrupt_on = mw_config.get('interrupt_on', {})
                 if interrupt_on:
@@ -328,6 +298,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                     logger.info(f"HumanInTheLoopMiddleware enabled for agent {agent.agent_id} (tools={list(interrupt_on.keys())})")
                 else:
                     logger.warning(f"HumanInTheLoopMiddleware skipped for agent {agent.agent_id}: 'interrupt_on' config is empty")
+            
             else:
                 logger.warning(f"Unknown middleware type '{mw_type}' for agent {agent.agent_id} — skipped")
 

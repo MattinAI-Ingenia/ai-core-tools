@@ -22,7 +22,9 @@ class MiddlewareService:
                 name=mw.name,
                 description=mw.description or "",
                 middleware_type=mw.middleware_type.value if mw.middleware_type else "monitoring",
-                created_at=mw.create_date
+                config=mw.config,
+                created_at=mw.create_date,
+                is_frozen=mw.is_frozen or False
             ))
 
         return result
@@ -36,7 +38,9 @@ class MiddlewareService:
                 name="",
                 description="",
                 middleware_type="monitoring",
-                created_at=None
+                config=None,
+                created_at=None,
+                is_frozen=False
             )
 
         middleware = MiddlewareRepository.get_by_id_and_app_id(db, middleware_id, app_id)
@@ -49,7 +53,9 @@ class MiddlewareService:
             name=middleware.name,
             description=middleware.description or "",
             middleware_type=middleware.middleware_type.value if middleware.middleware_type else "monitoring",
-            created_at=middleware.create_date
+            config=middleware.config,
+            created_at=middleware.create_date,
+            is_frozen=middleware.is_frozen or False
         )
 
     @staticmethod

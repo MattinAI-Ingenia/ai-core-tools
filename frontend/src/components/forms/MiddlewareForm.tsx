@@ -57,6 +57,13 @@ interface MiddlewareFormProps {
     onCancel: () => void;
 }
 
+interface AIServiceOption {
+    service_id: number;
+    name: string;
+    provider: string;
+    model_name: string;
+}
+
 const HOOK_STYLES: Record<HookType, { label: string; bg: string; text: string }> = {
     before_model: { label: 'Before Model', bg: 'bg-blue-100', text: 'text-blue-700' },
     after_model: { label: 'After Model', bg: 'bg-blue-100', text: 'text-blue-700' },
@@ -123,25 +130,13 @@ type HitlDecision = typeof ALL_HITL_DECISIONS[number];
 
 type SummarizationModelOption = { value: string; label: string; provider: string | null; description: string };
 
-const SUMMARIZATION_MODELS: SummarizationModelOption[] = [
-    { value: 'agent_llm', label: "Agent's LLM (default)", provider: null, description: "Uses the same LLM configured on the agent — no extra cost" },
-    // OpenAI
-    { value: 'openai:gpt-5.4-mini', label: 'GPT-5.4 mini', provider: 'OpenAI', description: '$0.75 / $4.50 per 1M tokens — strong mini model' },
-    { value: 'openai:gpt-5.4-nano', label: 'GPT-5.4 nano', provider: 'OpenAI', description: '$0.20 / $1.25 per 1M tokens — cheapest OpenAI option' },
-    // Anthropic
-    { value: 'anthropic:claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'Anthropic', description: '$1 / $5 per 1M tokens — fastest Claude' },
-    { value: 'anthropic:claude-haiku-3-5', label: 'Claude Haiku 3.5', provider: 'Anthropic', description: '$0.80 / $4 per 1M tokens — fast and cheap' },
-    { value: 'anthropic:claude-haiku-3', label: 'Claude Haiku 3', provider: 'Anthropic', description: '$0.25 / $1.25 per 1M tokens — lowest Anthropic cost' },
-    // Mistral
-    { value: 'mistral:ministral-3b-2512', label: 'Ministral 3B', provider: 'Mistral', description: '$0.10 / $0.10 per 1M tokens — tiny and ultra-efficient' },
-    { value: 'mistral:mistral-small-2603', label: 'Mistral Small 4', provider: 'Mistral', description: '$0.15 / $0.60 per 1M tokens — powerful hybrid model' },
-];
-
-const SUMMARIZATION_MODEL_PROVIDERS = [
-    { label: 'OpenAI', values: SUMMARIZATION_MODELS.filter(m => m.provider === 'OpenAI') },
-    { label: 'Anthropic', values: SUMMARIZATION_MODELS.filter(m => m.provider === 'Anthropic') },
-    { label: 'Mistral', values: SUMMARIZATION_MODELS.filter(m => m.provider === 'Mistral') },
-];
+// Kept only for description lookup of the "agent_llm" default option
+const AGENT_LLM_OPTION: SummarizationModelOption = {
+    value: 'agent_llm',
+    label: "Agent's LLM (default)",
+    provider: null,
+    description: "Uses the same LLM configured on the agent — no extra cost",
+};
 
 function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<MiddlewareFormProps>) {
     const [formData, setFormData] = useState<MiddlewareFormData>({
@@ -159,8 +154,22 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
     const [appAgentTools, setAppAgentTools] = useState<HitlToolOption[]>([]);
     const [appMcpSources, setAppMcpSources] = useState<HitlMcpSource[]>([]);
     const [loadingHitlSources, setLoadingHitlSources] = useState(false);
+    const [aiServices, setAiServices] = useState<AIServiceOption[]>([]);
 
     const isEditing = !!middleware && middleware.middleware_id !== 0;
+
+    useEffect(() => {
+        if (!appId) {
+            setAiServices([]);
+            return;
+        }
+        const numAppId = typeof appId === 'string' ? Number.parseInt(appId) : appId;
+        apiService.getAIServices(numAppId).then((services: AIServiceOption[]) => {
+            setAiServices(services);
+        }).catch(() => {
+            // Silent fallback — dropdown will only show "Agent's LLM"
+        });
+    }, [appId]);
 
     useEffect(() => {
         if (middleware) {
@@ -282,6 +291,9 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
         if (typeValue === 'summarization') {
             newConfig = { summarization_model: 'agent_llm' };
             setSummarizationModel('agent_llm');
+        }
+        if (typeValue === 'pii') {
+            newConfig = { pii_types: ['email', 'credit_card', 'ip', 'mac_address', 'url'], strategy: 'redact', apply_to_input: true, apply_to_output: true, apply_to_tool_results: true };
         }
         if (typeValue === 'human_in_the_loop') {
             newConfig = { interrupt_on: {} };
@@ -481,23 +493,25 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                         disabled={isSubmitting}
                     >
                         <option value="agent_llm">Agent's LLM (default)</option>
-                        {SUMMARIZATION_MODEL_PROVIDERS.map(({ label, values }) => (
-                            <optgroup key={label} label={label}>
-                                {values.map((model) => (
-                                    <option key={model.value} value={model.value}>
-                                        {model.label}
-                                    </option>
-                                ))}
-                            </optgroup>
+                        {aiServices.map((svc) => (
+                            <option key={svc.service_id} value={`ai_service:${svc.service_id}`}>
+                                {svc.name} ({svc.provider} · {svc.model_name})
+                            </option>
                         ))}
                     </select>
                     <p className="mt-1 text-xs text-gray-500">
-                        {SUMMARIZATION_MODELS.find(m => m.value === summarizationModel)?.description ||
-                            'Select a model for conversation summarization'}
+                        {summarizationModel === 'agent_llm'
+                            ? AGENT_LLM_OPTION.description
+                            : (() => {
+                                const id = parseInt(summarizationModel.replace('ai_service:', ''), 10);
+                                const svc = aiServices.find(s => s.service_id === id);
+                                return svc ? `Uses "${svc.name}" (${svc.provider} · ${svc.model_name})` : 'Selected AI service';
+                            })()
+                        }
                     </p>
                     {summarizationModel !== 'agent_llm' && (
                         <p className="mt-1 text-xs text-blue-600">
-                            Uses the API key of the matching provider AIService configured in this app.
+                            Uses the API key of the selected AI service configured in this app.
                         </p>
                     )}
                 </div>
@@ -733,6 +747,87 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                         Cuando una tool seleccionada se vaya a ejecutar, el sistema se para antes y pide la decisión humana.
                         <strong> Approve</strong> la ejecuta, <strong>Edit</strong> permite cambiar sus argumentos y <strong>Reject</strong> la bloquea.
                     </p>
+                </div>
+            )}
+
+            {/* PII Configuration */}
+            {formData.middleware_type === 'pii' && (
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                            PII Types to detect <span className="text-red-500">*</span>
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {(['email', 'credit_card', 'ip', 'mac_address', 'url'] as const).map((piiType) => {
+                                const checked = (formData.config?.pii_types ?? ['email', 'credit_card', 'ip', 'mac_address', 'url']).includes(piiType);
+                                const labels: Record<string, string> = {
+                                    email: 'Email addresses',
+                                    credit_card: 'Credit card numbers',
+                                    ip: 'IP addresses',
+                                    mac_address: 'MAC addresses',
+                                    url: 'URLs',
+                                };
+                                return (
+                                    <label key={piiType} className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            disabled={isSubmitting}
+                                            onChange={(e) => {
+                                                const current: string[] = formData.config?.pii_types ?? ['email', 'credit_card', 'ip', 'mac_address', 'url'];
+                                                const next = e.target.checked
+                                                    ? [...current, piiType]
+                                                    : current.filter((t) => t !== piiType);
+                                                setFormData(prev => ({ ...prev, config: { ...prev.config, pii_types: next } }));
+                                            }}
+                                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                        />
+                                        <span className="text-sm text-gray-700">{labels[piiType]}</span>
+                                    </label>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    <div>
+                        <label htmlFor="pii_strategy" className="block text-sm font-medium text-gray-700 mb-1">
+                            Strategy
+                        </label>
+                        <select
+                            id="pii_strategy"
+                            value={formData.config?.strategy ?? 'redact'}
+                            disabled={isSubmitting}
+                            onChange={(e) => setFormData(prev => ({ ...prev, config: { ...prev.config, strategy: e.target.value } }))}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                        >
+                            <option value="redact">Redact — replace with [REDACTED_TYPE]</option>
+                            <option value="mask">Mask — partially hide (e.g. ****-1234)</option>
+                            <option value="hash">Hash — deterministic pseudonym</option>
+                            <option value="block">Block — raise error when PII detected</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Apply to</label>
+                        <div className="space-y-1">
+                            {([
+                                { key: 'apply_to_input', label: 'User input (before model)' },
+                                { key: 'apply_to_output', label: 'AI output (after model)' },
+                                { key: 'apply_to_tool_results', label: 'Tool results (before model)' },
+                            ] as const).map(({ key, label }) => (
+                                <label key={key} className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={formData.config?.[key] ?? true}
+                                        disabled={isSubmitting}
+                                        onChange={(e) => setFormData(prev => ({ ...prev, config: { ...prev.config, [key]: e.target.checked } }))}
+                                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                    />
+                                    <span className="text-sm text-gray-700">{label}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
                 </div>
             )}
 
