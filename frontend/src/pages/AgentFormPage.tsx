@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
+import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../constants/messages';
 import { DEFAULT_AGENT_TEMPERATURE } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
@@ -47,7 +48,7 @@ interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
-  middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string }>;
+  middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[] }>;
 }
 
 interface AgentFormData {
@@ -332,12 +333,33 @@ function AgentFormPage() {
   };
 
   const handleMCPToggle = (configId: number) => {
-    setFormData(prev => ({
-      ...prev,
-      mcp_config_ids: prev.mcp_config_ids.includes(configId)
+    setFormData(prev => {
+      const nextMcpIds = prev.mcp_config_ids.includes(configId)
         ? prev.mcp_config_ids.filter(id => id !== configId)
-        : [...prev.mcp_config_ids, configId]
-    }));
+        : [...prev.mcp_config_ids, configId];
+
+      // Auto-deselect middlewares whose required MCPs are no longer connected
+      const disabledMiddlewareIds = (agent?.middlewares ?? [])
+        .filter(mw => {
+          const mcpIds = mw.mcp_config_ids ?? [];
+          return mcpIds.length > 0 && !mcpIds.some(id => nextMcpIds.includes(id));
+        })
+        .map(mw => mw.middleware_id);
+
+      const removedIds = prev.middleware_ids.filter(id => disabledMiddlewareIds.includes(id));
+      if (removedIds.length > 0) {
+        const removedNames = (agent?.middlewares ?? [])
+          .filter(mw => removedIds.includes(mw.middleware_id))
+          .map(mw => mw.name);
+        toast.warning(`Middleware${removedNames.length > 1 ? 's' : ''} "${removedNames.join('", "')}" removed — required MCP no longer connected`);
+      }
+
+      return {
+        ...prev,
+        mcp_config_ids: nextMcpIds,
+        middleware_ids: prev.middleware_ids.filter(id => !disabledMiddlewareIds.includes(id)),
+      };
+    });
   };
 
   const handleSkillToggle = (skillId: number) => {
@@ -347,6 +369,15 @@ function AgentFormPage() {
         ? prev.skill_ids.filter(id => id !== skillId)
         : [...prev.skill_ids, skillId]
     }));
+  };
+
+  const getMiddlewareStatus = (mw: { mcp_config_ids?: number[] }): 'available' | 'disabled' | 'partial' => {
+    const mcpIds = mw.mcp_config_ids ?? [];
+    if (mcpIds.length === 0) return 'available';
+    const connected = mcpIds.filter(id => formData.mcp_config_ids.includes(id)).length;
+    if (connected === 0) return 'disabled';
+    if (connected < mcpIds.length) return 'partial';
+    return 'available';
   };
 
   const handleMiddlewareToggle = (middlewareId: number) => {
@@ -1478,35 +1509,76 @@ function AgentFormPage() {
                   {agent.middlewares.length > 0 ? (
                     <>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {agent.middlewares.map((mw) => (
+                        {agent.middlewares.map((mw) => {
+                          const status = getMiddlewareStatus(mw);
+                          const isSelected = formData.middleware_ids.includes(mw.middleware_id);
+                          const isDisabled = status === 'disabled';
+                          const isPartial = status === 'partial';
+                          const mcpIds = mw.mcp_config_ids ?? [];
+
+                          // Resolve MCP names for display
+                          const allMcpNames = (agent.mcp_configs ?? [])
+                            .filter(c => mcpIds.includes(c.config_id))
+                            .map(c => c.name);
+                          const missingMcpNames = (agent.mcp_configs ?? [])
+                            .filter(c => mcpIds.includes(c.config_id) && !formData.mcp_config_ids.includes(c.config_id))
+                            .map(c => c.name);
+
+                          return (
                           <button
                             key={mw.middleware_id}
                             type="button"
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.middleware_ids.includes(mw.middleware_id)
-                              ? 'border-indigo-500 bg-indigo-50'
-                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                            className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full relative ${
+                              isDisabled
+                                ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                                : isSelected
+                                  ? 'border-indigo-500 bg-indigo-50 cursor-pointer'
+                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
                               }`}
-                            onClick={() => handleMiddlewareToggle(mw.middleware_id)}
+                            onClick={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
+                            disabled={isDisabled}
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center">
                                 <input
                                   type="checkbox"
-                                  checked={formData.middleware_ids.includes(mw.middleware_id)}
-                                  onChange={() => handleMiddlewareToggle(mw.middleware_id)}
+                                  checked={isSelected}
+                                  onChange={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
+                                  disabled={isDisabled}
                                   className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                                 />
                                 <span className="ml-3 text-sm font-medium text-gray-900">{mw.name}</span>
                               </div>
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                                {mw.middleware_type}
-                              </span>
+                              <div className="flex items-center gap-1.5">
+                                {isPartial && (
+                                  <div className="relative group">
+                                    <AlertTriangle className="w-4 h-4 text-amber-500 cursor-help" />
+                                    <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block z-10 w-56 p-2.5 text-xs bg-gray-900 text-white rounded-lg shadow-lg pointer-events-none">
+                                      <p className="font-medium mb-1">Partially connected</p>
+                                      <p className="text-gray-300">
+                                        Not active for: {missingMcpNames.join(', ')}
+                                      </p>
+                                      <div className="absolute bottom-0 right-3 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
+                                    </div>
+                                  </div>
+                                )}
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                                  {mw.middleware_type}
+                                </span>
+                              </div>
                             </div>
                             {mw.description && (
                               <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{mw.description}</p>
                             )}
+                            {isDisabled && (
+                              <p className="mt-2 ml-7 text-xs text-red-500 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 shrink-0" />
+                                Requires unselected MCP{allMcpNames.length > 1 ? 's' : ''}: {allMcpNames.join(', ')}
+                              </p>
+                            )}
                           </button>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       {formData.middleware_ids.length > 0 && (

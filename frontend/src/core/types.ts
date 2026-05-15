@@ -96,6 +96,7 @@ export interface Middleware {
   middleware_type: string;
   config?: Record<string, any> | null;
   created_at: string;
+  mcp_config_ids?: number[];
 }
 
 // MCP Server types - for exposing agents as MCP tools

@@ -366,11 +366,16 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
         setError(null);
 
         try {
-            let submitData = formData;
+            let submitData: any = formData;
             if (formData.middleware_type === 'human_in_the_loop') {
                 const interrupt_on: Record<string, { allowed_decisions: string[] }> = {};
                 hitlTools.forEach(t => { interrupt_on[t.name] = { allowed_decisions: t.decisions }; });
-                submitData = { ...formData, config: { interrupt_on } };
+                // Derive mcp_config_ids from MCP sources that have at least one selected tool
+                const selectedToolNames = new Set(hitlTools.map(t => t.name));
+                const mcp_config_ids = appMcpSources
+                    .filter(mcp => mcp.tools.some(tool => selectedToolNames.has(tool.name)))
+                    .map(mcp => mcp.configId);
+                submitData = { ...formData, config: { interrupt_on }, mcp_config_ids };
             }
             await onSubmit(submitData);
         } catch (err) {

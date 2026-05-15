@@ -11,7 +11,7 @@ from .output_parser import OutputParser
 from .mcp_config import MCPConfig
 from .silo import Silo
 from .skill import Skill
-from .middleware import Middleware, AgentMiddleware
+from .middleware import Middleware, AgentMiddleware, MiddlewareMCP
 from .agent import Agent
 from .agent_marketplace_profile import AgentMarketplaceProfile
 from .agent_marketplace_rating import AgentMarketplaceRating

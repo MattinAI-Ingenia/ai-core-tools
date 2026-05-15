@@ -1,6 +1,6 @@
 from typing import Optional, List
-from sqlalchemy.orm import Session
-from models.middleware import Middleware, AgentMiddleware
+from sqlalchemy.orm import Session, joinedload
+from models.middleware import Middleware, AgentMiddleware, MiddlewareMCP
 
 
 class MiddlewareRepository:
@@ -9,12 +9,16 @@ class MiddlewareRepository:
     @staticmethod
     def get_all_by_app_id(db: Session, app_id: int) -> List[Middleware]:
         """Get all middlewares for a specific app"""
-        return db.query(Middleware).filter(Middleware.app_id == app_id).all()
+        return db.query(Middleware).options(
+            joinedload(Middleware.mcp_associations)
+        ).filter(Middleware.app_id == app_id).all()
 
     @staticmethod
     def get_by_id_and_app_id(db: Session, middleware_id: int, app_id: int) -> Optional[Middleware]:
         """Get a specific middleware by ID and app ID"""
-        return db.query(Middleware).filter(
+        return db.query(Middleware).options(
+            joinedload(Middleware.mcp_associations)
+        ).filter(
             Middleware.middleware_id == middleware_id,
             Middleware.app_id == app_id
         ).first()
@@ -65,3 +69,13 @@ class MiddlewareRepository:
         ).all()
 
         return {m.middleware_id for m in valid}
+
+    @staticmethod
+    def update_mcp_associations(db: Session, middleware_id: int, config_ids: List[int]) -> None:
+        """Replace the MCP associations for a middleware"""
+        db.query(MiddlewareMCP).filter(
+            MiddlewareMCP.middleware_id == middleware_id
+        ).delete(synchronize_session=False)
+        for config_id in config_ids:
+            db.add(MiddlewareMCP(middleware_id=middleware_id, config_id=config_id))
+        db.flush()

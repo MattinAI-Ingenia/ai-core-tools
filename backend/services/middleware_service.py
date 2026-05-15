@@ -24,7 +24,8 @@ class MiddlewareService:
                 middleware_type=mw.middleware_type.value if mw.middleware_type else "monitoring",
                 config=mw.config,
                 created_at=mw.create_date,
-                is_frozen=mw.is_frozen or False
+                is_frozen=mw.is_frozen or False,
+                mcp_config_ids=[a.config_id for a in mw.mcp_associations]
             ))
 
         return result
@@ -55,7 +56,8 @@ class MiddlewareService:
             middleware_type=middleware.middleware_type.value if middleware.middleware_type else "monitoring",
             config=middleware.config,
             created_at=middleware.create_date,
-            is_frozen=middleware.is_frozen or False
+            is_frozen=middleware.is_frozen or False,
+            mcp_config_ids=[a.config_id for a in middleware.mcp_associations]
         )
 
     @staticmethod
@@ -89,9 +91,13 @@ class MiddlewareService:
             middleware.middleware_type = MiddlewareType.MONITORING
 
         if middleware_id == 0:
-            return MiddlewareRepository.create(db, middleware)
+            middleware = MiddlewareRepository.create(db, middleware)
         else:
-            return MiddlewareRepository.update(db, middleware)
+            middleware = MiddlewareRepository.update(db, middleware)
+
+        MiddlewareRepository.update_mcp_associations(db, middleware.middleware_id, data.mcp_config_ids)
+        db.commit()
+        return middleware
 
     @staticmethod
     def delete_middleware(db: Session, app_id: int, middleware_id: int) -> bool:
