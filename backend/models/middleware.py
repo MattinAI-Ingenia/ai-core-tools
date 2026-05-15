@@ -34,6 +34,7 @@ class Middleware(Base):
     app_id = Column(Integer, ForeignKey('App.app_id'))
     app = relationship('App', back_populates='middlewares')
     agent_associations = relationship('AgentMiddleware', back_populates='middleware')
+    mcp_associations = relationship('MiddlewareMCP', back_populates='middleware', cascade='all, delete-orphan')
 
     def get_associated_agents(self):
         """Retrieve all agents associated with this Middleware."""
@@ -46,3 +47,11 @@ class AgentMiddleware(Base):
     middleware_id = Column(Integer, ForeignKey('Middleware.middleware_id'), primary_key=True)
     agent = relationship('Agent', foreign_keys=[agent_id], back_populates='middleware_associations')
     middleware = relationship('Middleware', foreign_keys=[middleware_id], back_populates='agent_associations')
+
+
+class MiddlewareMCP(Base):
+    __tablename__ = 'middleware_mcps'
+    middleware_id = Column(Integer, ForeignKey('Middleware.middleware_id', ondelete='CASCADE'), primary_key=True)
+    config_id = Column(Integer, ForeignKey('MCPConfig.config_id', ondelete='CASCADE'), primary_key=True)
+    middleware = relationship('Middleware', foreign_keys=[middleware_id], back_populates='mcp_associations')
+    mcp = relationship('MCPConfig', foreign_keys=[config_id])

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
@@ -14,6 +14,7 @@ class MiddlewareListItemSchema(BaseModel):
     config: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
     is_frozen: bool = False
+    mcp_config_ids: List[int] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -27,6 +28,7 @@ class MiddlewareDetailSchema(BaseModel):
     config: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
     is_frozen: bool = False
+    mcp_config_ids: List[int] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,3 +39,4 @@ class CreateUpdateMiddlewareSchema(BaseModel):
     description: Optional[str] = ""
     middleware_type: str = "monitoring"
     config: Optional[Dict[str, Any]] = None
+    mcp_config_ids: List[int] = []
