@@ -149,6 +149,19 @@ class ApiService {
     });
   }
 
+  async testAppLangsmith(appId: number, apiKey?: string): Promise<{
+    valid: boolean;
+    status: 'ok' | 'unauthorized' | 'network' | 'unknown';
+    message: string;
+    project_name?: string | null;
+    source?: 'app' | 'env' | 'request' | null;
+  }> {
+    return this.request(`/internal/apps/${appId}/langsmith/test`, {
+      method: 'POST',
+      body: JSON.stringify({ api_key: apiKey ?? null }),
+    });
+  }
+
   async dismissOnboarding(appId: number) {
     return this.request(`/internal/apps/${appId}/onboarding-dismissed`, {
       method: 'PATCH',
@@ -372,8 +385,9 @@ class ApiService {
     });
   }
 
-  async testAIServiceConnectionWithConfig(appId: number, data: any) {
-    return this.request(`/internal/apps/${appId}/ai-services/test-connection`, {
+  async testAIServiceConnectionWithConfig(appId: number, data: any, serviceId?: number) {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/apps/${appId}/ai-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -485,8 +499,9 @@ class ApiService {
     });
   }
 
-  async testEmbeddingServiceConnectionWithConfig(appId: number, data: any) {
-    return this.request(`/internal/apps/${appId}/embedding-services/test-connection`, {
+  async testEmbeddingServiceConnectionWithConfig(appId: number, data: any, serviceId?: number) {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/apps/${appId}/embedding-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -2354,15 +2369,17 @@ class ApiService {
     });
   }
 
-  async testSystemAIServiceConnectionWithConfig(data: any) {
-    return this.request('/internal/admin/system-ai-services/test-connection', {
+  async testSystemAIServiceConnectionWithConfig(data: any, serviceId?: number) {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/admin/system-ai-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async testSystemEmbeddingServiceConnectionWithConfig(data: any) {
-    return this.request('/internal/admin/system-embedding-services/test-connection', {
+  async testSystemEmbeddingServiceConnectionWithConfig(data: any, serviceId?: number) {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/admin/system-embedding-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });

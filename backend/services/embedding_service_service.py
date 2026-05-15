@@ -169,9 +169,11 @@ class EmbeddingServiceService:
         class _MockEmbeddingService:
             def __init__(self, data):
                 self.provider = data.get("provider")
-                self.name = data.get("description")  # embeddingTools uses .name as model
+                self.name = data.get("name")
+                self.description = data.get("description")
                 self.api_key = data.get("api_key")
                 self.endpoint = data.get("endpoint")
+                self.api_version = data.get("api_version")
 
         try:
             embeddings = get_embeddings_model(_MockEmbeddingService(config))

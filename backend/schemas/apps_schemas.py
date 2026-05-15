@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, field_validator
-from typing import Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any
 from datetime import datetime
 
 # ==================== APP SCHEMAS ====================
@@ -104,6 +104,29 @@ class UpdateAppSchema(BaseModel):
     @classmethod
     def _strip_credentials(cls, v):
         return _strip_if_string(v)
+
+
+class LangSmithTestRequestSchema(BaseModel):
+    """Schema for testing a LangSmith API key.
+
+    If ``api_key`` is omitted or matches the masked placeholder, the test runs
+    against the key already persisted for the app.
+    """
+    api_key: Optional[str] = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _strip_credentials(cls, v):
+        return _strip_if_string(v)
+
+
+class LangSmithTestResponseSchema(BaseModel):
+    """Schema for the LangSmith API key test result."""
+    valid: bool
+    status: Literal["ok", "unauthorized", "network", "unknown"]
+    message: str
+    project_name: Optional[str] = None
+    source: Optional[Literal["app", "env", "request"]] = None
 
 
 # ==================== COLLABORATION SCHEMAS ====================

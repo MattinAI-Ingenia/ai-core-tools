@@ -147,6 +147,14 @@ async def lifespan(app: FastAPI):
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.close_pool()
 
+        # Flush any pending LangSmith traces and clear the client cache
+        try:
+            from tools.langsmith_config import flush_langsmith_clients, clear_client_cache
+            flush_langsmith_clients()
+            clear_client_cache()
+        except Exception as exc:
+            logger.warning("LangSmith flush during shutdown failed: %s", exc)
+
         # Only shutdown provider if it was initialized (OIDC mode)
         if AuthConfig.LOGIN_MODE == "OIDC":
             await shutdown_provider()

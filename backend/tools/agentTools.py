@@ -16,7 +16,6 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
-import langsmith as ls
 import json
 import asyncio
 import os
@@ -122,10 +121,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     llm = get_llm(agent)
     if llm is None:
         raise ValueError("No LLM found for agent")
-    
-    # Get LangSmith configuration for per-app tracing
-    langsmith_config = get_langsmith_config(agent)
-    
+
     output_parser = get_output_parser(agent)
     format_instructions = ""
     pydantic_model = None
@@ -293,10 +289,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     logger.info(f"Created agent with {len(tools)} tools")
     logger.info(f"Memory enabled: {agent.has_memory}")
     logger.info(f"Output parser: {agent.output_parser_id is not None}")
-    logger.info(f"LangSmith configured: {langsmith_config is not None}")
-    
 
-    return agent_chain, langsmith_config, mcp_client
+    return agent_chain, mcp_client
 
 
 def prepare_agent_config(agent):
@@ -443,53 +437,6 @@ def build_human_message(
                 )
 
     return HumanMessage(content=content)
-
-
-def get_langsmith_config(agent):
-    """Get LangSmith configuration for per-app tracing.
-    
-    Returns a dict with client and project_name if the app has a valid LangSmith
-    API key configured, or None otherwise.
-    """
-    if agent.app.langsmith_api_key:
-        try:
-            client = ls.Client(
-                api_key=agent.app.langsmith_api_key,
-                api_url="https://api.smith.langchain.com",
-            )
-            try:
-                client._get_settings()
-                logger.info(
-                    f"LangSmith API key validated for app '{agent.app.name}' "
-                    f"(project: '{agent.app.name}')"
-                )
-            except Exception as validation_err:
-                error_msg = str(validation_err)
-                if "403" in error_msg or "Forbidden" in error_msg:
-                    logger.error(
-                        f"LangSmith API key is INVALID or EXPIRED for app '{agent.app.name}'. "
-                        f"Traces will NOT be sent. "
-                        f"Generate a new key at https://smith.langchain.com/settings"
-                    )
-                else:
-                    logger.error(
-                        f"LangSmith API key validation FAILED for app '{agent.app.name}': "
-                        f"{type(validation_err).__name__}: {validation_err}. "
-                        f"Traces will NOT be sent."
-                    )
-                return None
-            
-            return {
-                "client": client,
-                "project_name": agent.app.name,
-            }
-        except Exception as e:
-            logger.error(
-                f"Failed to create LangSmith client for app '{agent.app.name}': "
-                f"{type(e).__name__}: {e}"
-            )
-            return None
-    return None
 
 
 class IACTTool(BaseTool):
