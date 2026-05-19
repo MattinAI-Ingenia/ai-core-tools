@@ -15,6 +15,7 @@ class MiddlewareListItemSchema(BaseModel):
     created_at: Optional[datetime] = None
     is_frozen: bool = False
     mcp_config_ids: List[int] = []
+    tool_agent_ids: List[int] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -29,6 +30,7 @@ class MiddlewareDetailSchema(BaseModel):
     created_at: Optional[datetime] = None
     is_frozen: bool = False
     mcp_config_ids: List[int] = []
+    tool_agent_ids: List[int] = []
 
     model_config = ConfigDict(from_attributes=True)
 

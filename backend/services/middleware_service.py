@@ -17,6 +17,7 @@ class MiddlewareService:
 
         result = []
         for mw in middlewares:
+            tool_agent_ids = (mw.config or {}).get('tool_agent_ids', []) if mw.config else []
             result.append(MiddlewareListItemSchema(
                 middleware_id=mw.middleware_id,
                 name=mw.name,
@@ -25,7 +26,8 @@ class MiddlewareService:
                 config=mw.config,
                 created_at=mw.create_date,
                 is_frozen=mw.is_frozen or False,
-                mcp_config_ids=[a.config_id for a in mw.mcp_associations]
+                mcp_config_ids=[a.config_id for a in mw.mcp_associations],
+                tool_agent_ids=tool_agent_ids
             ))
 
         return result
@@ -49,6 +51,7 @@ class MiddlewareService:
         if not middleware:
             return None
 
+        tool_agent_ids = (middleware.config or {}).get('tool_agent_ids', []) if middleware.config else []
         return MiddlewareDetailSchema(
             middleware_id=middleware.middleware_id,
             name=middleware.name,
@@ -57,7 +60,8 @@ class MiddlewareService:
             config=middleware.config,
             created_at=middleware.create_date,
             is_frozen=middleware.is_frozen or False,
-            mcp_config_ids=[a.config_id for a in middleware.mcp_associations]
+            mcp_config_ids=[a.config_id for a in middleware.mcp_associations],
+            tool_agent_ids=tool_agent_ids
         )
 
     @staticmethod
