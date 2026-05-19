@@ -40,6 +40,7 @@ interface HitlToolOption {
     name: string;
     label: string;
     description?: string;
+    agent_id?: number;
 }
 
 interface HitlMcpSource {
@@ -210,6 +211,7 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                         name: (agent.name as string).replace(/ /g, '_'),
                         label: agent.name,
                         description: agent.description || 'Agent exposed as a tool',
+                        agent_id: agent.agent_id as number,
                     }));
 
                 const mcpSources = await Promise.all(
@@ -375,7 +377,11 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                 const mcp_config_ids = appMcpSources
                     .filter(mcp => mcp.tools.some(tool => selectedToolNames.has(tool.name)))
                     .map(mcp => mcp.configId);
-                submitData = { ...formData, config: { interrupt_on }, mcp_config_ids };
+                // Derive tool_agent_ids from agent tools that have at least one selected tool
+                const tool_agent_ids = appAgentTools
+                    .filter(t => selectedToolNames.has(t.name) && t.agent_id !== undefined)
+                    .map(t => t.agent_id as number);
+                submitData = { ...formData, config: { interrupt_on, tool_agent_ids }, mcp_config_ids };
             }
             await onSubmit(submitData);
         } catch (err) {

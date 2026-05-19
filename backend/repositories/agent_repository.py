@@ -315,7 +315,7 @@ class AgentRepository:
 
         # Get middlewares
         middlewares = MiddlewareRepository.get_all_by_app_id(db, app_id)
-        middlewares_list = [{"middleware_id": m.middleware_id, "name": m.name, "description": m.description, "middleware_type": m.middleware_type.value if m.middleware_type else "monitoring", "mcp_config_ids": [a.config_id for a in m.mcp_associations]} for m in middlewares]
+        middlewares_list = [{"middleware_id": m.middleware_id, "name": m.name, "description": m.description, "middleware_type": m.middleware_type.value if m.middleware_type else "monitoring", "mcp_config_ids": [a.config_id for a in m.mcp_associations], "tool_agent_ids": (m.config or {}).get('tool_agent_ids', []) if m.config else []} for m in middlewares]
 
         return {
             'ai_services': ai_services_list,

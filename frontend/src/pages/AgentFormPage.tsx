@@ -48,7 +48,7 @@ interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
-  middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[] }>;
+  middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[]; tool_agent_ids?: number[] }>;
 }
 
 interface AgentFormData {
@@ -324,12 +324,37 @@ function AgentFormPage() {
   };
 
   const handleToolToggle = (toolId: number) => {
-    setFormData(prev => ({
-      ...prev,
-      tool_ids: prev.tool_ids.includes(toolId)
+    setFormData(prev => {
+      const nextToolIds = prev.tool_ids.includes(toolId)
         ? prev.tool_ids.filter(id => id !== toolId)
-        : [...prev.tool_ids, toolId]
-    }));
+        : [...prev.tool_ids, toolId];
+
+      // Auto-deselect HITL middlewares that become fully disconnected after removing this tool agent
+      const disabledMiddlewareIds = (agent?.middlewares ?? [])
+        .filter(mw => {
+          const mcpIds = mw.mcp_config_ids ?? [];
+          const toolAgentIds = mw.tool_agent_ids ?? [];
+          if (mcpIds.length === 0 && toolAgentIds.length === 0) return false;
+          const connectedMcps = mcpIds.filter(id => prev.mcp_config_ids.includes(id)).length;
+          const connectedToolAgents = toolAgentIds.filter(id => nextToolIds.includes(id)).length;
+          return connectedMcps + connectedToolAgents === 0;
+        })
+        .map(mw => mw.middleware_id);
+
+      const removedIds = prev.middleware_ids.filter(id => disabledMiddlewareIds.includes(id));
+      if (removedIds.length > 0) {
+        const removedNames = (agent?.middlewares ?? [])
+          .filter(mw => removedIds.includes(mw.middleware_id))
+          .map(mw => mw.name);
+        toast.warning(`Middleware${removedNames.length > 1 ? 's' : ''} "${removedNames.join('", "')}" removed — required tools no longer connected`);
+      }
+
+      return {
+        ...prev,
+        tool_ids: nextToolIds,
+        middleware_ids: prev.middleware_ids.filter(id => !disabledMiddlewareIds.includes(id)),
+      };
+    });
   };
 
   const handleMCPToggle = (configId: number) => {
@@ -338,11 +363,15 @@ function AgentFormPage() {
         ? prev.mcp_config_ids.filter(id => id !== configId)
         : [...prev.mcp_config_ids, configId];
 
-      // Auto-deselect middlewares whose required MCPs are no longer connected
+      // Auto-deselect middlewares whose required MCPs are no longer connected (and have no tool agents connected either)
       const disabledMiddlewareIds = (agent?.middlewares ?? [])
         .filter(mw => {
           const mcpIds = mw.mcp_config_ids ?? [];
-          return mcpIds.length > 0 && !mcpIds.some(id => nextMcpIds.includes(id));
+          const toolAgentIds = mw.tool_agent_ids ?? [];
+          if (mcpIds.length === 0 && toolAgentIds.length === 0) return false;
+          const connectedMcps = mcpIds.filter(id => nextMcpIds.includes(id)).length;
+          const connectedToolAgents = toolAgentIds.filter(id => prev.tool_ids.includes(id)).length;
+          return connectedMcps + connectedToolAgents === 0;
         })
         .map(mw => mw.middleware_id);
 
@@ -371,12 +400,16 @@ function AgentFormPage() {
     }));
   };
 
-  const getMiddlewareStatus = (mw: { mcp_config_ids?: number[] }): 'available' | 'disabled' | 'partial' => {
+  const getMiddlewareStatus = (mw: { mcp_config_ids?: number[]; tool_agent_ids?: number[] }): 'available' | 'disabled' | 'partial' => {
     const mcpIds = mw.mcp_config_ids ?? [];
-    if (mcpIds.length === 0) return 'available';
-    const connected = mcpIds.filter(id => formData.mcp_config_ids.includes(id)).length;
-    if (connected === 0) return 'disabled';
-    if (connected < mcpIds.length) return 'partial';
+    const toolAgentIds = mw.tool_agent_ids ?? [];
+    if (mcpIds.length === 0 && toolAgentIds.length === 0) return 'available';
+    const connectedMcps = mcpIds.filter(id => formData.mcp_config_ids.includes(id)).length;
+    const connectedToolAgents = toolAgentIds.filter(id => formData.tool_ids.includes(id)).length;
+    const totalDeps = mcpIds.length + toolAgentIds.length;
+    const connectedDeps = connectedMcps + connectedToolAgents;
+    if (connectedDeps === 0) return 'disabled';
+    if (connectedDeps < totalDeps) return 'partial';
     return 'available';
   };
 
@@ -1515,6 +1548,7 @@ function AgentFormPage() {
                           const isDisabled = status === 'disabled';
                           const isPartial = status === 'partial';
                           const mcpIds = mw.mcp_config_ids ?? [];
+                          const toolAgentIds = mw.tool_agent_ids ?? [];
 
                           // Resolve MCP names for display
                           const allMcpNames = (agent.mcp_configs ?? [])
@@ -1523,6 +1557,14 @@ function AgentFormPage() {
                           const missingMcpNames = (agent.mcp_configs ?? [])
                             .filter(c => mcpIds.includes(c.config_id) && !formData.mcp_config_ids.includes(c.config_id))
                             .map(c => c.name);
+                          // Resolve tool agent names for display
+                          const allToolAgentNames = (agent.tools ?? [])
+                            .filter(t => toolAgentIds.includes(t.agent_id))
+                            .map(t => t.name);
+                          const missingToolAgentNames = (agent.tools ?? [])
+                            .filter(t => toolAgentIds.includes(t.agent_id) && !formData.tool_ids.includes(t.agent_id))
+                            .map(t => t.name);
+                          const missingAll = [...missingMcpNames, ...missingToolAgentNames];
 
                           return (
                           <button
@@ -1556,7 +1598,7 @@ function AgentFormPage() {
                                     <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block z-10 w-56 p-2.5 text-xs bg-gray-900 text-white rounded-lg shadow-lg pointer-events-none">
                                       <p className="font-medium mb-1">Partially connected</p>
                                       <p className="text-gray-300">
-                                        Not active for: {missingMcpNames.join(', ')}
+                                        Not active for: {missingAll.join(', ')}
                                       </p>
                                       <div className="absolute bottom-0 right-3 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
                                     </div>
@@ -1573,7 +1615,7 @@ function AgentFormPage() {
                             {isDisabled && (
                               <p className="mt-2 ml-7 text-xs text-red-500 flex items-center gap-1">
                                 <AlertTriangle className="w-3 h-3 shrink-0" />
-                                Requires unselected MCP{allMcpNames.length > 1 ? 's' : ''}: {allMcpNames.join(', ')}
+                                Requires unselected {[...allMcpNames, ...allToolAgentNames].length > 1 ? 'resources' : 'resource'}: {[...allMcpNames, ...allToolAgentNames].join(', ')}
                               </p>
                             )}
                           </button>
