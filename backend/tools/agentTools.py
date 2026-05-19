@@ -465,7 +465,7 @@ def build_human_message(
     """
     from utils.config import get_app_config
 
-    formatted_message = agent.prompt_template.format(question=message)
+    formatted_message = agent.prompt_template.format(question=message) if agent.prompt_template else message
 
     if not image_files:
         return HumanMessage(content=formatted_message)
