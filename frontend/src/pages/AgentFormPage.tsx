@@ -1445,58 +1445,57 @@ function AgentFormPage() {
                           const missingAll = [...missingMcpNames, ...missingToolAgentNames];
 
                           return (
-                          <button
-                            key={mw.middleware_id}
-                            type="button"
-                            className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full relative ${
-                              isDisabled
-                                ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
-                                : isSelected
-                                  ? 'border-indigo-500 bg-indigo-50 cursor-pointer'
-                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
-                              }`}
-                            onClick={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
-                            disabled={isDisabled}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center">
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  onChange={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
-                                  disabled={isDisabled}
-                                  className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                                />
-                                <span className="ml-3 text-sm font-medium text-gray-900">{mw.name}</span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                {isPartial && (
-                                  <div className="relative group">
-                                    <AlertTriangle className="w-4 h-4 text-amber-500 cursor-help" />
-                                    <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block z-10 w-56 p-2.5 text-xs bg-gray-900 text-white rounded-lg shadow-lg pointer-events-none">
-                                      <p className="font-medium mb-1">Partially connected</p>
-                                      <p className="text-gray-300">
-                                        Not active for: {missingAll.join(', ')}
-                                      </p>
-                                      <div className="absolute bottom-0 right-3 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
+                            <button
+                              key={mw.middleware_id}
+                              type="button"
+                              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full relative ${isDisabled
+                                  ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                                  : isSelected
+                                    ? 'border-indigo-500 bg-indigo-50 cursor-pointer'
+                                    : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
+                                }`}
+                              onClick={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
+                              disabled={isDisabled}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
+                                    disabled={isDisabled}
+                                    className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                  />
+                                  <span className="ml-3 text-sm font-medium text-gray-900">{mw.name}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  {isPartial && (
+                                    <div className="relative group">
+                                      <AlertTriangle className="w-4 h-4 text-amber-500 cursor-help" />
+                                      <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block z-10 w-56 p-2.5 text-xs bg-gray-900 text-white rounded-lg shadow-lg pointer-events-none">
+                                        <p className="font-medium mb-1">Partially connected</p>
+                                        <p className="text-gray-300">
+                                          Not active for: {missingAll.join(', ')}
+                                        </p>
+                                        <div className="absolute bottom-0 right-3 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
+                                      </div>
                                     </div>
-                                  </div>
-                                )}
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                                  {mw.middleware_type}
-                                </span>
+                                  )}
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                                    {mw.middleware_type}
+                                  </span>
+                                </div>
                               </div>
-                            </div>
-                            {mw.description && (
-                              <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{mw.description}</p>
-                            )}
-                            {isDisabled && (
-                              <p className="mt-2 ml-7 text-xs text-red-500 flex items-center gap-1">
-                                <AlertTriangle className="w-3 h-3 shrink-0" />
-                                Requires unselected {[...allMcpNames, ...allToolAgentNames].length > 1 ? 'resources' : 'resource'}: {[...allMcpNames, ...allToolAgentNames].join(', ')}
-                              </p>
-                            )}
-                          </button>
+                              {mw.description && (
+                                <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{mw.description.split('###')[0].trim()}</p>
+                              )}
+                              {isDisabled && (
+                                <p className="mt-2 ml-7 text-xs text-red-500 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  Requires unselected {[...allMcpNames, ...allToolAgentNames].length > 1 ? 'resources' : 'resource'}: {[...allMcpNames, ...allToolAgentNames].join(', ')}
+                                </p>
+                              )}
+                            </button>
                           );
                         })}
                       </div>

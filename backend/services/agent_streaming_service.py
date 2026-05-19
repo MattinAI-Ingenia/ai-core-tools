@@ -22,6 +22,7 @@ from tools.streaming_utils import (
     format_sse_event,
     map_stream_event,
     SSE_TOKEN,
+    SSE_HITL_INTERRUPT,
 )
 from services.agent_execution_service import AgentExecutionService
 from utils.logger import get_logger
@@ -210,40 +211,106 @@ class AgentStreamingService:
                         if event["type"] == SSE_TOKEN:
                             accumulated_content += event["data"].get("content", "")
                         yield format_sse_event(event["type"], event["data"])
+            if langsmith_config:
+                stream_ctx = ls.tracing_context(
+                    client=langsmith_config["client"],
+                    project_name=langsmith_config["project_name"],
+                    enabled=True,
+                )
+            else:
+                from contextlib import nullcontext
 
-            # ----------------------------------------------------------------
-            # 7. Post-processing phase — delegates to AgentExecutionService
-            # ----------------------------------------------------------------
+                stream_ctx = nullcontext()
 
-            # Log usage metrics if monitoring is enabled
-            if monitoring_handler is not None:
-                try:
-                    usage = monitoring_handler.usage_metadata
-                    logger.info(
-                        f"[Monitoring] agent_id={ctx.fresh_agent.agent_id} | "
-                        f"input_tokens={usage.get('input_tokens', 0)} | "
-                        f"output_tokens={usage.get('output_tokens', 0)} | "
-                        f"total_tokens={usage.get('total_tokens', 0)} | "
-                        f"llm_calls={len(monitoring_handler.usage_metadata_list)}"
-                    )
-                except Exception as monitor_err:
-                    logger.warning(f"Error reading monitoring metrics: {monitor_err}")
+            with stream_ctx:
+                async for mode, chunk in agent_chain.astream(
+                    {"messages": [message_payload]},
+                    config=config,
+                    stream_mode=["messages", "updates", "custom"],
+                ):
+                    events = map_stream_event(mode, chunk)
+                    if events:
+                        for event in events:
+                            if event["type"] == SSE_TOKEN:
+                                accumulated_content += event["data"].get("content", "")
+                            yield format_sse_event(event["type"], event["data"])
 
-            result = await self.execution_service._finalize_turn(
-                ctx, accumulated_content, effective_db
-            )
+            logger.info("Stream completed — accumulated_content length=%d", len(accumulated_content))
 
-            # ----------------------------------------------------------------
-            # 8. Emit done event
-            # ----------------------------------------------------------------
-            yield format_sse_event(
-                "done",
-                {
-                    "response": result["parsed_response"],
-                    "conversation_id": result["effective_conv_id"],
-                    "files": result["files_data"],
-                },
-            )
+            # Check for pending interrupts after stream completes
+            has_pending_interrupt = False
+            try:
+                graph_state = await agent_chain.aget_state(config)
+                if hasattr(graph_state, 'tasks'):
+                    for task in graph_state.tasks:
+                        if hasattr(task, 'interrupts') and task.interrupts:
+                            has_pending_interrupt = True
+                            logger.info("PENDING INTERRUPT found in graph state: %s", task.interrupts)
+                            for intr in task.interrupts:
+                                payload = intr.value if hasattr(intr, 'value') else intr
+                                action_requests = []
+                                review_configs = []
+                                if isinstance(payload, dict):
+                                    action_requests = payload.get("action_requests", [])
+                                    review_configs = payload.get("review_configs", [])
+                                yield format_sse_event(
+                                    "hitl_interrupt",
+                                    {
+                                        "action_requests": action_requests,
+                                        "review_configs": review_configs,
+                                    },
+                                )
+            except Exception as state_err:
+                logger.warning("Could not check graph state for interrupts: %s", state_err)
+
+            # If HITL interrupted, emit done with interrupt message and skip normal finalization
+            if has_pending_interrupt:
+                yield format_sse_event(
+                    "done",
+                    {
+                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
+                        "conversation_id": ctx.effective_conv_id,
+                        "files": [],
+                    },
+                )
+            else:
+                # ----------------------------------------------------------------
+                # 7. Post-processing phase — delegates to AgentExecutionService
+                # ----------------------------------------------------------------
+
+                # Log usage metrics if monitoring is enabled
+                if monitoring_handler is not None:
+                    try:
+                        usage_by_model = monitoring_handler.usage_metadata
+                        total_input = sum(u.get('input_tokens', 0) for u in usage_by_model.values())
+                        total_output = sum(u.get('output_tokens', 0) for u in usage_by_model.values())
+                        total_tokens = sum(u.get('total_tokens', 0) for u in usage_by_model.values())
+                        logger.info(
+                            f"[Monitoring] agent_id={ctx.fresh_agent.agent_id} | "
+                            f"models={list(usage_by_model.keys())} | "
+                            f"input_tokens={total_input} | "
+                            f"output_tokens={total_output} | "
+                            f"total_tokens={total_tokens} | "
+                            f"llm_calls={len(usage_by_model)}"
+                        )
+                    except Exception as monitor_err:
+                        logger.warning(f"Error reading monitoring metrics: {monitor_err}")
+
+                result = await self.execution_service._finalize_turn(
+                    ctx, accumulated_content, effective_db
+                )
+
+                # ----------------------------------------------------------------
+                # 8. Emit done event
+                # ----------------------------------------------------------------
+                yield format_sse_event(
+                    "done",
+                    {
+                        "response": result["parsed_response"],
+                        "conversation_id": result["effective_conv_id"],
+                        "files": result["files_data"],
+                    },
+                )
 
         except (
             psycopg.errors.AdminShutdown,
@@ -260,8 +327,44 @@ class AgentStreamingService:
             )
             yield format_sse_event("error", {"message": "Connection error, please retry."})
         except Exception as exc:
-            logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
-            yield format_sse_event("error", {"message": str(exc)})
+            # Check if this is a GraphInterrupt from HumanInTheLoop middleware
+            from langgraph.types import Interrupt
+            exc_type = type(exc).__name__
+            if exc_type == "GraphInterrupt" or (
+                hasattr(exc, "interrupts") or "interrupt" in exc_type.lower()
+            ):
+                interrupts = getattr(exc, "interrupts", [])
+                logger.info(
+                    "GraphInterrupt caught — HITL middleware paused execution. "
+                    "Interrupts: %s", interrupts
+                )
+                # Emit HITL interrupt event to the frontend
+                for intr in interrupts:
+                    payload = intr.value if hasattr(intr, "value") else intr
+                    action_requests = []
+                    review_configs = []
+                    if isinstance(payload, dict):
+                        action_requests = payload.get("action_requests", [])
+                        review_configs = payload.get("review_configs", [])
+                    yield format_sse_event(
+                        "hitl_interrupt",
+                        {
+                            "action_requests": action_requests,
+                            "review_configs": review_configs,
+                        },
+                    )
+                # Emit done with a placeholder so the UI shows the interrupt message
+                yield format_sse_event(
+                    "done",
+                    {
+                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
+                        "conversation_id": ctx.effective_conv_id if ctx else None,
+                        "files": [],
+                    },
+                )
+            else:
+                logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
+                yield format_sse_event("error", {"message": str(exc)})
 
         finally:
             if mcp_client:
@@ -270,3 +373,157 @@ class AgentStreamingService:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def stream_resume_agent_chat(
+        self,
+        agent_id: int,
+        decisions: list[dict],
+        user_context: dict | None = None,
+        conversation_id: int | None = None,
+        db: Session | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Resume a HITL-interrupted agent turn by sending decisions back.
+
+        After a ``hitl_interrupt`` event paused the graph, the client calls
+        this method with the user's decisions (approve / edit / reject) to
+        resume execution from the saved checkpoint.
+
+        Yields:
+            SSE-formatted strings identical to ``stream_agent_chat``.
+        """
+        from langgraph.types import Command
+
+        effective_db = db or self.db
+        mcp_client = None
+        ctx = None
+
+        try:
+            # 1. Prepare turn (reuses same session / conversation)
+            ctx = await self.execution_service._prepare_turn(
+                agent_id=agent_id,
+                message="",  # No new user message for resume
+                user_context=user_context,
+                conversation_id=conversation_id,
+                db=effective_db,
+            )
+
+            yield format_sse_event(
+                "metadata",
+                {
+                    "conversation_id": ctx.effective_conv_id,
+                    "session_id": ctx.conversation.session_id if ctx.conversation else None,
+                    "agent_id": agent_id,
+                    "agent_name": ctx.agent.name,
+                    "has_memory": ctx.agent.has_memory,
+                },
+            )
+
+            # 2. Rebuild agent chain (same tools, same checkpointer)
+            temp_silo_ids = None
+            session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
+            if session_id_for_media and effective_db:
+                try:
+                    from services.playground_media_service import PlaygroundMediaService
+                    app_id = user_context.get("app_id") if user_context else None
+                    if app_id:
+                        temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
+                            app_id, agent_id, session_id_for_media, effective_db
+                        )
+                except Exception:
+                    pass
+
+            agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
+                ctx.fresh_agent,
+                ctx.search_params,
+                ctx.session_id_for_cache,
+                ctx.user_context,
+                ctx.working_dir,
+                temp_silo_ids=temp_silo_ids or None,
+            )
+
+            config = prepare_agent_config(ctx.fresh_agent)
+            if ctx.fresh_agent.has_memory and ctx.session_id_for_cache:
+                config["configurable"]["thread_id"] = (
+                    f"thread_{ctx.fresh_agent.agent_id}_{ctx.session_id_for_cache}"
+                )
+
+            # 3. Build the Command to resume with decisions
+            resume_value = {"decisions": decisions}
+            resume_input = Command(resume=resume_value)
+
+            logger.info(
+                "Resuming HITL for agent %s with %d decision(s): %s",
+                agent_id, len(decisions),
+                [d.get("type") for d in decisions],
+            )
+
+            # 4. Stream resumed execution
+            accumulated_content = ""
+
+            async for mode, chunk in agent_chain.astream(
+                resume_input,
+                config=config,
+                stream_mode=["messages", "updates", "custom"],
+            ):
+                events = map_stream_event(mode, chunk)
+                if events:
+                    for event in events:
+                        if event["type"] == SSE_TOKEN:
+                            accumulated_content += event["data"].get("content", "")
+                        yield format_sse_event(event["type"], event["data"])
+
+            # 5. Check for further interrupts (chained HITL)
+            has_pending_interrupt = False
+            try:
+                graph_state = await agent_chain.aget_state(config)
+                if hasattr(graph_state, 'tasks'):
+                    for task in graph_state.tasks:
+                        if hasattr(task, 'interrupts') and task.interrupts:
+                            has_pending_interrupt = True
+                            for intr in task.interrupts:
+                                payload = intr.value if hasattr(intr, 'value') else intr
+                                action_requests = []
+                                review_configs = []
+                                if isinstance(payload, dict):
+                                    action_requests = payload.get("action_requests", [])
+                                    review_configs = payload.get("review_configs", [])
+                                yield format_sse_event(
+                                    "hitl_interrupt",
+                                    {
+                                        "action_requests": action_requests,
+                                        "review_configs": review_configs,
+                                    },
+                                )
+            except Exception as state_err:
+                logger.warning("Could not check graph state after resume: %s", state_err)
+
+            if has_pending_interrupt:
+                yield format_sse_event(
+                    "done",
+                    {
+                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
+                        "conversation_id": ctx.effective_conv_id,
+                        "files": [],
+                    },
+                )
+            else:
+                # 6. Normal finalization
+                result = await self.execution_service._finalize_turn(
+                    ctx, accumulated_content, effective_db
+                )
+                yield format_sse_event(
+                    "done",
+                    {
+                        "response": result["parsed_response"],
+                        "conversation_id": result["effective_conv_id"],
+                        "files": result["files_data"],
+                    },
+                )
+
+        except Exception as exc:
+            logger.error("Error resuming HITL agent chat: %s", str(exc), exc_info=True)
+            yield format_sse_event("error", {"message": str(exc)})
+
+        finally:
+            if mcp_client:
+                logger.info("MCP client will be cleaned up automatically")

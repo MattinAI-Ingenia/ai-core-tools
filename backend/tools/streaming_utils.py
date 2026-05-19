@@ -48,6 +48,9 @@ SSE_ERROR: str = "error"
 #: The stream has completed.
 SSE_DONE: str = "done"
 
+#: A HumanInTheLoop interrupt is waiting for approval.
+SSE_HITL_INTERRUPT: str = "hitl_interrupt"
+
 # ---------------------------------------------------------------------------
 # Thinking-message i18n map
 # ---------------------------------------------------------------------------
@@ -334,6 +337,35 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                         "Could not extract ToolMessage info for tool_end event",
                         exc_info=True,
                     )
+
+    # --- __interrupt__: HumanInTheLoop middleware paused execution ---
+    # This check MUST be outside the for-loop above because when LangGraph
+    # emits an interrupt the chunk is {"__interrupt__": [Interrupt(...)]}.
+    # The list value is not a dict, so the `continue` inside the loop skips it.
+    interrupt_value = chunk.get("__interrupt__")
+    if interrupt_value:
+        try:
+            interrupts = interrupt_value if isinstance(interrupt_value, list) else [interrupt_value]
+            for intr in interrupts:
+                action_requests = []
+                if isinstance(intr, dict):
+                    payload = intr.get("value", intr)
+                elif hasattr(intr, "value"):
+                    payload = intr.value
+                else:
+                    payload = {}
+                if isinstance(payload, dict):
+                    action_requests = payload.get("action_requests", [])
+                events.append({
+                    "type": SSE_HITL_INTERRUPT,
+                    "data": {
+                        "action_requests": action_requests,
+                        "review_configs": payload.get("review_configs", []) if isinstance(payload, dict) else [],
+                    },
+                })
+                logger.info("HITL interrupt emitted for tools: %s", [r.get('name') for r in action_requests])
+        except Exception:
+            logger.warning("Could not parse __interrupt__ payload", exc_info=True)
 
     return events if events else None
 

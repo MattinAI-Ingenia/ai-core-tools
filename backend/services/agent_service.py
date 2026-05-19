@@ -415,6 +415,18 @@ class AgentService:
                 assoc = AgentMiddleware(agent_id=agent_id, middleware_id=mid)
                 db.add(assoc)
 
+        # Auto-enable memory when a human_in_the_loop middleware is associated,
+        # because HumanInTheLoopMiddleware requires a LangGraph checkpointer.
+        if valid_ids:
+            from models.middleware import Middleware, MiddlewareType
+            hitl_exists = db.query(Middleware).filter(
+                Middleware.middleware_id.in_(valid_ids),
+                Middleware.middleware_type == MiddlewareType.HUMAN_IN_THE_LOOP,
+            ).first()
+            if hitl_exists and not agent.has_memory:
+                agent.has_memory = True
+                db.add(agent)
+
         db.commit()
 
     def delete_agent(self, db: Session, agent_id: int) -> bool:
