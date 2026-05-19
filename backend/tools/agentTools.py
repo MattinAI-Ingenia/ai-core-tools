@@ -4,7 +4,7 @@ from langchain.agents.middleware import SummarizationMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitMiddleware
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 from langchain.agents.middleware.pii import PIIMiddleware
-from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware, AgentMiddleware
 from models.agent import Agent
 from models.silo import Silo, SiloType
 from langchain.tools import BaseTool, tool
@@ -219,15 +219,70 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         )
 
     middleware = []
+
+    # If a summarization middleware entity is attached, let it override
+    # memory-based defaults even when has_memory=True.
+    summarization_assoc_config = None
+    if hasattr(agent, 'middleware_associations') and agent.middleware_associations:
+        for assoc in agent.middleware_associations:
+            if assoc.middleware and assoc.middleware.middleware_type.value == 'summarization':
+                summarization_assoc_config = assoc.middleware.config or {}
+                break
+
     if agent.has_memory:
         max_tokens = agent.memory_max_tokens or 4000
         max_messages = agent.memory_max_messages or 20
         trim_tokens = agent.memory_summarize_threshold or 4000
-        summarization = SummarizationMiddleware(
-            model=llm,
-            trigger=("tokens", max_tokens),
-            keep=("messages", max_messages),
-            trim_tokens_to_summarize=trim_tokens,
+        summarization_llm = llm
+
+        if summarization_assoc_config is not None:
+            max_tokens = summarization_assoc_config.get('trigger_tokens', max_tokens)
+            max_messages = summarization_assoc_config.get('keep_messages', max_messages)
+            # Use 4000 as fallback, not agent.memory_summarize_threshold, to avoid inheriting unrelated agent settings
+            trim_tokens = summarization_assoc_config.get('trim_tokens', 4000)
+
+            summarization_model_value = summarization_assoc_config.get('summarization_model', 'agent_llm')
+            if summarization_model_value and summarization_model_value != 'agent_llm':
+                try:
+                    service_id = int(summarization_model_value.split(':', 1)[1])
+                    summarization_llm = _build_summarization_llm_from_service(agent, service_id) or llm
+                except (ValueError, IndexError):
+                    logger.warning(f"Invalid ai_service format '{summarization_model_value}' — using agent LLM")
+
+        _trigger_tokens = max_tokens
+        _keep_messages = max_messages
+        _trim_tokens = trim_tokens
+        _s_llm = summarization_llm
+        _agent_id = agent.agent_id
+
+        class _DiagnosticSummarizationMiddleware(SummarizationMiddleware):
+            """Wraps SummarizationMiddleware to add diagnostic logging."""
+            async def abefore_model(self, state, runtime):
+                msgs = state.get("messages", [])
+                approx = self.token_counter(msgs)
+                logger.info(
+                    f"[Summarization] abefore_model: agent={_agent_id}, "
+                    f"messages={len(msgs)}, approx_tokens={approx}, trigger={self.trigger}"
+                )
+                result = await super().abefore_model(state, runtime)
+                if result is not None:
+                    new_count = len(result.get("messages", []))
+                    logger.info(
+                        f"[Summarization] TRIGGERED for agent {_agent_id}: "
+                        f"reduced to {new_count} messages (summary generated)"
+                    )
+                else:
+                    logger.info(
+                        f"[Summarization] NOT triggered for agent {_agent_id} "
+                        f"(approx_tokens={approx} < trigger={self.trigger})"
+                    )
+                return result
+
+        summarization = _DiagnosticSummarizationMiddleware(
+            model=_s_llm,
+            trigger=("tokens", _trigger_tokens),
+            keep=("messages", _keep_messages),
+            trim_tokens_to_summarize=_trim_tokens,
         )
         middleware.append(summarization)
         logger.info(
@@ -259,21 +314,28 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                             logger.warning(f"Invalid ai_service format '{summarization_model_value}' — using agent LLM")
                     else:
                         logger.info(f"Summarization using agent's own LLM")
+                    trigger_tokens = mw_config.get('trigger_tokens', 4000)
+                    keep_messages = mw_config.get('keep_messages', 20)
+                    trim_tokens = mw_config.get('trim_tokens', 4000)
                     summarization_mw = SummarizationMiddleware(
                         model=summarization_llm,
-                        trigger=("tokens", 4000),
-                        keep=("messages", 20),
-                        trim_tokens_to_summarize=4000,
+                        trigger=("tokens", trigger_tokens),
+                        keep=("messages", keep_messages),
+                        trim_tokens_to_summarize=trim_tokens,
                     )
                     middleware.append(summarization_mw)
-                    logger.info(f"SummarizationMiddleware added via middleware entity for agent {agent.agent_id}")
+                    logger.info(
+                        f"SummarizationMiddleware added via middleware entity for agent {agent.agent_id}: "
+                        f"trigger=('tokens', {trigger_tokens}), keep=('messages', {keep_messages}), "
+                        f"trim_tokens_to_summarize={trim_tokens}"
+                    )
             elif mw_type == 'model_call_limit':
                 max_calls = mw_config.get('max_calls', 50)
-                middleware.append(ModelCallLimitMiddleware(max_calls=max_calls))
+                middleware.append(ModelCallLimitMiddleware(run_limit=max_calls))
                 logger.info(f"ModelCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
             elif mw_type == 'tool_call_limit':
                 max_calls = mw_config.get('max_calls', 100)
-                middleware.append(ToolCallLimitMiddleware(max_calls=max_calls))
+                middleware.append(ToolCallLimitMiddleware(run_limit=max_calls))
                 logger.info(f"ToolCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
             elif mw_type == 'pii':
                 pii_types = mw_config.get('pii_types', ['email', 'credit_card', 'ip', 'mac_address', 'url'])
@@ -281,14 +343,26 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                 apply_to_input = mw_config.get('apply_to_input', True)
                 apply_to_output = mw_config.get('apply_to_output', True)
                 apply_to_tool_results = mw_config.get('apply_to_tool_results', True)
-                # Create a single PIIMiddleware instance with all configured types
-                middleware.append(PIIMiddleware(
-                    pii_type=pii_types,
-                    strategy=strategy,
-                    apply_to_input=apply_to_input,
-                    apply_to_output=apply_to_output,
-                    apply_to_tool_results=apply_to_tool_results,
-                ))
+                # PIIMiddleware accepts a single pii_type — create one instance per type
+                for pii_type in pii_types:
+                    middleware.append(PIIMiddleware(
+                        pii_type=pii_type,
+                        strategy=strategy,
+                        apply_to_input=apply_to_input,
+                        apply_to_output=apply_to_output,
+                        apply_to_tool_results=apply_to_tool_results,
+                    ))
+                # Add a logging middleware after PII to show redacted content
+                class _PIILogMiddleware(AgentMiddleware):
+                    def before_model(self, state, runtime):
+                        msgs = state.get("messages", [])
+                        for msg in reversed(msgs):
+                            if isinstance(msg, HumanMessage):
+                                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                                logger.info(f"[PII] Message after redaction: {content[:300]}")
+                                break
+                        return None
+                middleware.append(_PIILogMiddleware())
                 logger.info(f"PIIMiddleware enabled for agent {agent.agent_id} (types={pii_types}, strategy={strategy})")
             elif mw_type == 'human_in_the_loop':
                 interrupt_on = mw_config.get('interrupt_on', {})

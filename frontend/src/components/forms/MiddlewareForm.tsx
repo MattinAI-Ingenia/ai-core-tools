@@ -130,7 +130,7 @@ const AGENT_LLM_OPTION: SummarizationModelOption = {
     value: 'agent_llm',
     label: "Agent's LLM (default)",
     provider: null,
-    description: "Uses the same LLM configured on the agent — no extra cost",
+    description: "Uses the same LLM configured on the agent",
 };
 
 function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<MiddlewareFormProps>) {
@@ -142,6 +142,9 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
     });
     const [limitValue, setLimitValue] = useState<number | ''>('');
     const [summarizationModel, setSummarizationModel] = useState('agent_llm');
+    const [triggerTokens, setTriggerTokens] = useState<number>(4000);
+    const [keepMessages, setKeepMessages] = useState<number>(20);
+    const [trimTokens, setTrimTokens] = useState<number>(4000);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [hitlTools, setHitlTools] = useState<HitlToolEntry[]>([]);
@@ -178,6 +181,15 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
             }
             if (middleware.config?.summarization_model) {
                 setSummarizationModel(middleware.config.summarization_model);
+            }
+            if (middleware.config?.trigger_tokens) {
+                setTriggerTokens(middleware.config.trigger_tokens);
+            }
+            if (middleware.config?.keep_messages) {
+                setKeepMessages(middleware.config.keep_messages);
+            }
+            if (middleware.config?.trim_tokens) {
+                setTrimTokens(middleware.config.trim_tokens);
             }
             if (middleware.middleware_type === 'human_in_the_loop' && middleware.config?.interrupt_on) {
                 const entries: HitlToolEntry[] = Object.entries(middleware.config.interrupt_on).map(
@@ -284,8 +296,11 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
             newConfig = { max_calls: typeInfo.limitDefault };
         }
         if (typeValue === 'summarization') {
-            newConfig = { summarization_model: 'agent_llm' };
+            newConfig = { summarization_model: 'agent_llm', trigger_tokens: 4000, keep_messages: 20, trim_tokens: 4000 };
             setSummarizationModel('agent_llm');
+            setTriggerTokens(4000);
+            setKeepMessages(20);
+            setTrimTokens(4000);
         }
         if (typeValue === 'pii') {
             newConfig = { pii_types: ['email', 'credit_card', 'ip', 'mac_address', 'url'], strategy: 'redact', apply_to_input: true, apply_to_output: true, apply_to_tool_results: true };
@@ -334,6 +349,16 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
         }));
     };
 
+    const handleSummarizationParamChange = (field: string, value: number) => {
+        if (field === 'trigger_tokens') setTriggerTokens(value);
+        if (field === 'keep_messages') setKeepMessages(value);
+        if (field === 'trim_tokens') setTrimTokens(value);
+        setFormData(prev => ({
+            ...prev,
+            config: { ...prev.config, [field]: value }
+        }));
+    };
+
     const handleLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value === '' ? '' : parseInt(e.target.value, 10);
         setLimitValue(val);
@@ -369,6 +394,19 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
 
         try {
             let submitData: any = formData;
+            if (formData.middleware_type === 'summarization') {
+                // Always persist all three params so backend never falls back to agent defaults
+                submitData = {
+                    ...formData,
+                    config: {
+                        ...formData.config,
+                        summarization_model: summarizationModel,
+                        trigger_tokens: triggerTokens,
+                        keep_messages: keepMessages,
+                        trim_tokens: trimTokens,
+                    }
+                };
+            }
             if (formData.middleware_type === 'human_in_the_loop') {
                 const interrupt_on: Record<string, { allowed_decisions: string[] }> = {};
                 hitlTools.forEach(t => { interrupt_on[t.name] = { allowed_decisions: t.decisions }; });
@@ -506,6 +544,67 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                             Uses the API key of the selected AI service configured in this app.
                         </p>
                     )}
+
+                    {/* Summarization Parameters */}
+                    <div className="mt-4 space-y-4 border-t border-gray-200 pt-4">
+                        <h4 className="text-sm font-medium text-gray-700">Summarization Settings</h4>
+                        <div>
+                            <label htmlFor="trigger_tokens" className="block text-sm font-medium text-gray-700 mb-1">
+                                Trigger (tokens)
+                            </label>
+                            <input
+                                type="number"
+                                id="trigger_tokens"
+                                min={500}
+                                max={128000}
+                                step={500}
+                                value={triggerTokens}
+                                onChange={(e) => handleSummarizationParamChange('trigger_tokens', parseInt(e.target.value, 10))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                disabled={isSubmitting}
+                            />
+                            <p className="mt-1 text-xs text-gray-500">
+                                Summarization triggers when conversation exceeds this token count (default: 4000)
+                            </p>
+                        </div>
+                        <div>
+                            <label htmlFor="keep_messages" className="block text-sm font-medium text-gray-700 mb-1">
+                                Keep (messages)
+                            </label>
+                            <input
+                                type="number"
+                                id="keep_messages"
+                                min={1}
+                                max={200}
+                                value={keepMessages}
+                                onChange={(e) => handleSummarizationParamChange('keep_messages', parseInt(e.target.value, 10))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                disabled={isSubmitting}
+                            />
+                            <p className="mt-1 text-xs text-gray-500">
+                                Number of recent messages to keep after summarization (default: 20)
+                            </p>
+                        </div>
+                        <div>
+                            <label htmlFor="trim_tokens" className="block text-sm font-medium text-gray-700 mb-1">
+                                Trim tokens to summarize
+                            </label>
+                            <input
+                                type="number"
+                                id="trim_tokens"
+                                min={500}
+                                max={128000}
+                                step={500}
+                                value={trimTokens}
+                                onChange={(e) => handleSummarizationParamChange('trim_tokens', parseInt(e.target.value, 10))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                disabled={isSubmitting}
+                            />
+                            <p className="mt-1 text-xs text-gray-500">
+                                Max tokens from old messages to feed into the summarization prompt (default: 4000)
+                            </p>
+                        </div>
+                    </div>
                 </div>
             )}
 

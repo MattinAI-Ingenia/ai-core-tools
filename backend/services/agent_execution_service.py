@@ -1150,13 +1150,17 @@ class AgentExecutionService:
             # Log usage metrics if monitoring is enabled
             if monitoring_handler is not None:
                 try:
-                    usage = monitoring_handler.usage_metadata
+                    usage_by_model = monitoring_handler.usage_metadata
+                    total_input = sum(u.get('input_tokens', 0) for u in usage_by_model.values())
+                    total_output = sum(u.get('output_tokens', 0) for u in usage_by_model.values())
+                    total_tokens = sum(u.get('total_tokens', 0) for u in usage_by_model.values())
                     logger.info(
                         f"[Monitoring] agent_id={fresh_agent.agent_id} | "
-                        f"input_tokens={usage.get('input_tokens', 0)} | "
-                        f"output_tokens={usage.get('output_tokens', 0)} | "
-                        f"total_tokens={usage.get('total_tokens', 0)} | "
-                        f"llm_calls={len(monitoring_handler.usage_metadata_list)}"
+                        f"models={list(usage_by_model.keys())} | "
+                        f"input_tokens={total_input} | "
+                        f"output_tokens={total_output} | "
+                        f"total_tokens={total_tokens} | "
+                        f"llm_calls={len(usage_by_model)}"
                     )
                 except Exception as monitor_err:
                     logger.warning(f"Error reading monitoring metrics: {monitor_err}")
