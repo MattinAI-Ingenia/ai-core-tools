@@ -69,6 +69,11 @@ _validate_test_db_url(TEST_DATABASE_URL)
 # when backend.main is imported by the test client fixture.
 os.environ["SQLALCHEMY_DATABASE_URI"] = TEST_DATABASE_URL
 
+# Provide a default REPO_BASE_FOLDER before any backend import: services.silo_service
+# resolves it at module load time, so importing tools.agentTools (and anything that
+# pulls it in) fails if the variable is unset.
+os.environ.setdefault("REPO_BASE_FOLDER", "./data/repositories")
+
 
 # ---------------------------------------------------------------------------
 # Database fixtures
