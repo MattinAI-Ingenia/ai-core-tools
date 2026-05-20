@@ -16,6 +16,9 @@ AGENT_ID = 'Agent.agent_id'
 # Default temperature for agents
 DEFAULT_AGENT_TEMPERATURE = 0.7
 
+# Default memory summarize threshold (number of messages)
+DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20
+
 
 class AgentSkill(Base):
     """Association table for Agent-Skill many-to-many relationship"""
@@ -76,7 +79,7 @@ class Agent(Base):
     # Memory management via LangChain SummarizationMiddleware (when has_memory=True)
     memory_max_messages = Column(Integer, default=20, nullable=False)  # SummarizationMiddleware.keep=("messages", N) — messages to preserve after summarization
     memory_max_tokens = Column(Integer, default=4000, nullable=True)  # SummarizationMiddleware.trigger=("tokens", N) — token count that triggers summarization
-    memory_summarize_threshold = Column(Integer, default=4000, nullable=False)  # SummarizationMiddleware.trim_tokens_to_summarize — max tokens sent to summarizer LLM
+    memory_summarize_threshold = Column(Integer, default=DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, nullable=False)  # SummarizationMiddleware.trim_tokens_to_summarize — max tokens sent to summarizer LLM
     
     output_parser_id = Column(Integer,
                         ForeignKey('OutputParser.parser_id'),

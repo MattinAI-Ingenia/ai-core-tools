@@ -187,7 +187,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     if agent.has_memory:
         max_tokens = agent.memory_max_tokens or 4000
         max_messages = agent.memory_max_messages or 20
-        trim_tokens = agent.memory_summarize_threshold or 4000
+        from models.agent import DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+        trim_tokens = agent.memory_summarize_threshold or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
         summarization = SummarizationMiddleware(
             model=llm,
             trigger=("tokens", max_tokens),

@@ -1,6 +1,6 @@
 from typing import Union, List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE
+from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
 from models.ocr_agent import OCRAgent
 from schemas.agent_schemas import AgentListItemSchema, AgentDetailSchema
 from repositories.agent_repository import AgentRepository
@@ -101,7 +101,7 @@ class AgentService:
             server_tools=getattr(agent, 'server_tools', None) or [],
             memory_max_messages=getattr(agent, 'memory_max_messages', 20) or 20,
             memory_max_tokens=getattr(agent, 'memory_max_tokens', 4000),
-            memory_summarize_threshold=getattr(agent, 'memory_summarize_threshold', 4000) or 4000,
+            memory_summarize_threshold=getattr(agent, 'memory_summarize_threshold', DEFAULT_MEMORY_SUMMARIZE_THRESHOLD) or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
             service_id=getattr(agent, 'service_id', None),
             silo_id=getattr(agent, 'silo_id', None),
             output_parser_id=getattr(agent, 'output_parser_id', None),
