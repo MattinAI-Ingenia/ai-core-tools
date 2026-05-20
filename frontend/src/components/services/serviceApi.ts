@@ -16,7 +16,13 @@ export interface TestConnectionResult {
 /** Strongly-typed view of the API surface needed by a single (kind, scope) combo. */
 export interface ServiceApiClient {
   listModels(req: ListProviderModelsRequest): Promise<ListProviderModelsResponse>;
-  testConnection(payload: ServiceFormData): Promise<TestConnectionResult>;
+  /**
+   * Test the connection with the provided payload. When ``serviceId`` is
+   * supplied (edit mode) and the payload's API key is masked, the backend
+   * recovers the stored key transparently — so the user doesn't have to
+   * re-type the secret on every check.
+   */
+  testConnection(payload: ServiceFormData, serviceId?: number): Promise<TestConnectionResult>;
 }
 
 /**
@@ -40,18 +46,20 @@ export function getServiceApiClient(
       return {
         listModels: (req) =>
           apiService.listSystemAIServiceProviderModels(req),
-        testConnection: (payload) =>
+        testConnection: (payload, serviceId) =>
           apiService.testSystemAIServiceConnectionWithConfig(
             payload,
+            serviceId,
           ) as Promise<TestConnectionResult>,
       };
     }
     return {
       listModels: (req) =>
         apiService.listSystemEmbeddingServiceProviderModels(req),
-      testConnection: (payload) =>
+      testConnection: (payload, serviceId) =>
         apiService.testSystemEmbeddingServiceConnectionWithConfig(
           payload,
+          serviceId,
         ) as Promise<TestConnectionResult>,
     };
   }
@@ -64,19 +72,21 @@ export function getServiceApiClient(
   if (kind === 'ai') {
     return {
       listModels: (req) => apiService.listAIServiceProviderModels(id, req),
-      testConnection: (payload) =>
+      testConnection: (payload, serviceId) =>
         apiService.testAIServiceConnectionWithConfig(
           id,
           payload,
+          serviceId,
         ) as Promise<TestConnectionResult>,
     };
   }
   return {
     listModels: (req) => apiService.listEmbeddingServiceProviderModels(id, req),
-    testConnection: (payload) =>
+    testConnection: (payload, serviceId) =>
       apiService.testEmbeddingServiceConnectionWithConfig(
         id,
         payload,
+        serviceId,
       ) as Promise<TestConnectionResult>,
   };
 }

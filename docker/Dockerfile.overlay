@@ -1,0 +1,14 @@
+# Overlay Dockerfile — REGENERATE the local backend image without re-running
+# `poetry install`. Starts from the already-cached upstream image and copies
+# the current backend/ source on top. Used while PyPI has packages quarantined.
+#
+# Build:
+#   docker build -f docker/Dockerfile.overlay \
+#     -t ghcr.io/lksnext-ai-lab/mattinai-backend:develop .
+#
+# After building, `docker compose up -d --no-deps backend` will pick up the
+# locally-tagged image (pull_policy defaults to "missing", so no fetch happens).
+
+FROM ghcr.io/lksnext-ai-lab/mattinai-backend:develop
+
+COPY backend/ /aict_backend/

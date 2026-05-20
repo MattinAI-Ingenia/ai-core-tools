@@ -16,7 +16,8 @@ from services.rate_limit_service import rate_limit_service
 
 # Import schemas and auth
 from schemas.apps_schemas import (
-    AppListItemSchema, AppDetailSchema, CreateAppSchema, UpdateAppSchema, AppUsageStatsSchema
+    AppListItemSchema, AppDetailSchema, CreateAppSchema, UpdateAppSchema, AppUsageStatsSchema,
+    LangSmithTestRequestSchema, LangSmithTestResponseSchema,
 )
 from schemas.common_schemas import MessageResponseSchema
 from schemas.export_schemas import AppExportFileSchema
@@ -599,6 +600,8 @@ async def update_app(
     if is_masked_key(langsmith_key):
         langsmith_key = app.langsmith_api_key
 
+    langsmith_key_rotated = (langsmith_key or "") != (app.langsmith_api_key or "")
+
     update_dict = {
         'app_id': app_id,
         'name': app_data.name,
@@ -608,9 +611,15 @@ async def update_app(
         'agent_cors_origins': app_data.agent_cors_origins,
         'enable_openai_api': app_data.enable_openai_api
     }
-    
+
     # Update app using service
     updated_app = app_service.create_or_update_app(update_dict)
+
+    # Invalidate the cached LangSmith client so the next agent invocation
+    # picks up the new key (or the absence of it).
+    if langsmith_key_rotated:
+        from tools.langsmith_config import clear_client_cache
+        clear_client_cache(app_id)
     
     # Get owner information
     owner_email = None
@@ -632,6 +641,82 @@ async def update_app(
         max_file_size_mb=updated_app.max_file_size_mb or DEFAULT_MAX_FILE_SIZE_MB,
         agent_cors_origins=updated_app.agent_cors_origins,
         enable_openai_api=updated_app.enable_openai_api
+    )
+
+
+@apps_router.post(
+    "/{app_id}/langsmith/test",
+    response_model=LangSmithTestResponseSchema,
+    summary="Test LangSmith API key",
+    tags=["Apps"],
+)
+async def test_langsmith_connection(
+    app_id: int,
+    payload: LangSmithTestRequestSchema,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("administrator"))],
+):
+    """Validate a LangSmith API key against the LangSmith API.
+
+    If ``payload.api_key`` is omitted or is the masked placeholder, the test
+    uses the key already stored for the app. The key is never returned in the
+    response.
+    """
+    from tools.langsmith_config import (
+        DEFAULT_LANGSMITH_ENDPOINT,
+        resolve_langsmith_settings,
+        validate_langsmith_key,
+    )
+
+    app_service, _ = get_services(db)
+    app = app_service.get_app(app_id)
+    if not app:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=APP_NOT_FOUND_MSG,
+        )
+
+    candidate_key = payload.api_key
+    source: str = "request"
+    if not candidate_key or is_masked_key(candidate_key):
+        candidate_key = app.langsmith_api_key
+        source = "app" if candidate_key else "env"
+
+    project_name: Optional[str] = app.name
+
+    if not candidate_key:
+        # Fall back to env vars when neither the request nor the app provide a key
+        settings = resolve_langsmith_settings(app)
+        if settings is None:
+            return LangSmithTestResponseSchema(
+                valid=False,
+                status="unauthorized",
+                message="No LangSmith API key configured for this app and no global fallback is enabled.",
+                project_name=None,
+                source=None,
+            )
+        candidate_key = settings.api_key
+        project_name = settings.project_name
+        source = settings.source
+
+    endpoint = os.getenv("LANGSMITH_ENDPOINT") or DEFAULT_LANGSMITH_ENDPOINT
+    result = validate_langsmith_key(candidate_key, endpoint)
+
+    logger.info(
+        "LangSmith key test for app_id=%s — valid=%s status=%s source=%s",
+        app_id,
+        result.valid,
+        result.status,
+        source,
+    )
+
+    return LangSmithTestResponseSchema(
+        valid=result.valid,
+        status=result.status,
+        message=result.message,
+        project_name=project_name if result.valid else None,
+        source=source if result.valid else None,
     )
 
 
@@ -677,71 +762,59 @@ async def delete_app(
 
 
 @apps_router.post("/{app_id}/validate-langsmith-key",
-                 summary="Validate LangSmith API key",
+                 summary="Validate LangSmith API key (legacy)",
                  tags=["Apps"],
-                 response_model=MessageResponseSchema)
+                 response_model=MessageResponseSchema,
+                 deprecated=True)
 async def validate_langsmith_key(
     app_id: int,
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("administrator"))],
 ):
+    """Legacy validator preserved for external scripts.
+
+    New clients should call ``POST /internal/apps/{app_id}/langsmith/test``,
+    which exposes structured status codes and project metadata.
     """
-    Validate the LangSmith API key configured for an app.
-    Tests connectivity to the LangSmith API and returns the result.
-    """
-    import langsmith as ls
+    from tools.langsmith_config import DEFAULT_LANGSMITH_ENDPOINT, validate_langsmith_key as _validate
 
     app_service, _ = get_services(db)
     app = app_service.get_app(app_id)
     if not app:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=APP_NOT_FOUND_MSG
+            detail=APP_NOT_FOUND_MSG,
         )
 
     if not app.langsmith_api_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No LangSmith API key configured for this app"
+            detail="No LangSmith API key configured for this app",
         )
 
-    try:
-        api_url = os.getenv("LANGSMITH_ENDPOINT") or "https://api.smith.langchain.com"
-        client = ls.Client(
-            api_key=app.langsmith_api_key,
-            api_url=api_url,
-        )
-        settings = client._get_settings()
-        tenant_handle = getattr(settings, 'tenant_handle', None)
-        logger.info(
-            f"LangSmith API key validated for app '{app.name}'. "
-            f"Tenant: {tenant_handle or 'default'}"
-        )
+    endpoint = os.getenv("LANGSMITH_ENDPOINT") or DEFAULT_LANGSMITH_ENDPOINT
+    result = _validate(app.langsmith_api_key, endpoint)
+    if result.valid:
         return MessageResponseSchema(
-            message=f"LangSmith API key is valid. "
-                    f"Tenant: {tenant_handle or 'default'}. "
-                    f"Traces will be sent to project '{app.name}'."
-        )
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(
-            f"LangSmith API key validation failed for app '{app.name}': "
-            f"{type(e).__name__}: {error_msg}"
-        )
-        if "403" in error_msg or "Forbidden" in error_msg:
-            detail = (
-                "LangSmith API key is invalid or expired. "
-                "Generate a new key at https://smith.langchain.com/settings"
+            message=(
+                f"LangSmith API key is valid. "
+                f"Traces will be sent to project '{app.name}'."
             )
-        elif "401" in error_msg or "Unauthorized" in error_msg:
-            detail = "LangSmith API key is missing or malformed."
-        else:
-            detail = f"Cannot connect to LangSmith: {error_msg}"
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=detail
         )
+
+    detail_by_status = {
+        "unauthorized": (
+            "LangSmith API key is invalid or expired. "
+            "Generate a new key at https://smith.langchain.com/settings"
+        ),
+        "network": "Cannot reach LangSmith. Check connectivity and the LANGSMITH_ENDPOINT setting.",
+        "unknown": result.message,
+    }
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=detail_by_status.get(result.status, result.message),
+    )
 
 
 @apps_router.post("/{app_id}/leave",

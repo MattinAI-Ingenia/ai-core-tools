@@ -235,7 +235,7 @@ Local dev: port 5173 (Vite). Docker: port 3000.
 - **Multimodal chat**: Agents accept images (base64 or signed static URLs)
 - **Secure static files**: `/static/{path}` requires cryptographic signature
 - **Cascade deletion**: `AppService.delete_app()` performs ordered deletion across all entity types
-- **LangSmith tracing**: Optional per-app tracing via `App.langsmith_api_key`
+- **LangSmith tracing**: Per-App key in `App.langsmith_api_key` (project = app name) with optional global env-var fallback (`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` + `LANGSMITH_PROJECT`). Validated via `POST /internal/apps/{id}/langsmith/test`. Central module: `backend/tools/langsmith_config.py`
 - **MCP dual-role**: Mattin AI acts as both MCP server (exposing agents) and MCP client (consuming external tool servers)
 
 ## Anti-Patterns

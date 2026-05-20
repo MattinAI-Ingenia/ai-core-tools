@@ -812,15 +812,36 @@ async def list_system_embedding_service_provider_models(
 async def test_system_ai_service_connection_with_config(
     config: CreateUpdateAIServiceSchema,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
 ):
-    """Test a system AI service connection with the provided config (OMNIADMIN)."""
+    """Test a system AI service connection with the provided config (OMNIADMIN).
+
+    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
+    persisted key for that system service is used.
+    """
     from services.ai_service_service import AIServiceService
+    from repositories.ai_service_repository import AIServiceRepository
+    from utils.secret_utils import is_masked_key
+    from core.export_constants import PLACEHOLDER_API_KEY
 
     try:
+        api_key = config.api_key or ""
+        if service_id is not None and (
+            not api_key
+            or api_key == PLACEHOLDER_API_KEY
+            or is_masked_key(api_key)
+        ):
+            stored = AIServiceRepository.get_by_id(db, service_id)
+            # Only honor the stored key when the target is actually a system
+            # service (app_id is NULL) — never leak an app-scoped key here.
+            if stored and stored.app_id is None and stored.api_key:
+                api_key = stored.api_key
+
         service_config = {
             "provider": config.provider,
             "description": config.model_name,
-            "api_key": config.api_key,
+            "api_key": api_key,
             "endpoint": config.base_url,
             "api_version": getattr(config, "api_version", None),
         }
@@ -844,15 +865,34 @@ async def test_system_ai_service_connection_with_config(
 async def test_system_embedding_service_connection_with_config(
     config: CreateUpdateEmbeddingServiceSchema,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
 ):
-    """Test a system embedding service connection with the provided config (OMNIADMIN)."""
+    """Test a system embedding service connection with the provided config (OMNIADMIN).
+
+    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
+    persisted key for that system service is used.
+    """
     from services.embedding_service_service import EmbeddingServiceService
+    from repositories.embedding_service_repository import EmbeddingServiceRepository
+    from utils.secret_utils import is_masked_key
+    from core.export_constants import PLACEHOLDER_API_KEY
 
     try:
+        api_key = config.api_key or ""
+        if service_id is not None and (
+            not api_key
+            or api_key == PLACEHOLDER_API_KEY
+            or is_masked_key(api_key)
+        ):
+            stored = EmbeddingServiceRepository.get_by_id(db, service_id)
+            if stored and stored.app_id is None and stored.api_key:
+                api_key = stored.api_key
+
         service_config = {
             "provider": config.provider,
             "description": config.model_name,
-            "api_key": config.api_key,
+            "api_key": api_key,
             "endpoint": config.base_url,
         }
         return EmbeddingServiceService.test_connection_with_config(service_config)

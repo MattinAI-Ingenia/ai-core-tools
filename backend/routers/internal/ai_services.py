@@ -108,20 +108,42 @@ async def list_ai_service_provider_models(
                          summary="Test AI service connection with config",
                          tags=["AI Services"])
 async def test_ai_service_connection_with_config(
+    app_id: int,
     config: CreateUpdateAIServiceSchema,
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
-    role: Annotated[AppRole, Depends(require_min_role("administrator"))]
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("administrator"))],
+    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
 ):
     """
     Test connection to AI service using provided configuration.
+
+    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
+    persisted key for that service is used. This lets the UI run a test
+    without forcing the user to re-type the secret on every check.
     """
+    from utils.secret_utils import is_masked_key
+    from core.export_constants import PLACEHOLDER_API_KEY
+    from repositories.ai_service_repository import AIServiceRepository
+
     try:
+        # If user sent a masked placeholder, fall back to the stored key.
+        api_key = config.api_key or ""
+        if service_id is not None and (
+            not api_key
+            or api_key == PLACEHOLDER_API_KEY
+            or is_masked_key(api_key)
+        ):
+            stored = AIServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
+            if stored and stored.api_key:
+                api_key = stored.api_key
+
         # Map schema fields to service fields
         # Note: Do not log or expose api_key in any error messages
         service_config = {
             "provider": config.provider,
             "description": config.model_name,
-            "api_key": config.api_key,
+            "api_key": api_key,
             "endpoint": config.base_url,
             "api_version": getattr(config, 'api_version', None)
         }
