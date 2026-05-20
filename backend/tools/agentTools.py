@@ -21,6 +21,7 @@ from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
 from langchain_core.callbacks import UsageMetadataCallbackHandler
+import asyncio
 import json
 import os
 import base64
@@ -32,6 +33,19 @@ from tools.skill_tools import create_skill_loader_tool, generate_skills_system_p
 from tools.python_sandbox_tools import create_python_repl_tool
 
 logger = get_logger(__name__)
+
+MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
+
+
+def _extract_mcp_root_causes(exc: BaseException) -> str:
+    """Extract concise root-cause messages from (possibly nested) ExceptionGroups."""
+    causes: list[str] = []
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            causes.append(_extract_mcp_root_causes(sub))
+    else:
+        causes.append(f"{type(exc).__name__}: {exc}")
+    return "; ".join(causes)
 
 class MCPClientManager:
     _instance = None
@@ -493,14 +507,25 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     try:
         logger.info("Starting MCP tools loading...")
         mcp_client = await MCPClientManager().get_client(agent, user_context)
-        if (mcp_client):
-            mcp_tools = await mcp_client.get_tools()
+        if mcp_client:
+            mcp_tools = await asyncio.wait_for(
+                mcp_client.get_tools(), timeout=MCP_TOOLS_TIMEOUT
+            )
             logger.info(f"MCP tools loaded successfully: {len(mcp_tools)} tools")
-            if (mcp_tools):
+            if mcp_tools:
                 tools.extend(mcp_tools)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"MCP tools loading timed out after {MCP_TOOLS_TIMEOUT}s — "
+            "agent will continue without MCP tools"
+        )
+        mcp_client = None
     except Exception as e:
-        logger.error(f"Error loading MCP tools: {e}", exc_info=True)
-        # As of langchain-mcp-adapters 0.1.0, no manual cleanup needed
+        root_cause = _extract_mcp_root_causes(e) if isinstance(e, BaseExceptionGroup) else str(e)
+        logger.warning(
+            f"MCP tools unavailable (agent will continue without them): {root_cause}"
+        )
+        logger.debug("Full MCP tools loading error:", exc_info=True)
         mcp_client = None
 
     # Add skill loader tool if agent has skills
@@ -741,18 +766,28 @@ class IACTTool(BaseTool):
             logger.info(f"Starting MCP tools loading for sub-agent {agent.agent_id}...")
             instance.mcp_client = await MCPClientManager().get_client(agent, user_context)
             if instance.mcp_client:
-                mcp_tools = await instance.mcp_client.get_tools()
+                mcp_tools = await asyncio.wait_for(
+                    instance.mcp_client.get_tools(), timeout=MCP_TOOLS_TIMEOUT
+                )
                 logger.info(
                     f"MCP tools loaded successfully for sub-agent {agent.agent_id}: "
                     f"{len(mcp_tools)} tools"
                 )
                 if mcp_tools:
                     tools.extend(mcp_tools)
-        except Exception as e:
-            logger.error(
-                f"Error loading MCP tools for sub-agent {agent.agent_id}: {e}",
-                exc_info=True,
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"MCP tools loading timed out for sub-agent {agent.agent_id} "
+                f"after {MCP_TOOLS_TIMEOUT}s — sub-agent will continue without MCP tools"
             )
+            instance.mcp_client = None
+        except Exception as e:
+            root_cause = _extract_mcp_root_causes(e) if isinstance(e, BaseExceptionGroup) else str(e)
+            logger.warning(
+                f"MCP tools unavailable for sub-agent {agent.agent_id} "
+                f"(will continue without them): {root_cause}"
+            )
+            logger.debug("Full MCP tools loading error for sub-agent:", exc_info=True)
             instance.mcp_client = None
 
         # Build system prompt with optional skills section (LangChain v1 pattern)
