@@ -185,7 +185,7 @@ function AgentFormPage() {
     name: '',
     description: '',
     system_prompt: '',
-    prompt_template: '',
+    prompt_template: '{question}',
     type: 'agent',
     is_tool: false,
     has_memory: false,
@@ -218,7 +218,7 @@ function AgentFormPage() {
 
   // Load agent data when component mounts
   useEffect(() => {
-    if (appId && agentId) {
+    if (appId && agentId && Number.parseInt(agentId) !== 0) {
       loadAgentData();
     } else {
       setLoading(false);
