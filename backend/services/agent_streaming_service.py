@@ -447,6 +447,10 @@ class AgentStreamingService:
                     f"thread_{ctx.fresh_agent.agent_id}_{ctx.session_id_for_cache}"
                 )
 
+            # Attach monitoring callback if enabled
+            if monitoring_handler is not None:
+                config.setdefault("callbacks", []).append(monitoring_handler)
+
             # 3. Build the Command to resume with decisions
             resume_value = {"decisions": decisions}
             resume_input = Command(resume=resume_value)
@@ -507,6 +511,24 @@ class AgentStreamingService:
                     },
                 )
             else:
+                # Log usage metrics if monitoring is enabled
+                if monitoring_handler is not None:
+                    try:
+                        usage_by_model = monitoring_handler.usage_metadata
+                        total_input = sum(u.get('input_tokens', 0) for u in usage_by_model.values())
+                        total_output = sum(u.get('output_tokens', 0) for u in usage_by_model.values())
+                        total_tokens = sum(u.get('total_tokens', 0) for u in usage_by_model.values())
+                        logger.info(
+                            f"[Monitoring] agent_id={ctx.fresh_agent.agent_id} | "
+                            f"models={list(usage_by_model.keys())} | "
+                            f"input_tokens={total_input} | "
+                            f"output_tokens={total_output} | "
+                            f"total_tokens={total_tokens} | "
+                            f"llm_calls={len(usage_by_model)}"
+                        )
+                    except Exception as monitor_err:
+                        logger.warning(f"Error reading monitoring metrics: {monitor_err}")
+
                 # 6. Normal finalization
                 result = await self.execution_service._finalize_turn(
                     ctx, accumulated_content, effective_db
