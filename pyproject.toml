@@ -177,8 +177,8 @@ dev = "uvicorn backend.main:app --reload --port 8000"
 optional = true
 
 [tool.poetry.group.sharepoint.dependencies]
-mattin-sharepoint = {path = "../mattin-ai-plugins", develop = true}  # local dev
-#mattin-sharepoint = {git = "https://github.com/lks/mattin-ai-plugins.git"}  # client
+#mattin-sharepoint = {path = "../mattin-ai-plugins", develop = true}  # local dev
+#mattin-sharepoint = {git = "https://github.com/lksnext-ai-lab/mattin-ai-plugins.git"}  # client
 
 [tool.poetry.group.test.dependencies]
 pytest = ">=8.0.0,<9.0.0"
