@@ -24,21 +24,28 @@ class HuggingFaceEmbeddingsAdapter:
         return [self.embed_query(doc) for doc in documents]
 
 def get_embeddings_model(embedding_service):
-    """Returns the appropriate embeddings model based on the service configuration"""
+    """Returns the appropriate embeddings model based on the service configuration.
+
+    Field convention (must match AIService): ``description`` holds the model
+    identifier expected by the upstream API (e.g. ``"text-embedding-3-large"``)
+    while ``name`` is the human-readable label shown in the UI.
+    """
     if embedding_service is None:
         raise ValueError("No embedding service provided")
 
     logger.info(f"Proveedor {embedding_service.provider}")
 
+    model_id = embedding_service.description
+
     if embedding_service.provider == EmbeddingProvider.OpenAI.value:
         return OpenAIEmbeddings(
-            model=embedding_service.name,
+            model=model_id,
             api_key=embedding_service.api_key
         )
 
     elif embedding_service.provider == EmbeddingProvider.MistralAI.value:
         return MistralAIEmbeddings(
-            model=embedding_service.name,
+            model=model_id,
             api_key=embedding_service.api_key
         )
 
@@ -49,9 +56,8 @@ def get_embeddings_model(embedding_service):
         )
         return HuggingFaceEmbeddingsAdapter(client)
     elif embedding_service.provider == EmbeddingProvider.Ollama.value:
-        logger.info("Entro bien en ollama")
         return OllamaEmbeddings(
-            model=embedding_service.name,
+            model=model_id,
             base_url=embedding_service.endpoint,
             client_kwargs={
                 "verify": False,
@@ -62,7 +68,7 @@ def get_embeddings_model(embedding_service):
         )
     elif embedding_service.provider == EmbeddingProvider.Azure.value:
         return AzureAIEmbeddingsModel(
-            model_name=embedding_service.name,
+            model_name=model_id,
             api_version=embedding_service.api_version or "2024-02-15-preview",
             credential=embedding_service.api_key,
             endpoint=embedding_service.endpoint

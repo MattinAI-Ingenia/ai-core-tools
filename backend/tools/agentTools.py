@@ -16,7 +16,6 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
-import langsmith as ls
 import json
 import asyncio
 import os
@@ -122,10 +121,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     llm = get_llm(agent)
     if llm is None:
         raise ValueError("No LLM found for agent")
-    
-    # Get LangSmith configuration for per-app tracing
-    langsmith_config = get_langsmith_config(agent)
-    
+
     output_parser = get_output_parser(agent)
     format_instructions = ""
     pydantic_model = None
@@ -191,7 +187,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     if agent.has_memory:
         max_tokens = agent.memory_max_tokens or 4000
         max_messages = agent.memory_max_messages or 20
-        trim_tokens = agent.memory_summarize_threshold or 4000
+        from models.agent import DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+        trim_tokens = agent.memory_summarize_threshold or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
         summarization = SummarizationMiddleware(
             model=llm,
             trigger=("tokens", max_tokens),
@@ -228,7 +225,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
 
     for tool in agent.tool_associations:
         sub_agent = tool.tool
-        tools.append(IACTTool(sub_agent))
+        tools.append(await IACTTool.create(sub_agent, user_context=user_context))
 
     # Base tools — always available for every agent
     tools.append(get_current_date)
@@ -293,10 +290,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     logger.info(f"Created agent with {len(tools)} tools")
     logger.info(f"Memory enabled: {agent.has_memory}")
     logger.info(f"Output parser: {agent.output_parser_id is not None}")
-    logger.info(f"LangSmith configured: {langsmith_config is not None}")
-    
 
-    return agent_chain, langsmith_config, mcp_client
+    return agent_chain, mcp_client
 
 
 def prepare_agent_config(agent):
@@ -445,86 +440,74 @@ def build_human_message(
     return HumanMessage(content=content)
 
 
-def get_langsmith_config(agent):
-    """Get LangSmith configuration for per-app tracing.
-    
-    Returns a dict with client and project_name if the app has a valid LangSmith
-    API key configured, or None otherwise.
-    """
-    if agent.app.langsmith_api_key:
-        try:
-            client = ls.Client(
-                api_key=agent.app.langsmith_api_key,
-                api_url="https://api.smith.langchain.com",
-            )
-            try:
-                client._get_settings()
-                logger.info(
-                    f"LangSmith API key validated for app '{agent.app.name}' "
-                    f"(project: '{agent.app.name}')"
-                )
-            except Exception as validation_err:
-                error_msg = str(validation_err)
-                if "403" in error_msg or "Forbidden" in error_msg:
-                    logger.error(
-                        f"LangSmith API key is INVALID or EXPIRED for app '{agent.app.name}'. "
-                        f"Traces will NOT be sent. "
-                        f"Generate a new key at https://smith.langchain.com/settings"
-                    )
-                else:
-                    logger.error(
-                        f"LangSmith API key validation FAILED for app '{agent.app.name}': "
-                        f"{type(validation_err).__name__}: {validation_err}. "
-                        f"Traces will NOT be sent."
-                    )
-                return None
-            
-            return {
-                "client": client,
-                "project_name": agent.app.name,
-            }
-        except Exception as e:
-            logger.error(
-                f"Failed to create LangSmith client for app '{agent.app.name}': "
-                f"{type(e).__name__}: {e}"
-            )
-            return None
-    return None
-
-
 class IACTTool(BaseTool):
     name: str = "agent_tool"
     description: str = "Search for a repository"
     agent: Agent
+    user_context: Optional[Dict] = None
     react_agent: Any = None
+    mcp_client: Any = None
     llm: Any = None
 
-    def __init__(self, agent: Agent) -> None:
-        super().__init__(agent=agent)
-        
-        self.agent = agent  
+    def __init__(self, agent: Agent, user_context: Optional[Dict] = None) -> None:
+        super().__init__(agent=agent, user_context=user_context)
+
+        self.agent = agent
+        self.user_context = user_context
         self.name = agent.name.replace(" ", "_")
         self.description = agent.description or "Agent tool"
         self.llm = get_llm(agent)
         if self.llm is None:
             raise ValueError("No LLM found for agent")
-        
+        self.react_agent = None
+        self.mcp_client = None
+
+    @classmethod
+    async def create(cls, agent: Agent, user_context: Optional[Dict] = None) -> "IACTTool":
+        """Build an agent-as-tool, including the sub-agent's MCP tools.
+
+        MCP tools are loaded with an awaited MultiServerMCPClient, which is not
+        possible inside a synchronous ``__init__``; hence this async factory. It
+        is the only supported way to obtain a ready-to-use ``IACTTool``.
+        """
+        instance = cls(agent, user_context=user_context)
+
         tools = []
         # Add nested tool agents recursively
         for tool in agent.tool_associations:
             sub_agent = tool.tool
-            tools.append(IACTTool(sub_agent))
-        
+            tools.append(await IACTTool.create(sub_agent, user_context=user_context))
+
         # Add base useful tools
         tools.append(get_current_date)
         tools.append(fetch_file_in_base64)
-        
+
         # Add silo retriever if configured
         if agent.silo_id is not None:
             retriever_tool = get_retriever_tool(agent.silo)
             if retriever_tool is not None:
                 tools.append(retriever_tool)
-        
+
+        # Add MCP tools — mirrors create_agent. A failing MCP server degrades the
+        # sub-agent but never breaks its construction.
+        try:
+            logger.info(f"Starting MCP tools loading for sub-agent {agent.agent_id}...")
+            instance.mcp_client = await MCPClientManager().get_client(agent, user_context)
+            if instance.mcp_client:
+                mcp_tools = await instance.mcp_client.get_tools()
+                logger.info(
+                    f"MCP tools loaded successfully for sub-agent {agent.agent_id}: "
+                    f"{len(mcp_tools)} tools"
+                )
+                if mcp_tools:
+                    tools.extend(mcp_tools)
+        except Exception as e:
+            logger.error(
+                f"Error loading MCP tools for sub-agent {agent.agent_id}: {e}",
+                exc_info=True,
+            )
+            instance.mcp_client = None
+
         # Build system prompt with optional skills section (LangChain v1 pattern)
         tool_system_prompt = agent.system_prompt or ""
         if agent.system_prompt and hasattr(agent, 'skill_associations') and agent.skill_associations:
@@ -533,14 +516,19 @@ class IACTTool(BaseTool):
                 tool_system_prompt = tool_system_prompt + "\n" + skills_section
 
         # Create sub-agent
-        self.react_agent = create_langchain_agent(
-            model=self.llm,
+        instance.react_agent = create_langchain_agent(
+            model=instance.llm,
             tools=tools,
             system_prompt=tool_system_prompt if tool_system_prompt else None,
         )
+        return instance
 
     def _run(self, query: str, *args, **kwargs) -> str:
         """Synchronous execution of the agent tool"""
+        if self.react_agent is None:
+            raise RuntimeError(
+                "IACTTool must be built via 'await IACTTool.create(...)' before use."
+            )
         try:
             # Format the message using prompt_template if available, otherwise use query directly
             if self.agent.prompt_template:
@@ -581,6 +569,10 @@ class IACTTool(BaseTool):
     
     async def _arun(self, query: str, *args, **kwargs) -> str:
         """Asynchronous execution of the agent tool"""
+        if self.react_agent is None:
+            raise RuntimeError(
+                "IACTTool must be built via 'await IACTTool.create(...)' before use."
+            )
         try:
             # Format the message using prompt_template if available, otherwise use query directly
             if self.agent.prompt_template:

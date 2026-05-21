@@ -98,6 +98,17 @@ async def lifespan(app: FastAPI):
                 "EntraID provider NOT initialized (development/testing only)"
             )
         
+        # Load plugins via entry points
+        from plugins.registry import plugin_registry
+        app.state.plugin_registry = plugin_registry
+        import importlib.metadata
+        for ep in importlib.metadata.entry_points(group="mattin.plugins"):
+            try:
+                ep.load()(app, plugin_registry)
+                logger.info(f"Plugin loaded: {ep.name}")
+            except Exception as e:
+                logger.error(f"Failed to load plugin '{ep.name}': {e}", exc_info=True)
+
         # Initialize checkpointer connection pool for LangGraph agent memory
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.initialize_pool()
@@ -123,9 +134,26 @@ async def lifespan(app: FastAPI):
             from services.crawl.worker import stop_crawl_workers
             await stop_crawl_workers(crawl_tasks)
 
+        # Stop SharePoint sync workers gracefully (if plugin installed)
+        sharepoint_tasks = getattr(app.state, 'sharepoint_tasks', None)
+        if sharepoint_tasks:
+            try:
+                from mattin_sharepoint.worker import stop_sharepoint_worker
+                await stop_sharepoint_worker(sharepoint_tasks)
+            except ImportError:
+                pass
+
         # Close checkpointer connection pool
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.close_pool()
+
+        # Flush any pending LangSmith traces and clear the client cache
+        try:
+            from tools.langsmith_config import flush_langsmith_clients, clear_client_cache
+            flush_langsmith_clients()
+            clear_client_cache()
+        except Exception as exc:
+            logger.warning("LangSmith flush during shutdown failed: %s", exc)
 
         # Only shutdown provider if it was initialized (OIDC mode)
         if AuthConfig.LOGIN_MODE == "OIDC":

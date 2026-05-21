@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Pencil } from 'lucide-react';
 import { apiService } from '../../services/api';
+import { useConfirm } from '../../contexts/ConfirmContext';
 
 interface Conversation {
   conversation_id: number;
@@ -48,11 +49,11 @@ export default function ConversationSidebar({
   onNewConversation,
   onReloadRequest: _onReloadRequest
 }: ConversationSidebarProps) {
+  const confirm = useConfirm();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const [editingConvId, setEditingConvId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
 
@@ -76,25 +77,26 @@ export default function ConversationSidebar({
 
   async function handleDeleteConversation(conversationId: number, e: React.MouseEvent) {
     e.stopPropagation();
-    
-    if (deleteConfirm === conversationId) {
-      try {
-        await apiService.deleteConversation(conversationId);
-        setConversations(conversations.filter(c => c.conversation_id !== conversationId));
-        
-        // If deleting current conversation, trigger new conversation
-        if (currentConversationId === conversationId) {
-          onNewConversation();
-        }
-        
-        setDeleteConfirm(null);
-      } catch (err) {
-        console.error('Error deleting conversation:', err);
-        alert('Error al eliminar conversación');
+
+    const ok = await confirm({
+      title: 'Delete conversation',
+      message: 'Are you sure you want to delete this conversation? This action cannot be undone.',
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    });
+
+    if (!ok) return;
+
+    try {
+      await apiService.deleteConversation(conversationId);
+      setConversations(conversations.filter(c => c.conversation_id !== conversationId));
+
+      if (currentConversationId === conversationId) {
+        onNewConversation();
       }
-    } else {
-      setDeleteConfirm(conversationId);
-      setTimeout(() => setDeleteConfirm(null), 3000);
+    } catch (err) {
+      console.error('Error deleting conversation:', err);
+      alert('Error al eliminar conversación');
     }
   }
 
@@ -173,7 +175,6 @@ export default function ConversationSidebar({
       <div className="divide-y divide-white/10 dark:divide-gray-700/30">
         {conversations.map((conversation) => {
           const isActive = conversation.conversation_id === currentConversationId;
-          const isDeleteConfirming = deleteConfirm === conversation.conversation_id;
 
           return (
             <button
@@ -239,12 +240,8 @@ export default function ConversationSidebar({
                 <button
                   data-action="delete"
                   onClick={(e) => handleDeleteConversation(conversation.conversation_id, e)}
-                  className={`ml-2 p-1 rounded transition-colors ${
-                    isDeleteConfirming
-                      ? 'bg-red-100/80 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200/80 dark:hover:bg-red-900/50'
-                      : 'text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50/60 dark:hover:bg-red-900/20'
-                  }`}
-                  title={isDeleteConfirming ? 'Clic de nuevo para confirmar' : 'Eliminar conversación'}
+                  className="ml-2 p-1 rounded transition-colors text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50/60 dark:hover:bg-red-900/20"
+                  title="Delete conversation"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />

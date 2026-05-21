@@ -1,11 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Check, AlertTriangle, Tag, BarChart2, Info, Zap } from 'lucide-react';
+import { Check, AlertTriangle, Tag, BarChart2, Info, Zap, CheckCircle2, XCircle, WifiOff, HelpCircle, Plug } from 'lucide-react';
 import { apiService } from '../../services/api';
 import Alert from '../../components/ui/Alert';
 import { useAppRole } from '../../hooks/useAppRole';
 import { AppRole } from '../../types/roles';
 import ReadOnlyBanner from '../../components/ui/ReadOnlyBanner';
+
+type LangsmithTestStatus = 'ok' | 'unauthorized' | 'network' | 'unknown';
+
+interface LangsmithTestResult {
+  readonly status: LangsmithTestStatus;
+  readonly message: string;
+  readonly projectName?: string | null;
+}
 
 function AppSettingsPage() {
   const { appId } = useParams();
@@ -26,6 +34,8 @@ function AppSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [langsmithKeyChanged, setLangsmithKeyChanged] = useState(false);
   const [originalLangsmithKey, setOriginalLangsmithKey] = useState('');
+  const [testingLangsmith, setTestingLangsmith] = useState(false);
+  const [langsmithTestResult, setLangsmithTestResult] = useState<LangsmithTestResult | null>(null);
 
   const [slugInput, setSlugInput] = useState('');
   const [savingSlug, setSavingSlug] = useState(false);
@@ -132,6 +142,7 @@ function AppSettingsPage() {
 
     if (e.target.name === 'langsmith_api_key') {
       setLangsmithKeyChanged(true);
+      setLangsmithTestResult(null);
     }
 
     setFormData(prev => ({
@@ -139,6 +150,34 @@ function AppSettingsPage() {
       [e.target.name]: newValue
     }));
   };
+
+  async function handleTestLangsmith() {
+    if (!appId) return;
+
+    setTestingLangsmith(true);
+    setLangsmithTestResult(null);
+
+    try {
+      const keyToTest = langsmithKeyChanged ? formData.langsmith_api_key : undefined;
+      const result = await apiService.testAppLangsmith(Number.parseInt(appId), keyToTest);
+      setLangsmithTestResult({
+        status: result.status,
+        message: result.message,
+        projectName: result.project_name ?? null,
+      });
+    } catch (err) {
+      setLangsmithTestResult({
+        status: 'unknown',
+        message: err instanceof Error ? err.message : 'Failed to test LangSmith connection',
+      });
+    } finally {
+      setTestingLangsmith(false);
+    }
+  }
+
+  const canTestLangsmith = (langsmithKeyChanged
+    ? Boolean(formData.langsmith_api_key.trim())
+    : Boolean(originalLangsmithKey));
 
   if (loading) {
     return (
@@ -245,28 +284,73 @@ function AppSettingsPage() {
                   <label htmlFor="langsmith_api_key" className="block text-sm font-medium text-gray-700 mb-2">
                     Langsmith API Key
                   </label>
-                  <input
-                    type="password"
-                    id="langsmith_api_key"
-                    name="langsmith_api_key"
-                    value={formData.langsmith_api_key}
-                    onChange={handleChange}
-                    onKeyDown={(e) => {
-                      if (!langsmithKeyChanged && formData.langsmith_api_key.startsWith('****') && e.key.length === 1) {
-                        setFormData(prev => ({ ...prev, langsmith_api_key: '' }));
-                        setLangsmithKeyChanged(true);
-                      }
-                    }}
-                    autoComplete="off"
-                    data-lpignore="true"
-                    data-form-type="other"
-                    disabled={!canEdit}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
-                    placeholder={!langsmithKeyChanged && originalLangsmithKey ? 'Leave empty to keep current key' : 'Enter Langsmith API key'}
-                  />
+                  <div className="flex items-stretch space-x-2">
+                    <input
+                      type="password"
+                      id="langsmith_api_key"
+                      name="langsmith_api_key"
+                      value={formData.langsmith_api_key}
+                      onChange={handleChange}
+                      onKeyDown={(e) => {
+                        if (!langsmithKeyChanged && formData.langsmith_api_key.startsWith('****') && e.key.length === 1) {
+                          setFormData(prev => ({ ...prev, langsmith_api_key: '' }));
+                          setLangsmithKeyChanged(true);
+                          setLangsmithTestResult(null);
+                        }
+                      }}
+                      autoComplete="off"
+                      data-lpignore="true"
+                      data-form-type="other"
+                      disabled={!canEdit}
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                      placeholder={!langsmithKeyChanged && originalLangsmithKey ? 'Leave empty to keep current key' : 'Enter Langsmith API key'}
+                    />
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={handleTestLangsmith}
+                        disabled={testingLangsmith || !canTestLangsmith}
+                        className="inline-flex items-center px-3 py-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed text-gray-700 rounded-lg text-sm whitespace-nowrap border border-gray-300"
+                        title="Verify the API key against LangSmith"
+                      >
+                        {testingLangsmith ? (
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600 mr-2"></div>
+                        ) : (
+                          <Plug className="w-4 h-4 mr-2" />
+                        )}
+                        {testingLangsmith ? 'Testing…' : 'Test connection'}
+                      </button>
+                    )}
+                  </div>
                   <p className="mt-1 text-sm text-gray-500">
-                    Your Langsmith API key for monitoring and tracing
+                    Your Langsmith API key for monitoring and tracing. Leave empty to use the global
+                    <code className="mx-1 bg-gray-100 px-1 rounded text-xs">LANGSMITH_API_KEY</code>
+                    environment variable (when <code className="mx-1 bg-gray-100 px-1 rounded text-xs">LANGSMITH_TRACING=true</code>).
                   </p>
+                  {langsmithTestResult && (
+                    <div
+                      role="status"
+                      className={`mt-2 inline-flex items-center text-sm rounded-md px-3 py-1.5 border ${
+                        langsmithTestResult.status === 'ok'
+                          ? 'bg-green-50 text-green-700 border-green-200'
+                          : langsmithTestResult.status === 'unauthorized'
+                          ? 'bg-red-50 text-red-700 border-red-200'
+                          : langsmithTestResult.status === 'network'
+                          ? 'bg-amber-50 text-amber-700 border-amber-200'
+                          : 'bg-gray-50 text-gray-700 border-gray-200'
+                      }`}
+                    >
+                      {langsmithTestResult.status === 'ok' && <CheckCircle2 className="w-4 h-4 mr-2" />}
+                      {langsmithTestResult.status === 'unauthorized' && <XCircle className="w-4 h-4 mr-2" />}
+                      {langsmithTestResult.status === 'network' && <WifiOff className="w-4 h-4 mr-2" />}
+                      {langsmithTestResult.status === 'unknown' && <HelpCircle className="w-4 h-4 mr-2" />}
+                      <span>
+                        {langsmithTestResult.status === 'ok' && langsmithTestResult.projectName
+                          ? `Connected to LangSmith — project "${langsmithTestResult.projectName}"`
+                          : langsmithTestResult.message}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Agent rate limit */}

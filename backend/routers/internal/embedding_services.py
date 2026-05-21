@@ -114,16 +114,37 @@ async def list_embedding_service_provider_models(
     tags=["Embedding Services"],
 )
 async def test_embedding_service_connection_with_config(
+    app_id: int,
     config: CreateUpdateEmbeddingServiceSchema,
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("administrator"))],
+    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
 ):
-    """Test connection to an embedding service using provided configuration."""
+    """Test connection to an embedding service using provided configuration.
+
+    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
+    persisted key for that service is used.
+    """
+    from utils.secret_utils import is_masked_key
+    from core.export_constants import PLACEHOLDER_API_KEY
+    from repositories.embedding_service_repository import EmbeddingServiceRepository
+
     try:
+        api_key = config.api_key or ""
+        if service_id is not None and (
+            not api_key
+            or api_key == PLACEHOLDER_API_KEY
+            or is_masked_key(api_key)
+        ):
+            stored = EmbeddingServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
+            if stored and stored.api_key:
+                api_key = stored.api_key
+
         service_config = {
             "provider": config.provider,
             "description": config.model_name,
-            "api_key": config.api_key,
+            "api_key": api_key,
             "endpoint": config.base_url,
         }
         result = EmbeddingServiceService.test_connection_with_config(service_config)

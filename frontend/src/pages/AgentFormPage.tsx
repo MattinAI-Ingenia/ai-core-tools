@@ -4,7 +4,7 @@ import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb,
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
-import { DEFAULT_AGENT_TEMPERATURE } from '../constants/agentConstants';
+import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
@@ -185,7 +185,7 @@ function AgentFormPage() {
     name: '',
     description: '',
     system_prompt: '',
-    prompt_template: '',
+    prompt_template: '{question}',
     type: 'agent',
     is_tool: false,
     has_memory: false,
@@ -193,7 +193,7 @@ function AgentFormPage() {
     server_tools: [],
     memory_max_messages: 20,
     memory_max_tokens: 4000,
-    memory_summarize_threshold: 4000,
+    memory_summarize_threshold: DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
     temperature: DEFAULT_AGENT_TEMPERATURE,
     tool_ids: [],
     mcp_config_ids: [],
@@ -218,7 +218,7 @@ function AgentFormPage() {
 
   // Load agent data when component mounts
   useEffect(() => {
-    if (appId && agentId) {
+    if (appId && agentId && Number.parseInt(agentId) !== 0) {
       loadAgentData();
     } else {
       setLoading(false);
@@ -247,7 +247,7 @@ function AgentFormPage() {
         server_tools: response.server_tools || [],
         memory_max_messages: response.memory_max_messages || 20,
         memory_max_tokens: response.memory_max_tokens || 4000,
-        memory_summarize_threshold: response.memory_summarize_threshold || 4000,
+        memory_summarize_threshold: response.memory_summarize_threshold || DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
         service_id: response.service_id || undefined,
         silo_id: response.silo_id || undefined,
         output_parser_id: response.output_parser_id || undefined,
@@ -967,7 +967,7 @@ function AgentFormPage() {
                           const toggle = () => handleInputChange(
                             'server_tools',
                             active
-                              ? formData.server_tools.filter(t => t === tool.id)
+                              ? formData.server_tools.filter(t => t !== tool.id)
                               : [...formData.server_tools, tool.id]
                           );
                           return (
