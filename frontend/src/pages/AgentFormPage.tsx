@@ -218,7 +218,7 @@ function AgentFormPage() {
 
   // Load agent data when component mounts
   useEffect(() => {
-    if (appId && agentId && Number.parseInt(agentId) !== 0) {
+    if (appId && agentId) {
       loadAgentData();
     } else {
       setLoading(false);
