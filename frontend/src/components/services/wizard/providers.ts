@@ -74,7 +74,7 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
   {
     value: 'Google',
     label: 'Google AI Studio',
-    description: 'Gemini family via the AI Studio API.',
+    description: 'Gemini models and embeddings via the AI Studio API.',
     Icon: Sparkles,
     apiKey: 'required',
     needsBaseUrl: false,
@@ -82,7 +82,7 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
     apiKeyPlaceholder: 'AIza...',
     apiKeyHelp: 'Generate an API key at aistudio.google.com',
     apiKeyDocUrl: 'https://aistudio.google.com/apikey',
-    supportedFor: ['ai'],
+    supportedFor: ['ai', 'embedding'],
   },
   {
     // Single AI Services option that covers both pure Ollama and any
@@ -155,7 +155,7 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
   {
     value: 'GoogleCloud',
     label: 'Google Cloud (Vertex AI)',
-    description: 'Vertex AI deployments. Authenticated with a service-account JSON.',
+    description: 'Vertex AI Gemini models and embeddings with a service-account JSON.',
     Icon: Globe,
     apiKey: 'required',
     needsBaseUrl: true,
@@ -165,7 +165,7 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
     apiKeyPlaceholder: '{"type":"service_account",...}',
     apiKeyHelp: 'Paste the full Service Account JSON key content.',
     apiKeyDocUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
-    supportedFor: ['ai'],
+    supportedFor: ['ai', 'embedding'],
   },
 ];
 

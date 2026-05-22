@@ -81,7 +81,7 @@ SECRET_KEY=your-256-bit-secret-key-here
 | `MISTRAL_API_KEY` | No | — | MistralAI API key |
 | `AZURE_OPENAI_API_KEY` | No | — | Azure OpenAI API key |
 | `AZURE_OPENAI_ENDPOINT` | No | — | Azure OpenAI endpoint URL |
-| `GOOGLE_API_KEY` | No | — | Google Gemini API key |
+| `GOOGLE_API_KEY` | No | — | Google Gemini API key for AI Studio LLMs and embeddings |
 
 **Example**:
 ```bash
@@ -91,6 +91,8 @@ MISTRAL_API_KEY=...
 ```
 
 **Note**: API keys are optional. Configure only the providers you plan to use.
+
+Google AI Studio and Vertex AI credentials can also be configured per AI Service or Embedding Service in the Mattin AI UI. Vertex AI uses a service-account JSON, project ID, and region stored on the service configuration rather than a global environment variable.
 
 ### Vector Database
 

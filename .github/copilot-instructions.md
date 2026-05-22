@@ -51,7 +51,7 @@ Access is enforced with `@require_min_role(AppRole.EDITOR)` decorators on routes
 | **Agent** | Core AI agent. Configured with a system prompt, an LLM (via AIService), optional RAG (via Silo), memory settings, temperature, output parser, skills, and MCP tool configs. Can be composed: agents marked `is_tool=True` can be used as tools by other agents. |
 | **OCRAgent** | Specialized Agent subclass (STI via `type` column). Dual-LLM: a vision model for scanned pages and a text model for structuring output. |
 | **AIService** | LLM provider configuration. Stores provider type (OpenAI, Anthropic, MistralAI, Azure, Google, Custom), endpoint, API key. Each App can have multiple. |
-| **EmbeddingService** | Embedding model configuration for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom, Azure. |
+| **EmbeddingService** | Embedding model configuration for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
 | **Skill** | Reusable markdown prompt block that can be attached to agents (M:N via `agent_skills`). Injected into the agent's system prompt at execution time. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Stored as a `fields` JSON column. At runtime, dynamically generates a Pydantic model. Used by agents for structured responses and by silos for metadata filtering. |
 | **Conversation** | Tracks a chat session between a user and an agent. Memory state stored in LangGraph's PostgreSQL checkpointer. Metadata (title, message count, last message) stored in the Conversation table. |

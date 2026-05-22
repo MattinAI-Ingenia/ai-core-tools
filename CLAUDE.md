@@ -94,7 +94,7 @@ docker compose down -v           # Parar y borrar volúmenes
 | **Agent** | Core AI agent. Configured with system prompt, LLM (AIService), optional RAG (Silo), memory settings, output parser, skills, and MCP tool configs. Agents with `is_tool=True` can be used as tools by other agents. |
 | **OCRAgent** | Agent subclass (STI via `type` column). Dual-LLM: vision model for scanned pages + text model for structuring output. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom). |
-| **EmbeddingService** | Embedding model config for vector stores. |
+| **EmbeddingService** | Embedding model config for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
 | **Skill** | Reusable markdown prompt block attached to agents (M:N). Injected into system prompt at execution time. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Dynamically generates a Pydantic model at runtime. |
 | **Conversation** | Chat session. Memory state in LangGraph's PostgreSQL checkpointer; metadata in Conversation table. |
