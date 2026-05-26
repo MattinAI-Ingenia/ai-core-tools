@@ -593,7 +593,7 @@ function ChatInterface({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      handleSendMessage();
+      if (canSend) handleSendMessage();
     }
   };
 

@@ -32,7 +32,7 @@ from schemas.marketplace_schemas import (
 from services.agent_execution_service import AgentExecutionService
 from services.agent_streaming_service import AgentStreamingService
 from services.file_management_service import FileManagementService, FileReference
-from services.playground_media_service import PlaygroundMediaService
+from services.playground_media_service import PlaygroundMediaService, VECTORIZABLE_FILE_TYPES
 from routers.internal.auth_utils import get_current_user_oauth
 from routers.controls.file_size_limit import enforce_file_size_limit
 from routers.controls.role_authorization import require_min_role, AppRole
@@ -933,7 +933,9 @@ async def upload_file_for_chat(
 
     Args:
         conversation_id: Optional conversation ID to associate the file with.
-                        If provided, file will be specific to that conversation.
+                        If provided, file will be specific to that conversation
+                        and vectorizable files (PDF, text) are indexed into the
+                        temp playground silo immediately at upload time.
     """
     try:
         # Verify agent belongs to this app
@@ -955,13 +957,37 @@ async def upload_file_for_chat(
             conversation_id=conversation_id,
             has_memory=bool(getattr(agent, "has_memory", False)),
         )
-        
-        logger.info(f"File uploaded for agent {agent_id} by user {auth_context.identity.id}")
+
+        # Vectorize at upload time: derive session_id from conversation
+        vectorized = False
+        if conversation_id and file_ref.file_type in VECTORIZABLE_FILE_TYPES and file_ref.content:
+            from models.conversation import Conversation
+            from services.playground_media_service import PlaygroundMediaService
+            conversation = db.query(Conversation).filter(
+                Conversation.conversation_id == conversation_id
+            ).first()
+            if conversation and conversation.session_id:
+                try:
+                    vectorized = PlaygroundMediaService.vectorize_uploaded_file(
+                        app_id=app_id,
+                        agent_id=agent_id,
+                        session_id=conversation.session_id,
+                        file_id=file_ref.file_id,
+                        filename=file_ref.filename,
+                        file_path=file_ref.file_path,
+                        content=file_ref.content,
+                        db=db,
+                    )
+                except Exception as vec_err:
+                    logger.warning(f"File vectorization at upload failed: {vec_err}")
+
+        logger.info(f"File uploaded for agent {agent_id} by user {auth_context.identity.id} (vectorized={vectorized})")
         return {
             "success": True,
             "file_id": file_ref.file_id,
             "filename": file_ref.filename,
             "file_type": file_ref.file_type,
+            "vectorized": vectorized,
             # Visual feedback fields
             "file_size_bytes": file_ref.file_size_bytes,
             "file_size_display": FileReference.format_file_size(file_ref.file_size_bytes),

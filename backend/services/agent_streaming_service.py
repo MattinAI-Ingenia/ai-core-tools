@@ -120,7 +120,7 @@ class AgentStreamingService:
             # ----------------------------------------------------------------
             # 3. Build agent chain
             # ----------------------------------------------------------------
-            # Resolve temporary playground media silos
+            # Resolve temporary playground media/file silos
             temp_silo_ids = None
             session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
             if session_id_for_media and effective_db:
@@ -133,11 +133,6 @@ class AgentStreamingService:
                         )
                 except Exception:
                     pass
-
-                # Vectorize attached files (PDFs, text) into a temp silo for RAG
-                temp_silo_ids = self.execution_service._vectorize_and_resolve_file_silos(
-                    ctx, agent_id, session_id_for_media, effective_db, temp_silo_ids
-                )
 
             agent_chain, mcp_client = await create_agent(
                 ctx.fresh_agent,

@@ -12,7 +12,7 @@ Files (PDFs, text) are chunked and indexed directly into the same silo.
 
 import os
 import logging
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any
 
 from fastapi import UploadFile, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -31,11 +31,6 @@ TEMP_REPO_PREFIX = "_playground_"
 
 # File types that should be vectorized instead of injected into context
 VECTORIZABLE_FILE_TYPES = {"pdf", "text"}
-
-# In-process cache of file IDs already vectorized per session.
-# Key: (app_id, agent_id, session_id) -> set of file_id strings.
-# Cleared when the playground media is cleaned up.
-_indexed_file_ids_cache: Dict[tuple, Set[str]] = {}
 
 
 def _temp_repo_name(agent_id: int, session_id: str) -> str:
@@ -263,9 +258,6 @@ class PlaygroundMediaService:
         )
         RepositoryService.delete_repository(repo, db)
 
-        # Clear indexed file IDs cache for this session
-        _indexed_file_ids_cache.pop((app_id, agent_id, session_id), None)
-
         return True
 
     @staticmethod
@@ -290,53 +282,36 @@ class PlaygroundMediaService:
         return []
 
     @staticmethod
-    def vectorize_file_references(
+    def vectorize_uploaded_file(
         app_id: int,
         agent_id: int,
         session_id: str,
-        processed_files: List[Dict[str, Any]],
+        file_id: str,
+        filename: str,
+        file_path: Optional[str],
+        content: str,
         db: Session,
         embedding_service_id: Optional[int] = None,
-    ) -> Set[str]:
-        """Vectorize text-based file references into the shared temp silo.
+    ) -> bool:
+        """Vectorize a single file at upload time into the shared temp silo.
 
-        Only files with ``type`` in VECTORIZABLE_FILE_TYPES (pdf, text) are
-        processed.  Images are left untouched (they use multimodal injection).
-
-        Uses proper LangChain loaders with chunking (1000/200) when the
-        original file is available on disk, falling back to raw content
-        indexing otherwise.
+        Called immediately after a file is uploaded to the playground, so that
+        vectorization happens once and the message hot path never re-processes it.
 
         Args:
             app_id: App ID.
             agent_id: Agent ID.
-            session_id: Conversation session ID.
-            processed_files: Dicts with keys filename, content, type, file_id, file_path.
+            session_id: Conversation session ID (e.g. ``conv_5_abc123``).
+            file_id: Unique file identifier.
+            filename: Original filename.
+            file_path: Relative path to TMP_BASE_FOLDER (may be None).
+            content: Pre-extracted text content (fallback if file_path unavailable).
             db: Database session.
             embedding_service_id: Optional explicit embedding service ID.
 
         Returns:
-            Set of file_id strings that were successfully vectorized.
+            True if file was successfully vectorized.
         """
-        vectorizable = [
-            f for f in processed_files
-            if f.get("type") in VECTORIZABLE_FILE_TYPES and f.get("content")
-        ]
-
-        if not vectorizable:
-            return set()
-
-        # Skip files already indexed in this session to prevent duplicate vectors
-        cache_key = (app_id, agent_id, session_id)
-        already_indexed = _indexed_file_ids_cache.get(cache_key, set())
-        vectorizable = [
-            f for f in vectorizable
-            if f.get("file_id") not in already_indexed
-        ]
-
-        if not vectorizable:
-            return already_indexed
-
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id, agent_id, session_id, db,
             embedding_service_id=embedding_service_id,
@@ -344,73 +319,55 @@ class PlaygroundMediaService:
 
         if not repo or not repo.silo_id:
             logger.warning("Could not create temp repository/silo for file vectorization")
-            return set()
+            return False
 
         from utils.config import get_app_config
         app_config = get_app_config()
         tmp_base = app_config['TMP_BASE_FOLDER']
 
-        vectorized_ids: Set[str] = set()
+        base_metadata = {
+            "file_id": file_id,
+            "filename": filename,
+            "source": "playground_upload",
+        }
 
-        for file_data in vectorizable:
-            try:
-                file_id = file_data.get("file_id", "unknown")
-                filename = file_data.get("filename", "unknown")
-                file_path = file_data.get("file_path")
-                content = file_data.get("content", "")
+        docs_indexed = False
 
-                base_metadata = {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "source": "playground_upload",
-                }
-
-                docs_indexed = False
-
-                # Try file-based extraction with proper loaders/chunking
-                if file_path:
-                    abs_path = os.path.join(tmp_base, file_path)
-                    if os.path.exists(abs_path):
-                        ext = os.path.splitext(filename)[1].lower()
-                        try:
-                            docs = SiloService.extract_documents_from_file(
-                                abs_path, ext, base_metadata
-                            )
-                            if docs:
-                                SiloService.index_multiple_content(
-                                    repo.silo_id,
-                                    [{"content": d.page_content, "metadata": d.metadata} for d in docs],
-                                    db,
-                                )
-                                docs_indexed = True
-                        except Exception as exc:
-                            logger.warning(
-                                "File-based extraction failed for %s, falling back to content: %s",
-                                filename, exc,
-                            )
-
-                # Fallback: use pre-extracted text content
-                if not docs_indexed and content:
-                    SiloService.index_multiple_content(
-                        repo.silo_id,
-                        [{"content": content, "metadata": base_metadata}],
-                        db,
+        # Try file-based extraction with proper loaders/chunking
+        if file_path:
+            abs_path = os.path.join(tmp_base, file_path)
+            if os.path.exists(abs_path):
+                ext = os.path.splitext(filename)[1].lower()
+                try:
+                    docs = SiloService.extract_documents_from_file(
+                        abs_path, ext, base_metadata
                     )
-                    docs_indexed = True
-
-                if docs_indexed:
-                    vectorized_ids.add(file_id)
-                    logger.info(
-                        "Vectorized file %s (%s) into silo %s",
-                        file_id, filename, repo.silo_id,
+                    if docs:
+                        SiloService.index_multiple_content(
+                            repo.silo_id,
+                            [{"content": d.page_content, "metadata": d.metadata} for d in docs],
+                            db,
+                        )
+                        docs_indexed = True
+                except Exception as exc:
+                    logger.warning(
+                        "File-based extraction failed for %s, falling back to content: %s",
+                        filename, exc,
                     )
 
-            except Exception as exc:
-                logger.error("Error vectorizing file %s: %s", file_data.get("filename"), exc)
+        # Fallback: use pre-extracted text content
+        if not docs_indexed and content:
+            SiloService.index_multiple_content(
+                repo.silo_id,
+                [{"content": content, "metadata": base_metadata}],
+                db,
+            )
+            docs_indexed = True
 
-        # Update cache with newly vectorized file IDs
-        if vectorized_ids:
-            _indexed_file_ids_cache.setdefault(cache_key, set()).update(vectorized_ids)
+        if docs_indexed:
+            logger.info(
+                "Vectorized file %s (%s) into silo %s at upload time",
+                file_id, filename, repo.silo_id,
+            )
 
-        # Return all indexed IDs (previously cached + newly vectorized)
-        return already_indexed | vectorized_ids
+        return docs_indexed

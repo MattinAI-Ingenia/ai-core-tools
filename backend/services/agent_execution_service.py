@@ -105,7 +105,7 @@ class AgentExecutionService:
             if db is not None:
                 db.commit()
 
-            # Resolve temporary playground media silos for this session
+            # Resolve temporary playground media/file silos for this session
             temp_silo_ids = None
             session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
             if session_id_for_media and db:
@@ -118,11 +118,6 @@ class AgentExecutionService:
                         )
                 except Exception as e:
                     logger.warning(f"Could not resolve temp silos: {e}")
-
-                # Vectorize attached files (PDFs, text) into a temp silo for RAG
-                temp_silo_ids = self._vectorize_and_resolve_file_silos(
-                    ctx, agent_id, session_id_for_media, db, temp_silo_ids
-                )
 
             response = await self._execute_agent_async(
                 ctx.fresh_agent,
@@ -243,7 +238,15 @@ class AgentExecutionService:
             raise HTTPException(status_code=404, detail="Agent not found in database")
 
         # 8. Build enhanced message + separate image files
-        enhanced_message, image_files = self._prepare_message_with_files(message, processed_files)
+        # Exclude vectorizable files (pdf, text) from message context — they are
+        # already in the temp silo (vectorized at upload time) and will be
+        # retrieved via RAG.
+        from services.playground_media_service import VECTORIZABLE_FILE_TYPES
+        non_vectorized_files = [
+            f for f in processed_files
+            if f.get("type") not in VECTORIZABLE_FILE_TYPES
+        ]
+        enhanced_message, image_files = self._prepare_message_with_files(message, non_vectorized_files)
 
         session_id_for_cache = session.id if (fresh_agent.has_memory and session) else None
         effective_conv_id = conversation_id or (
@@ -928,68 +931,6 @@ class AgentExecutionService:
             logger.error(f"Error processing PDF with OCR: {str(e)}")
             raise
     
-    def _vectorize_and_resolve_file_silos(
-        self,
-        ctx: "AgentExecutionContext",
-        agent_id: int,
-        session_id: str,
-        db: Session,
-        temp_silo_ids: Optional[List[int]],
-    ) -> Optional[List[int]]:
-        """Vectorize text-based attached files into the shared temp playground silo.
-
-        Reuses the same repo/silo created by PlaygroundMediaService so that
-        media transcriptions and file content live in a single retriever.
-
-        Modifies ``ctx.enhanced_message`` and ``ctx.image_files`` in-place to
-        remove file content that has been vectorized (the agent will retrieve
-        it via RAG instead of reading it from the message context).
-
-        Returns:
-            Updated list of temp_silo_ids (may be the same reference or a new list).
-        """
-        try:
-            from services.playground_media_service import PlaygroundMediaService
-            app_id = ctx.user_context.get("app_id") if ctx.user_context else None
-            if not app_id or not ctx.processed_files:
-                return temp_silo_ids
-
-            # Resolve embedding service from the agent's silo for consistency
-            embedding_service_id = None
-            if ctx.fresh_agent and getattr(ctx.fresh_agent, 'silo', None):
-                embedding_service_id = ctx.fresh_agent.silo.embedding_service_id
-
-            vectorized_ids = PlaygroundMediaService.vectorize_file_references(
-                app_id, agent_id, session_id,
-                ctx.processed_files, db,
-                embedding_service_id=embedding_service_id,
-            )
-            if not vectorized_ids:
-                return temp_silo_ids
-
-            # Rebuild enhanced message without vectorized file content
-            remaining_files = [
-                f for f in ctx.processed_files if f.get("file_id") not in vectorized_ids
-            ]
-            ctx.enhanced_message, ctx.image_files = self._prepare_message_with_files(
-                ctx.original_message, remaining_files
-            )
-
-            # Re-resolve silo IDs (vectorize may have created the repo/silo)
-            if not temp_silo_ids:
-                temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
-                    app_id, agent_id, session_id, db
-                )
-
-            logger.info(
-                "Vectorized %d file(s) for agent %s; temp_silo_ids=%s",
-                len(vectorized_ids), agent_id, temp_silo_ids,
-            )
-        except Exception as e:
-            logger.warning(f"Could not vectorize playground files: {e}")
-
-        return temp_silo_ids
-
     def _prepare_message_with_files(self, message: str, processed_files: List[Dict]) -> tuple:
         """
         Build enhanced message with file contents and separate image files.
