@@ -29,7 +29,7 @@ export default function VideoPlayer({ videoUrl, timestamps, title, isAudio = fal
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(true);
 
   useEffect(() => {
     const video = videoRef.current;
