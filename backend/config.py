@@ -62,3 +62,12 @@ CHROMA_PERSIST_DIR = os.getenv('CHROMA_PERSIST_DIR', './chroma_db')
 # MCP Server Configuration
 # Base URL for generating MCP endpoint URLs (e.g., https://your-domain.com)
 MCP_BASE_URL = os.getenv('MCP_BASE_URL', 'http://localhost:8000') 
+
+# LightRAG / Neo4j Configuration (optional, opt-in)
+# These settings are only consumed when LIGHTRAG_ENABLED is true and a silo
+# is configured to use the LightRAG backend. They default to safe no-op
+# values so the backend boots cleanly without Neo4j running.
+LIGHTRAG_ENABLED: bool = os.getenv('LIGHTRAG_ENABLED', 'false').lower() == 'true'
+NEO4J_URI: Optional[str] = os.getenv('NEO4J_URI') or None
+NEO4J_USERNAME: str = os.getenv('NEO4J_USERNAME', 'neo4j')
+NEO4J_PASSWORD: Optional[str] = os.getenv('NEO4J_PASSWORD') or None

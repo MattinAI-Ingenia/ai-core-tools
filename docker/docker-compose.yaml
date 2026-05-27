@@ -81,6 +81,11 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+
+      LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-false}
+      NEO4J_URI: ${NEO4J_URI:-}
+      NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
     volumes:
       - ../backend/data:/aict_backend/data
       - ../backend/logs:/aict_backend/logs
@@ -153,6 +158,28 @@ services:
       - mattin-network
     restart: unless-stopped
 
+  neo4j:
+    image: neo4j:5-community
+    container_name: mattin-neo4j
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env when LightRAG is enabled}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    networks:
+      - mattin-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    # Internal-only: no published ports
+    restart: unless-stopped
+    profiles: ["lightrag"]
+
 networks:
   mattin-network:
     driver: bridge
@@ -162,3 +189,5 @@ volumes:
   qdrant-data:
   caddy-data:
   caddy-config:
+  neo4j-data:
+  neo4j-logs:
