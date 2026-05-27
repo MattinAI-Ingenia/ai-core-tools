@@ -891,6 +891,9 @@ def get_retriever_tool(silo: Silo, search_params=None, retrieval_config: Optiona
         else:
             description = f"Use this tool to search for documents and information about {silo.description}"
 
+        if silo.vector_db_type and silo.vector_db_type.upper() == 'LIGHTRAG':
+            description = f"Use this tool to search for documents using graph-enhanced retrieval. {silo.description or ''}"
+
         # Create a wrapper retriever that includes metadata in page_content
         # This ensures the agent can see metadata like holiday_item_id, type, etc.
         # We'll use a closure to capture the retriever instead of storing it as an attribute

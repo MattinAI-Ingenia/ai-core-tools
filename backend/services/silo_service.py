@@ -200,15 +200,21 @@ class SiloService:
             logger.debug(f"Getting retriever for silo {silo_id} with embedding service: {silo.embedding_service.name}")
             
             collection_name = COLLECTION_PREFIX + str(silo_id)
-            
-            # Merge search_params with default k value
-            # search_params typically contains 'filter' for metadata filtering
-            merged_search_kwargs = {'k': 30}
-            
+
+            # Known retriever parameters that should not be wrapped in 'filter'
+            known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type', 'lightrag_query_mode'}
+
+            # --- Layer 1: system defaults ---
+            merged_search_kwargs: dict = {'k': 30}
+
+            # --- Layer 2: agent-level retrieval_config (persisted) ---
+            if retrieval_config:
+                for key, value in retrieval_config.items():
+                    if value is not None and key in known_params:
+                        merged_search_kwargs[key] = value
+
+            # --- Layer 3: per-call search_params (highest priority) ---
             if search_params:
-                # Known retriever parameters that should not be wrapped in 'filter'
-                known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type'}
-                
                 # Separate known params from filter fields
                 filter_fields = {}
                 direct_params = {}
@@ -1290,6 +1296,15 @@ class SiloService:
             logger.info("Returning new silo template")
             vector_db_options = VectorStoreFactory.get_available_type_options()
             default_vector_db_type = _resolve_vector_db_type()
+            # Get AI services for indexing LLM selector
+            try:
+                form_data = SiloRepository.get_form_data_for_silo(app_id, 0, db)
+                ai_services = [
+                    {"service_id": s.service_id, "name": s.name, "provider": s.provider}
+                    for s in form_data.get('ai_services', [])
+                ]
+            except Exception:
+                ai_services = []
             return SiloDetailSchema(
                 silo_id=0,
                 name="",
@@ -1301,6 +1316,7 @@ class SiloService:
                 # Form data
                 output_parsers=[],
                 embedding_services=[],
+                ai_services=ai_services,
                 vector_db_options=vector_db_options
             )
         
@@ -1332,11 +1348,16 @@ class SiloService:
                 [EmbeddingServiceOptionSchema(service_id=s.service_id, name=s.name, provider=s.provider.value if hasattr(s.provider, 'value') else s.provider, is_system=False) for s in form_data['embedding_services']]
                 + [EmbeddingServiceOptionSchema(service_id=s.service_id, name=s.name, provider=s.provider.value if hasattr(s.provider, 'value') else s.provider, is_system=True) for s in form_data.get('system_embedding_services', [])]
             )
-            logger.info(f"Found {len(output_parsers)} parsers and {len(embedding_services)} embedding services")
+            ai_services = [
+                {"service_id": s.service_id, "name": s.name, "provider": s.provider}
+                for s in form_data.get('ai_services', [])
+            ]
+            logger.info(f"Found {len(output_parsers)} parsers, {len(embedding_services)} embedding services, {len(ai_services)} AI services")
         except Exception as e:
             logger.error(f"Error getting form data: {str(e)}")
             output_parsers = []
             embedding_services = []
+            ai_services = []
         
         # Get metadata definition fields if silo has one
         metadata_fields = None
@@ -1372,9 +1393,15 @@ class SiloService:
                 # Current values for editing
                 metadata_definition_id=silo.metadata_definition_id,
                 embedding_service_id=silo.embedding_service_id,
+                indexing_service_id=silo.indexing_service_id,
+                lightrag_chunk_strategy=silo.lightrag_chunk_strategy,
+                lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
+                lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
+                lightrag_graph_context_enabled=silo.lightrag_graph_context_enabled,
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
+                ai_services=ai_services,
                 vector_db_options=vector_db_options,
                 # Metadata definition fields for playground
                 metadata_fields=metadata_fields
@@ -1404,7 +1431,12 @@ class SiloService:
             'type': silo_data.type,
             'output_parser_id': silo_data.output_parser_id,
             'embedding_service_id': getattr(silo_data, 'embedding_service_id', None),
-            'vector_db_type': getattr(silo_data, 'vector_db_type', None)
+            'vector_db_type': getattr(silo_data, 'vector_db_type', None),
+            'indexing_service_id': getattr(silo_data, 'indexing_service_id', None),
+            'lightrag_chunk_strategy': getattr(silo_data, 'lightrag_chunk_strategy', None),
+            'lightrag_chunk_token_size': getattr(silo_data, 'lightrag_chunk_token_size', None),
+            'lightrag_chunk_overlap_token_size': getattr(silo_data, 'lightrag_chunk_overlap_token_size', None),
+            'lightrag_graph_context_enabled': getattr(silo_data, 'lightrag_graph_context_enabled', None),
         }
         
         # Create or update using the existing service

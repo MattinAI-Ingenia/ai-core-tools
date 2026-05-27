@@ -98,10 +98,14 @@ class SiloRepository:
         silo = SiloRepository.get_by_id(silo_id, db) if silo_id != 0 else None
         embedding_services = SiloRepository.get_embedding_services_by_app_id(app_id, db)
         system_embedding_services = EmbeddingServiceRepository.get_system_services(db)
+        from repositories.ai_service_repository import AIServiceRepository
+        ai_services = AIServiceRepository.get_by_app_id(db, app_id)
+        system_ai_services = AIServiceRepository.get_system_services(db)
 
         return {
             'output_parsers': output_parsers,
             'silo': silo,
             'embedding_services': embedding_services,
             'system_embedding_services': system_embedding_services,
+            'ai_services': ai_services + system_ai_services,
         }

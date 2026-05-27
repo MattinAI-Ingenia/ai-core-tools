@@ -38,6 +38,7 @@ class SiloDetailSchema(BaseModel):
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
+    ai_services: List[Dict[str, Any]] = []
     vector_db_options: List[Dict[str, Any]] = []
     # Metadata definition fields for playground
     metadata_fields: Optional[List[Dict[str, Any]]] = None
