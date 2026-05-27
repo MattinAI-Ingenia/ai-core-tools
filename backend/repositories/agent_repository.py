@@ -295,7 +295,7 @@ class AgentRepository:
         
         # Get silos
         silos = AgentRepository.get_silos_by_app_id(db, app_id)
-        silos_list = [{"silo_id": s.silo_id, "name": s.name} for s in silos]
+        silos_list = [{"silo_id": s.silo_id, "name": s.name, "vector_db_type": s.vector_db_type} for s in silos]
         
         # Get output parsers
         output_parsers = AgentRepository.get_output_parsers_by_app_id(db, app_id)

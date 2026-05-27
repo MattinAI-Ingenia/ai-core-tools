@@ -22,6 +22,12 @@ interface Silo {
   output_parsers?: { parser_id: number; name: string }[];
   embedding_services?: { service_id: number; name: string; provider?: string; is_system?: boolean }[];
   vector_db_options?: VectorDbOption[];
+  indexing_service_id?: number;
+  lightrag_chunk_strategy?: string;
+  lightrag_chunk_token_size?: number;
+  lightrag_chunk_overlap_token_size?: number;
+  lightrag_graph_context_enabled?: boolean;
+  ai_services?: { service_id: number; name: string; provider?: string; is_system?: boolean }[];
 }
 
 // Define the form data type
@@ -32,6 +38,11 @@ interface SiloFormData {
   output_parser_id?: number;
   embedding_service_id?: number;
   vector_db_type?: string;
+  indexing_service_id?: number;
+  lightrag_chunk_strategy?: string;
+  lightrag_chunk_token_size?: number;
+  lightrag_chunk_overlap_token_size?: number;
+  lightrag_graph_context_enabled?: boolean;
 }
 
 // Define the props for the component
@@ -49,13 +60,19 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
     type: 'CUSTOM', // Always CUSTOM for this interface
     output_parser_id: undefined,
     embedding_service_id: undefined,
-    vector_db_type: 'PGVECTOR'
+    vector_db_type: 'PGVECTOR',
+    indexing_service_id: undefined,
+    lightrag_chunk_strategy: 'token_window',
+    lightrag_chunk_token_size: 1200,
+    lightrag_chunk_overlap_token_size: 100,
+    lightrag_graph_context_enabled: false
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outputParsers, setOutputParsers] = useState<any[]>([]);
   const [embeddingServices, setEmbeddingServices] = useState<any[]>([]);
   const [vectorDbOptions, setVectorDbOptions] = useState<VectorDbOption[]>([]);
+  const [aiServices, setAiServices] = useState<any[]>([]);
   const [loadingFormData, setLoadingFormData] = useState(true);
 
   const isEditing = !!silo && silo.silo_id !== 0;
@@ -83,6 +100,10 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
 
     setVectorDbOptions(availableVectorDbOptions);
 
+    if (silo?.ai_services) {
+      setAiServices(silo.ai_services);
+    }
+
     setFormData(prev => ({
       ...prev,
       name: silo?.name || '',
@@ -90,7 +111,12 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
       type: 'CUSTOM',
       output_parser_id: silo?.metadata_definition_id || undefined,
       embedding_service_id: silo?.embedding_service_id || undefined,
-      vector_db_type: vectorDbTypeValue
+      vector_db_type: vectorDbTypeValue,
+      indexing_service_id: silo?.indexing_service_id || undefined,
+      lightrag_chunk_strategy: silo?.lightrag_chunk_strategy || 'token_window',
+      lightrag_chunk_token_size: silo?.lightrag_chunk_token_size || 1200,
+      lightrag_chunk_overlap_token_size: silo?.lightrag_chunk_overlap_token_size || 100,
+      lightrag_graph_context_enabled: silo?.lightrag_graph_context_enabled || false
     }));
   }, [silo]);
 
@@ -140,7 +166,8 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
 
     let parsedValue: string | number | undefined = value === '' ? undefined : value;
 
-    if (name === 'embedding_service_id' || name === 'output_parser_id') {
+    if (name === 'embedding_service_id' || name === 'output_parser_id' || name === 'indexing_service_id'
+        || name === 'lightrag_chunk_token_size' || name === 'lightrag_chunk_overlap_token_size') {
       parsedValue = value === '' ? undefined : Number.parseInt(value, 10);
     } else if (name === 'vector_db_type' && typeof value === 'string') {
       parsedValue = value.toUpperCase();
@@ -170,7 +197,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
       setIsSubmitting(true);
       setError(null);
       const payload = isEditing
-        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, ...rest }) => rest)(formData)
+        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi, ...rest }) => rest)(formData)
         : { ...formData, vector_db_type: formData.vector_db_type!.toUpperCase() };
       await onSubmit(payload);
     } catch (err) {
@@ -301,7 +328,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
             {/* Vector Database */}
             <div>
               <label htmlFor="vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
-                Vector Database <span className="text-red-500">*</span>
+                Database type <span className="text-red-500">*</span>
               </label>
               <select
                 id="vector_db_type"
@@ -335,6 +362,117 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
               )}
             </div>
           </div>
+
+          {/* LightRAG Configuration — shown only when LIGHTRAG is selected */}
+          {formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
+            <div className="border-t border-gray-200 pt-6 mt-6 space-y-6">
+              <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">LightRAG Configuration</h3>
+
+              {/* Indexing AI Service (LLM for entity extraction) */}
+              <div>
+                <label htmlFor="indexing_service_id" className="block text-sm font-medium text-gray-700 mb-2">
+                  Indexing AI Service <span className="text-red-500">*</span>
+                </label>
+                <select
+                  id="indexing_service_id"
+                  name="indexing_service_id"
+                  value={formData.indexing_service_id?.toString() || ''}
+                  onChange={handleChange}
+                  required
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
+                  disabled={isSubmitting || isEditing}
+                >
+                  <option value="">Select an AI service for entity extraction</option>
+                  {aiServices.map((service: any) => (
+                    <option key={service.service_id} value={service.service_id}>
+                      {service.is_system ? `[System] ${service.name}` : service.name}{service.provider ? ` (${service.provider})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-sm text-gray-500">
+                  LLM used for knowledge graph extraction during indexing. Recommended: GPT-4o or equivalent.
+                </p>
+              </div>
+
+              {/* Chunking Strategy */}
+              <div>
+                <label htmlFor="lightrag_chunk_strategy" className="block text-sm font-medium text-gray-700 mb-2">
+                  Chunking strategy
+                </label>
+                <select
+                  id="lightrag_chunk_strategy"
+                  name="lightrag_chunk_strategy"
+                  value={formData.lightrag_chunk_strategy || 'token_window'}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
+                  disabled={isSubmitting}
+                >
+                  <option value="token_window">Token window (default)</option>
+                  <option value="split_by_char">Split by character</option>
+                  <option value="split_by_char_only">Split by character only</option>
+                </select>
+              </div>
+
+              {/* Token size fields — shown only for token_window strategy */}
+              {(formData.lightrag_chunk_strategy || 'token_window') === 'token_window' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="lightrag_chunk_token_size" className="block text-sm font-medium text-gray-700 mb-2">
+                      Chunk token size
+                    </label>
+                    <input
+                      type="number"
+                      id="lightrag_chunk_token_size"
+                      name="lightrag_chunk_token_size"
+                      value={formData.lightrag_chunk_token_size ?? 1200}
+                      onChange={handleChange}
+                      min={100}
+                      max={8000}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
+                      disabled={isSubmitting}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="lightrag_chunk_overlap_token_size" className="block text-sm font-medium text-gray-700 mb-2">
+                      Overlap token size
+                    </label>
+                    <input
+                      type="number"
+                      id="lightrag_chunk_overlap_token_size"
+                      name="lightrag_chunk_overlap_token_size"
+                      value={formData.lightrag_chunk_overlap_token_size ?? 100}
+                      onChange={handleChange}
+                      min={0}
+                      max={2000}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
+                      disabled={isSubmitting}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Graph context toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label htmlFor="lightrag_graph_context_enabled" className="text-sm font-medium text-gray-700">
+                    Graph context in retrieval metadata
+                  </label>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    When enabled, retrieved documents may include compact graph hints (linked entities and relations).
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  id="lightrag_graph_context_enabled"
+                  name="lightrag_graph_context_enabled"
+                  checked={formData.lightrag_graph_context_enabled || false}
+                  onChange={(e) => setFormData(prev => ({ ...prev, lightrag_graph_context_enabled: e.target.checked }))}
+                  className="h-4 w-4 text-yellow-600 focus:ring-yellow-500 border-gray-300 rounded"
+                  disabled={isSubmitting}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Error Message */}
           {error && (

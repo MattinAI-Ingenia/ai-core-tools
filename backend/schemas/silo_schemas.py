@@ -86,6 +86,27 @@ class SiloCountRequestSchema(BaseModel):
     filter_metadata: Optional[Dict[str, Any]] = None
     min_content_length: Optional[int] = None
     max_content_length: Optional[int] = None
+    retrieval_config: Optional[Dict[str, Any]] = None
+
+
+class CostEstimationRequestSchema(BaseModel):
+    """Request body for cost estimation — list of documents to be indexed."""
+    documents: List[Dict[str, Any]]  # Each dict has 'content' (str) and optional 'metadata'
+
+
+class CostEstimationResponseSchema(BaseModel):
+    """Cost estimation result returned to the frontend."""
+    total_chunks: int
+    chunk_token_size: int
+    estimated_llm_calls: int
+    estimated_embedding_calls: int
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_cost_min: Optional[float] = None
+    estimated_cost_max: Optional[float] = None
+    model_name: Optional[str] = None
+    embedding_model_name: Optional[str] = None
+    warnings: List[str] = []
 
 
 class SiloSearchSchema(BaseModel):

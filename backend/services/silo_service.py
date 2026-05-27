@@ -1578,3 +1578,59 @@ class SiloService:
         return _get_vector_store(silo).get_distinct_metadata_values(
             collection_name, field, prefix=prefix, limit=limit,
         )
+
+    @staticmethod
+    def estimate_indexing_cost(silo_id: int, documents: List[Dict[str, Any]], db: Session) -> dict:
+        """Estimate the cost of indexing documents into a LightRAG silo.
+
+        Returns a dict matching CostEstimationResponseSchema fields.
+        Raises LookupError if silo not found, ValueError if not a LightRAG silo
+        or missing required services.
+        """
+        silo = SiloRepository.get_by_id(silo_id, db)
+        if not silo:
+            raise LookupError(f"Silo {silo_id} not found")
+
+        if getattr(silo, 'vector_db_type', None) != 'LIGHTRAG':
+            raise ValueError("Cost estimation is only available for LightRAG silos")
+
+        if not silo.indexing_service:
+            raise ValueError("Silo has no indexing AI service configured")
+        if not silo.embedding_service:
+            raise ValueError("Silo has no embedding service configured")
+
+        total_chars = sum(len(doc.get('content', '')) for doc in documents)
+        total_tokens = total_chars // 4  # rough char-to-token ratio
+
+        chunk_token_size = silo.lightrag_chunk_token_size or 1200
+        num_chunks = max(1, total_tokens // chunk_token_size)
+
+        extraction_calls = num_chunks * 2  # entity + relationship
+        embedding_calls = num_chunks
+        estimated_input_tokens = num_chunks * chunk_token_size
+        estimated_output_tokens = num_chunks * 500  # avg extraction output
+
+        # TODO: implement pricing catalog lookup
+        estimated_cost_min = None
+        estimated_cost_max = None
+
+        warnings: List[str] = []
+        model_name = getattr(silo.indexing_service, 'model_name', None) or ''
+        if any(p in model_name.lower() for p in ('mini', 'small', 'tiny')):
+            warnings.append(
+                f"Model '{model_name}' may have limited context or quality for entity extraction"
+            )
+
+        return {
+            "total_chunks": num_chunks,
+            "chunk_token_size": chunk_token_size,
+            "estimated_llm_calls": extraction_calls,
+            "estimated_embedding_calls": embedding_calls,
+            "estimated_input_tokens": estimated_input_tokens,
+            "estimated_output_tokens": estimated_output_tokens,
+            "estimated_cost_min": estimated_cost_min,
+            "estimated_cost_max": estimated_cost_max,
+            "model_name": model_name or None,
+            "embedding_model_name": getattr(silo.embedding_service, 'model_name', None),
+            "warnings": warnings,
+        }

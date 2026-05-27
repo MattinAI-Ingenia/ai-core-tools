@@ -1131,7 +1131,7 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/silos/0`);
   }
 
-  async createSilo(appId: number, data: { name: string; description?: string; embedding_service_id?: number; vector_db_type?: string; fixed_metadata?: boolean }) {
+  async createSilo(appId: number, data: { name: string; description?: string; embedding_service_id?: number; vector_db_type?: string; fixed_metadata?: boolean; indexing_service_id?: number; lightrag_chunk_strategy?: string; lightrag_chunk_token_size?: number; lightrag_chunk_overlap_token_size?: number; lightrag_graph_context_enabled?: boolean }) {
     return this.request(`/internal/apps/${appId}/silos/`, {
       method: 'POST',
       body: JSON.stringify(data),

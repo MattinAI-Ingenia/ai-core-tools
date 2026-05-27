@@ -13,7 +13,8 @@ from models.silo import Silo
 
 from schemas.silo_schemas import (
     SiloListItemSchema, SiloDetailSchema, CreateUpdateSiloSchema,
-    CreateSiloSchema, UpdateSiloSchema, SiloSearchSchema, SiloCountRequestSchema
+    CreateSiloSchema, UpdateSiloSchema, SiloSearchSchema, SiloCountRequestSchema,
+    CostEstimationRequestSchema, CostEstimationResponseSchema
 )
 from schemas.import_schemas import ConflictMode, ImportResponseSchema
 from schemas.export_schemas import SiloExportFileSchema
@@ -574,3 +575,31 @@ async def delete_silo_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting documents: {str(e)}"
         ) 
+
+
+@silos_router.post(
+    "/{silo_id}/estimate-indexing",
+    summary="Estimate LightRAG indexing cost",
+    tags=["Silos"],
+    response_model=CostEstimationResponseSchema,
+)
+async def estimate_indexing_cost(
+    app_id: int,
+    silo_id: int,
+    request: Annotated[CostEstimationRequestSchema, Body(...)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    """
+    Estimate the cost of indexing documents into a LightRAG silo.
+    Returns estimated chunks, LLM calls, tokens, and optional cost range.
+    """
+    _validate_silo_app_ownership(silo_id, app_id, db)
+    try:
+        result = SiloService.estimate_indexing_cost(silo_id, request.documents, db)
+        return CostEstimationResponseSchema(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
