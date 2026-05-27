@@ -448,9 +448,16 @@ The **"Show neighboring chunks"** action calls `GET /internal/apps/{appId}/silos
 5. **Index optimization**: Use HNSW indexes for PGVector, configure Qdrant for performance
 6. **Monitoring**: Track retrieval latency and relevance scores
 
+## LightRAG (Graph-Enhanced RAG)
+
+LightRAG adds a third vector store backend that combines knowledge graphs (Neo4j) with vector search (Qdrant) for deeper document understanding. Unlike PGVector and Qdrant which perform pure vector similarity search, LightRAG extracts entities and relationships from documents to build a knowledge graph, enabling contextual retrieval with multiple query modes.
+
+For detailed setup, configuration, and usage instructions, see the [LightRAG Integration Guide](../guides/lightrag-integration.md).
+
 ## See Also
 
 - [LLM Integration](llm-integration.md) — Embedding services
 - [Agent System](agent-system.md) — How agents use RAG
 - [Database Schema](../architecture/database.md) — Silo, Repository, Domain models
 - [File Processing](../reference/file-processing.md) — Document ingestion
+- [LightRAG Integration](../guides/lightrag-integration.md) — Graph-enhanced RAG with Neo4j
