@@ -25,7 +25,14 @@ class Silo(Base):
     metadata_definition = relationship('OutputParser', uselist=False)
     embedding_service_id = Column(Integer, ForeignKey('embedding_service.service_id'), nullable=True)
     embedding_service = relationship('EmbeddingService', uselist=False)
+    indexing_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
+    indexing_service = relationship('AIService', uselist=False, foreign_keys=[indexing_service_id])
     vector_db_type = Column(String(45), default='PGVECTOR')
+
+    lightrag_chunk_strategy = Column(String(45), nullable=True)
+    lightrag_chunk_token_size = Column(Integer, nullable=True)
+    lightrag_chunk_overlap_token_size = Column(Integer, nullable=True)
+    lightrag_graph_context_enabled = Column(Boolean, default=False, nullable=True)
 
     is_frozen = Column(Boolean, default=False, nullable=False)
     agents = relationship('Agent', lazy=True)

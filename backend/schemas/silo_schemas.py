@@ -30,6 +30,11 @@ class SiloDetailSchema(BaseModel):
     # Current values for editing
     metadata_definition_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
+    indexing_service_id: Optional[int] = None
+    lightrag_chunk_strategy: Optional[str] = None
+    lightrag_chunk_token_size: Optional[int] = None
+    lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_graph_context_enabled: Optional[bool] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -49,6 +54,11 @@ class CreateSiloSchema(BaseModel):
     output_parser_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
     vector_db_type: Optional[str] = None
+    indexing_service_id: Optional[int] = None
+    lightrag_chunk_strategy: Optional[str] = None
+    lightrag_chunk_token_size: Optional[int] = None
+    lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_graph_context_enabled: Optional[bool] = None
 
 
 class UpdateSiloSchema(BaseModel):

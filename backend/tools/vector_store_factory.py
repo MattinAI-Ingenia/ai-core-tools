@@ -23,18 +23,19 @@ class VectorStoreFactory:
     SUPPORTED_TYPES = {
         'PGVECTOR': 'PGVector (PostgreSQL with pgvector extension)',
         'QDRANT': 'Qdrant vector database',
+        'LIGHTRAG': 'LightRAG graph-enhanced RAG (Neo4j + Qdrant + PostgreSQL)',
         'PINECONE': 'Pinecone vector database (future support)',
         'WEAVIATE': 'Weaviate vector database (future support)',
         'CHROMA': 'Chroma vector database (future support)',
     }
 
     # Types that are currently implemented and can be selected by users
-    IMPLEMENTED_TYPES = ('PGVECTOR', 'QDRANT')
+    IMPLEMENTED_TYPES = ('PGVECTOR', 'QDRANT', 'LIGHTRAG')
 
     _instances: Dict[str, VectorStoreInterface] = {}
 
     @staticmethod
-    def get_vector_store(db, vector_db_type: Optional[str] = None) -> VectorStoreInterface:
+    def get_vector_store(db, vector_db_type: Optional[str] = None, **kwargs) -> VectorStoreInterface:
         """Return a cached vector store instance for the requested backend."""
 
         resolved_type = (vector_db_type or 'PGVECTOR').upper()
@@ -60,11 +61,14 @@ class VectorStoreFactory:
             instance = VectorStoreFactory._create_pgvector_backend(db)
         elif resolved_type == 'QDRANT':
             instance = VectorStoreFactory._create_qdrant_backend(db)
+        elif resolved_type == 'LIGHTRAG':
+            instance = VectorStoreFactory._create_lightrag_backend(db, **kwargs)
         else:
             # Guard clause for future implementations
             raise NotImplementedError(f"Vector DB type {resolved_type} is not implemented yet")
 
-        VectorStoreFactory._instances[resolved_type] = instance
+        if resolved_type != 'LIGHTRAG':
+            VectorStoreFactory._instances[resolved_type] = instance
         return instance
 
     @staticmethod
@@ -124,4 +128,32 @@ class VectorStoreFactory:
             url=config.QDRANT_URL,
             api_key=config.QDRANT_API_KEY,
             prefer_grpc=config.QDRANT_PREFER_GRPC
+        )
+
+    @staticmethod
+    def _create_lightrag_backend(db, **kwargs) -> VectorStoreInterface:
+        from tools.vector_stores.lightrag.adapters import is_lightrag_available
+        from tools.vector_stores.lightrag_store import LightRAGStore
+
+        if not is_lightrag_available():
+            raise RuntimeError(
+                "LightRAG is not available. Install lightrag-hku[offline-storage] "
+                "and set LIGHTRAG_ENABLED=true."
+            )
+
+        ai_service = kwargs.get('ai_service')
+        embedding_service = kwargs.get('embedding_service')
+
+        if ai_service is None or embedding_service is None:
+            raise ValueError(
+                "LightRAG requires both ai_service and embedding_service. "
+                "Pass them via VectorStoreFactory.get_vector_store(db, 'LIGHTRAG', "
+                "ai_service=..., embedding_service=...)."
+            )
+
+        logger.debug("Creating LightRAG store")
+        return LightRAGStore(
+            db=db,
+            ai_service=ai_service,
+            embedding_service=embedding_service,
         )

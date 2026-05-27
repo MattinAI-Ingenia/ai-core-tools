@@ -46,6 +46,12 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
     """Return the vector store implementation bound to the silo's backend."""
 
     resolved_type = _resolve_vector_db_type(silo, vector_db_type)
+    if resolved_type == 'LIGHTRAG' and silo is not None:
+        return VectorStoreFactory.get_vector_store(
+            db_obj, resolved_type,
+            ai_service=silo.indexing_service,
+            embedding_service=silo.embedding_service,
+        )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
 
@@ -305,7 +311,7 @@ class SiloService:
             field_types['embedding_service_id'] = int
         
         # Convert string values to int where needed
-        for field in ['silo_id', 'app_id', 'embedding_service_id']:
+        for field in ['silo_id', 'app_id', 'embedding_service_id', 'indexing_service_id']:
             if field in silo_data and silo_data[field] and isinstance(silo_data[field], str):
                 try:
                     silo_data[field] = int(silo_data[field])
@@ -344,7 +350,25 @@ class SiloService:
                 logger.info("Creating new silo")
 
             silo.vector_db_type = _resolve_vector_db_type(silo, requested_vector_db_type)
-            
+
+            # LightRAG validation: require indexing_service_id and embedding_service_id
+            if silo.vector_db_type == 'LIGHTRAG' and not silo_id:
+                if not silo_data.get('indexing_service_id'):
+                    raise ValidationError("LightRAG silos require an indexing_service_id (entity extraction LLM)")
+                if not silo_data.get('embedding_service_id'):
+                    raise ValidationError("LightRAG silos require an embedding_service_id")
+
+            # Set indexing service on creation only — immutable after creation
+            if not silo_id and silo_data.get('indexing_service_id'):
+                silo.indexing_service_id = silo_data['indexing_service_id']
+
+            # Set LightRAG config columns on creation
+            if not silo_id:
+                for field in ('lightrag_chunk_strategy', 'lightrag_chunk_token_size',
+                              'lightrag_chunk_overlap_token_size', 'lightrag_graph_context_enabled'):
+                    if field in silo_data and silo_data[field] is not None:
+                        setattr(silo, field, silo_data[field])
+
             # Set silo type from form data if provided
             if silo_data.get('type') and silo_data['type'].strip():
                 silo.silo_type = silo_data['type'].strip()
