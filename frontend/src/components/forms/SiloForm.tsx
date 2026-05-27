@@ -52,7 +52,7 @@ interface SiloFormProps {
   onCancel: () => void;
 }
 
-function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
+function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
   const { appId } = useParams();
   const [formData, setFormData] = useState<SiloFormData>({
     name: '',
@@ -122,11 +122,11 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
 
   async function loadFormData() {
     if (!appId) return;
-    
+
     try {
       setLoadingFormData(true);
       setError(null);
-      
+
       const appIdNumber = Number.parseInt(appId, 10);
 
       // Load output parsers and embedding services in parallel
@@ -167,7 +167,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
     let parsedValue: string | number | undefined = value === '' ? undefined : value;
 
     if (name === 'embedding_service_id' || name === 'output_parser_id' || name === 'indexing_service_id'
-        || name === 'lightrag_chunk_token_size' || name === 'lightrag_chunk_overlap_token_size') {
+      || name === 'lightrag_chunk_token_size' || name === 'lightrag_chunk_overlap_token_size') {
       parsedValue = value === '' ? undefined : Number.parseInt(value, 10);
     } else if (name === 'vector_db_type' && typeof value === 'string') {
       parsedValue = value.toUpperCase();
@@ -181,7 +181,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     // Basic validation
     if (!formData.name.trim()) {
       setError('Silo name is required');
@@ -224,7 +224,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
           {isEditing ? `Edit Silo: ${silo?.name}` : 'Create New Silo'}
         </h2>
         <p className="text-gray-600">
-          {isEditing 
+          {isEditing
             ? 'Update your silo configuration and settings.'
             : 'Create a new silo for vector storage and semantic search.'
           }
@@ -523,7 +523,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
             </h3>
             <div className="mt-2 text-sm text-blue-700">
               <p>
-                Custom silos are vector storage containers that enable semantic search and retrieval. 
+                Custom silos are vector storage containers that enable semantic search and retrieval.
                 They store document embeddings and allow AI agents to find relevant information quickly.
               </p>
               <p className="mt-2">
