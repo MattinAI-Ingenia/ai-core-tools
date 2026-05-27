@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from schemas.embedding_service_schemas import EmbeddingServiceOptionSchema
 
@@ -70,22 +70,91 @@ class UpdateSiloSchema(BaseModel):
     output_parser_id: Optional[int] = None
 
 
-class SiloSearchSchema(BaseModel):
-    """Schema for searching in a silo"""
+class _ContentLengthFilterSchema(BaseModel):
+    """Shared metadata and content-length filters for silo operations."""
+    filter_metadata: Optional[Dict[str, Any]] = None
+    min_content_length: Optional[int] = None
+    max_content_length: Optional[int] = None
+
+    @field_validator("min_content_length", "max_content_length")
+    @classmethod
+    def validate_content_length(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and value < 0:
+            raise ValueError("content length filters must be greater than or equal to 0")
+        return value
+
+    @model_validator(mode="after")
+    def validate_content_length_range(self) -> "_ContentLengthFilterSchema":
+        if (
+            self.min_content_length is not None
+            and self.max_content_length is not None
+            and self.min_content_length > self.max_content_length
+        ):
+            raise ValueError("min_content_length cannot be greater than max_content_length")
+        return self
+
+
+class SiloSearchSchema(_ContentLengthFilterSchema):
+    """Schema for searching in a silo."""
     query: str
     limit: Optional[int] = None
-    filter_metadata: Optional[Dict[str, Any]] = None
+    search_type: Optional[Literal["similarity", "mmr", "similarity_score_threshold"]] = "similarity"
+    fetch_k: Optional[int] = None
+    lambda_mult: Optional[float] = None
+    score_threshold: Optional[float] = None
+    lightrag_query_mode: Optional[Literal["local", "global", "hybrid", "mix", "naive", "bypass"]] = None
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and not (1 <= value <= 200):
+            raise ValueError("limit must be between 1 and 200")
+        return value
+
+    @field_validator("fetch_k")
+    @classmethod
+    def validate_fetch_k(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and value < 1:
+            raise ValueError("fetch_k must be at least 1")
+        return value
+
+    @field_validator("lambda_mult")
+    @classmethod
+    def validate_lambda_mult(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not (0.0 <= value <= 1.0):
+            raise ValueError("lambda_mult must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("score_threshold")
+    @classmethod
+    def validate_score_threshold(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not (0.0 <= value <= 1.0):
+            raise ValueError("score_threshold must be between 0.0 and 1.0")
+        return value
+
+    @model_validator(mode="after")
+    def validate_search_options(self) -> "SiloSearchSchema":
+        if self.search_type == "similarity_score_threshold" and self.score_threshold is None:
+            raise ValueError(
+                "score_threshold is required when search_type is 'similarity_score_threshold'"
+            )
+        if self.search_type != "similarity_score_threshold" and self.score_threshold is not None:
+            raise ValueError(
+                "score_threshold can only be used when search_type is 'similarity_score_threshold'"
+            )
+        if self.search_type != "mmr" and self.fetch_k is not None:
+            raise ValueError("fetch_k can only be used when search_type is 'mmr'")
+        if self.search_type != "mmr" and self.lambda_mult is not None:
+            raise ValueError("lambda_mult can only be used when search_type is 'mmr'")
+        return self
 
 
 # Kept for backward compatibility with the public API router
 CreateUpdateSiloSchema = CreateSiloSchema
 
 
-class SiloCountRequestSchema(BaseModel):
+class SiloCountRequestSchema(_ContentLengthFilterSchema):
     """Request body for the count-documents endpoint."""
-    filter_metadata: Optional[Dict[str, Any]] = None
-    min_content_length: Optional[int] = None
-    max_content_length: Optional[int] = None
     retrieval_config: Optional[Dict[str, Any]] = None
 
 

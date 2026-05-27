@@ -1465,14 +1465,14 @@ class SiloService:
         db: Session = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Search for documents in a silo using semantic search with optional metadata filtering
+        Search for documents in a silo using semantic search with optional metadata filtering.
         """
         # Get silo to validate it exists
         silo = SiloService.get_silo(silo_id, db)
         if not silo:
             return None
-        
-        # Perform the search with metadata filtering
+
+
         results = SiloService.find_docs_in_collection(
             silo_id,
             query,
@@ -1486,8 +1486,8 @@ class SiloService:
             max_content_length=max_content_length,
             db=db,
         )
-        
-        # Convert results to response format
+
+
         response_results = []
         for doc in results:
             # Extract score from metadata if available

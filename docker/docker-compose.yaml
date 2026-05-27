@@ -82,10 +82,10 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
 
-      LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-false}
-      NEO4J_URI: ${NEO4J_URI:-}
+      LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-true}
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j}
     volumes:
       - ../backend/data:/aict_backend/data
       - ../backend/logs:/aict_backend/logs
@@ -93,6 +93,8 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+      neo4j:
         condition: service_healthy
     networks:
       - mattin-network
@@ -162,7 +164,7 @@ services:
     image: neo4j:5-community
     container_name: mattin-neo4j
     environment:
-      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env when LightRAG is enabled}"
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-neo4j}"
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
     volumes:
@@ -178,7 +180,6 @@ services:
       start_period: 40s
     # Internal-only: no published ports
     restart: unless-stopped
-    profiles: ["lightrag"]
 
 networks:
   mattin-network:
