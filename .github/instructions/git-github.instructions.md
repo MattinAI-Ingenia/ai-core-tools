@@ -37,10 +37,13 @@ Never push without pulling first.
 
 | Remote | URL | Purpose |
 |--------|-----|---------|
-| `origin` | `git@github.com:lksnext-ai-lab/ai-core-tools.git` | **Primary** — all day-to-day work |
-| `lks` | `ssh://git@gitlab.devops.lksnext.com:2222/lks/genai/ai-core-tools.git` | **Mirror** — push only when explicitly requested |
+| `origin` | `https://github.com/lksnext-ai-lab/ai-core-tools.git` | **Primary** — all day-to-day work happens here |
+| `gitlab` | `https://gitlab.devops.lksnext.com/lks/genai/ai-core-tools.git` | LKS DevOps GitLab mirror — push only when explicitly requested |
+| `mattinai` | `https://github.com/MattinAI-Ingenia/ai-core-tools.git` | MattinAI organization GitHub mirror — push only when explicitly requested |
 
-Default: always push to `origin`. Push to `lks` **only** when the user explicitly asks.
+Default: always push to `origin`. Push to `gitlab` or `mattinai` **only** when the user explicitly asks.
+
+Verify with `git remote -v` before pushing — the URLs above must match exactly.
 
 ## Branch Naming
 
@@ -136,6 +139,17 @@ gh auth status
 
 `enhancement`, `bug`, `documentation`, `technical-debt`, `good-first-issue`, `help-wanted`, `question`, `discussion`, `invalid`, `wontfix`, `duplicate`
 
+## Publication Confirmation Gates
+
+Publishing a branch or opening a PR is irreversible from the user's perspective (everyone can see it once it's on a public remote). Agents that run git operations on behalf of the user (`@git-github`, `@plan-executor`, `@release-manager`) MUST confirm before each publication step:
+
+- **Before `git push`**: show the branch, the remote, and the new commits (`git log --oneline <remote>/<branch>..HEAD`) and ask for explicit `yes`.
+- **Before `gh pr create`**: show the proposed title, body preview, base branch, and head branch and ask for explicit `yes`.
+
+Exception: when the user's immediate prior message already names the publication ("push it", "open the PR with title X"), that message counts as the confirmation and the agent can proceed.
+
+Non-publishing operations (status, add, commit, branch creation, log, diff, issue/PR view/list) do NOT require a gate and should run directly.
+
 ## Safety Rules
 
 - ❌ Never force-push to shared branches without explicit user approval
@@ -143,3 +157,5 @@ gh auth status
 - ❌ Never commit secrets, credentials, or `.env` files
 - ❌ Never use `git add .` without first reviewing `git status` and `git diff --stat`
 - ❌ Never reset, rebase, or amend published (already pushed) commits without explicit user instruction
+- ❌ Never `git push` without showing the commits that would be pushed and getting explicit user confirmation (see Confirmation Gates above)
+- ❌ Never `gh pr create` without showing the proposed title/body/base/head and getting explicit user confirmation (see Confirmation Gates above)

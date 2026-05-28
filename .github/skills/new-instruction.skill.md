@@ -12,7 +12,7 @@ Creates a new Copilot instruction file in `.github/instructions/` that auto-appl
 | Parameter | Required | Description | Example |
 |-----------|----------|-------------|---------|
 | `name` | Yes | Descriptive name for the instruction set | `Python Testing` |
-| `slug` | No | Kebab-case filename prefix (derived from name if omitted) | `.py-testing` |
+| `slug` | No | Kebab-case filename stem (derived from name if omitted; **no leading dot** — files like `.py-testing.instructions.md` are not auto-loaded by Copilot) | `python-testing` |
 | `description` | Yes | What these instructions cover | `Conventions for writing pytest tests in this project` |
 | `applyTo` | No | Glob pattern to auto-apply (omit for workflow/manual instructions) | `tests/**/*.py` |
 
@@ -33,7 +33,7 @@ Choose the right scoping strategy:
 
 ### Step 2: Create the Instruction File
 
-Create `.github/instructions/<slug>.instructions.md`:
+Create `.github/instructions/<slug>.instructions.md` (kebab-case, **without** a leading dot — the leading-dot pattern was a pre-2026 convention that prevents Copilot from auto-discovering the file):
 
 ```markdown
 ---
