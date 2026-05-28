@@ -745,8 +745,11 @@ class FileManagementService:
         the session directory is removed if it becomes empty.
         """
         session_keys_seen: set = set()
+        removed_count = 0
+        skipped_count = 0
         for ref in refs:
             if getattr(ref, "storage_strategy", STORAGE_STRATEGY_PERSISTENT) != STORAGE_STRATEGY_EPHEMERAL:
+                skipped_count += 1
                 continue
             session_key = getattr(ref, "_session_key", None)
             file_id = ref.file_id
@@ -768,11 +771,18 @@ class FileManagementService:
                 # list_attached_files() in the same process doesn't surface it.
                 if session_key and session_key in self._files:
                     self._files[session_key].pop(file_id, None)
+                removed_count += 1
             except OSError as exc:
                 logger.warning(
                     "Best-effort ephemeral cleanup failed for %s: %s",
                     file_id, exc,
                 )
+
+        if removed_count or skipped_count:
+            logger.info(
+                "cleanup_ephemeral_refs: removed=%d ephemeral, kept=%d persistent",
+                removed_count, skipped_count,
+            )
 
         # Remove empty session directories so the ephemeral root stays tidy.
         for session_key in session_keys_seen:
@@ -798,37 +808,42 @@ class FileManagementService:
         """
         try:
             session_path = None
-            for base_dir in (self._persistent_dir, self._ephemeral_dir):
+            loaded_strategy = STORAGE_STRATEGY_PERSISTENT
+            for base_dir, strategy in (
+                (self._persistent_dir, STORAGE_STRATEGY_PERSISTENT),
+                (self._ephemeral_dir, STORAGE_STRATEGY_EPHEMERAL),
+            ):
                 if not os.path.exists(base_dir):
                     continue
                 candidate = os.path.join(base_dir, session_key)
                 if os.path.exists(candidate) and os.path.isdir(candidate):
                     session_path = candidate
+                    loaded_strategy = strategy
                     # Prefer persistent if it exists; ephemeral is only checked
                     # when persistent does not have the session.
                     break
             if session_path is None:
                 return
-                
+
             # Initialize session if not exists
             if session_key not in self._files:
                 self._files[session_key] = {}
-            
+
             # Load files for this session
             for filename in os.listdir(session_path):
                 if filename.endswith('.json'):
                     file_id = filename[:-5]  # Remove .json extension
                     metadata_file = os.path.join(session_path, filename)
                     content_file = os.path.join(session_path, f"{file_id}.content")
-                    
+
                     if os.path.exists(content_file):
                         try:
                             with open(metadata_file, 'r') as f:
                                 metadata = json.load(f)
-                            
+
                             with open(content_file, 'r', encoding='utf-8') as f:
                                 content = f.read()
-                            
+
                             # Recreate FileReference with visual feedback data
                             file_ref = FileReference(
                                 file_id=metadata['file_id'],
@@ -839,6 +854,13 @@ class FileManagementService:
                                 file_size_bytes=metadata.get('file_size_bytes'),
                                 conversation_id=metadata.get('conversation_id')
                             )
+                            # Re-stamp the lifecycle markers that the original
+                            # upload set on the in-memory ref. Without these
+                            # cleanup_ephemeral_refs cannot tell ephemeral
+                            # refs apart from persistent ones when the chat
+                            # happens in a later request than the upload.
+                            file_ref.storage_strategy = loaded_strategy
+                            file_ref._session_key = session_key
                             
                             # If file_path is missing, try to regenerate it
                             if not file_ref.file_path:
@@ -1086,12 +1108,28 @@ class FileManagementService:
                 "Filtered to %d file(s) based on file_reference_ids", len(existing_files)
             )
 
-        # 4. Append existing files not already added via upload
+        # 4. Append existing files not already added via upload.
+        #    Prefer the in-memory FileReference (already populated by step 2's
+        #    list_attached_files -> _load_session_files): it carries the
+        #    ``storage_strategy`` and ``_session_key`` annotations that the
+        #    cleanup pass needs. Rebuilding from the dict would drop those.
+        session_key = self._get_session_key(
+            agent_id,
+            user_context,
+            str(conversation_id) if conversation_id else None,
+        )
+        cached_refs = self._files.get(session_key, {})
         for file_data in existing_files:
-            if file_data["file_id"] not in uploaded_ids:
+            file_id = file_data["file_id"]
+            if file_id in uploaded_ids:
+                continue
+            cached = cached_refs.get(file_id)
+            if cached is not None:
+                all_refs.append(cached)
+            else:
                 all_refs.append(
                     FileReference(
-                        file_id=file_data["file_id"],
+                        file_id=file_id,
                         filename=file_data["filename"],
                         file_type=file_data["file_type"],
                         content=file_data["content"],
