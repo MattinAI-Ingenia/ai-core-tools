@@ -18,10 +18,29 @@ asyncio task started from ``main.lifespan``, ``asyncio.CancelledError``
 for graceful shutdown, no extra dependencies. The actual filesystem
 walk is blocking I/O so it runs in a thread (``asyncio.to_thread``) to
 keep the event loop free.
+
+**Multi-worker coordination**: uvicorn forks one process per
+``UVICORN_WORKERS``, each running its own lifespan. Without coordination
+every worker would launch its own sweep loop, all competing to delete
+the same files. ``start_file_cleanup_worker()`` therefore acquires a
+non-blocking exclusive ``fcntl.flock`` on
+``$TMP_BASE_FOLDER/.cleanup.lock``. Only the first worker that wins the
+lock runs the sweep; others log a notice and return ``None``. The lock
+is released automatically when the file descriptor is closed (process
+exit, including SIGKILL) so no manual lockfile cleanup is needed.
+
+**About the staggered "starting" logs**: with multiple uvicorn workers
+each lifespan runs in its own process. The second worker typically
+finishes its lifespan ~30 s after the first because the slow steps
+(plugin discovery, checkpointer pool initialization) are per-process.
+That is normal — only one of those workers will go on to register an
+active cleanup sweep; the other will log the "another worker holds the
+leader lock" notice.
 """
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
 import time
 from typing import List
@@ -172,15 +191,100 @@ async def _worker_loop() -> None:
             raise
 
 
-def start_file_cleanup_worker() -> asyncio.Task:
-    """Start the cleanup task. Called from FastAPI lifespan startup."""
+# Module-level FD for the leader lock. Held for the lifetime of the
+# leader process so the kernel keeps the flock; closing the FD (process
+# exit) releases it automatically.
+_lock_fd: int | None = None
+
+
+def _try_acquire_leader_lock() -> bool:
+    """Try to acquire the cleanup leader lock.
+
+    Returns True if this process is the leader and should run the sweep;
+    False if another process already holds the lock.
+
+    The lock file lives under ``$TMP_BASE_FOLDER/.cleanup.lock`` so it
+    shares the same volume that the workers operate on — guaranteeing
+    that all uvicorn workers of the same container see the same file.
+    The PID is written to the lock file purely for diagnostics
+    (``cat .cleanup.lock`` reveals which worker owns the sweep).
+    """
+    global _lock_fd
+    cfg = _config()
+    lock_dir = cfg['TMP_BASE_FOLDER']
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, '.cleanup.lock')
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        os.close(fd)
+        return False
+
+    # Persist our PID for diagnostics; ignore write failures (cosmetic).
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except OSError:
+        pass
+
+    _lock_fd = fd
+    return True
+
+
+def _release_leader_lock() -> None:
+    """Release the leader lock if held. Idempotent and exception-safe."""
+    global _lock_fd
+    if _lock_fd is None:
+        return
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(_lock_fd)
+    except OSError:
+        pass
+    _lock_fd = None
+
+
+def start_file_cleanup_worker() -> asyncio.Task | None:
+    """Start the cleanup task on the leader worker only.
+
+    With multiple uvicorn workers each lifespan runs in its own process.
+    Only the first one to acquire the cleanup leader lock returns an
+    asyncio.Task; the others return None and the sweep does not run in
+    their event loop. Callers should still pass the (possibly None)
+    return value to ``stop_file_cleanup_worker`` during shutdown so the
+    lock is released cleanly.
+    """
+    if not _try_acquire_leader_lock():
+        logger.info(
+            "file_cleanup_worker: another worker holds the leader lock; "
+            "not starting in this process",
+        )
+        return None
     return asyncio.create_task(_worker_loop(), name="file-cleanup-worker")
 
 
-async def stop_file_cleanup_worker(task: asyncio.Task) -> None:
-    """Cancel the cleanup task. Called from FastAPI lifespan shutdown."""
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
+async def stop_file_cleanup_worker(task: asyncio.Task | None) -> None:
+    """Cancel the cleanup task and release the leader lock.
+
+    Tolerates ``task is None`` (non-leader worker) — in that case there
+    is no task to cancel; the lock release is also a no-op since
+    non-leaders never acquired it.
+    """
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "file_cleanup_worker: unexpected error while awaiting "
+                "task shutdown",
+                exc_info=True,
+            )
+    _release_leader_lock()

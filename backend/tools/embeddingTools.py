@@ -4,15 +4,11 @@ from langchain_mistralai import MistralAIEmbeddings
 from langchain_azure_ai.embeddings import AzureAIEmbeddingsModel
 from huggingface_hub import InferenceClient
 from models.embedding_service import EmbeddingProvider
-import logging
+from utils.logger import get_logger
 import json
 import os
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class HuggingFaceEmbeddingsAdapter:
     def __init__(self, client):
