@@ -27,12 +27,52 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Instalar Poetry
 RUN pip install --no-cache-dir "poetry>=2.2.0,<3.0.0"
 
-# Copiar archivos de dependencias
-COPY pyproject.toml poetry.lock ./
+# Copiar archivo de dependencias (no copiar `poetry.lock` para evitar path deps locales)
+COPY pyproject.toml ./
 
-# Instalar dependencias de producción
+# Remove local-only dependency groups (e.g. sharepoint) that reference host paths.
+# Robust against CRLF line endings (Windows hosts). Processes line-by-line so it
+# does not depend on a specific newline character.
+RUN python - <<'PY'
+with open('pyproject.toml', 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+
+out = []
+in_sharepoint = False
+for line in lines:
+    stripped = line.lstrip()
+    if stripped.startswith('['):
+        in_sharepoint = stripped.startswith('[tool.poetry.group.sharepoint')
+    if not in_sharepoint:
+        out.append(line)
+
+with open('pyproject.toml', 'w', encoding='utf-8', newline='') as f:
+    f.writelines(out)
+
+# Sanity check — fail the build loudly if the path-dep is still present
+with open('pyproject.toml', 'r', encoding='utf-8') as f:
+    content = f.read()
+if 'mattin-sharepoint' in content or 'mattin-ai-plugins' in content:
+    raise SystemExit('ERROR: sharepoint group was not stripped from pyproject.toml')
+print(f'Stripped sharepoint group; removed {len(lines) - len(out)} lines.')
+PY
+
+# Remove any stale lock that might have been copied (defensive — we don't COPY it,
+# but the build cache could resurrect one from a prior layer)
+RUN rm -f poetry.lock
+
+# Install production deps. Poetry will generate the lock on the fly from the
+# (now sharepoint-free) pyproject.toml.
 RUN poetry config virtualenvs.create false && \
-    poetry install --only=main --no-interaction --no-ansi --no-cache
+    poetry install --no-interaction --no-ansi --no-cache --without dev
+
+# --- pgvector + lightrag-hku --------------------------------------------------
+# langchain-postgres 0.0.17 declara pgvector <0.4 (restriccion conservadora),
+# pero lightrag-hku requiere pgvector >=0.4.2. Forzamos pgvector mas nuevo con
+# --force-reinstall (Poetry sobrescribia --upgrade sin esto), luego instalamos
+# lightrag-hku (que reutiliza el pgvector ya instalado).
+RUN pip install --force-reinstall --no-deps --upgrade "pgvector>=0.4.2,<1.0.0" && \
+    pip install --no-cache-dir "lightrag-hku[offline-storage]==1.4.16"
 
 # ----------------------------------------------------------------------------
 # Stage 2: Production
@@ -68,13 +108,14 @@ COPY backend/ /aict_backend/
 COPY alembic /alembic/
 COPY alembic.ini /alembic.ini
 COPY pyproject.toml /aict_backend/pyproject.toml
+COPY tests/ /aict_backend/tests/
 
 # Crear directorios necesarios
 RUN mkdir -p /aict_backend/data/repositories \
-             /aict_backend/data/temp/uploads \
-             /aict_backend/data/temp/downloads \
-             /aict_backend/data/temp/images \
-             /aict_backend/logs && \
+    /aict_backend/data/temp/uploads \
+    /aict_backend/data/temp/downloads \
+    /aict_backend/data/temp/images \
+    /aict_backend/logs && \
     # Limpiar archivos innecesarios
     find /aict_backend -name "*.pyc" -delete && \
     find /aict_backend -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true

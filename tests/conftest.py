@@ -376,6 +376,12 @@ def fake_domain(db, fake_app, fake_silo):
 # ---------------------------------------------------------------------------
 
 
+def pytest_configure(config):
+    """Register custom markers early to avoid PytestUnknownMarkWarning."""
+    config.addinivalue_line("markers", "unit: Unit tests (no external dependencies)")
+    config.addinivalue_line("markers", "integration: Integration tests (database, services)")
+
+
 def pytest_collection_modifyitems(config, items):
     """Auto-apply 'unit' / 'integration' markers based on test file location."""
     for item in items:
