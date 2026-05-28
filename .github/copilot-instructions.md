@@ -12,7 +12,7 @@ This file provides repository-wide guidance for GitHub Copilot when working with
 
 **Tech Stack:**
 - **Backend**: Python 3.11+, FastAPI, SQLAlchemy, Alembic, LangChain/LangGraph
-- **Frontend**: React 18, TypeScript, Vite, Tailwind CSS
+- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS
 - **Database**: PostgreSQL with pgvector extension
 - **Infrastructure**: Docker, Docker Compose
 
@@ -24,7 +24,7 @@ This section describes **what Mattin AI does** from a product and domain perspec
 
 **App (Workspace)**: The central tenant unit. Every resource in the system (agents, silos, repos, services, API keys) is scoped to an App. Each App has an `owner`, a URL-safe `slug`, configurable rate limits, CORS origins, and max file sizes. Users create Apps to organize their AI work.
 
-**User**: A platform account (email, name). A User can own multiple Apps and be a collaborator on others. Users authenticate via OIDC (Azure Entra ID) in production or a simplified email-only flow in development (`AICT_LOGIN=FAKE`).
+**User**: A platform account (email, name). A User can own multiple Apps and be a collaborator on others. Users authenticate in one of three modes set via `AICT_LOGIN`: `FAKE` (simplified email-only flow for local development), `LOCAL` (SaaS email + password with `UserCredential`), or `OIDC` (Azure Entra ID, used in production).
 
 **Collaborator**: Users can be invited to an App with a specific role. The invitation workflow has states: `PENDING` → `ACCEPTED` / `DECLINED`.
 
@@ -51,7 +51,7 @@ Access is enforced with `@require_min_role(AppRole.EDITOR)` decorators on routes
 | **Agent** | Core AI agent. Configured with a system prompt, an LLM (via AIService), optional RAG (via Silo), memory settings, temperature, output parser, skills, and MCP tool configs. Can be composed: agents marked `is_tool=True` can be used as tools by other agents. |
 | **OCRAgent** | Specialized Agent subclass (STI via `type` column). Dual-LLM: a vision model for scanned pages and a text model for structuring output. |
 | **AIService** | LLM provider configuration. Stores provider type (OpenAI, Anthropic, MistralAI, Azure, Google, Custom), endpoint, API key. Each App can have multiple. |
-| **EmbeddingService** | Embedding model configuration for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
+| **EmbeddingService** | Embedding model configuration for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. Provider selection happens via `backend/tools/embeddingTools.py`. |
 | **Skill** | Reusable markdown prompt block that can be attached to agents (M:N via `agent_skills`). Injected into the agent's system prompt at execution time. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Stored as a `fields` JSON column. At runtime, dynamically generates a Pydantic model. Used by agents for structured responses and by silos for metadata filtering. |
 | **Conversation** | Tracks a chat session between a user and an agent. Memory state stored in LangGraph's PostgreSQL checkpointer. Metadata (title, message count, last message) stored in the Conversation table. |
@@ -66,7 +66,9 @@ Access is enforced with `@require_min_role(AppRole.EDITOR)` decorators on routes
 | **Folder** | Hierarchical folder structure within a Repository. Self-referencing for nesting. |
 | **Media** | Audio/video content within a Repository. Supports direct upload or YouTube URLs. Transcribed with configurable chunking (min/max duration, overlap), then vectorized. |
 | **Domain** | Web scraping source. Configured with a base URL and CSS selectors. Crawled URLs are vectorized into the linked Silo. |
-| **Url** | Individual page within a Domain. |
+| **DomainUrl / CrawlPolicy / CrawlJob** | Domain crawling pipeline. `DomainUrl` is each individual URL discovered, `CrawlPolicy` defines per-domain crawl rules, `CrawlJob` tracks an in-flight crawl run. |
+| **SharePointSource** | Microsoft SharePoint connector configured per Silo. Syncs documents from a SharePoint location into the silo's collection. |
+| **SharePointFile** | Individual file synced from a `SharePointSource` (mirrors `Resource` for the SharePoint case). |
 
 #### MCP Entities (Dual-Role Architecture)
 
@@ -82,6 +84,19 @@ Mattin AI acts as **both** an MCP server and an MCP client:
 | Entity | Purpose |
 |--------|---------|
 | **APIKey** | 64-character key for programmatic access (public API + MCP). Scoped to an App, owned by a User. Shown once on creation. |
+| **UserCredential** | Hashed email/password credentials used when `AICT_LOGIN=LOCAL` (SaaS mode). One-to-one with `User`. |
+
+#### Marketplace & Billing Entities
+
+| Entity | Purpose |
+|--------|---------|
+| **AgentMarketplaceProfile** | Public marketplace listing for an Agent (description, category, tags). One-to-one with `Agent`. |
+| **AgentMarketplaceRating** | User ratings/reviews of marketplace-published agents. |
+| **MarketplaceUsage** | Counter for marketplace invocations of an agent. |
+| **Subscription** | A User's subscription plan. References a `TierConfig`, has `SubscriptionTier`, `BillingStatus`. |
+| **TierConfig** | Defines a pricing tier (Free, Pro, Enterprise…) and the feature limits / quotas it grants. |
+| **UsageRecord** | Per-resource billable usage records (API calls, file uploads, etc.) for quota enforcement and billing. |
+| **SystemSetting** | Cross-app key/value system configuration (OMNIADMIN-managed). |
 
 ### Entity Relationships (Key FKs)
 
@@ -174,7 +189,7 @@ The frontend is a **reusable npm library** (`@lksnext/ai-core-tools-base`):
 - **Multimodal chat**: Agents accept images alongside text (base64 or signed static URLs)
 - **Secure static files**: `/static/{path}` requires cryptographic signature
 - **Cascade deletion**: `AppService.delete_app()` performs ordered deletion across all entity types
-- **LangSmith tracing**: Optional per-app tracing via `App.langsmith_api_key`
+- **LangSmith tracing**: Optional per-app tracing via `App.langsmith_api_key` (project = app name), with a global env-var fallback (`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` + `LANGSMITH_PROJECT`) for development. Validated via `POST /internal/apps/{id}/langsmith/test`. Central helper: `backend/tools/langsmith_config.py`.
 
 ## Specialized Agents
 
@@ -182,19 +197,21 @@ For domain-specific tasks, invoke these specialized agents:
 
 | Agent | Invoke With | Use For |
 |-------|-------------|---------|
+| Issue Reader | `@issue-reader` (or `/start-from-issue`) | **Entry point for issue-driven work**. Reads a GitHub issue via the `@github` MCP server, emits an Issue Analysis block, and offers handoff to `@feature-planner` (formal spec) or `@quick-executor` (autonomous ad-hoc) |
 | Backend Expert | `@backend-expert` | Python/FastAPI development, services, repositories |
 | React Expert | `@react-expert` | React/TypeScript frontend, components, hooks |
 | Alembic Expert | `@alembic-expert` | Database migrations, schema changes |
 | Git & GitHub | `@git-github` | Git workflows, issues, PRs, releases, branching |
 | Test Expert | `@test-expert` | Writing, debugging, and maintaining tests — pytest fixtures, unit/integration test setup, mocking, CI coverage |
-| Version Bumper | `@version-bumper` | Semantic versioning in pyproject.toml |
-| AI Dev Architect | `@ai-dev-architect` | Agent/instruction file management |
-| Feature Planner | `@feature-planner` | Structured feature planning, specs, and plan tracking in /plans; supports plan extensions |
-| Plan Executor | `@plan-executor` | Reads plans from /plans, generates sequenced step files for implementation agents, executes plan extensions with continuous step numbering |
+| Version Bumper | `@version-bumper` | Semantic versioning in `pyproject.toml` (mainly next-dev-cycle bump after a release) |
+| AI Dev Architect | `@ai-dev-architect` | Agent / instruction / prompt / skill file management — the Copilot ecosystem itself |
+| Quick Executor | `@quick-executor` (or `/quick-execute`) | **Autonomous ad-hoc executor**. Twin of `@plan-executor` without the `/plans/` spec. Auto-invokes implementer subagents, runs git directly with commit / push / PR confirmation gates. Use for bugs and small fixes you want executed end-to-end without manual handoffs. |
+| Feature Planner | `@feature-planner` | Structured feature planning, specs, and plan tracking in `/plans`; supports plan extensions |
+| Plan Executor | `@plan-executor` | Reads plans from `/plans`, generates sequenced step files for implementation agents, executes plan extensions with continuous step numbering |
 | Documentation Manager | `@docs-manager` | Documentation management, index/TOC, freshness tracking |
-| Open Source Manager | `@oss-manager` | Licensing, community files, changelog, release notes, OSS governance |
+| Open Source Manager | `@oss-manager` | Licensing, community files, changelog *content*, release notes, OSS governance |
 | Release Manager | `@release-manager` | Complete release workflow — version bump, changelog, merge to main, tagging, GitHub releases |
-| Website Maintainer | `@website-maintainer` | Maintains `mattinai.github.io` landing site — syncs content, translations (ES/EN/EU), version references, and feature descriptions with the current project state |
+| Website Maintainer | `@website-maintainer` | Cross-repo agent for the `mattinai.github.io` landing site — syncs content, translations (ES/EN/EU), version references after each release |
 
 ## Architecture Conventions
 
@@ -202,16 +219,22 @@ For domain-specific tasks, invoke these specialized agents:
 
 ```
 backend/
-├── main.py              # FastAPI app entry point
-├── models/              # SQLAlchemy ORM models
+├── main.py              # FastAPI app entry point (lifespan: CheckpointerCacheService, OIDC)
+├── models/              # SQLAlchemy ORM models (import ALL via models/__init__.py)
 ├── schemas/             # Pydantic request/response schemas
 ├── repositories/        # Data access layer
 ├── services/            # Business logic layer
 ├── routers/
-│   ├── internal/        # Frontend-backend API (session auth)
-│   └── public/          # External API (API key auth)
+│   ├── internal/        # Frontend-backend API (session/OIDC auth)
+│   ├── public/v1/       # External API (X-API-KEY, rate-limited, CORS-validated)
+│   ├── mcp/             # JSON-RPC 2.0 MCP endpoints (X-API-KEY)
+│   └── controls/        # Cross-cutting middleware: rate limit, CORS, file size
 ├── tools/               # AI/LLM integration utilities
-└── auth/                # Authentication handlers
+│   ├── ai/              # LLM provider implementations
+│   ├── embeddingTools.py        # Embedding provider factory (OpenAI, Mistral, Google, Vertex…)
+│   ├── vector_store_factory.py  # Per-silo factory: PGVector or Qdrant
+│   └── langsmith_config.py      # Per-app + global LangSmith tracing config
+└── auth/                # Authentication handlers (FAKE, LOCAL, OIDC)
 ```
 
 **Patterns:**
@@ -224,14 +247,18 @@ backend/
 
 ```
 frontend/src/
-├── core/                # ExtensibleBaseApp and config
+├── core/                # ExtensibleBaseApp (library entry point) and config
 ├── components/          # Reusable UI components
 │   ├── ui/              # Generic UI elements
 │   ├── forms/           # Form components
 │   └── playground/      # Agent playground components
 ├── pages/               # Page-level components
-├── services/            # API client (api.ts)
-├── contexts/            # React contexts
+├── services/            # API client (api.ts — all HTTP goes through here)
+├── contexts/            # React contexts (user, theme, settings)
+├── constants/           # Shared constants (agentConstants.ts, messages.ts).
+│                        # Must stay in sync with backend defaults — e.g.
+│                        # DEFAULT_MEMORY_SUMMARIZE_THRESHOLD matches the
+│                        # Agent model default in the backend.
 └── auth/                # OIDC authentication
 ```
 
@@ -293,7 +320,7 @@ interface UserProfileProps {
 ## Database & Migrations
 
 - **Always** create Alembic migrations for model changes
-- Follow the migration workflow in `.github/instructions/.alembic.instructions.md`
+- Follow the migration workflow in `.github/instructions/alembic.instructions.md`
 - Test migrations both upgrade AND downgrade before committing
 
 ```bash
@@ -323,12 +350,11 @@ Implementation agents (`@backend-expert`, `@react-expert`, `@alembic-expert`, `@
 @test-expert            →  (writes tests)        →  suggests @git-github
 ```
 
-The `@git-github` agent follows the `commit-and-push` skill (`.github/skills/commit-and-push.skill.md`) for the standard commit/push workflow.
+The `@git-github` agent follows the `git-github` skill (`.github/skills/git-github.skill.md`) for the standard commit/push/PR workflow.
 
 ## Commit & Issue Guidelines
 
-- Follow commit conventions in `.github/instructions/.gh-commit.instructions.md`
-- Manage issues per `.github/instructions/.gh-issues.instructions.md`
+- Follow commit, branch and GitHub CLI conventions in `.github/instructions/git-github.instructions.md` (GPG signing, GitFlow, `--body-file` rule, remotes, labels)
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`
 
 ## Common Commands
@@ -399,10 +425,13 @@ Key variables to set (see `CLAUDE.md` for full list):
 | Variable | Purpose |
 |----------|---------|
 | `SQLALCHEMY_DATABASE_URI` | PostgreSQL connection string |
-| `AICT_LOGIN` | Auth mode: `FAKE` or `OIDC` |
+| `AICT_LOGIN` | Auth mode: `FAKE` (dev) \| `LOCAL` (SaaS email+password) \| `OIDC` (production) |
+| `AICT_MODE` | Deployment mode: `SELF-HOSTED` \| `SAAS` (changes feature flags and billing behavior) |
+| `AICT_OMNIADMINS` | Comma-separated emails granted OMNIADMIN role |
 | `SECRET_KEY` | Session encryption key |
-| `OPENAI_API_KEY` | LLM provider API key |
-| `VECTOR_DB_TYPE` | `PGVECTOR` or `QDRANT` |
+| `OPENAI_API_KEY` | LLM provider API key (one per provider used) |
+| `VECTOR_DB_TYPE` | Default vector store backend: `PGVECTOR` \| `QDRANT` (overridable per-silo) |
+| `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | Optional global LangSmith tracing fallback when no per-app key is set |
 
 ## Quick Reference Links
 

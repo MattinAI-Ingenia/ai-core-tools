@@ -77,6 +77,7 @@ class FullAppImportService:
     def preview_import(
         self,
         export_data: AppExportFileSchema,
+        user_id: int,
     ) -> AppImportPreviewSchema:
         """Preview full app import without importing.
 
@@ -100,15 +101,15 @@ class FullAppImportService:
         global_warnings = []
         dependencies = []
 
-        # Check app name conflict
+        # Check app name conflict (scope to importing user)
         existing_app = (
             self.session.query(App)
-            .filter(App.name == export_data.app.name)
+            .filter(App.name == export_data.app.name, App.owner_id == user_id)
             .first()
         )
         if existing_app:
             global_warnings.append(
-                f"App '{export_data.app.name}' already exists. "
+                f"App '{export_data.app.name}' already exists for the importing user. "
                 f"Use rename mode to auto-generate a new name."
             )
 
@@ -521,9 +522,11 @@ class FullAppImportService:
         base_name = export_data.app.name
         final_name = new_name if new_name else base_name
 
-        # Check for name conflict
+        # Check for name conflict (scope to importing user)
         existing_app = (
-            self.session.query(App).filter(App.name == final_name).first()
+            self.session.query(App)
+            .filter(App.name == final_name, App.owner_id == user_id)
+            .first()
         )
         
         if existing_app:
@@ -535,7 +538,8 @@ class FullAppImportService:
                     timestamp = datetime.now().strftime("%Y-%m-%d")
                     final_name = f"{base_name} (imported {timestamp})"
                     counter = 1
-                    while self.session.query(App).filter(App.name == final_name).first():
+                    # Deduplicate only against apps owned by the importing user
+                    while self.session.query(App).filter(App.name == final_name, App.owner_id == user_id).first():
                         final_name = f"{base_name} (imported {timestamp} {counter})"
                         counter += 1
             elif conflict_mode == ConflictMode.OVERRIDE:

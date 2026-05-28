@@ -5,7 +5,7 @@ description: Comprehensive git and GitHub CLI procedures for the Mattin AI proje
 
 # Git & GitHub Skill
 
-Shared procedures for all git and GitHub CLI operations in the Mattin AI project. Follow these step-by-step recipes for each operation type. Project-specific rules (signing, remotes, naming conventions) are enforced via `.github/instructions/.git-github.instructions.md`.
+Shared procedures for all git and GitHub CLI operations in the Mattin AI project. Follow these step-by-step recipes for each operation type. Project-specific rules (signing, remotes, naming conventions) are enforced via `.github/instructions/git-github.instructions.md`.
 
 ---
 

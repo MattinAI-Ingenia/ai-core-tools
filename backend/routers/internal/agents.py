@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFi
 from fastapi.responses import StreamingResponse
 from utils.security import generate_signature
 import os
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, Any, AsyncGenerator, List, Optional
 from lks_idprovider import AuthContext
 from sqlalchemy.orm import Session
 import json
@@ -639,6 +639,8 @@ async def chat_with_agent(
         search_params: Optional search parameters
         conversation_id: Optional conversation ID to continue existing conversation
     """
+    fms = FileManagementService()
+    all_file_references: list = []
     try:
         # Fetch agent and verify it belongs to this app
         agent = _get_agent_or_404(db, agent_id, app_id)
@@ -663,12 +665,13 @@ async def chat_with_agent(
             "token": jwt_token,
         }
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_file_references,
             agent_id=agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         execution_service = AgentExecutionService()
@@ -693,6 +696,8 @@ async def chat_with_agent(
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR)
+    finally:
+        await fms.cleanup_ephemeral_refs(all_file_references)
 
 
 @agents_router.post(
@@ -723,7 +728,7 @@ async def chat_with_agent_stream(
     """
     try:
         # Verify agent exists and belongs to this app
-        _get_agent_or_404(db, agent_id, app_id)
+        agent = _get_agent_or_404(db, agent_id, app_id)
 
         parsed_search_params = _parse_optional_json(search_params, "search_params")
         parsed_file_references = _parse_optional_json(file_references, "file_references")
@@ -740,16 +745,18 @@ async def chat_with_agent_stream(
             "token": jwt_token,
         }
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        fms = FileManagementService()
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_file_references,
             agent_id=agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         streaming_service = AgentStreamingService(db)
-        generator = streaming_service.stream_agent_chat(
+        base_generator = streaming_service.stream_agent_chat(
             agent_id=agent_id,
             message=message,
             file_references=all_file_references,
@@ -759,9 +766,18 @@ async def chat_with_agent_stream(
             db=db,
         )
 
+        # Wrap so ephemeral uploads are cleaned when the consumer is done
+        # streaming, not when the endpoint returns its StreamingResponse.
+        async def generator() -> AsyncGenerator[str, None]:
+            try:
+                async for chunk in base_generator:
+                    yield chunk
+            finally:
+                await fms.cleanup_ephemeral_refs(all_file_references)
+
         logger.info(f"Streaming chat request for agent {agent_id} by user {auth_context.identity.id}")
         return StreamingResponse(
-            generator,
+            generator(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

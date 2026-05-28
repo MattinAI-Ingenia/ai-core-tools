@@ -32,7 +32,18 @@ class Config:
         'IMAGES_PATH': 'data/tmp/images/',
         'REPO_BASE_FOLDER': 'data/repositories',
         'PERMANENT_SESSION_LIFETIME_MINUTES': '30',
-        'AICT_OMNIADMINS': ''
+        'AICT_OMNIADMINS': '',
+        # File lifecycle cleanup defaults. The background cleanup worker
+        # (services.file_cleanup_worker) consumes these. ``TMP_PERSISTENT_TTL_DAYS``
+        # tracks the OpenAI Threads convention (7 days from last activity).
+        # ``TMP_EPHEMERAL_ORPHAN_HOURS`` is a defensive sweep for files left
+        # behind by requests that crashed before the router could call
+        # ``cleanup_ephemeral_refs`` — under normal operation the directory
+        # is already empty.
+        'TMP_PERSISTENT_TTL_DAYS': '7',
+        'TMP_EPHEMERAL_ORPHAN_HOURS': '1',
+        'TMP_CLEANUP_INTERVAL_MINUTES': '60',
+        'TMP_CLEANUP_ENABLED': 'True',
     }
     
     @staticmethod
@@ -199,10 +210,26 @@ class Config:
             'IMAGES_PATH': Config.get_env_var('IMAGES_PATH', Config.DEFAULTS['IMAGES_PATH']),
             'REPO_BASE_FOLDER': Config.get_env_var('REPO_BASE_FOLDER', Config.DEFAULTS['REPO_BASE_FOLDER']),
             'PERMANENT_SESSION_LIFETIME_MINUTES': Config.get_int_env_var(
-                'PERMANENT_SESSION_LIFETIME_MINUTES', 
+                'PERMANENT_SESSION_LIFETIME_MINUTES',
                 int(Config.DEFAULTS['PERMANENT_SESSION_LIFETIME_MINUTES'])
             ),
-            'SECRET_KEY': Config.get_env_var('SECRET_KEY', required=False) or 'your-secret-key-SXSCDSDASD'
+            'SECRET_KEY': Config.get_env_var('SECRET_KEY', required=False) or 'your-secret-key-SXSCDSDASD',
+            'TMP_PERSISTENT_TTL_DAYS': Config.get_int_env_var(
+                'TMP_PERSISTENT_TTL_DAYS',
+                int(Config.DEFAULTS['TMP_PERSISTENT_TTL_DAYS']),
+            ),
+            'TMP_EPHEMERAL_ORPHAN_HOURS': Config.get_int_env_var(
+                'TMP_EPHEMERAL_ORPHAN_HOURS',
+                int(Config.DEFAULTS['TMP_EPHEMERAL_ORPHAN_HOURS']),
+            ),
+            'TMP_CLEANUP_INTERVAL_MINUTES': Config.get_int_env_var(
+                'TMP_CLEANUP_INTERVAL_MINUTES',
+                int(Config.DEFAULTS['TMP_CLEANUP_INTERVAL_MINUTES']),
+            ),
+            'TMP_CLEANUP_ENABLED': Config.get_bool_env_var(
+                'TMP_CLEANUP_ENABLED',
+                default=True,
+            ),
         }
     
     @staticmethod
