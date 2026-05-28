@@ -21,15 +21,16 @@ if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
+import errno
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from scalar_fastapi import get_scalar_api_reference
 import os
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from config import CLIENT_CONFIG
 
 from models.app import App
@@ -118,6 +119,11 @@ async def lifespan(app: FastAPI):
         crawl_tasks = await start_crawl_workers(app)
         app.state.crawl_tasks = crawl_tasks
 
+        # Start the file cleanup worker (enforces TTL on uploaded files so
+        # `data/tmp/persistent/` and `data/tmp/ephemeral/` don't grow unbounded).
+        from services.file_cleanup_worker import start_file_cleanup_worker
+        app.state.file_cleanup_task = start_file_cleanup_worker()
+
         print("✅ Application startup complete")
     except Exception as e:
         logger.error(f"❌ Error during startup: {e}", exc_info=True)
@@ -133,6 +139,12 @@ async def lifespan(app: FastAPI):
         if crawl_tasks:
             from services.crawl.worker import stop_crawl_workers
             await stop_crawl_workers(crawl_tasks)
+
+        # Stop the file cleanup worker
+        file_cleanup_task = getattr(app.state, 'file_cleanup_task', None)
+        if file_cleanup_task is not None:
+            from services.file_cleanup_worker import stop_file_cleanup_worker
+            await stop_file_cleanup_worker(file_cleanup_task)
 
         # Stop SharePoint sync workers gracefully (if plugin installed)
         sharepoint_tasks = getattr(app.state, 'sharepoint_tasks', None)
@@ -243,6 +255,32 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
 )
+
+
+@app.exception_handler(OSError)
+async def _oserror_handler(_request: Request, exc: OSError) -> JSONResponse:
+    """Surface disk-full conditions to clients as 507 Insufficient Storage.
+
+    Without this handler, ``OSError(ENOSPC)`` leaking out of a handler
+    becomes an opaque 500 ("Internal server error") that doesn't tell the
+    operator what's actually wrong. Other ``OSError`` codes (permission,
+    not-found, …) fall through to the framework default.
+    """
+    if exc.errno == errno.ENOSPC:
+        logger.error("Server storage exhausted (ENOSPC): %s", exc)
+        return JSONResponse(
+            status_code=507,
+            content={
+                "detail": (
+                    "Server storage exhausted. The operator must free disk "
+                    "space on the host before retrying."
+                )
+            },
+        )
+    # Not a disk-full error — re-raise so FastAPI's default handler maps it
+    # to a 500 with the original traceback in the logs.
+    raise exc
+
 
 # Mount routers - clean structure with no nesting
 app.include_router(internal_router, prefix="/internal")
