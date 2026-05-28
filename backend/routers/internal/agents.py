@@ -918,7 +918,7 @@ async def upload_file_for_chat(
     """
     try:
         # Verify agent belongs to this app
-        _get_agent_or_404(db, agent_id, app_id)
+        agent = _get_agent_or_404(db, agent_id, app_id)
 
         # Create user context for OAuth user
         user_context = {
@@ -933,7 +933,8 @@ async def upload_file_for_chat(
             file=file,
             agent_id=agent_id,
             user_context=user_context,
-            conversation_id=conversation_id
+            conversation_id=conversation_id,
+            has_memory=bool(getattr(agent, "has_memory", False)),
         )
         
         logger.info(f"File uploaded for agent {agent_id} by user {auth_context.identity.id}")

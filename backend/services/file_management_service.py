@@ -359,11 +359,15 @@ class FileManagementService:
         try:
             # Get session key for this agent, user, and optionally conversation
             session_key = self._get_session_key(agent_id, user_context, conversation_id)
-            
-            # Load files for this session if not already loaded
-            if session_key not in self._files:
-                self._load_session_files(session_key)
-            
+
+            # Always re-sync from disk. The in-memory cache is per-worker, so
+            # an upload handled by worker A is invisible to worker B unless
+            # worker B re-reads the on-disk sidecars. The previous guard
+            # (only load when the key was missing) was wrong: an earlier
+            # listing on worker B would create an empty entry that then
+            # masked subsequent disk uploads.
+            self._load_session_files(session_key)
+
             # Return files for this session
             if session_key in self._files:
                 files_list = [file_ref.to_dict() for file_ref in self._files[session_key].values()]
@@ -400,11 +404,11 @@ class FileManagementService:
         try:
             # Get session key for this agent, user, and optionally conversation
             session_key = self._get_session_key(agent_id, user_context, conversation_id)
-            
-            # Load files for this session if not already loaded
-            if session_key not in self._files:
-                self._load_session_files(session_key)
-            
+
+            # Always re-sync from disk so removals work consistently across
+            # uvicorn workers (the in-memory cache is per-process).
+            self._load_session_files(session_key)
+
             if session_key in self._files and file_id in self._files[session_key]:
                 del self._files[session_key][file_id]
                 
@@ -783,13 +787,27 @@ class FileManagementService:
                 pass
 
     def _load_session_files(self, session_key: str):
-        """Load existing files from disk for a specific session"""
+        """Load existing files from disk for a specific session.
+
+        Sidecar metadata (.json/.content) may live under either
+        ``persistent/{session_key}/`` or ``ephemeral/{session_key}/`` since
+        the storage strategy is decided per-upload. We have to look in both
+        so the visible file list survives across uvicorn workers (the
+        in-memory ``self._files`` cache is per-process, but the on-disk
+        layout is shared).
+        """
         try:
-            if not os.path.exists(self._persistent_dir):
-                return
-                
-            session_path = os.path.join(self._persistent_dir, session_key)
-            if not os.path.exists(session_path) or not os.path.isdir(session_path):
+            session_path = None
+            for base_dir in (self._persistent_dir, self._ephemeral_dir):
+                if not os.path.exists(base_dir):
+                    continue
+                candidate = os.path.join(base_dir, session_key)
+                if os.path.exists(candidate) and os.path.isdir(candidate):
+                    session_path = candidate
+                    # Prefer persistent if it exists; ephemeral is only checked
+                    # when persistent does not have the session.
+                    break
+            if session_path is None:
                 return
                 
             # Initialize session if not exists
