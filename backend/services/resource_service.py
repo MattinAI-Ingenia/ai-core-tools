@@ -239,11 +239,17 @@ class ResourceService:
             else:
                 failed_files.append(result)
 
+        session_id = None
         if created_resources:
             try:
                 ResourceRepository.commit(db)
                 logger.info(f"Successfully saved {len(created_resources)} resources to database")
-                ResourceService._index_resources(created_resources)
+                
+                # Fetch silo_id from repository
+                repo = ResourceRepository.get_repository_by_id(db, repository_id)
+                silo_id = repo.silo_id if repo else 0
+                
+                session_id = ResourceService._index_resources_background(created_resources, silo_id)
             except Exception as e:
                 logger.error(f"Error committing resources to database: {str(e)}")
                 ResourceRepository.rollback(db)
@@ -253,7 +259,7 @@ class ResourceService:
         if failed_files:
             logger.warning(f"Failed to process {len(failed_files)} files: {failed_files}")
 
-        return created_resources, failed_files
+        return created_resources, failed_files, session_id
 
     @staticmethod
     def _process_single_file(file, repository_id: int, target_path: str, custom_name: str = None, folder_id: Optional[int] = None, db: Session = None):
@@ -294,11 +300,12 @@ class ResourceService:
         
         try:
             resource = Resource(
-                name=name, 
-                uri=save_filename, 
+                name=name,
+                uri=save_filename,
                 repository_id=repository_id,
                 folder_id=folder_id,
-                type=file_extension  # Set the file type based on extension
+                type=file_extension,  # Set the file type based on extension
+                status='indexing',    # Will be updated to 'ready' or 'error' by background thread
             )
             file_path = os.path.join(target_path, save_filename)
             
@@ -325,15 +332,118 @@ class ResourceService:
             return {'filename': file.filename, 'error': str(e)}
 
     @staticmethod
-    def _index_resources(resources: List[Resource]):
-        indexed_count = 0
-        for resource in resources:
+    def _index_resources_background(resources: List[Resource], silo_id: int = 0) -> str:
+        """Launch indexing in a background thread and return a session_id.
+
+        Progress is tracked by real chunk count, not file count.
+        The client connects to the SSE endpoint with this session_id to
+        monitor the ingestion progress bar in real time.
+        """
+        import uuid
+        import threading
+        from services.ingestion_progress_tracker import IngestionProgressManager
+
+        session_id = str(uuid.uuid4())
+
+        # Snapshot resource IDs and names so we don't hold ORM refs across threads
+        resource_snapshots = [
+            (r.resource_id, getattr(r, 'uri', str(r.resource_id)))
+            for r in resources
+        ]
+
+        def _run():
+            import asyncio
+            from models.resource import Resource as ResourceModel
+            from db.database import SessionLocal as _SessionLocal
+
+            # Background threads have no event loop; LightRAG/Neo4j async code
+            # requires one.  Create a dedicated loop for this thread.
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Phase 1: extract docs per resource to get the real chunk count.
+            # Extraction is CPU-only (no LLM calls), so this adds only seconds.
+            chunk_counts = {}
+            for resource_id, _ in resource_snapshots:
+                _db = _SessionLocal()
+                resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                _db.close()
+                if resource_obj:
+                    chunk_counts[resource_id] = SiloService.count_resource_chunks(resource_obj)
+
+            total_chunks = sum(chunk_counts.values()) or len(resource_snapshots)
+            IngestionProgressManager.create_session(
+                session_id=session_id,
+                silo_id=silo_id,
+                total_chunks=total_chunks,
+            )
+
+            # Phase 2: index each resource, reporting progress by chunk count.
+            cumulative = 0
+            failed = 0
             try:
-                SiloService.index_resource(resource)
-                indexed_count += 1
-            except Exception as e:
-                logger.error(f"Failed to index resource {resource.resource_id}: {str(e)}")
-        logger.info(f"Successfully indexed {indexed_count}/{len(resources)} resources")
+                for resource_id, resource_name in resource_snapshots:
+                    resource_chunks = chunk_counts.get(resource_id, 1)
+                    IngestionProgressManager.update_progress(
+                        session_id=session_id,
+                        processed=cumulative,
+                        failed=failed,
+                        chunk_name=resource_name,
+                    )
+                    try:
+                        _db = _SessionLocal()
+                        resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                        _db.close()
+                        if resource_obj:
+                            offset = cumulative
+                            def _on_progress(n, _offset=offset, _failed=failed):
+                                IngestionProgressManager.update_progress(
+                                    session_id=session_id,
+                                    processed=_offset + n,
+                                    failed=_failed,
+                                )
+                            SiloService.index_resource(resource_obj, progress_callback=_on_progress)
+                        # Mark resource as ready in DB
+                        _db2 = _SessionLocal()
+                        try:
+                            r = _db2.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                            if r:
+                                r.status = 'ready'
+                                _db2.commit()
+                        finally:
+                            _db2.close()
+                        cumulative += resource_chunks
+                    except Exception as e:
+                        logger.error(f"Failed to index resource {resource_id}: {e}")
+                        _db3 = _SessionLocal()
+                        try:
+                            r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                            if r:
+                                r.status = 'error'
+                                _db3.commit()
+                        finally:
+                            _db3.close()
+                        failed += resource_chunks
+                        cumulative += resource_chunks
+
+                    IngestionProgressManager.update_progress(
+                        session_id=session_id,
+                        processed=cumulative,
+                        failed=failed,
+                        chunk_name=resource_name,
+                    )
+            finally:
+                loop.close()
+
+            IngestionProgressManager.complete_session(session_id)
+            logger.info(
+                "Background indexing done: %s/%s chunks, %s failed",
+                cumulative - failed, total_chunks, failed,
+            )
+
+        thread = threading.Thread(target=_run, daemon=True, name=f"index-{session_id[:8]}")
+        thread.start()
+        return session_id
 
     @staticmethod
     def _cleanup_files(resources: List[Resource], repository_path: str):
@@ -389,18 +499,36 @@ class ResourceService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Repository not found"
             )
-        
+
+        # Guard: reject concurrent ingestion on the same silo — LightRAG asyncio
+        # locks are bound to a single event loop and cannot be shared across the
+        # independent background threads each upload batch spawns.
+        silo_id = repo.silo_id if repo.silo_id else 0
+        if silo_id:
+            from services.ingestion_progress_tracker import IngestionProgressManager
+            if IngestionProgressManager.has_active_session_for_silo(silo_id):
+                logger.warning(
+                    f"Rejected concurrent upload for silo {silo_id} "
+                    f"(repository {repository_id}): ingestion already in progress"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This silo already has an active ingestion in progress. "
+                           "Please wait for it to complete before uploading more files.",
+                )
+
         logger.info(f"Repository {repository_id} found, processing {len(files)} files")
-        
+
         # Process files using create_multiple_resources method
-        created_resources, failed_files = ResourceService.create_multiple_resources(
+        created_resources, failed_files, session_id = ResourceService.create_multiple_resources(
             files, repository_id, db, folder_id=folder_id
         )
-        
+
         logger.info(f"Upload completed - {len(created_resources)} resources created, {len(failed_files)} failed")
-        
+
         return {
             "message": f"Successfully uploaded {len(created_resources)} files to repository {repository_id}",
+            "session_id": session_id,  # client uses this to monitor ingestion progress via SSE
             "created_resources": [
                 {
                     "resource_id": r.resource_id,

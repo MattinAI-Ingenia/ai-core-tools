@@ -49,6 +49,7 @@ local/
 clients/
 qdrant_storage/
 .playwright-mcp/
+.claude/
 temp/
 .serena
 tmpclaude*

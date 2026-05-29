@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search } from 'lucide-react';
+import { ArrowLeft, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader } from 'lucide-react';
 import { apiService } from '../services/api';
 import Modal from '../components/ui/Modal';
 import FolderTree from '../components/FolderTree';
@@ -9,6 +9,7 @@ import Alert from '../components/ui/Alert';
 import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
+import IngestionProgressBar from '../components/ui/IngestionProgressBar';
 
 interface Resource {
   resource_id: number;
@@ -18,12 +19,15 @@ interface Resource {
   created_at: string;
   folder_id?: number;
   folder_path?: string;
+  status?: string;
 }
 
 interface RepositoryDetail {
   repository_id: number;
   name: string;
   created_at: string;
+  silo_id?: number | null;
+  vector_db_type?: string | null;
   resources: Resource[];
   folders: Array<{
     folder_id: number;
@@ -44,19 +48,37 @@ interface RepositoryDetail {
   video_ai_service_id?: number | null;
 }
 
-  interface Media {
-    media_id: number;
-    name: string;
-    source_type: string;
-    source_url: string | null;
-    duration: number | null;
-    language: string | null;
-    status: string;
-    processing_mode: string | null;
-    error_message: string | null;
-    create_date: string;
-    folder_id: number | null;
-  }
+interface CostEstimationResult {
+  total_chunks: number;
+  chunk_token_size: number;
+  estimated_llm_calls: number;
+  estimated_embedding_calls: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_cost_min?: number | null;
+  estimated_cost_max?: number | null;
+  currency?: string | null;
+  estimated_indexing_time_min?: number | null;
+  estimated_indexing_time_max?: number | null;
+  estimated_indexing_time_avg?: number | null;
+  model_name?: string | null;
+  embedding_model_name?: string | null;
+  warnings: string[];
+}
+
+interface Media {
+  media_id: number;
+  name: string;
+  source_type: string;
+  source_url: string | null;
+  duration: number | null;
+  language: string | null;
+  status: string;
+  processing_mode: string | null;
+  error_message: string | null;
+  create_date: string;
+  folder_id: number | null;
+}
 
 function isTerminalMediaStatus(status: string): boolean {
   return status === 'ready' || status === 'error';
@@ -90,9 +112,23 @@ function FolderBreadcrumb({ path }: { readonly path: string }) {
   );
 }
 
-function UploadButtonIcon({ uploading }: { readonly uploading: boolean }) {
+function UploadButtonIcon({ uploading, indexing }: { readonly uploading: boolean; readonly indexing?: boolean }) {
   if (uploading) return <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />;
+  if (indexing) return <Loader className="w-4 h-4 animate-spin" />;
   return <FolderOpen className="w-4 h-4" />;
+}
+
+function formatEstimateValue(value: number | null | undefined) {
+  if (value == null) return 'Unavailable';
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatSeconds(seconds: number | null | undefined): string {
+  if (seconds == null) return '?';
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
 }
 
 function getAllFolderPaths(
@@ -114,20 +150,28 @@ const RepositoryDetailPage: React.FC = () => {
   const { appId, repositoryId } = useParams<{ appId: string; repositoryId: string }>();
   const { hasMinRole, userRole } = useAppRole(appId);
   const canEdit = hasMinRole(AppRole.EDITOR);
-  
+
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
+
   const [repository, setRepository] = useState<RepositoryDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [estimatingUpload, setEstimatingUpload] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showEstimateModal, setShowEstimateModal] = useState(false);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
+  const [uploadEstimate, setUploadEstimate] = useState<CostEstimationResult | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [resourceToDelete, setResourceToDelete] = useState<Resource | null>(null);
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [resourceToMove, setResourceToMove] = useState<Resource | null>(null);
   const [moveToFolderId, setMoveToFolderId] = useState<number | null>(null);
-  
+
+  // Ingestion progress tracking
+  const [ingestionSessionId, setIngestionSessionId] = useState<string | null>(null);
+  const [isIndexing, setIsIndexing] = useState(false);
+
   // Folder-related state
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
   const [selectedFolderPath, setSelectedFolderPath] = useState<string>('');
@@ -170,6 +214,37 @@ const RepositoryDetailPage: React.FC = () => {
     }
   }, [appId, repositoryId]);
 
+  // On page load (and when repository data refreshes), query the backend to
+  // check whether an indexing session is already running.  This covers:
+  // 1. LightRAG / any vector store – same IngestionProgressManager path.
+  // 2. The user navigating to the page while a background index is in progress.
+  // When a session is found we set ingestionSessionId so the progress bar picks
+  // it up via SSE; we also set isIndexing so the upload button is disabled.
+  useEffect(() => {
+    if (!repository || ingestionSessionId || !appId || !repositoryId) return;
+
+    let mounted = true;
+    (async () => {
+      try {
+        const status = await apiService.getIngestionStatus(
+          Number.parseInt(appId!),
+          Number.parseInt(repositoryId!),
+        );
+        if (!mounted) return;
+        setIsIndexing(status.is_indexing);
+        if (status.is_indexing && status.active_session_id) {
+          setIngestionSessionId(status.active_session_id);
+        }
+      } catch (err) {
+        console.error('Error fetching ingestion status:', err);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [repository, ingestionSessionId, appId, repositoryId]);
+
   useEffect(() => {
     return () => {
       pollingIntervalsRef.current.forEach(interval => clearInterval(interval));
@@ -178,7 +253,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const startPolling = (mediaId: number) => {
     if (pollingIntervalsRef.current.has(mediaId)) return;
-    
+
     const interval = setInterval(async () => {
       try {
         const media = await apiService.getMediaStatus(Number.parseInt(appId!), Number.parseInt(repositoryId!), mediaId);
@@ -191,7 +266,7 @@ const RepositoryDetailPage: React.FC = () => {
         stopPolling(mediaId);
       }
     }, 3000);
-    
+
     pollingIntervalsRef.current.set(mediaId, interval);
   };
 
@@ -204,24 +279,77 @@ const RepositoryDetailPage: React.FC = () => {
   };
 
   const loadRepository = async (clearError: boolean = true) => {
+    // Only show the full-page spinner on the very first load (no data yet).
+    // Background refreshes (after upload, after indexing completes) update
+    // silently so the page never flickers/blinks.
+    const isFirstLoad = repository === null;
     try {
-      setLoading(true);
+      if (isFirstLoad) setLoading(true);
       const data = await apiService.getRepository(Number.parseInt(appId!), Number.parseInt(repositoryId!));
       setRepository(data);
-      
+
       // Start polling for processing media
       data.media?.forEach((m: Media) => {
         if (m.status !== 'ready' && m.status !== 'error' && !pollingIntervalsRef.current.has(m.media_id)) {
           startPolling(m.media_id);
         }
       });
-      
+
       if (clearError) setError(null);
     } catch (err) {
       console.error('Error loading repository:', err);
       setError('Failed to load repository');
     } finally {
-      setLoading(false);
+      if (isFirstLoad) setLoading(false);
+    }
+  };
+
+  const resetPendingUploadEstimate = () => {
+    setShowEstimateModal(false);
+    setPendingUploadFiles([]);
+    setUploadEstimate(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const performFileUpload = async (filesToUpload: File[]) => {
+    try {
+      setUploading(true);
+      setError(null);
+
+      const result = await apiService.uploadResources(
+        Number.parseInt(appId!),
+        Number.parseInt(repositoryId!),
+        filesToUpload,
+        selectedFolderId || undefined,
+      );
+
+      if (result.failed_files && result.failed_files.length > 0) {
+        const failedMessages = result.failed_files.map((failed: { filename: string; error: string }) =>
+          `${failed.filename}: ${failed.error}`
+        ).join('\n');
+
+        if (result.created_resources && result.created_resources.length > 0) {
+          setError(`Some files failed to upload:\n${failedMessages}`);
+        } else {
+          setError(`Upload failed:\n${failedMessages}`);
+        }
+      }
+
+      // Start monitoring ingestion progress if the backend returned a session_id
+      if (result.session_id) {
+        setIngestionSessionId(result.session_id);
+        setIsIndexing(true);
+      }
+
+      await loadRepository(false);
+      resetPendingUploadEstimate();
+    } catch (err: any) {
+      console.error('Error uploading files:', err);
+      setError(err.message || 'Failed to upload files');
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -229,54 +357,40 @@ const RepositoryDetailPage: React.FC = () => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
+    const selectedFiles = Array.from(files);
+    const isLightRagRepository = repository?.vector_db_type?.toUpperCase() === 'LIGHTRAG';
+
     try {
-      setUploading(true);
       setError(null);
 
-      const formData = new FormData();
-      Array.from(files).forEach(file => {
-        formData.append('files', file);
-      });
+      if (!isLightRagRepository) {
+        await performFileUpload(selectedFiles);
+        return;
+      }
 
-      console.log('Uploading files with folder_id:', selectedFolderId);
-      const result = await apiService.uploadResources(Number.parseInt(appId!), Number.parseInt(repositoryId!), Array.from(files), selectedFolderId || undefined);
-      
-      console.log('Upload result:', result);
-      
-      // Check if there are any failed files
-      if (result.failed_files && result.failed_files.length > 0) {
-        console.log('Failed files detected:', result.failed_files);
-        const failedMessages = result.failed_files.map((failed: any) => 
-          `${failed.filename}: ${failed.error}`
-        ).join('\n');
-        
-        console.log('Failed messages:', failedMessages);
-        
-        if (result.created_resources && result.created_resources.length > 0) {
-          // Some files succeeded, some failed
-          setError(`Some files failed to upload:\n${failedMessages}`);
-        } else {
-          // All files failed
-          setError(`Upload failed:\n${failedMessages}`);
-        }
-      } else {
-        console.log('No failed files detected');
-      }
-      
-      // Reload repository to get updated file list (even if some files failed)
-      // Don't clear error if we just set one for failed files
-      await loadRepository(false);
-      
-      // Clear file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+      setEstimatingUpload(true);
+      const estimate = await apiService.estimateUploadResources(
+        Number.parseInt(appId!),
+        Number.parseInt(repositoryId!),
+        selectedFiles,
+        selectedFolderId || undefined,
+      );
+
+      setPendingUploadFiles(selectedFiles);
+      setUploadEstimate(estimate);
+      setShowEstimateModal(true);
     } catch (err: any) {
-      console.error('Error uploading files:', err);
-      setError(err.message || 'Failed to upload files');
+      console.error('Error estimating upload:', err);
+      setError(err.message || 'Failed to estimate upload cost');
+      resetPendingUploadEstimate();
     } finally {
-      setUploading(false);
+      setEstimatingUpload(false);
     }
+  };
+
+  const confirmEstimatedUpload = async () => {
+    if (pendingUploadFiles.length === 0) return;
+    await performFileUpload(pendingUploadFiles);
   };
 
   const handleMediaUpload = async () => {
@@ -292,9 +406,9 @@ const RepositoryDetailPage: React.FC = () => {
           selectedFolderId || undefined,
           mediaConfig,
         );
-        
+
         if (result.failed_files?.length > 0) {
-          const failedMessages = result.failed_files.map((f: any) => 
+          const failedMessages = result.failed_files.map((f: any) =>
             `${f.filename}: ${f.error}`
           ).join('\n');
           setError(`Some files failed:\n${failedMessages}`);
@@ -308,7 +422,7 @@ const RepositoryDetailPage: React.FC = () => {
           mediaConfig,
         );
       }
-      
+
       setShowMediaUploadModal(false);
       setMediaFiles([]);
       setYoutubeUrl('');
@@ -351,7 +465,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const createFolder = async () => {
     if (!newFolderName.trim()) return;
-    
+
     try {
       await apiService.createFolder(
         Number.parseInt(appId!),
@@ -371,7 +485,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const renameFolder = async () => {
     if (!newFolderName.trim() || !folderActionData.folderId) return;
-    
+
     try {
       await apiService.updateFolder(
         Number.parseInt(appId!),
@@ -391,7 +505,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const deleteFolder = async () => {
     if (!folderActionData.folderId) return;
-    
+
     try {
       await apiService.deleteFolder(
         Number.parseInt(appId!),
@@ -414,7 +528,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const moveFolder = async () => {
     if (!folderActionData.folderId) return;
-    
+
     try {
       await apiService.moveFolder(
         Number.parseInt(appId!),
@@ -447,12 +561,12 @@ const RepositoryDetailPage: React.FC = () => {
   const filteredMedia = filterByFolder(repository?.media, selectedFolderId);
 
   const isEmpty =
-  filteredResources.length === 0 && filteredMedia.length === 0;
+    filteredResources.length === 0 && filteredMedia.length === 0;
 
   const handleDownloadResource = async (resource: Resource) => {
     try {
       const response = await apiService.downloadResource(Number.parseInt(appId!), Number.parseInt(repositoryId!), resource.resource_id);
-      
+
       // Create a blob from the response and download it
       const blob = new Blob([response], { type: 'application/octet-stream' });
       const url = globalThis.URL.createObjectURL(blob);
@@ -504,10 +618,10 @@ const RepositoryDetailPage: React.FC = () => {
         resourceToMove.resource_id,
         moveToFolderId || undefined
       );
-      
+
       // Reload repository to get updated file list
       await loadRepository();
-      
+
       setShowMoveModal(false);
       setResourceToMove(null);
       setMoveToFolderId(null);
@@ -527,7 +641,7 @@ const RepositoryDetailPage: React.FC = () => {
 
     try {
       stopPolling(mediaToDelete.media_id);  // Add this - stop polling before delete
-      
+
       await apiService.deleteMedia(
         Number.parseInt(appId!),
         Number.parseInt(repositoryId!),
@@ -627,7 +741,7 @@ const RepositoryDetailPage: React.FC = () => {
               )}
             </p>
           )}
-          
+
           {/* Breadcrumb Navigation */}
           <div className="mt-2 flex items-center text-sm text-gray-600">
             <button
@@ -639,7 +753,7 @@ const RepositoryDetailPage: React.FC = () => {
             <FolderBreadcrumb path={selectedFolderPath} />
           </div>
         </div>
-        
+
         <div className="flex gap-3">
           <button
             onClick={() => navigate(`/apps/${appId}/repositories/${repositoryId}/playground`)}
@@ -651,11 +765,12 @@ const RepositoryDetailPage: React.FC = () => {
             <>
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
+                disabled={uploading || estimatingUpload || isIndexing}
+                title={isIndexing ? 'Indexing in progress — please wait' : undefined}
                 className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
               >
-                <UploadButtonIcon uploading={uploading} />
-                Upload Files
+                <UploadButtonIcon uploading={uploading || estimatingUpload} indexing={isIndexing} />
+                {isIndexing ? 'Indexing…' : 'Upload Files'}
               </button>
 
               <button
@@ -686,6 +801,29 @@ const RepositoryDetailPage: React.FC = () => {
 
       {/* Error Message */}
       {error && <Alert type="error" message={error} onDismiss={() => setError(null)} className="mb-6" />}
+      {estimatingUpload && (
+        <Alert
+          type="info"
+          message="Estimating LightRAG ingestion cost before upload..."
+          className="mb-6"
+        />
+      )}
+
+      {/* Ingestion Progress Bar — shown while background indexing is running */}
+      {ingestionSessionId && (
+        <div className="mb-6">
+          <IngestionProgressBar
+            appId={Number.parseInt(appId!)}
+            repositoryId={Number.parseInt(repositoryId!)}
+            sessionId={ingestionSessionId}
+            onComplete={() => {
+              setIngestionSessionId(null);
+              setIsIndexing(false);
+              loadRepository(false);
+            }}
+          />
+        </div>
+      )}
 
       {/* Main Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -742,9 +880,11 @@ const RepositoryDetailPage: React.FC = () => {
                   <div className="flex justify-center gap-3">
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"
+                      disabled={uploading || estimatingUpload || isIndexing}
+                      title={isIndexing ? 'Indexing in progress — please wait' : undefined}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg disabled:opacity-50"
                     >
-                      Upload Files
+                      {isIndexing ? 'Indexing…' : 'Upload Files'}
                     </button>
 
                     <button
@@ -769,9 +909,21 @@ const RepositoryDetailPage: React.FC = () => {
                         <div className="flex items-center gap-4">
                           <div className="bg-gray-100 p-2 rounded-lg"><FileText className="w-4 h-4" /></div>
                           <div>
-                            <h3 className="font-medium text-gray-900">
-                              {resource.name}
-                            </h3>
+                            <div className="flex items-center gap-2">
+                              <h3 className="font-medium text-gray-900">
+                                {resource.name}
+                              </h3>
+                              {resource.status === 'indexing' && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
+                                  <Loader className="w-3 h-3 animate-spin" /> Indexing
+                                </span>
+                              )}
+                              {resource.status === 'error' && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                                  Index failed
+                                </span>
+                              )}
+                            </div>
                             <p className="text-sm text-gray-500">
                               {(resource.file_type || 'unknown').toUpperCase()} • Uploaded{' '}
                               {formatDate(resource.created_at)}
@@ -872,6 +1024,121 @@ const RepositoryDetailPage: React.FC = () => {
         </div>
 
       </div>
+
+      <Modal
+        isOpen={showEstimateModal}
+        onClose={resetPendingUploadEstimate}
+        title="Confirm LightRAG Ingestion"
+        size="large"
+      >
+        <div className="space-y-5">
+          <div>
+            <p className="text-gray-700">
+              Uploading these files will immediately start LightRAG indexing. Review the estimated ingestion cost before continuing.
+            </p>
+            <p className="text-sm text-gray-500 mt-2">
+              {pendingUploadFiles.length} file(s) selected
+              {selectedFolderPath ? ` for ${selectedFolderPath}` : ' for repository root'}.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Chunks</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.total_chunks)}</p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Chunk Size</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.chunk_token_size)} tokens</p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">LLM Calls</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_llm_calls)}</p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Calls</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_embedding_calls)}</p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Input Tokens</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_input_tokens)}</p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Output Tokens</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_output_tokens)}</p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <p>
+              Indexing model: <span className="font-medium">{uploadEstimate?.model_name || 'Unavailable'}</span>
+            </p>
+            <p className="mt-1">
+              Embedding model: <span className="font-medium">{uploadEstimate?.embedding_model_name || 'Unavailable'}</span>
+            </p>
+            <p className="mt-1">
+              Estimated price range:{' '}
+              <span className="font-medium">
+                {uploadEstimate?.estimated_cost_min != null || uploadEstimate?.estimated_cost_max != null
+                  ? `$${uploadEstimate?.estimated_cost_min ?? '?'} – $${uploadEstimate?.estimated_cost_max ?? '?'} ${uploadEstimate?.currency || 'USD'}`
+                  : 'Not available (model not in pricing catalog)'}
+              </span>
+            </p>
+            {(uploadEstimate?.estimated_indexing_time_min != null || uploadEstimate?.estimated_indexing_time_avg != null) && (
+              <p className="mt-1">
+                Estimated indexing time:{' '}
+                <span className="font-medium">
+                  {uploadEstimate?.estimated_indexing_time_min != null
+                    ? `${formatSeconds(uploadEstimate.estimated_indexing_time_min)} – ${formatSeconds(uploadEstimate.estimated_indexing_time_max)}`
+                    : formatSeconds(uploadEstimate?.estimated_indexing_time_avg)}
+                </span>
+              </p>
+            )}
+          </div>
+
+          <div className="sticky top-0 z-10 -mx-6 bg-white/95 px-6 py-3 backdrop-blur-sm border-y border-gray-200">
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={resetPendingUploadEstimate}
+                disabled={uploading}
+                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmEstimatedUpload}
+                disabled={uploading}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
+              >
+                {uploading ? 'Uploading...' : 'Confirm ingestion'}
+              </button>
+            </div>
+          </div>
+
+          {uploadEstimate?.warnings?.length ? (
+            <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
+              <h4 className="text-sm font-medium text-yellow-900">Warnings</h4>
+              <ul className="mt-2 space-y-1 text-sm text-yellow-800 list-disc list-inside">
+                {uploadEstimate.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <div>
+            <h4 className="text-sm font-medium text-gray-900">Files to upload</h4>
+            <div className="mt-2 max-h-32 overflow-y-auto rounded-lg border border-gray-200">
+              {pendingUploadFiles.map((file) => (
+                <div key={`${file.name}-${file.size}-${file.lastModified}`} className="flex items-center justify-between border-b border-gray-100 px-3 py-2 text-sm last:border-b-0">
+                  <span className="truncate pr-4 text-gray-700">{file.name}</span>
+                  <span className="shrink-0 text-gray-500">{formatEstimateValue(file.size)} bytes</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </Modal>
 
       {/* Delete Confirmation Modal */}
       <Modal
@@ -1042,7 +1309,7 @@ const RepositoryDetailPage: React.FC = () => {
           </div>
         </div>
       </Modal>
-      
+
       {/* Move Folder Modal */}
       <Modal
         isOpen={showMoveFolderModal}
@@ -1238,7 +1505,7 @@ const RepositoryDetailPage: React.FC = () => {
           {/* Configuration */}
           <div className="border-t pt-4">
             <h3 className="font-medium mb-3">Processing Options</h3>
-            
+
             {/* Repository AI Services (read-only info) */}
             <div className="mb-3 space-y-2">
               {repository?.transcription_service_id ? (
@@ -1266,7 +1533,7 @@ const RepositoryDetailPage: React.FC = () => {
                 <select
                   id="media-language-select"
                   value={mediaConfig.forced_language}
-                  onChange={(e) => setMediaConfig({...mediaConfig, forced_language: e.target.value})}
+                  onChange={(e) => setMediaConfig({ ...mediaConfig, forced_language: e.target.value })}
                   className="w-full px-3 py-2 border rounded-md text-sm"
                 >
                   <option value="">Auto-detect</option>
@@ -1284,7 +1551,7 @@ const RepositoryDetailPage: React.FC = () => {
                     id="chunk-min-duration"
                     type="number"
                     value={mediaConfig.chunk_min_duration}
-                    onChange={(e) => setMediaConfig({...mediaConfig, chunk_min_duration: Number.parseInt(e.target.value)})}
+                    onChange={(e) => setMediaConfig({ ...mediaConfig, chunk_min_duration: Number.parseInt(e.target.value) })}
                     className="w-full px-2 py-1 border rounded text-sm"
                     min="10"
                     max="60"
@@ -1296,7 +1563,7 @@ const RepositoryDetailPage: React.FC = () => {
                     id="chunk-max-duration"
                     type="number"
                     value={mediaConfig.chunk_max_duration}
-                    onChange={(e) => setMediaConfig({...mediaConfig, chunk_max_duration: Number.parseInt(e.target.value)})}
+                    onChange={(e) => setMediaConfig({ ...mediaConfig, chunk_max_duration: Number.parseInt(e.target.value) })}
                     className="w-full px-2 py-1 border rounded text-sm"
                     min="60"
                     max="300"
@@ -1308,7 +1575,7 @@ const RepositoryDetailPage: React.FC = () => {
                     id="chunk-overlap"
                     type="number"
                     value={mediaConfig.chunk_overlap}
-                    onChange={(e) => setMediaConfig({...mediaConfig, chunk_overlap: Number.parseInt(e.target.value)})}
+                    onChange={(e) => setMediaConfig({ ...mediaConfig, chunk_overlap: Number.parseInt(e.target.value) })}
                     className="w-full px-2 py-1 border rounded text-sm"
                     min="0"
                     max="20"

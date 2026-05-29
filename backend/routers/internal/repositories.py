@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+import asyncio
 from typing import List, Optional, Annotated
 import json
 import logging
 from lks_idprovider import AuthContext
 from sqlalchemy.orm import Session
+import os
+import tempfile
 
 # Import services
 from services.repository_service import RepositoryService
@@ -12,6 +15,7 @@ from services.resource_service import ResourceService
 from services.media_service import MediaService
 from services.repository_export_service import RepositoryExportService
 from services.repository_import_service import RepositoryImportService
+from services.silo_service import SiloService
 
 from schemas.repository_schemas import RepositoryListItemSchema, RepositoryDetailSchema, CreateUpdateRepositorySchema, CreateRepositorySchema, UpdateRepositorySchema, RepositorySearchSchema
 from schemas.media_schemas import MediaResponse, MediaUploadResponse
@@ -22,6 +26,7 @@ from routers.controls import enforce_file_size_limit
 from routers.controls.role_authorization import require_min_role, AppRole
 from repositories.media_repository import MediaRepository
 from utils.error_handlers import ValidationError
+from schemas.silo_schemas import CostEstimationResponseSchema
 
 # Import database dependency
 from db.database import get_db
@@ -332,6 +337,85 @@ async def upload_resources(
     )
     
     return result
+
+
+@repositories_router.post("/{repository_id}/resources/estimate",
+                         summary="Estimate indexing cost for uploaded files",
+                         tags=["Resources"],
+                         response_model=CostEstimationResponseSchema)
+async def estimate_upload_resources(
+    app_id: int,
+    repository_id: int,
+    files: Annotated[List[UploadFile], File(...)],
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+    folder_id: Annotated[Optional[int], Form()] = None,
+):
+    """
+    Server-side dry-run: receive multipart files, extract text server-side,
+    and return a LightRAG indexing cost estimation without persisting files.
+    """
+    user_id = int(auth_context.identity.id)
+    logger.info(f"Estimate resources endpoint called - app_id: {app_id}, repository_id: {repository_id}, files_count: {len(files)}, folder_id: {folder_id}, user_id: {user_id}")
+
+    # Validate repository ownership
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    repo = RepositoryService.get_repository(repository_id, db)
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+
+    silo_id = getattr(repo, 'silo_id', None)
+    if not silo_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Repository has no silo configured")
+
+    tmp_paths = []
+    try:
+        extracted_documents = []
+        for upload in files:
+            filename = upload.filename
+            file_ext = os.path.splitext(filename)[1].lower()
+            content = await upload.read()
+            # write to temp file for existing loader utilities
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tf:
+                tf.write(content)
+                temp_path = tf.name
+            tmp_paths.append(temp_path)
+
+            base_metadata = {
+                "repository_id": repository_id,
+                "name": filename,
+                "file_type": file_ext,
+                "folder_id": folder_id,
+            }
+
+            # Use existing extraction utility (raises for unsupported types)
+            docs = SiloService.extract_documents_from_file(temp_path, file_ext, base_metadata)
+            for doc in docs:
+                extracted_documents.append({
+                    "content": getattr(doc, "page_content", ""),
+                    "metadata": getattr(doc, "metadata", {}),
+                })
+
+        # Call existing estimation logic
+        result = SiloService.estimate_indexing_cost(silo_id, extracted_documents, db)
+        return CostEstimationResponseSchema(**result)
+
+    except ValueError as e:
+        logger.error(f"Error estimating indexing cost: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except LookupError as e:
+        logger.error(f"Silo lookup error: {e}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in estimate resources: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        for p in tmp_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
 
 @repositories_router.post("/{repository_id}/resources/{resource_id}/move",
@@ -670,4 +754,105 @@ async def search_repository_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching repository: {str(e)}"
-        ) 
+        )
+
+
+@repositories_router.get(
+    "/{repository_id}/ingestion-status",
+    summary="Check if repository silo has an active ingestion",
+    tags=["Resources"],
+)
+async def get_ingestion_status(
+    app_id: int,
+    repository_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Return whether the silo associated with this repository is currently indexing.
+
+    Response:
+    - ``is_indexing``: true while an ingestion session is running
+    - ``active_session_id``: session_id of the running session (or null)
+    """
+    from services.ingestion_progress_tracker import IngestionProgressManager
+
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    repo = RepositoryService.get_repository(repository_id, db)
+    if not repo or not repo.silo_id:
+        return {"is_indexing": False, "active_session_id": None}
+
+    sessions = IngestionProgressManager.list_sessions_by_silo(repo.silo_id)
+    active = [s for s in sessions if s["processed_chunks"] < s["total_chunks"]]
+
+    return {
+        "is_indexing": bool(active),
+        "active_session_id": active[0]["session_id"] if active else None,
+    }
+
+
+@repositories_router.get(
+    "/{repository_id}/ingestion-progress/{session_id}",
+    summary="Stream ingestion progress via SSE",
+    tags=["Resources"],
+)
+async def stream_ingestion_progress(
+    app_id: int,
+    repository_id: int,
+    session_id: str,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Stream file ingestion progress via Server-Sent Events.
+
+    Connect immediately after uploading files using the ``session_id``
+    returned in the upload response.
+
+    Events:
+    - ``message``: JSON ``IngestionProgress`` payload (emitted on every change)
+    - ``complete``: ingestion finished (no data)
+    - ``error``: something went wrong (data contains error message)
+    """
+    from services.ingestion_progress_tracker import IngestionProgressManager
+
+    async def event_generator():
+        max_wait = 3600
+        elapsed = 0.0
+        last_processed = -1
+
+        try:
+            while elapsed < max_wait:
+                await asyncio.sleep(0.5)
+                elapsed += 0.5
+
+                progress = IngestionProgressManager.get_progress(session_id)
+                if progress is None:
+                    if elapsed > 10:
+                        yield "event: complete\ndata: {}\n\n"
+                        break
+                    continue
+
+                if progress.processed_chunks != last_processed:
+                    last_processed = progress.processed_chunks
+                    yield f"data: {json.dumps(progress.to_dict())}\n\n"
+
+                if progress.processed_chunks >= progress.total_chunks:
+                    yield "event: complete\ndata: {}\n\n"
+                    break
+
+        except Exception as e:
+            logger.error("SSE error for session %s: %s", session_id, e)
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            IngestionProgressManager.cleanup_session(session_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

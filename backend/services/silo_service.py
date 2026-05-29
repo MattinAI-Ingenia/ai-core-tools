@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+import math
 import os
 import re
 from models.media import Media
@@ -30,6 +31,172 @@ MAX_SEARCH_LIMIT = 200
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# LightRAG 2026.05 role-specific model recommendations
+#
+# Per-role minimum specs based on the LightRAG release notes:
+#   EXTRACT  — entity/relationship extraction. Mid-tier, non-reasoning.
+#   QUERY    — final answer generation. Large, optionally reasoning.
+#   KEYWORDS — query keyword extraction. Small, fast. Only context matters.
+#   VLM      — vision-language for images/tables. MUST be multimodal.
+# ---------------------------------------------------------------------------
+
+_ROLE_MIN_SPECS = {
+    'extract':  {'params_b': 12, 'context_kb': 32},
+    'query':    {'params_b': 32, 'context_kb': 32},
+    'keywords': {'params_b': None, 'context_kb': 8},
+    'vlm':      {'params_b': None, 'context_kb': None},  # validated via vision flag
+}
+
+# Known model specs. Tuple is (context_kb, params_b, supports_vision).
+# Numbers are conservative public estimates — when uncertain, the value
+# is biased toward the lower bound so the warning errs on the safe side.
+_MODEL_SPECS = {
+    # OpenAI
+    'gpt-4o':            (128, 200, True),
+    'gpt-4o-mini':       (128, 15, True),
+    'gpt-4-turbo':       (128, 175, True),
+    'gpt-4':             (8,   175, False),
+    'gpt-3.5-turbo':     (16,  175, False),
+    # Anthropic
+    'claude-opus-4-7':   (200, 175, True),
+    'claude-sonnet-4-6': (200, 100, True),
+    'claude-opus':       (200, 175, True),
+    'claude-3.5-sonnet': (200, 100, True),
+    'claude-3-haiku':    (200, 30,  True),
+    # Mistral
+    'mistral-large':     (128, 123, False),
+    'mistral-medium':    (32,  60,  False),
+    'mistral-small':     (32,  10,  False),
+    'pixtral':           (128, 12,  True),
+    # Google
+    'gemini-2.0-flash':  (1000, 1000, True),
+    'gemini-1.5-pro':    (1000, 1000, True),
+    'gemini-1.5-flash':  (1000, 1000, True),
+}
+
+# ---------------------------------------------------------------------------
+# Pricing catalog — USD per 1 million tokens (public list prices, May 2026).
+# Tuples are (input_usd_per_1m, output_usd_per_1m).
+# Use the same fuzzy prefix/substring matching as _MODEL_SPECS.
+# ---------------------------------------------------------------------------
+
+_LLM_PRICING: dict[str, tuple[float, float]] = {
+    # OpenAI
+    'gpt-4o-mini':       (0.15,   0.60),
+    'gpt-4o':            (2.50,  10.00),
+    'gpt-4-turbo':       (10.00, 30.00),
+    'gpt-4':             (30.00, 60.00),
+    'gpt-3.5-turbo':     (0.50,   1.50),
+    # Anthropic
+    'claude-3-haiku':    (0.25,   1.25),
+    'claude-3.5-haiku':  (0.80,   4.00),
+    'claude-3.5-sonnet': (3.00,  15.00),
+    'claude-sonnet-4':   (3.00,  15.00),
+    'claude-opus-4':     (15.00, 75.00),
+    # Mistral
+    'mistral-small':     (0.10,   0.30),
+    'mistral-medium':    (0.40,   1.20),
+    'mistral-large':     (2.00,   6.00),
+    'pixtral':           (0.10,   0.30),
+    # Google
+    'gemini-2.0-flash':  (0.075,  0.30),
+    'gemini-1.5-flash':  (0.075,  0.30),
+    'gemini-1.5-pro':    (1.25,   5.00),
+}
+
+_EMBEDDING_PRICING: dict[str, float] = {
+    # OpenAI
+    'text-embedding-3-small': 0.02,
+    'text-embedding-3-large': 0.13,
+    'text-embedding-ada-002': 0.10,
+}
+
+
+def _lookup_llm_price(model_name: str) -> tuple[float, float] | None:
+    """Return (input_usd_per_1m, output_usd_per_1m) or None if unknown.
+
+    Longer/more-specific keys win over shorter ones to avoid 'gpt-4' matching
+    before 'gpt-4o' or 'gpt-4-turbo'.
+    """
+    if not model_name:
+        return None
+    lower = model_name.lower()
+    # Sort by key length descending so more-specific entries match first.
+    for known_id, price in sorted(_LLM_PRICING.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if known_id in lower or lower in known_id:
+            return price
+    return None
+
+
+def _lookup_embedding_price(model_name: str) -> float | None:
+    """Return input_usd_per_1m for an embedding model or None if unknown."""
+    if not model_name:
+        return None
+    lower = model_name.lower()
+    for known_id, price in _EMBEDDING_PRICING.items():
+        if known_id in lower or lower in known_id:
+            return price
+    return None
+
+
+def _lookup_model_specs(model_name: str):
+    """Return (context_kb, params_b, supports_vision) or None if unknown."""
+    if not model_name:
+        return None
+    lower = model_name.lower()
+    for known_id, specs in _MODEL_SPECS.items():
+        if known_id in lower or lower in known_id:
+            return specs
+    return None
+
+
+def model_supports_vision(model_name: str) -> bool:
+    """True only when the model is known to handle image inputs."""
+    specs = _lookup_model_specs(model_name)
+    return bool(specs and specs[2])
+
+
+def _validate_model_for_role(role: str, model_name: str) -> Optional[str]:
+    """Return a non-blocking warning for ``role``/``model_name`` or None.
+
+    ``role`` must be one of ``extract|query|keywords|vlm``. VLM is validated
+    elsewhere (it's a blocking error, not a warning) — see
+    :func:`SiloService._validate_vlm_service`.
+    """
+    if not model_name or role not in _ROLE_MIN_SPECS:
+        return None
+
+    min_spec = _ROLE_MIN_SPECS[role]
+    specs = _lookup_model_specs(model_name)
+
+    if specs is None:
+        # Unknown model — fall back to a name heuristic so we still warn
+        # operators about obviously-small models.
+        lower = model_name.lower()
+        if role in ('extract', 'query') and any(p in lower for p in ('mini', 'small', 'tiny')):
+            return (
+                f"Model '{model_name}' may be too small for the {role.upper()} role "
+                f"(recommend {min_spec['params_b']}B+ params, {min_spec['context_kb']}K+ context)"
+            )
+        return None
+
+    context_kb, params_b, _ = specs
+    issues = []
+    if min_spec['context_kb'] is not None and context_kb < min_spec['context_kb']:
+        issues.append(f"context {context_kb}K < {min_spec['context_kb']}K")
+    if min_spec['params_b'] is not None and params_b < min_spec['params_b']:
+        issues.append(f"params ~{params_b}B < {min_spec['params_b']}B")
+
+    if not issues:
+        return None
+    return f"{role.upper()}: '{model_name}' below LightRAG recommendation ({', '.join(issues)})"
+
+
+def _validate_model_for_lightrag(model_name: str) -> Optional[str]:
+    """Backward-compatible single-model validator (treats input as EXTRACT)."""
+    return _validate_model_for_role('extract', model_name)
+
 def _resolve_vector_db_type(silo: Optional[Silo] = None, override: Optional[str] = None) -> str:
     """Determine the vector DB type for a silo, falling back to PGVECTOR."""
 
@@ -47,10 +214,16 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
 
     resolved_type = _resolve_vector_db_type(silo, vector_db_type)
     if resolved_type == 'LIGHTRAG' and silo is not None:
+        # EXTRACT is the role that drives indexing; prefer the new column
+        # and fall back to the legacy ``indexing_service`` for old silos.
+        extract_service = getattr(silo, 'extract_service', None) or silo.indexing_service
         return VectorStoreFactory.get_vector_store(
             db_obj, resolved_type,
-            ai_service=silo.indexing_service,
+            ai_service=extract_service,
             embedding_service=silo.embedding_service,
+            query_service=getattr(silo, 'query_service', None),
+            keywords_service=getattr(silo, 'keywords_service', None),
+            vlm_service=getattr(silo, 'vlm_service', None),
         )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
@@ -167,6 +340,33 @@ class SiloService:
         Retrieve a silo by its ID
         """
         return SiloRepository.get_by_id(silo_id, db)
+
+    @staticmethod
+    def _validate_vlm_service(service_id: int, db: Session) -> None:
+        """Raise ``ValidationError`` if the AIService isn't a multimodal model.
+
+        Determined heuristically from the model name (see ``_MODEL_SPECS``);
+        unknown model names are treated as non-multimodal so the operator
+        gets a clear failure rather than a silent runtime error later.
+        """
+        from repositories.ai_service_repository import AIServiceRepository
+
+        ai_service = AIServiceRepository.get_by_id(db, service_id)
+        if ai_service is None:
+            raise ValidationError(f"VLM AI service {service_id} not found")
+
+        model_name = (
+            getattr(ai_service, 'description', None)
+            or getattr(ai_service, 'model_name', None)
+            or getattr(ai_service, 'name', None)
+            or ''
+        )
+        if not model_supports_vision(model_name):
+            raise ValidationError(
+                f"VLM role requires a multimodal model — '{model_name}' is not known to support vision. "
+                "Select a vision-capable model (e.g. gpt-4o, claude-3.5-sonnet, gemini-1.5-pro) "
+                "or leave the VLM service empty if your documents have no images."
+            )
     
     @staticmethod
     def get_silo_retriever(silo_id: int, search_params=None, **kwargs) -> Optional[VectorStoreRetriever]:
@@ -317,7 +517,10 @@ class SiloService:
             field_types['embedding_service_id'] = int
         
         # Convert string values to int where needed
-        for field in ['silo_id', 'app_id', 'embedding_service_id', 'indexing_service_id']:
+        for field in [
+            'silo_id', 'app_id', 'embedding_service_id', 'indexing_service_id',
+            'query_service_id', 'extract_service_id', 'keywords_service_id', 'vlm_service_id',
+        ]:
             if field in silo_data and silo_data[field] and isinstance(silo_data[field], str):
                 try:
                     silo_data[field] = int(silo_data[field])
@@ -357,16 +560,51 @@ class SiloService:
 
             silo.vector_db_type = _resolve_vector_db_type(silo, requested_vector_db_type)
 
-            # LightRAG validation: require indexing_service_id and embedding_service_id
+            # LightRAG validation: require at least one extraction LLM (query
+            # is the primary; extract is auto-filled from query in the UI but
+            # both can be provided) and an embedding service.
             if silo.vector_db_type == 'LIGHTRAG' and not silo_id:
-                if not silo_data.get('indexing_service_id'):
-                    raise ValidationError("LightRAG silos require an indexing_service_id (entity extraction LLM)")
+                has_extract_llm = (
+                    silo_data.get('extract_service_id')
+                    or silo_data.get('query_service_id')
+                    or silo_data.get('indexing_service_id')  # legacy
+                )
+                if not has_extract_llm:
+                    raise ValidationError(
+                        "LightRAG silos require at least a Query or Extract AI service"
+                    )
                 if not silo_data.get('embedding_service_id'):
                     raise ValidationError("LightRAG silos require an embedding_service_id")
 
-            # Set indexing service on creation only — immutable after creation
-            if not silo_id and silo_data.get('indexing_service_id'):
-                silo.indexing_service_id = silo_data['indexing_service_id']
+                # Block: VLM service, if provided, MUST be multimodal.
+                vlm_service_id = silo_data.get('vlm_service_id')
+                if vlm_service_id:
+                    SiloService._validate_vlm_service(int(vlm_service_id), session)
+
+            # Set role-specific services on creation only — immutable after creation.
+            # Legacy indexing_service_id is preserved for back-compat and also
+            # written into extract_service_id when the caller didn't provide
+            # the new field explicitly.
+            if not silo_id:
+                role_fields = (
+                    'indexing_service_id',
+                    'query_service_id',
+                    'extract_service_id',
+                    'keywords_service_id',
+                    'vlm_service_id',
+                )
+                for field in role_fields:
+                    if silo_data.get(field):
+                        setattr(silo, field, silo_data[field])
+
+                # Compatibility shim: when the UI sent only the new
+                # extract_service_id, mirror it into the legacy column so
+                # downstream code that still reads indexing_service_id keeps
+                # working until it is migrated.
+                if silo.extract_service_id and not silo.indexing_service_id:
+                    silo.indexing_service_id = silo.extract_service_id
+                elif silo.indexing_service_id and not silo.extract_service_id:
+                    silo.extract_service_id = silo.indexing_service_id
 
             # Set LightRAG config columns on creation
             if not silo_id:
@@ -750,29 +988,54 @@ class SiloService:
                 session.close()
 
     @staticmethod
-    def index_resource(resource: Resource):
-        # For resource operations, we need a fresh session since this might be called from other contexts
+    def count_resource_chunks(resource: Resource) -> int:
+        """Return the number of document chunks that would be extracted from a resource.
+
+        Uses the same extraction path as index_resource but discards the result.
+        Returns 0 on any error so the caller can continue safely.
+        """
         session = SessionLocal()
         try:
-            # Load resource with relationships within the session to avoid detached instance issues
             resource_with_relations = session.query(Resource).filter(Resource.resource_id == resource.resource_id).first()
             if not resource_with_relations:
-                logger.error(f"Resource {resource.resource_id} not found for indexing")
-                return
-                
-            collection_name = COLLECTION_PREFIX + str(resource_with_relations.repository.silo_id)
-            
-            # Build the correct file path including folder structure
+                return 0
+
             if resource_with_relations.folder_id:
                 from services.folder_service import FolderService
                 folder_path = FolderService.get_folder_path(resource_with_relations.folder_id, session)
                 path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), folder_path, resource_with_relations.uri)
             else:
                 path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), resource_with_relations.uri)
-            
+
+            file_extension = os.path.splitext(resource_with_relations.uri)[1].lower()
+            docs = SiloService.extract_documents_from_file(path, file_extension, {})
+            return len(docs) if docs else 0
+        except Exception:
+            return 0
+        finally:
+            session.close()
+
+    @staticmethod
+    def index_resource(resource: Resource, progress_callback=None):
+        """Index a resource into its silo's vector store."""
+        session = SessionLocal()
+        try:
+            resource_with_relations = session.query(Resource).filter(Resource.resource_id == resource.resource_id).first()
+            if not resource_with_relations:
+                logger.error(f"Resource {resource.resource_id} not found for indexing")
+                return
+
+            collection_name = COLLECTION_PREFIX + str(resource_with_relations.repository.silo_id)
+
+            if resource_with_relations.folder_id:
+                from services.folder_service import FolderService
+                folder_path = FolderService.get_folder_path(resource_with_relations.folder_id, session)
+                path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), folder_path, resource_with_relations.uri)
+            else:
+                path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), resource_with_relations.uri)
+
             file_extension = os.path.splitext(resource_with_relations.uri)[1].lower()
 
-            # Prepare base metadata
             base_metadata = {
                 "repository_id": resource_with_relations.repository_id,
                 "resource_id": resource_with_relations.resource_id,
@@ -780,17 +1043,14 @@ class SiloService:
                 "name": resource_with_relations.uri,
                 "file_type": file_extension
             }
-            
-            # Add folder information if resource is in a folder
+
             if resource_with_relations.folder_id:
                 from services.folder_service import FolderService
                 folder_path = FolderService.get_folder_path(resource_with_relations.folder_id, session)
                 base_metadata["folder_id"] = resource_with_relations.folder_id
                 base_metadata["folder_path"] = folder_path
-                # Store relative path including folder structure
                 base_metadata["ref"] = os.path.join(str(resource_with_relations.repository_id), folder_path, resource_with_relations.uri)
             else:
-                # Resource is at root level
                 base_metadata["folder_id"] = None
                 base_metadata["folder_path"] = ""
                 base_metadata["ref"] = os.path.join(str(resource_with_relations.repository_id), resource_with_relations.uri)
@@ -802,17 +1062,28 @@ class SiloService:
                 return
 
             embedding_service = resource_with_relations.repository.silo.embedding_service
-            
+
             if not embedding_service:
                 logger.warning(f"Silo {resource_with_relations.repository.silo_id} has no embedding service, skipping indexing for resource {resource_with_relations.resource_id}")
                 return
-                
-            _get_vector_store(resource_with_relations.repository.silo).index_documents(
+
+            silo = resource_with_relations.repository.silo
+            vector_store = _get_vector_store(silo)
+
+            # Index all chunks in one call (batch is more efficient for most backends)
+            vector_store.index_documents(
                 collection_name,
                 docs,
-                embedding_service
+                embedding_service,
+                progress_callback=progress_callback,
             )
-            logger.info(f"Successfully indexed resource {resource_with_relations.resource_id} in silo {resource_with_relations.repository.silo_id}")
+
+            logger.info(
+                "Indexed resource %s in silo %s (%s chunks)",
+                resource_with_relations.resource_id,
+                silo.silo_id,
+                len(docs),
+            )
         except Exception as e:
             logger.error(f"Error indexing resource {resource.resource_id}: {str(e)}")
             raise
@@ -1394,6 +1665,10 @@ class SiloService:
                 metadata_definition_id=silo.metadata_definition_id,
                 embedding_service_id=silo.embedding_service_id,
                 indexing_service_id=silo.indexing_service_id,
+                query_service_id=getattr(silo, 'query_service_id', None),
+                extract_service_id=getattr(silo, 'extract_service_id', None) or silo.indexing_service_id,
+                keywords_service_id=getattr(silo, 'keywords_service_id', None),
+                vlm_service_id=getattr(silo, 'vlm_service_id', None),
                 lightrag_chunk_strategy=silo.lightrag_chunk_strategy,
                 lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
                 lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
@@ -1433,6 +1708,10 @@ class SiloService:
             'embedding_service_id': getattr(silo_data, 'embedding_service_id', None),
             'vector_db_type': getattr(silo_data, 'vector_db_type', None),
             'indexing_service_id': getattr(silo_data, 'indexing_service_id', None),
+            'query_service_id': getattr(silo_data, 'query_service_id', None),
+            'extract_service_id': getattr(silo_data, 'extract_service_id', None),
+            'keywords_service_id': getattr(silo_data, 'keywords_service_id', None),
+            'vlm_service_id': getattr(silo_data, 'vlm_service_id', None),
             'lightrag_chunk_strategy': getattr(silo_data, 'lightrag_chunk_strategy', None),
             'lightrag_chunk_token_size': getattr(silo_data, 'lightrag_chunk_token_size', None),
             'lightrag_chunk_overlap_token_size': getattr(silo_data, 'lightrag_chunk_overlap_token_size', None),
@@ -1599,27 +1878,151 @@ class SiloService:
         if not silo.embedding_service:
             raise ValueError("Silo has no embedding service configured")
 
-        total_chars = sum(len(doc.get('content', '')) for doc in documents)
-        total_tokens = total_chars // 4  # rough char-to-token ratio
-
         chunk_token_size = silo.lightrag_chunk_token_size or 1200
-        num_chunks = max(1, total_tokens // chunk_token_size)
+        chunk_overlap_token_size = silo.lightrag_chunk_overlap_token_size or 0
+        chunk_strategy = getattr(silo, 'lightrag_chunk_strategy', None)
+
+        # Calculate chunks per document, then sum.
+        # Tokenization adjustment: actual token count is typically 10-25% higher than
+        # the rough 4-char-per-token estimate, due to whitespace, punctuation, and
+        # special tokens. Apply 1.25x multiplier for more accurate estimation.
+        num_chunks = 0
+        for doc in documents:
+            doc_chars = len(doc.get('content', ''))
+            doc_tokens = int((doc_chars / 4) * 1.25)
+
+            if chunk_overlap_token_size >= chunk_token_size:
+                # Edge case: overlap >= chunk size (invalid config but handle gracefully)
+                doc_chunks = max(1, math.ceil(doc_tokens / chunk_token_size))
+            elif chunk_overlap_token_size == 0:
+                # No overlap: ceil(tokens / chunk_size)
+                doc_chunks = max(1, math.ceil(doc_tokens / chunk_token_size))
+            else:
+                # With overlap: stride = chunk_size - overlap
+                stride = chunk_token_size - chunk_overlap_token_size
+                if doc_tokens <= chunk_token_size:
+                    doc_chunks = 1
+                else:
+                    doc_chunks = 1 + math.ceil((doc_tokens - chunk_token_size) / stride)
+
+            # Adjust for chunk strategy per document
+            if chunk_strategy == "split_only":
+                doc_chunks = max(1, int(doc_chunks * 1.25))
+
+            num_chunks += doc_chunks
 
         extraction_calls = num_chunks * 2  # entity + relationship
         embedding_calls = num_chunks
-        estimated_input_tokens = num_chunks * chunk_token_size
-        estimated_output_tokens = num_chunks * 500  # avg extraction output
+        # Each of the 2 LLM calls per chunk receives a full chunk as input.
+        estimated_input_tokens = extraction_calls * chunk_token_size
+        # Output varies widely: compact ~150 tokens/call, verbose ~800 tokens/call.
+        _out_per_call_avg = 250
+        _out_per_call_min = 150
+        _out_per_call_max = 800
+        estimated_output_tokens = extraction_calls * _out_per_call_avg
 
-        # TODO: implement pricing catalog lookup
         estimated_cost_min = None
         estimated_cost_max = None
 
         warnings: List[str] = []
-        model_name = getattr(silo.indexing_service, 'model_name', None) or ''
-        if any(p in model_name.lower() for p in ('mini', 'small', 'tiny')):
-            warnings.append(
-                f"Model '{model_name}' may have limited context or quality for entity extraction"
+
+        def _service_model_name(service):
+            if service is None:
+                return ''
+            return (
+                getattr(service, 'description', None)
+                or getattr(service, 'model_name', None)
+                or getattr(service, 'name', None)
+                or ''
             )
+
+        # EXTRACT model drives indexing cost — prefer the new role column,
+        # fall back to legacy indexing_service for older silos.
+        extract_service = getattr(silo, 'extract_service', None) or silo.indexing_service
+        model_name = _service_model_name(extract_service)
+        embedding_model_name = (
+            getattr(silo.embedding_service, 'description', None)
+            or getattr(silo.embedding_service, 'model_name', None)
+            or getattr(silo.embedding_service, 'name', None)
+            or None
+        )
+
+        # --- Pricing ---
+        # Try to get prices from DB first (fetched from provider APIs),
+        # fall back to hardcoded catalog if not found.
+        from services.pricing_service import PricingService
+
+        llm_price = PricingService.get_llm_pricing(db, model_name)
+        currency = "USD"
+        if llm_price is None:
+            llm_price = _lookup_llm_price(model_name)  # fallback hardcoded
+
+        emb_price = PricingService.get_embedding_pricing(db, embedding_model_name)
+        if emb_price is None:
+            emb_price = _lookup_embedding_price(embedding_model_name)  # fallback hardcoded
+
+        if llm_price is not None:
+            in_price, out_price = llm_price
+            emb_tokens = num_chunks * chunk_token_size
+            emb_cost = (emb_tokens * emb_price / 1_000_000) if emb_price is not None else 0.0
+
+            llm_input_cost = extraction_calls * chunk_token_size * in_price / 1_000_000
+            estimated_cost_min = round(
+                llm_input_cost + extraction_calls * _out_per_call_min * out_price / 1_000_000 + emb_cost, 4
+            )
+            estimated_cost_max = round(
+                llm_input_cost + extraction_calls * _out_per_call_max * out_price / 1_000_000 + emb_cost, 4
+            )
+
+        # --- Time Estimates (seconds) ---
+        # Account for worker concurrency. Default: 4 LLM workers, 8 embedding workers.
+        # Per-chunk time, then distribute across workers via ceil(chunks / workers).
+        llm_workers = getattr(silo, 'llm_model_max_sync', 4) or 4
+        embedding_workers = getattr(silo, 'embedding_model_max_sync', 8) or 8
+        overhead_factor = 1.2  # 20% overhead
+        fixed_overhead_s = 20  # startup/shutdown
+        merge_overhead_s = 20  # graph merge overhead
+
+        # Optimistic (50 tok/sec) and pessimistic (10 tok/sec) LLM throughput
+        llm_throughput_opt = 50.0
+        llm_throughput_pess = 10.0
+        embedding_throughput_opt = 500.0
+        embedding_throughput_pess = 100.0
+
+        # Time per chunk at single-threaded throughput
+        llm_tokens_per_chunk = chunk_token_size * 2  # entity + relationship
+        llm_s_per_chunk_opt = (llm_tokens_per_chunk / llm_throughput_opt) * overhead_factor
+        llm_s_per_chunk_pess = (llm_tokens_per_chunk / llm_throughput_pess) * overhead_factor
+
+        # Wall-clock time with concurrency: ceil(chunks / workers) * time_per_chunk
+        llm_wall_s_opt = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_opt
+        llm_wall_s_pess = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_pess
+
+        # Embedding: total tokens / throughput, then distributed across workers
+        emb_tokens_total = num_chunks * chunk_token_size
+        emb_raw_s_opt = (emb_tokens_total / embedding_throughput_opt) * overhead_factor
+        emb_raw_s_pess = (emb_tokens_total / embedding_throughput_pess) * overhead_factor
+        emb_wall_s_opt = emb_raw_s_opt / max(1, embedding_workers)
+        emb_wall_s_pess = emb_raw_s_pess / max(1, embedding_workers)
+
+        estimated_indexing_time_min = round(fixed_overhead_s + llm_wall_s_opt + emb_wall_s_opt + merge_overhead_s, 1)
+        estimated_indexing_time_max = round(fixed_overhead_s + llm_wall_s_pess + emb_wall_s_pess + merge_overhead_s, 1)
+        estimated_indexing_time_avg = round((estimated_indexing_time_min + estimated_indexing_time_max) / 2, 1)
+
+        # Emit per-role warnings for every configured role service.
+        role_services = {
+            'extract':  extract_service,
+            'query':    getattr(silo, 'query_service', None),
+            'keywords': getattr(silo, 'keywords_service', None),
+            'vlm':      getattr(silo, 'vlm_service', None),
+        }
+        for role, service in role_services.items():
+            role_model = _service_model_name(service)
+            if not role_model:
+                continue
+            warning = _validate_model_for_role(role, role_model)
+            if warning:
+                warnings.append(warning)
 
         return {
             "total_chunks": num_chunks,
@@ -1630,7 +2033,11 @@ class SiloService:
             "estimated_output_tokens": estimated_output_tokens,
             "estimated_cost_min": estimated_cost_min,
             "estimated_cost_max": estimated_cost_max,
+            "currency": currency,
             "model_name": model_name or None,
-            "embedding_model_name": getattr(silo.embedding_service, 'model_name', None),
+            "embedding_model_name": embedding_model_name,
+            "estimated_indexing_time_min": estimated_indexing_time_min,
+            "estimated_indexing_time_max": estimated_indexing_time_max,
+            "estimated_indexing_time_avg": estimated_indexing_time_avg,
             "warnings": warnings,
         }

@@ -171,7 +171,7 @@ ffmpeg-python = "^0.2.0"
 pymupdf = "^1.27.2.3"
 # lightrag-hku se instala manualmente en el Dockerfile via pip para evitar
 # el conflicto de dependencias con pgvector entre langchain-postgres (<0.4)
-# y lightrag-hku (>=0.4.2). Ver Dockerfile.
+# y lightrag-hku (>=0.4.2). Ver Dockerfile. Versión actual: 1.5.0rc3.
 
 [tool.poetry.scripts]
 dev = "uvicorn backend.main:app --reload --port 8000"

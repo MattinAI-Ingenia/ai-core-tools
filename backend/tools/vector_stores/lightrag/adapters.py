@@ -1,14 +1,15 @@
 """Adapter layer bridging our ``AIService`` / ``EmbeddingService`` to LightRAG.
 
-LightRAG (``lightrag-hku==1.4.16``) expects two callables when building a
-``LightRAG`` instance:
+LightRAG (``lightrag-hku==1.5.0rc3``) expects:
 
 * ``llm_model_func``: ``async def(prompt, system_prompt=None,
-  history_messages=None, **kwargs) -> str``
+  history_messages=None, **kwargs) -> str``  — base/fallback LLM callable.
+* ``role_llm_configs``: ``dict[str, RoleLLMConfig]`` — per-role LLM overrides
+  keyed by ``"extract" | "keyword" | "query" | "vlm"``.
 * ``embedding_func``: an ``EmbeddingFunc`` object with ``embedding_dim``,
   ``max_token_size`` and an async ``func(texts: list[str]) -> np.ndarray``.
 
-This module produces those callables from the project's existing service
+This module produces those objects from the project's existing service
 configuration so LightRAG reuses whichever LLM/embedding provider an
 ``AIService`` / ``EmbeddingService`` already points at. It contains **no**
 business logic and never instantiates a ``LightRAG`` object — that wiring is
@@ -30,6 +31,7 @@ from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only
+    from lightrag.llm_roles import RoleLLMConfig
     from lightrag.utils import EmbeddingFunc
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,7 @@ _EMBEDDING_MAX_TOKENS_BY_MODEL: dict[str, int] = {
 
 _LIGHTRAG_INSTALL_HINT = (
     "lightrag-hku is not installed. Install the optional extra "
-    "(`pip install 'lightrag-hku[offline-storage]==1.4.16'`) and set "
+    "(`pip install 'lightrag-hku[offline-storage]==1.5.0rc3'`) and set "
     "LIGHTRAG_ENABLED=true to enable the LightRAG integration."
 )
 
@@ -90,6 +92,61 @@ def is_lightrag_available() -> bool:
 # ---------------------------------------------------------------------------
 # LLM adapter
 # ---------------------------------------------------------------------------
+
+
+def build_role_llm_configs(
+    *,
+    extract_service: AIService,
+    query_service: Optional[AIService] = None,
+    keywords_service: Optional[AIService] = None,
+    vlm_service: Optional[AIService] = None,
+    temperature: float = 0.0,
+) -> dict[str, "RoleLLMConfig"]:
+    """Build a ``role_llm_configs`` dict for the ``LightRAG`` constructor.
+
+    Returns a mapping from LightRAG role name (``"extract" | "keyword" |
+    "query" | "vlm"``) to a :class:`RoleLLMConfig` containing the
+    ``llm_model_func`` callable for that role.
+
+    ``extract_service`` is mandatory — it is also used as the base
+    ``llm_model_func`` fallback. The other roles default to ``None``
+    (omitted from the dict) which tells LightRAG to reuse the base
+    ``llm_model_func`` automatically.
+
+    LightRAG 1.5.0rc3 expects role keys in **lowercase** and the keyword
+    role as singular ``"keyword"`` (not ``"keywords"``).
+    """
+    from lightrag.llm_roles import RoleLLMConfig  # noqa: WPS433
+
+    if extract_service is None:
+        raise ValueError("extract_service is required to build LightRAG role LLMs")
+
+    configs: dict[str, RoleLLMConfig] = {
+        'extract': RoleLLMConfig(
+            func=build_llm_model_func(extract_service, temperature=temperature),
+        ),
+    }
+
+    if query_service is not None:
+        configs['query'] = RoleLLMConfig(
+            func=build_llm_model_func(query_service, temperature=temperature),
+        )
+
+    # LightRAG uses "keyword" (singular), not "keywords".
+    if keywords_service is not None:
+        configs['keyword'] = RoleLLMConfig(
+            func=build_llm_model_func(keywords_service, temperature=temperature),
+        )
+
+    # VLM is optional — omitting the key is cleaner than an entry with
+    # func=None, because LightRAG's resolver treats a missing key as
+    # "fall back to base" and a None func as an error.
+    if vlm_service is not None:
+        configs['vlm'] = RoleLLMConfig(
+            func=build_llm_model_func(vlm_service, temperature=temperature),
+        )
+
+    return configs
 
 
 def build_llm_model_func(
@@ -222,5 +279,6 @@ __all__ = [
     "DEFAULT_EMBEDDING_MAX_TOKENS",
     "build_embedding_func",
     "build_llm_model_func",
+    "build_role_llm_configs",
     "is_lightrag_available",
 ]

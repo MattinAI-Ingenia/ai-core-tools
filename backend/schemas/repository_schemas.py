@@ -43,7 +43,13 @@ class RepositoryDetailSchema(BaseModel):
     ai_services: List[Dict[str, Any]] = []
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
-    
+    indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
+    # LightRAG 2026.05 role-specific LLM configuration
+    query_service_id: Optional[int] = None
+    extract_service_id: Optional[int] = None
+    keywords_service_id: Optional[int] = None
+    vlm_service_id: Optional[int] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -56,6 +62,12 @@ class CreateRepositorySchema(BaseModel):
     vector_db_type: Optional[str] = None
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
+    indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
+    # LightRAG 2026.05 role-specific LLM configuration
+    query_service_id: Optional[int] = None
+    extract_service_id: Optional[int] = None
+    keywords_service_id: Optional[int] = None
+    vlm_service_id: Optional[int] = None
 
 
 class UpdateRepositorySchema(BaseModel):
@@ -66,6 +78,7 @@ class UpdateRepositorySchema(BaseModel):
     embedding_service_id: Optional[int] = None
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
+    indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
 
 
 # Backward-compatible alias used by internal callers that haven't been updated yet

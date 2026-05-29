@@ -30,7 +30,12 @@ class SiloDetailSchema(BaseModel):
     # Current values for editing
     metadata_definition_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
-    indexing_service_id: Optional[int] = None
+    indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
+    # LightRAG 2026.05 role-specific LLM configuration
+    query_service_id: Optional[int] = None
+    extract_service_id: Optional[int] = None
+    keywords_service_id: Optional[int] = None
+    vlm_service_id: Optional[int] = None
     lightrag_chunk_strategy: Optional[str] = None
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
@@ -55,7 +60,12 @@ class CreateSiloSchema(BaseModel):
     output_parser_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
     vector_db_type: Optional[str] = None
-    indexing_service_id: Optional[int] = None
+    indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
+    # LightRAG 2026.05 role-specific LLM configuration
+    query_service_id: Optional[int] = None
+    extract_service_id: Optional[int] = None
+    keywords_service_id: Optional[int] = None
+    vlm_service_id: Optional[int] = None
     lightrag_chunk_strategy: Optional[str] = None
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
@@ -173,8 +183,13 @@ class CostEstimationResponseSchema(BaseModel):
     estimated_output_tokens: int
     estimated_cost_min: Optional[float] = None
     estimated_cost_max: Optional[float] = None
+    currency: str = "USD"  # ISO 4217 code (USD, EUR, etc.)
     model_name: Optional[str] = None
     embedding_model_name: Optional[str] = None
+    # Time estimates (seconds)
+    estimated_indexing_time_min: Optional[float] = None  # optimistic (faster calls)
+    estimated_indexing_time_max: Optional[float] = None  # pessimistic (slower calls)
+    estimated_indexing_time_avg: Optional[float] = None  # average estimate
     warnings: List[str] = []
 
 

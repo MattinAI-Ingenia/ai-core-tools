@@ -64,16 +64,28 @@ class RepositoryService:
         repository: Repository,
         embedding_service_id: Optional[int] = None,
         vector_db_type: Optional[str] = None,
-        db: Session = None
+        indexing_service_id: Optional[int] = None,
+        db: Session = None,
+        *,
+        query_service_id: Optional[int] = None,
+        extract_service_id: Optional[int] = None,
+        keywords_service_id: Optional[int] = None,
+        vlm_service_id: Optional[int] = None,
     ) -> Repository:
         """
         Create a new repository with its associated silo
-        
+
         Args:
             repository: Repository instance to create
             embedding_service_id: Optional embedding service ID for the silo
+            vector_db_type: Optional vector database type
+            indexing_service_id: Optional indexing AI service ID (legacy, prefer extract_service_id)
             db: Database session
-            
+            query_service_id: LightRAG QUERY role AI service
+            extract_service_id: LightRAG EXTRACT role AI service
+            keywords_service_id: LightRAG KEYWORDS role AI service
+            vlm_service_id: LightRAG VLM role AI service
+
         Returns:
             Created Repository instance
         """
@@ -84,7 +96,7 @@ class RepositoryService:
         resolved_vector_db_type = (vector_db_type or 'PGVECTOR')
         if isinstance(resolved_vector_db_type, str):
             resolved_vector_db_type = resolved_vector_db_type.upper()
-        
+
         # Create the silo with the correct metadata_definition_id
         silo_service = SiloService()
         silo_data = {
@@ -96,18 +108,23 @@ class RepositoryService:
             'fixed_metadata': False,
             'metadata_definition_id': parser_id,
             'embedding_service_id': embedding_service_id,
-            'vector_db_type': resolved_vector_db_type
+            'vector_db_type': resolved_vector_db_type,
+            'indexing_service_id': indexing_service_id,
+            'query_service_id': query_service_id,
+            'extract_service_id': extract_service_id,
+            'keywords_service_id': keywords_service_id,
+            'vlm_service_id': vlm_service_id,
         }
         silo = silo_service.create_or_update_silo(silo_data, SiloType.REPO, db)
-        
+
         # Now create the repository with the silo_id
         repository.silo_id = silo.silo_id
         created_repository = RepositoryRepository.create(db, repository)
-        
+
         # Create repository folder
         repo_folder = os.path.join(REPO_BASE_FOLDER, str(created_repository.repository_id))
         os.makedirs(repo_folder, exist_ok=True)
-        
+
         return created_repository
     
     @staticmethod
@@ -115,16 +132,19 @@ class RepositoryService:
         repository: Repository,
         embedding_service_id: Optional[int] = None,
         vector_db_type: Optional[str] = None,
+        indexing_service_id: Optional[int] = None,
         db: Session = None
     ) -> Repository:
         """
         Update an existing repository
-        
+
         Args:
             repository: Repository instance to update
             embedding_service_id: Optional embedding service ID for the silo
+            vector_db_type: Optional vector database type
+            indexing_service_id: Optional indexing AI service ID
             db: Database session
-            
+
         Returns:
             Updated Repository instance
         """
@@ -133,6 +153,12 @@ class RepositoryService:
                 repository.silo.embedding_service_id, embedding_service_id, "repository"
             )
             repository.silo.embedding_service_id = embedding_service_id
+
+        if repository.silo and indexing_service_id:
+            assert_embedding_service_immutable(
+                repository.silo.indexing_service_id, indexing_service_id, "repository"
+            )
+            repository.silo.indexing_service_id = indexing_service_id
 
         if repository.silo:
             if vector_db_type is not None:
@@ -268,7 +294,18 @@ class RepositoryService:
             # Get AI services for media transcription
             from repositories.ai_service_repository import AIServiceRepository
             ai_services_query = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
-            ai_services = [{"service_id": s.service_id, "name": s.name, "supports_video": s.supports_video} for s in ai_services_query]
+            ai_services = [
+                {
+                    "service_id": s.service_id,
+                    "name": s.name,
+                    "supports_video": s.supports_video,
+                    "description": getattr(s, 'description', None),
+                    "model_name": getattr(s, 'model_name', None),
+                    "provider": getattr(s, 'provider', None),
+                    "is_system": getattr(s, 'app_id', None) is None,
+                }
+                for s in ai_services_query
+            ]
             
             return RepositoryDetailSchema(
                 repository_id=0,
@@ -285,7 +322,8 @@ class RepositoryService:
                 media=[],
                 ai_services=ai_services,
                 transcription_service_id=None,
-                video_ai_service_id=None
+                video_ai_service_id=None,
+                indexing_service_id=None
             )
         
         # Existing repository
@@ -306,7 +344,8 @@ class RepositoryService:
                 "uri": resource.uri,
                 "file_type": resource.type or "unknown",
                 "created_at": resource.create_date,
-                "folder_id": resource.folder_id
+                "folder_id": resource.folder_id,
+                "status": resource.status,
             })
         
         # Get embedding services for form data
@@ -320,7 +359,18 @@ class RepositoryService:
         # Get AI services for media transcription
         from repositories.ai_service_repository import AIServiceRepository
         ai_services_query = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
-        ai_services = [{"service_id": s.service_id, "name": s.name, "supports_video": s.supports_video} for s in ai_services_query]
+        ai_services = [
+                {
+                    "service_id": s.service_id,
+                    "name": s.name,
+                    "supports_video": s.supports_video,
+                    "description": getattr(s, 'description', None),
+                    "model_name": getattr(s, 'model_name', None),
+                    "provider": getattr(s, 'provider', None),
+                    "is_system": getattr(s, 'app_id', None) is None,
+                }
+                for s in ai_services_query
+            ]
         
         # Get folders for the repository
         from services.folder_service import FolderService
@@ -346,16 +396,27 @@ class RepositoryService:
             }
             media_list.append(media_dict)
 
-        # Get the current embedding service ID from the repository's silo
+        # Get the current embedding service ID and role service IDs from the repository's silo
         embedding_service_id = None
+        indexing_service_id = None
+        query_service_id = None
+        extract_service_id = None
+        keywords_service_id = None
+        vlm_service_id = None
         silo_id = None
         metadata_fields = []
-        
+
         if repo.silo:
             silo_id = repo.silo.silo_id
             if repo.silo.embedding_service:
                 embedding_service_id = repo.silo.embedding_service.service_id
-            
+            if repo.silo.indexing_service_id:
+                indexing_service_id = repo.silo.indexing_service_id
+            query_service_id = getattr(repo.silo, 'query_service_id', None)
+            extract_service_id = getattr(repo.silo, 'extract_service_id', None) or indexing_service_id
+            keywords_service_id = getattr(repo.silo, 'keywords_service_id', None)
+            vlm_service_id = getattr(repo.silo, 'vlm_service_id', None)
+
             # Get metadata fields from silo's metadata definition (OutputParser)
             if repo.silo.metadata_definition and repo.silo.metadata_definition.fields:
                 try:
@@ -393,7 +454,12 @@ class RepositoryService:
             media=media_list,
             ai_services=ai_services,
             transcription_service_id=repo.transcription_service_id,
-            video_ai_service_id=repo.video_ai_service_id
+            video_ai_service_id=repo.video_ai_service_id,
+            indexing_service_id=indexing_service_id,
+            query_service_id=query_service_id,
+            extract_service_id=extract_service_id,
+            keywords_service_id=keywords_service_id,
+            vlm_service_id=vlm_service_id,
         )
 
     @staticmethod
@@ -435,7 +501,12 @@ class RepositoryService:
             repo,
             repo_data.embedding_service_id,
             normalized_vector_db_type,
+            repo_data.indexing_service_id,
             db,
+            query_service_id=getattr(repo_data, 'query_service_id', None),
+            extract_service_id=getattr(repo_data, 'extract_service_id', None),
+            keywords_service_id=getattr(repo_data, 'keywords_service_id', None),
+            vlm_service_id=getattr(repo_data, 'vlm_service_id', None),
         )
 
     @staticmethod
@@ -470,6 +541,7 @@ class RepositoryService:
             repo,
             repo_data.embedding_service_id,
             None,
+            repo_data.indexing_service_id,
             db,
         )
 

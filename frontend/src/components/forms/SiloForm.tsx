@@ -2,6 +2,11 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { AlertTriangle, Info } from 'lucide-react';
 import { apiService } from '../../services/api';
+import {
+  getRoleWarning,
+  vlmBlockingError,
+  type LightRAGRole,
+} from '../../utils/lightragModelSpecs';
 
 interface VectorDbOption {
   code: string;
@@ -22,12 +27,25 @@ interface Silo {
   output_parsers?: { parser_id: number; name: string }[];
   embedding_services?: { service_id: number; name: string; provider?: string; is_system?: boolean }[];
   vector_db_options?: VectorDbOption[];
-  indexing_service_id?: number;
+  indexing_service_id?: number; // legacy alias for extract_service_id
+  query_service_id?: number;
+  extract_service_id?: number;
+  keywords_service_id?: number;
+  vlm_service_id?: number;
   lightrag_chunk_strategy?: string;
   lightrag_chunk_token_size?: number;
   lightrag_chunk_overlap_token_size?: number;
   lightrag_graph_context_enabled?: boolean;
-  ai_services?: { service_id: number; name: string; provider?: string; is_system?: boolean }[];
+  ai_services?: AIServiceOption[];
+}
+
+interface AIServiceOption {
+  service_id: number;
+  name: string;
+  provider?: string;
+  is_system?: boolean;
+  description?: string;
+  model_name?: string;
 }
 
 // Define the form data type
@@ -38,12 +56,24 @@ interface SiloFormData {
   output_parser_id?: number;
   embedding_service_id?: number;
   vector_db_type?: string;
-  indexing_service_id?: number;
+  indexing_service_id?: number; // legacy alias for extract_service_id
+  query_service_id?: number;
+  extract_service_id?: number;
+  keywords_service_id?: number;
+  vlm_service_id?: number;
   lightrag_chunk_strategy?: string;
   lightrag_chunk_token_size?: number;
   lightrag_chunk_overlap_token_size?: number;
   lightrag_graph_context_enabled?: boolean;
 }
+
+const ROLE_SERVICE_FIELDS = [
+  'query_service_id',
+  'extract_service_id',
+  'keywords_service_id',
+  'vlm_service_id',
+] as const;
+type RoleServiceField = typeof ROLE_SERVICE_FIELDS[number];
 
 // Define the props for the component
 interface SiloFormProps {
@@ -62,6 +92,10 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     embedding_service_id: undefined,
     vector_db_type: 'PGVECTOR',
     indexing_service_id: undefined,
+    query_service_id: undefined,
+    extract_service_id: undefined,
+    keywords_service_id: undefined,
+    vlm_service_id: undefined,
     lightrag_chunk_strategy: 'token_window',
     lightrag_chunk_token_size: 1200,
     lightrag_chunk_overlap_token_size: 100,
@@ -113,6 +147,12 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       embedding_service_id: silo?.embedding_service_id || undefined,
       vector_db_type: vectorDbTypeValue,
       indexing_service_id: silo?.indexing_service_id || undefined,
+      // LightRAG 2026.05 roles. Fall back to the legacy ``indexing_service_id``
+      // for old silos that still only have the single-LLM column populated.
+      query_service_id: silo?.query_service_id || silo?.indexing_service_id || undefined,
+      extract_service_id: silo?.extract_service_id || silo?.indexing_service_id || undefined,
+      keywords_service_id: silo?.keywords_service_id || silo?.indexing_service_id || undefined,
+      vlm_service_id: silo?.vlm_service_id || undefined,
       lightrag_chunk_strategy: silo?.lightrag_chunk_strategy || 'token_window',
       lightrag_chunk_token_size: silo?.lightrag_chunk_token_size || 1200,
       lightrag_chunk_overlap_token_size: silo?.lightrag_chunk_overlap_token_size || 100,
@@ -166,18 +206,45 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
 
     let parsedValue: string | number | undefined = value === '' ? undefined : value;
 
-    if (name === 'embedding_service_id' || name === 'output_parser_id' || name === 'indexing_service_id'
-      || name === 'lightrag_chunk_token_size' || name === 'lightrag_chunk_overlap_token_size') {
+    const intFields = [
+      'embedding_service_id', 'output_parser_id', 'indexing_service_id',
+      'query_service_id', 'extract_service_id', 'keywords_service_id', 'vlm_service_id',
+      'lightrag_chunk_token_size', 'lightrag_chunk_overlap_token_size',
+    ];
+    if (intFields.includes(name)) {
       parsedValue = value === '' ? undefined : Number.parseInt(value, 10);
     } else if (name === 'vector_db_type' && typeof value === 'string') {
       parsedValue = value.toUpperCase();
     }
 
-    setFormData(prev => ({
-      ...prev,
-      [name]: parsedValue
-    }));
+    setFormData(prev => {
+      const next = { ...prev, [name]: parsedValue };
+      // Query is the primary role — when it changes, propagate the value to
+      // Extract and Keywords if those slots are empty OR were matching the
+      // previous Query value (treat them as auto-filled). VLM is left alone
+      // because it requires a multimodal model.
+      if (name === 'query_service_id') {
+        const prevQuery = prev.query_service_id;
+        const autofillRoles: RoleServiceField[] = ['extract_service_id', 'keywords_service_id'];
+        for (const role of autofillRoles) {
+          if (!prev[role] || prev[role] === prevQuery) {
+            next[role] = parsedValue as number | undefined;
+          }
+        }
+      }
+      return next;
+    });
   };
+
+  // Helper: get the model identifier for an AIService row used in the dropdown.
+  const getServiceModelName = (serviceId: number | undefined): string | undefined => {
+    if (!serviceId) return undefined;
+    const svc = aiServices.find((s) => s.service_id === serviceId);
+    return svc?.description || svc?.model_name || svc?.name;
+  };
+
+  const isLightRAG = formData.vector_db_type?.toUpperCase() === 'LIGHTRAG';
+  const vlmError = isLightRAG ? vlmBlockingError(getServiceModelName(formData.vlm_service_id)) : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -193,12 +260,26 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       return;
     }
 
+    // Block: VLM role must be multimodal when set (LightRAG only).
+    if (isLightRAG && vlmError) {
+      setError(vlmError);
+      return;
+    }
+
     try {
       setIsSubmitting(true);
       setError(null);
+      // Always mirror Extract into the legacy indexing_service_id so older
+      // backend code paths keep working until they migrate to the new column.
+      const normalized: SiloFormData = {
+        ...formData,
+        indexing_service_id: formData.extract_service_id || formData.indexing_service_id,
+      };
       const payload = isEditing
-        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi, ...rest }) => rest)(formData)
-        : { ...formData, vector_db_type: formData.vector_db_type!.toUpperCase() };
+        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi,
+              query_service_id: _qsi, extract_service_id: _esi2, keywords_service_id: _ksi,
+              vlm_service_id: _vsi, ...rest }) => rest)(normalized)
+        : { ...normalized, vector_db_type: normalized.vector_db_type!.toUpperCase() };
       await onSubmit(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save silo');
@@ -254,7 +335,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
             </div>
             <div>
               <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
-                Silo Description
+                Silo Description <span className="text-red-500">*</span>
               </label>
               <input
                 type="text"
@@ -368,31 +449,84 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
             <div className="border-t border-gray-200 pt-6 mt-6 space-y-6">
               <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">LightRAG Configuration</h3>
 
-              {/* Indexing AI Service (LLM for entity extraction) */}
-              <div>
-                <label htmlFor="indexing_service_id" className="block text-sm font-medium text-gray-700 mb-2">
-                  Indexing AI Service <span className="text-red-500">*</span>
-                </label>
-                <select
-                  id="indexing_service_id"
-                  name="indexing_service_id"
-                  value={formData.indexing_service_id?.toString() || ''}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
-                  disabled={isSubmitting || isEditing}
-                >
-                  <option value="">Select an AI service for entity extraction</option>
-                  {aiServices.map((service: any) => (
-                    <option key={service.service_id} value={service.service_id}>
-                      {service.is_system ? `[System] ${service.name}` : service.name}{service.provider ? ` (${service.provider})` : ''}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-sm text-gray-500">
-                  LLM used for knowledge graph extraction during indexing. Recommended: GPT-4o or equivalent.
-                </p>
-              </div>
+              {/* Role-specific LLM configuration (LightRAG 2026.05).
+                  QUERY is the primary role — selecting it auto-fills EXTRACT
+                  and KEYWORDS. VLM is optional and must be multimodal. */}
+              {([
+                {
+                  field: 'query_service_id' as RoleServiceField,
+                  role: 'query' as LightRAGRole,
+                  label: 'Query AI Service',
+                  required: true,
+                  helper: 'LLM that generates the final answer at query time. Recommended: large model (32B+, e.g. GPT-4o, Claude 3.5 Sonnet). Selecting this auto-fills Extract & Keywords.',
+                  placeholder: 'Select an AI service for query generation',
+                },
+                {
+                  field: 'extract_service_id' as RoleServiceField,
+                  role: 'extract' as LightRAGRole,
+                  label: 'Extract AI Service',
+                  required: true,
+                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier (12B+, non-reasoning).',
+                  placeholder: 'Select an AI service for entity extraction',
+                },
+                {
+                  field: 'keywords_service_id' as RoleServiceField,
+                  role: 'keywords' as LightRAGRole,
+                  label: 'Keywords AI Service',
+                  required: false,
+                  helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
+                  placeholder: 'Select an AI service for keyword extraction',
+                },
+                {
+                  field: 'vlm_service_id' as RoleServiceField,
+                  role: 'vlm' as LightRAGRole,
+                  label: 'VLM AI Service (optional)',
+                  required: false,
+                  helper: 'Vision-language model for images/tables inside documents. MUST be multimodal — leave empty if your docs are text-only.',
+                  placeholder: '(none — text-only documents)',
+                },
+              ]).map(({ field, role, label, required, helper, placeholder }) => {
+                const value = formData[field];
+                const modelName = getServiceModelName(value);
+                const warning = role !== 'vlm' ? getRoleWarning(role, modelName) : null;
+                const blockingError = role === 'vlm' ? vlmBlockingError(modelName) : null;
+                return (
+                  <div key={field}>
+                    <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-2">
+                      {label}{required && <span className="text-red-500"> *</span>}
+                    </label>
+                    <select
+                      id={field}
+                      name={field}
+                      value={value?.toString() || ''}
+                      onChange={handleChange}
+                      required={required}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
+                      disabled={isSubmitting || isEditing}
+                    >
+                      <option value="">{placeholder}</option>
+                      {aiServices.map((service: AIServiceOption) => (
+                        <option key={service.service_id} value={service.service_id}>
+                          {service.is_system ? `[System] ${service.name}` : service.name}{service.provider ? ` (${service.provider})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-sm text-gray-500">{helper}</p>
+                    {warning && (
+                      <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{warning}</span>
+                      </div>
+                    )}
+                    {blockingError && (
+                      <div className="mt-2 flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{blockingError}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
 
               {/* Chunking Strategy */}
               <div>
@@ -499,8 +633,9 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !!vlmError}
               className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded-lg flex items-center"
+              title={vlmError ?? undefined}
             >
               {isSubmitting && (
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>

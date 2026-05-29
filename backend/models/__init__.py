@@ -36,6 +36,7 @@ from .subscription import Subscription, SubscriptionTier, BillingStatus
 from .tier_config import TierConfig
 from .usage_record import UsageRecord
 from .user_credential import UserCredential
+from .pricing_catalog import PricingCatalog
 
 __all__ = [
     'User', 'App', 'AppCollaborator', 'APIKey',
@@ -53,4 +54,5 @@ __all__ = [
     'TierConfig',
     'UsageRecord',
     'UserCredential',
+    'PricingCatalog',
 ]

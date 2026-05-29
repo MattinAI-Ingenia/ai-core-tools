@@ -1,8 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { AlertTriangle } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
+import {
+  getRoleWarning,
+  vlmBlockingError,
+  type LightRAGRole,
+} from '../utils/lightragModelSpecs';
 
 interface RepositoryFormData {
   name: string;
@@ -10,7 +16,14 @@ interface RepositoryFormData {
   vector_db_type: string;
   transcription_service_id?: number;
   video_ai_service_id?: number;
+  indexing_service_id?: number; // legacy alias for extract_service_id
+  query_service_id?: number;
+  extract_service_id?: number;
+  keywords_service_id?: number;
+  vlm_service_id?: number;
 }
+
+type RoleServiceField = 'query_service_id' | 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
 
 interface EmbeddingService {
   service_id: number;
@@ -29,6 +42,10 @@ interface AIService {
   service_id: number;
   name: string;
   supports_video?: boolean;
+  description?: string;
+  model_name?: string;
+  provider?: string;
+  is_system?: boolean;
 }
 
 const RepositoryFormPage: React.FC = () => {
@@ -47,6 +64,11 @@ const RepositoryFormPage: React.FC = () => {
     vector_db_type: 'PGVECTOR',
     transcription_service_id: undefined,
     video_ai_service_id: undefined,
+    indexing_service_id: undefined,
+    query_service_id: undefined,
+    extract_service_id: undefined,
+    keywords_service_id: undefined,
+    vlm_service_id: undefined,
   });
 
   const isNewRepository = repositoryId === '0';
@@ -99,6 +121,11 @@ const RepositoryFormPage: React.FC = () => {
           vector_db_type: resolvedVectorDbType,
           transcription_service_id: repository.transcription_service_id ?? undefined,
           video_ai_service_id: repository.video_ai_service_id ?? undefined,
+          indexing_service_id: repository.indexing_service_id ?? undefined,
+          query_service_id: repository.query_service_id ?? repository.indexing_service_id ?? undefined,
+          extract_service_id: repository.extract_service_id ?? repository.indexing_service_id ?? undefined,
+          keywords_service_id: repository.keywords_service_id ?? repository.indexing_service_id ?? undefined,
+          vlm_service_id: repository.vlm_service_id ?? undefined,
         });
       } catch (err) {
         console.error('Error loading repository:', err);
@@ -131,6 +158,8 @@ const RepositoryFormPage: React.FC = () => {
       return;
     }
 
+    const normalizedVectorDbType = formData.vector_db_type.toUpperCase();
+
     if (isNewRepository && !formData.vector_db_type) {
       setError('Vector database selection is required');
       return;
@@ -141,7 +170,24 @@ const RepositoryFormPage: React.FC = () => {
       return;
     }
 
-    const normalizedVectorDbType = formData.vector_db_type.toUpperCase();
+    if (isNewRepository && normalizedVectorDbType === 'LIGHTRAG') {
+      const hasExtractLlm = formData.extract_service_id || formData.query_service_id || formData.indexing_service_id;
+      if (!hasExtractLlm) {
+        setError('LightRAG repositories require at least a Query or Extract AI service');
+        return;
+      }
+      // Block VLM if not multimodal
+      const vlmModel = formData.vlm_service_id
+        ? (aiServices.find(s => s.service_id === formData.vlm_service_id)?.description
+           || aiServices.find(s => s.service_id === formData.vlm_service_id)?.model_name
+           || aiServices.find(s => s.service_id === formData.vlm_service_id)?.name)
+        : undefined;
+      const vlmErr = vlmBlockingError(vlmModel);
+      if (vlmErr) {
+        setError(vlmErr);
+        return;
+      }
+    }
     const repositoryIdNumber = repositoryId ? Number.parseInt(repositoryId, 10) : 0;
     if (!isNewRepository && Number.isNaN(repositoryIdNumber)) {
       setError('Invalid repository context');
@@ -154,6 +200,12 @@ const RepositoryFormPage: React.FC = () => {
       vector_db_type: normalizedVectorDbType,
       transcription_service_id: formData.transcription_service_id,
       video_ai_service_id: formData.video_ai_service_id,
+      // Mirror extract → legacy indexing_service_id for backward compat.
+      indexing_service_id: formData.extract_service_id || formData.indexing_service_id,
+      query_service_id: formData.query_service_id,
+      extract_service_id: formData.extract_service_id,
+      keywords_service_id: formData.keywords_service_id,
+      vlm_service_id: formData.vlm_service_id,
     };
 
     setError(null);
@@ -285,9 +337,9 @@ const RepositoryFormPage: React.FC = () => {
               <select
                 id="embedding_service_id"
                 value={formData.embedding_service_id || ''}
-                onChange={(e) => setFormData({ 
-                  ...formData, 
-                  embedding_service_id: e.target.value ? Number.parseInt(e.target.value, 10) : undefined 
+                onChange={(e) => setFormData({
+                  ...formData,
+                  embedding_service_id: e.target.value ? Number.parseInt(e.target.value, 10) : undefined
                 })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 required
@@ -305,6 +357,102 @@ const RepositoryFormPage: React.FC = () => {
                 This embedding service will be used for the silo that's automatically created with this repository
               </p>
             </div>
+          )}
+
+          {/* LightRAG role-specific LLM configuration (only for new repositories) */}
+          {isNewRepository && formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
+            <>
+              {([
+                {
+                  field: 'query_service_id' as RoleServiceField,
+                  role: 'query' as LightRAGRole,
+                  label: 'Query AI Service',
+                  required: true,
+                  helper: 'LLM that generates the final answer at query time. Recommended: large model (32B+). Selecting this auto-fills Extract & Keywords.',
+                  placeholder: 'Select an AI service for query generation',
+                },
+                {
+                  field: 'extract_service_id' as RoleServiceField,
+                  role: 'extract' as LightRAGRole,
+                  label: 'Extract AI Service',
+                  required: true,
+                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier (12B+, non-reasoning).',
+                  placeholder: 'Select an AI service for entity extraction',
+                },
+                {
+                  field: 'keywords_service_id' as RoleServiceField,
+                  role: 'keywords' as LightRAGRole,
+                  label: 'Keywords AI Service',
+                  required: false,
+                  helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
+                  placeholder: 'Select an AI service for keyword extraction',
+                },
+                {
+                  field: 'vlm_service_id' as RoleServiceField,
+                  role: 'vlm' as LightRAGRole,
+                  label: 'VLM AI Service (optional)',
+                  required: false,
+                  helper: 'Vision-language model for images/tables inside documents. MUST be multimodal — leave empty if docs are text-only.',
+                  placeholder: '(none — text-only documents)',
+                },
+              ]).map(({ field, role, label, required, helper, placeholder }) => {
+                const value = formData[field];
+                const svc = value ? aiServices.find(s => s.service_id === value) : undefined;
+                const modelName = svc?.description || svc?.model_name || svc?.name;
+                const warning = role !== 'vlm' ? getRoleWarning(role, modelName) : null;
+                const blockingErr = role === 'vlm' ? vlmBlockingError(modelName) : null;
+                return (
+                  <div key={field}>
+                    <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-2">
+                      {label}{required && <span className="text-red-500"> *</span>}
+                    </label>
+                    <select
+                      id={field}
+                      value={value || ''}
+                      onChange={(e) => {
+                        const parsed = e.target.value ? Number.parseInt(e.target.value, 10) : undefined;
+                        setFormData(prev => {
+                          const next = { ...prev, [field]: parsed };
+                          // Auto-fill Extract and Keywords when Query changes
+                          if (field === 'query_service_id') {
+                            const prevQuery = prev.query_service_id;
+                            if (!prev.extract_service_id || prev.extract_service_id === prevQuery) {
+                              next.extract_service_id = parsed;
+                            }
+                            if (!prev.keywords_service_id || prev.keywords_service_id === prevQuery) {
+                              next.keywords_service_id = parsed;
+                            }
+                          }
+                          return next;
+                        });
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      required={required}
+                    >
+                      <option value="">{placeholder}</option>
+                      {aiServices.map((service) => (
+                        <option key={service.service_id} value={service.service_id}>
+                          {service.is_system ? '[System] ' : ''}{service.name}{service.provider ? ` (${service.provider})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-sm text-gray-500 mt-1">{helper}</p>
+                    {warning && (
+                      <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{warning}</span>
+                      </div>
+                    )}
+                    {blockingErr && (
+                      <div className="mt-2 flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{blockingErr}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </>
           )}
 
           {/* Transcription Service */}

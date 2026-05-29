@@ -156,4 +156,7 @@ class VectorStoreFactory:
             db=db,
             ai_service=ai_service,
             embedding_service=embedding_service,
+            query_service=kwargs.get('query_service'),
+            keywords_service=kwargs.get('keywords_service'),
+            vlm_service=kwargs.get('vlm_service'),
         )

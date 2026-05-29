@@ -27,6 +27,21 @@ class Silo(Base):
     embedding_service = relationship('EmbeddingService', uselist=False)
     indexing_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
     indexing_service = relationship('AIService', uselist=False, foreign_keys=[indexing_service_id])
+
+    # LightRAG 2026.05 role-specific LLM configuration. Each role is an
+    # independent AIService so operators can size models per task
+    # (small/fast for KEYWORDS, mid-tier for EXTRACT, large for QUERY,
+    # multimodal for VLM). ``indexing_service_id`` above is kept as a
+    # legacy alias that maps to ``extract_service_id``.
+    query_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
+    query_service = relationship('AIService', uselist=False, foreign_keys=[query_service_id])
+    extract_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
+    extract_service = relationship('AIService', uselist=False, foreign_keys=[extract_service_id])
+    keywords_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
+    keywords_service = relationship('AIService', uselist=False, foreign_keys=[keywords_service_id])
+    vlm_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
+    vlm_service = relationship('AIService', uselist=False, foreign_keys=[vlm_service_id])
+
     vector_db_type = Column(String(45), default='PGVECTOR')
 
     lightrag_chunk_strategy = Column(String(45), nullable=True)

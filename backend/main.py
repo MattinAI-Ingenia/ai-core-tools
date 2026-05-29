@@ -124,6 +124,10 @@ async def lifespan(app: FastAPI):
         from services.file_cleanup_worker import start_file_cleanup_worker
         app.state.file_cleanup_task = start_file_cleanup_worker()
 
+        # Initialize pricing catalog from provider APIs
+        from startup_tasks import initialize_pricing_catalog
+        await initialize_pricing_catalog()
+
         print("✅ Application startup complete")
     except Exception as e:
         logger.error(f"❌ Error during startup: {e}", exc_info=True)

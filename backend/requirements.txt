@@ -203,5 +203,5 @@ yaql==3.1.0
 yarl==1.20.1
 zipp==3.23.0
 zstandard==0.23.0
-lightrag-hku[offline-storage]==1.4.16
+lightrag-hku[offline-storage]==1.5.0rc3
 neo4j>=5.0.0

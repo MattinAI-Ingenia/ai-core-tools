@@ -100,10 +100,11 @@ class QdrantStore(VectorStoreInterface):
         )
     
     def index_documents(
-        self, 
-        collection_name: str, 
-        documents: List[Document], 
-        embedding_service=None
+        self,
+        collection_name: str,
+        documents: List[Document],
+        embedding_service=None,
+        progress_callback=None,
     ) -> None:
         """
         Index documents into Qdrant collection.

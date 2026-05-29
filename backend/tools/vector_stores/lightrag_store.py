@@ -1,7 +1,7 @@
 """LightRAG implementation of the vector store interface.
 
 This module provides a LightRAG-backed implementation of
-:class:`VectorStoreInterface`, wrapping ``lightrag-hku==1.4.16``'s embedded
+:class:`VectorStoreInterface`, wrapping ``lightrag-hku==1.5.0rc3``'s embedded
 Python API behind the same abstract interface used by PGVectorStore and
 QdrantStore.
 
@@ -9,7 +9,7 @@ All ``lightrag`` imports are **lazy** (inside methods) so this file is
 importable even when ``lightrag-hku`` is not installed.
 
 Note: Requires ``lightrag-hku`` and its storage extras:
-    pip install 'lightrag-hku[offline-storage]==1.4.16'
+    pip install 'lightrag-hku[offline-storage]==1.5.0rc3'
 """
 
 from __future__ import annotations
@@ -35,12 +35,50 @@ logger = logging.getLogger(__name__)
 _LIGHTRAG_MODES = frozenset({"local", "global", "hybrid", "naive", "mix", "bypass"})
 
 
+async def _ainsert_with_progress(rag, texts, progress_callback=None):
+    """Run rag.ainsert with optional sub-document progress reporting.
+
+    Polls pipeline_status every 0.5s while ainsert runs.  Falls back
+    gracefully if the namespace isn't available.
+    """
+    if progress_callback is None:
+        await rag.ainsert(texts)
+        return
+
+    total = len(texts)
+
+    async def _poll():
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                from lightrag.kg.shared_storage import get_namespace_data
+                workspace = getattr(rag, 'workspace', None)
+                status = await get_namespace_data("pipeline_status", workspace=workspace)
+                cur = status.get("cur_batch", 0)
+                batches = max(1, status.get("batchs", 1))
+                progress_callback(min(total - 1, int(total * cur / batches)))
+            except Exception:
+                pass  # polling is best-effort
+
+    poll_task = asyncio.create_task(_poll())
+    try:
+        await rag.ainsert(texts)
+    finally:
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
+
+    progress_callback(total)
+
+
 def _run_async(coro):
     """Run an async coroutine from synchronous code.
 
-    If an event loop is already running (e.g. inside Jupyter or an async
-    framework), this falls back to ``asyncio.ensure_future`` + a new thread
-    so we never block the running loop.
+    Reuses the current thread's event loop when available, so that Neo4j and
+    other async clients that bind futures to a specific loop stay on the same
+    loop across multiple calls (avoids "Future attached to a different loop").
+
+    If an event loop is already running (e.g. inside an async FastAPI handler),
+    offloads to a fresh worker thread instead to avoid blocking.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -48,7 +86,18 @@ def _run_async(coro):
         loop = None
 
     if loop is None:
-        return asyncio.run(coro)
+        # Synchronous context (e.g. a background threading.Thread).
+        # Prefer the thread's own persistent loop so all coroutines within this
+        # thread share one loop — keeps Neo4j connections consistent.
+        try:
+            thread_loop = asyncio.get_event_loop()
+            if thread_loop.is_closed():
+                raise RuntimeError("loop is closed")
+        except RuntimeError:
+            thread_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(thread_loop)
+
+        return thread_loop.run_until_complete(coro)
 
     # An event loop is already running — offload to a new thread.
     import concurrent.futures
@@ -140,9 +189,21 @@ class LightRAGStore(VectorStoreInterface):
         ai_service,
         embedding_service,
         workspace_prefix: str = "silo",
+        *,
+        query_service=None,
+        keywords_service=None,
+        vlm_service=None,
     ):
         self.db = db
+        # ``ai_service`` is the legacy single-LLM parameter — it acts as the
+        # EXTRACT role and as a fallback for QUERY/KEYWORDS when those are
+        # not configured. The new role-specific services let callers
+        # override each role independently.
         self.ai_service = ai_service
+        self.extract_service = ai_service
+        self.query_service = query_service
+        self.keywords_service = keywords_service
+        self.vlm_service = vlm_service
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
         self._rag_instances: Dict[str, Any] = {}
@@ -165,19 +226,34 @@ class LightRAGStore(VectorStoreInterface):
         from tools.vector_stores.lightrag.adapters import (
             build_embedding_func,
             build_llm_model_func,
+            build_role_llm_configs,
         )
         from tools.vector_stores.lightrag.storage_config import (
             build_storage_config,
         )
 
         storage_cfg = build_storage_config()
-        llm_func = build_llm_model_func(self.ai_service)
+
+        # Base LLM callable — used as fallback for any role not explicitly
+        # configured in ``role_llm_configs``.
+        base_llm_func = build_llm_model_func(self.extract_service)
+
+        # Build per-role LLM overrides (extract/keyword/query/vlm).
+        # Roles without a dedicated AIService are omitted from the dict;
+        # LightRAG automatically falls back to ``llm_model_func`` for those.
+        role_configs = build_role_llm_configs(
+            extract_service=self.extract_service,
+            query_service=self.query_service,
+            keywords_service=self.keywords_service,
+            vlm_service=self.vlm_service,
+        )
         emb_func = build_embedding_func(self.embedding_service)
 
         rag = LightRAG(
             working_dir=self._working_dir,
             workspace=collection_name,
-            llm_model_func=llm_func,
+            llm_model_func=base_llm_func,
+            role_llm_configs=role_configs,
             embedding_func=emb_func,
             graph_storage=storage_cfg["graph_storage"],
             vector_storage=storage_cfg["vector_storage"],
@@ -201,6 +277,7 @@ class LightRAGStore(VectorStoreInterface):
         collection_name: str,
         documents: List[Document],
         embedding_service=None,
+        progress_callback=None,
     ) -> None:
         if not documents:
             return
@@ -218,7 +295,7 @@ class LightRAGStore(VectorStoreInterface):
             logger.debug("No non-empty texts to index; skipping.")
             return
 
-        _run_async(rag.ainsert(texts))
+        _run_async(_ainsert_with_progress(rag, texts, progress_callback))
         logger.info(
             "Successfully indexed %d texts into workspace '%s'",
             len(texts),

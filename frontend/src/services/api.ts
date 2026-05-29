@@ -1358,14 +1358,14 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`);
   }
 
-  async createRepository(appId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number }) {
+  async createRepository(appId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number; indexing_service_id?: number }) {
     return this.request(`/internal/apps/${appId}/repositories/`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateRepository(appId: number, repositoryId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number }) {
+  async updateRepository(appId: number, repositoryId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number; indexing_service_id?: number }) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -1424,6 +1424,38 @@ class ApiService {
       console.error('API: Upload failed:', error);
       throw error;
     }
+  }
+
+  async getIngestionSessions(appId: number, siloId: number) {
+    return this.request(`/internal/apps/${appId}/silos/${siloId}/ingestion-sessions`);
+  }
+
+  async getIngestionStatus(appId: number, repositoryId: number): Promise<{ is_indexing: boolean; active_session_id: string | null }> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/ingestion-status`);
+  }
+
+  async estimateUploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {
+    const formData = new FormData();
+    files.forEach(file => {
+      formData.append('files', file);
+    });
+
+    if (folderId !== undefined && folderId !== null) {
+      formData.append('folder_id', folderId.toString());
+    }
+
+    const token = this.getAuthToken();
+    const headers: Record<string, string> = {};
+
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources/estimate`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
   }
 
   async deleteResource(appId: number, repositoryId: number, resourceId: number) {
