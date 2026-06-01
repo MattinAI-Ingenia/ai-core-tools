@@ -37,13 +37,13 @@ class ConfigService {
     const runtimeConfig = (globalThis as any).__RUNTIME_CONFIG__;
     
     // Fallback chain: runtime config -> build-time env vars -> default.
-    // Uses ?? (nullish coalescing) so an explicit empty string is respected —
-    // empty means "same origin as the page", which is what Caddy reverse-proxy
-    // setups rely on to avoid CORS.
-    const baseUrl = runtimeConfig?.VITE_API_BASE_URL ??
-                   import.meta.env.VITE_API_BASE_URL ??
-                   import.meta.env.VITE_API_URL ??
-                   'http://localhost:8000';
+    // Use `||` for the runtime value so an empty string placeholder falls
+    // through to the build-time env (`import.meta.env.VITE_API_BASE_URL`).
+    // This preserves Docker/runtime overwrite behavior while allowing local
+    // dev `.env` values to take precedence when `public/config.js` is empty.
+    const baseUrl = (runtimeConfig?.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE_URL) ||
+             import.meta.env.VITE_API_URL ||
+             'http://localhost:8000';
     
     return {
       baseUrl,
