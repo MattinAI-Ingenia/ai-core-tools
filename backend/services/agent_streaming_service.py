@@ -30,6 +30,52 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _emit_monitoring_log(
+    agent_id: int,
+    monitoring_handler,
+    monitoring_config: dict | None,
+    log_fn,
+) -> None:
+    """Emit the [Monitoring] log line, filtering to only selected metrics.
+
+    Args:
+        agent_id: The agent being monitored.
+        monitoring_handler: UsageMetadataCallbackHandler instance.
+        monitoring_config: The ``config`` dict from the Monitoring middleware
+            entity, or None.  Absent or None means all metrics enabled.
+        log_fn: callable used for logging (e.g. logger.info).
+    """
+    try:
+        usage_by_model = monitoring_handler.usage_metadata
+        metrics_cfg: dict = (monitoring_config or {}).get("metrics", {})
+
+        # Default-on: absent key => metric is enabled
+        def enabled(key: str) -> bool:
+            return metrics_cfg.get(key, True)
+
+        parts: list[str] = [f"[Monitoring] agent_id={agent_id}"]
+
+        if enabled("models"):
+            parts.append(f"models={list(usage_by_model.keys())}")
+        if enabled("input_tokens"):
+            total = sum(u.get("input_tokens", 0) for u in usage_by_model.values())
+            parts.append(f"input_tokens={total}")
+        if enabled("output_tokens"):
+            total = sum(u.get("output_tokens", 0) for u in usage_by_model.values())
+            parts.append(f"output_tokens={total}")
+        if enabled("total_tokens"):
+            total = sum(u.get("total_tokens", 0) for u in usage_by_model.values())
+            parts.append(f"total_tokens={total}")
+        if enabled("llm_calls"):
+            parts.append(f"llm_calls={len(usage_by_model)}")
+
+        if len(parts) > 1:  # more than just the prefix
+            log_fn(" | ".join(parts))
+    except Exception as monitor_err:
+        import logging
+        logging.getLogger(__name__).warning(f"Error reading monitoring metrics: {monitor_err}")
+
+
 class AgentStreamingService:
     """Service for streaming agent responses via Server-Sent Events."""
 
@@ -258,21 +304,12 @@ class AgentStreamingService:
 
                 # Log usage metrics if monitoring is enabled
                 if monitoring_handler is not None:
-                    try:
-                        usage_by_model = monitoring_handler.usage_metadata
-                        total_input = sum(u.get('input_tokens', 0) for u in usage_by_model.values())
-                        total_output = sum(u.get('output_tokens', 0) for u in usage_by_model.values())
-                        total_tokens = sum(u.get('total_tokens', 0) for u in usage_by_model.values())
-                        logger.info(
-                            f"[Monitoring] agent_id={ctx.fresh_agent.agent_id} | "
-                            f"models={list(usage_by_model.keys())} | "
-                            f"input_tokens={total_input} | "
-                            f"output_tokens={total_output} | "
-                            f"total_tokens={total_tokens} | "
-                            f"llm_calls={len(usage_by_model)}"
-                        )
-                    except Exception as monitor_err:
-                        logger.warning(f"Error reading monitoring metrics: {monitor_err}")
+                    monitoring_mw_config = None
+                    for _assoc in (getattr(ctx.fresh_agent, 'middleware_associations', None) or []):
+                        if _assoc.middleware and _assoc.middleware.middleware_type.value == 'monitoring':
+                            monitoring_mw_config = _assoc.middleware.config or {}
+                            break
+                    _emit_monitoring_log(ctx.fresh_agent.agent_id, monitoring_handler, monitoring_mw_config, logger.info)
 
                 result = await self.execution_service._finalize_turn(
                     ctx, accumulated_content, effective_db
@@ -491,21 +528,12 @@ class AgentStreamingService:
             else:
                 # Log usage metrics if monitoring is enabled
                 if monitoring_handler is not None:
-                    try:
-                        usage_by_model = monitoring_handler.usage_metadata
-                        total_input = sum(u.get('input_tokens', 0) for u in usage_by_model.values())
-                        total_output = sum(u.get('output_tokens', 0) for u in usage_by_model.values())
-                        total_tokens = sum(u.get('total_tokens', 0) for u in usage_by_model.values())
-                        logger.info(
-                            f"[Monitoring] agent_id={ctx.fresh_agent.agent_id} | "
-                            f"models={list(usage_by_model.keys())} | "
-                            f"input_tokens={total_input} | "
-                            f"output_tokens={total_output} | "
-                            f"total_tokens={total_tokens} | "
-                            f"llm_calls={len(usage_by_model)}"
-                        )
-                    except Exception as monitor_err:
-                        logger.warning(f"Error reading monitoring metrics: {monitor_err}")
+                    monitoring_mw_config = None
+                    for _assoc in (getattr(ctx.fresh_agent, 'middleware_associations', None) or []):
+                        if _assoc.middleware and _assoc.middleware.middleware_type.value == 'monitoring':
+                            monitoring_mw_config = _assoc.middleware.config or {}
+                            break
+                    _emit_monitoring_log(ctx.fresh_agent.agent_id, monitoring_handler, monitoring_mw_config, logger.info)
 
                 # 6. Normal finalization
                 result = await self.execution_service._finalize_turn(

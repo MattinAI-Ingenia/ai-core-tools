@@ -386,6 +386,12 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                 else:
                     logger.warning(f"HumanInTheLoopMiddleware skipped for agent {agent.agent_id}: 'interrupt_on' config is empty")
             
+            elif mw_type == 'guardrails':
+                from tools.middleware.guardrails import GuardrailsMiddleware
+                mw_instance = GuardrailsMiddleware(config=mw_config)
+                middleware.append(mw_instance)
+                logger.info(f"GuardrailsMiddleware enabled for agent {agent.agent_id}")
+
             else:
                 logger.warning(f"Unknown middleware type '{mw_type}' for agent {agent.agent_id} — skipped")
 

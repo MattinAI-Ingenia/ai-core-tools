@@ -13,6 +13,7 @@ class MiddlewareType(enum.Enum):
     PII = "pii"
     HUMAN_IN_THE_LOOP = "human_in_the_loop"
     CUSTOM = "custom"
+    GUARDRAILS = "guardrails"
 
 
 class Middleware(Base):

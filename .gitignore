@@ -56,3 +56,8 @@ plans/
 
 nginx/
 develop/
+
+# Spec-kit
+.github/agents/speckit.*
+prompts/
+.specify/
