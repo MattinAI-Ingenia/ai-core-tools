@@ -440,3 +440,9 @@ Key variables to set (see `CLAUDE.md` for full list):
 - API Docs (Public): http://localhost:8000/docs/public
 - Frontend Dev: http://localhost:5173
 - Full documentation: `docs/` directory
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan:
+`specs/001-guardrails-monitoring-middlewares/plan.md`
+<!-- SPECKIT END -->
