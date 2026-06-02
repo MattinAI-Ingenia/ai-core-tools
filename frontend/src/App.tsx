@@ -25,8 +25,9 @@ import type { LibraryConfig } from './core/types';
 const runtimeConfig = (globalThis as unknown as { __RUNTIME_CONFIG__?: Record<string, string> }).__RUNTIME_CONFIG__;
 
 const getConfig = (key: string, fallback: string = ''): string => {
-  // Uses ?? so an explicit empty string (same-origin via reverse proxy) is respected.
-  return runtimeConfig?.[key] ?? import.meta.env[key] ?? fallback;
+  // Uses || so an empty placeholder in public/config.js (local dev) falls through
+  // to the build-time env var. Matches the same behavior as ConfigService.getDefaultApiConfig().
+  return runtimeConfig?.[key] || import.meta.env[key] || fallback;
 };
 
 // Demo configuration for the base application
