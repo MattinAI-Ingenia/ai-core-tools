@@ -22,6 +22,7 @@ const MIDDLEWARE_TYPE_LABELS: Record<string, string> = {
     tool_call_limit: 'Tool Call Limit',
     pii: 'PII Detection',
     human_in_the_loop: 'Human in the Loop',
+    guardrails: 'Guardrails',
     custom: 'Custom',
 };
 
