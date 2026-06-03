@@ -845,7 +845,16 @@ async def stream_ingestion_progress(
             logger.error("SSE error for session %s: %s", session_id, e)
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
         finally:
-            IngestionProgressManager.cleanup_session(session_id)
+            # Keep active sessions in memory if the client disconnects so the
+            # frontend can reconnect (refresh/navigation) and keep the UI lock.
+            progress = IngestionProgressManager.get_progress(session_id)
+            if progress and progress.processed_chunks >= progress.total_chunks:
+                IngestionProgressManager.cleanup_session(session_id)
+            else:
+                logger.info(
+                    "Retaining ingestion session %s for potential reconnection",
+                    session_id,
+                )
 
     return StreamingResponse(
         event_generator(),

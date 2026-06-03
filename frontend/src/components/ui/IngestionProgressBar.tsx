@@ -57,7 +57,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   }
 
   // Error with no data yet — show a dedicated error state
-  if (error && !isConnected && !progress && !isComplete) {
+  if (error && error !== 'Connection lost' && !isConnected && !progress && !isComplete) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
         <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />

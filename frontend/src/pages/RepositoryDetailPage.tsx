@@ -560,6 +560,14 @@ const RepositoryDetailPage: React.FC = () => {
   // Filter media by selected folder
   const filteredMedia = filterByFolder(repository?.media, selectedFolderId);
 
+  // Keep uploads blocked while any resource is still indexing, even if the
+  // SSE session is temporarily disconnected.
+  const hasIndexingResources = (repository?.resources ?? []).some(
+    (resource) => resource.status === 'indexing',
+  );
+  const indexingInProgress = isIndexing || hasIndexingResources;
+  const uploadDisabled = uploading || estimatingUpload || indexingInProgress;
+
   const isEmpty =
     filteredResources.length === 0 && filteredMedia.length === 0;
 
@@ -765,12 +773,12 @@ const RepositoryDetailPage: React.FC = () => {
             <>
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploading || estimatingUpload || isIndexing}
-                title={isIndexing ? 'Indexing in progress — please wait' : undefined}
+                disabled={uploadDisabled}
+                title={indexingInProgress ? 'Indexing in progress — please wait' : undefined}
                 className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
               >
-                <UploadButtonIcon uploading={uploading || estimatingUpload} indexing={isIndexing} />
-                {isIndexing ? 'Indexing…' : 'Upload Files'}
+                <UploadButtonIcon uploading={uploading || estimatingUpload} indexing={indexingInProgress} />
+                {indexingInProgress ? 'Indexing…' : 'Upload Files'}
               </button>
 
               <button
@@ -880,11 +888,11 @@ const RepositoryDetailPage: React.FC = () => {
                   <div className="flex justify-center gap-3">
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading || estimatingUpload || isIndexing}
-                      title={isIndexing ? 'Indexing in progress — please wait' : undefined}
+                      disabled={uploadDisabled}
+                      title={indexingInProgress ? 'Indexing in progress — please wait' : undefined}
                       className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg disabled:opacity-50"
                     >
-                      {isIndexing ? 'Indexing…' : 'Upload Files'}
+                      {indexingInProgress ? 'Indexing…' : 'Upload Files'}
                     </button>
 
                     <button
