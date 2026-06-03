@@ -288,6 +288,8 @@ function MiddlewaresPage() {
                                     <li><strong>Model Call Limit</strong> — Caps LLM calls per run to prevent infinite loops (configurable)</li>
                                     <li><strong>Tool Call Limit</strong> — Caps tool invocations per run to prevent runaway execution (configurable)</li>
                                     <li><strong>PII Detection</strong> — Redacts personal data before the LLM and restores it in responses</li>
+                                    <li><strong>Human in the Loop</strong> — Requires explicit human approval/edit/reject before selected tools run</li>
+                                    <li><strong>Guardrails</strong> — Applies safety and policy checks on prompts and model responses</li>
                                 </ul>
                             </div>
                             <p className="mt-2 text-xs text-indigo-600 italic">
