@@ -37,6 +37,9 @@ _ISSUER = "mattin-local-auth"
 _AUDIENCE = "mattin-internal"
 
 _ACCESS_TTL_MINUTES: int = int(os.getenv("LOCAL_ACCESS_TTL_MINUTES", "15"))
+#: Exported so that auth_cookies.py can share this single source of truth
+#: for the cookie max-age without re-reading the env var independently.
+ACCESS_TTL_MINUTES: int = _ACCESS_TTL_MINUTES
 _LEEWAY_SECONDS: int = int(os.getenv("LOCAL_TOKEN_LEEWAY_SECONDS", "30"))
 
 

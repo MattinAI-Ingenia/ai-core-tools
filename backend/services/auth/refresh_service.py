@@ -53,6 +53,9 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _REFRESH_TTL_DAYS: int = int(os.getenv("LOCAL_REFRESH_TTL_DAYS", "14"))
+#: Exported so that auth_cookies.py can share this single source of truth
+#: for the cookie max-age without re-reading the env var independently.
+REFRESH_TTL_DAYS: int = _REFRESH_TTL_DAYS
 _OPAQUE_BYTES: int = 48  # yields 64 url-safe base64 chars
 
 # ---------------------------------------------------------------------------

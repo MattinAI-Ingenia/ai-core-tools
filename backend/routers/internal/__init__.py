@@ -1,4 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from middleware.csrf import enforce_csrf
 
 # Import internal routers
 # Note: Most routers are imported by apps router for /internal/apps/{app_id}/... structure
@@ -15,8 +17,10 @@ from .config import router as config_router
 from .platform_chatbot import platform_chatbot_router
 from .capabilities import router as capabilities_router
 
-# Create the main internal router
-internal_router = APIRouter()
+# CSRF double-submit protection is scoped exclusively to the internal router.
+# The public (/public/v1) and MCP (/mcp/v1) routers use API-key auth and
+# must NOT carry this dependency — see main.py for the mount points.
+internal_router = APIRouter(dependencies=[Depends(enforce_csrf)])
 
 # Include sub-routers based on frontend expectations
 # Most routes are nested under apps: /internal/apps/{app_id}/...
