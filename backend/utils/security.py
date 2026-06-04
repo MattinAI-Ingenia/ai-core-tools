@@ -1,7 +1,6 @@
 import hmac
 import hashlib
-import os
-from config import SECRET_KEY
+from utils.secret_key import get_secret_key
 
 def generate_signature(path: str, username: str) -> str:
     """
@@ -21,7 +20,7 @@ def generate_signature(path: str, username: str) -> str:
         
     message = f"{path}:{username}"
     signature = hmac.new(
-        SECRET_KEY.encode('utf-8'),
+        get_secret_key().encode('utf-8'),
         message.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()

@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, List, Optional, Union
 from utils.logger import get_logger
 from utils.error_handlers import ValidationError
+from utils.secret_key import get_secret_key
 
 logger = get_logger(__name__)
 
@@ -213,7 +214,7 @@ class Config:
                 'PERMANENT_SESSION_LIFETIME_MINUTES',
                 int(Config.DEFAULTS['PERMANENT_SESSION_LIFETIME_MINUTES'])
             ),
-            'SECRET_KEY': Config.get_env_var('SECRET_KEY', required=False) or 'your-secret-key-SXSCDSDASD',
+            'SECRET_KEY': get_secret_key(),
             'TMP_PERSISTENT_TTL_DAYS': Config.get_int_env_var(
                 'TMP_PERSISTENT_TTL_DAYS',
                 int(Config.DEFAULTS['TMP_PERSISTENT_TTL_DAYS']),

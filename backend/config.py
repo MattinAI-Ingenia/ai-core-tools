@@ -5,6 +5,8 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+from utils.secret_key import get_secret_key  # noqa: E402 – must follow load_dotenv()
+
 class ClientConfig(BaseModel):
     client_id: str
     client_name: str
@@ -31,7 +33,13 @@ def load_client_config() -> ClientConfig:
 CLIENT_CONFIG = load_client_config()
 
 DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URI', 'postgresql://iacoretoolsdev:iacoretoolsdev@localhost:5432/iacoretoolsdev')
-SECRET_KEY = os.getenv('SECRET_KEY', 'supersecret')
+
+# SECRET_KEY has no insecure default. get_secret_key() validates and raises
+# RuntimeError if the value is absent, too short, or a known weak default.
+# Module-level evaluation means any process that imports config without a
+# valid SECRET_KEY in the env will fail immediately — which is the intended
+# fail-fast behaviour. Tests set this via pytest-env in pyproject.toml.
+SECRET_KEY: str = get_secret_key()
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')

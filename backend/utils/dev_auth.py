@@ -10,7 +10,7 @@ SECURITY WARNING: Only use in development environments with OIDC_ENABLED=false
 import jwt
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
-from config import SECRET_KEY
+from utils.secret_key import get_secret_key
 
 # Constants for dev tokens
 JWT_ALGORITHM = "HS256"
@@ -58,8 +58,8 @@ def generate_dev_token(email: str, name: str = None) -> Dict[str, Any]:
     }
     
     # Generate the token
-    token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
-    
+    token = jwt.encode(payload, get_secret_key(), algorithm=JWT_ALGORITHM)
+
     return {
         "access_token": token,
         "expires_at": expiration.replace(tzinfo=None).isoformat() + "Z",
@@ -84,7 +84,7 @@ def generate_local_auth_token(email: str, name: str = None) -> Dict[str, Any]:
         "iss": LOCAL_AUTH_ISSUER,
         "aud": DEV_AUDIENCE,
     }
-    token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
+    token = jwt.encode(payload, get_secret_key(), algorithm=JWT_ALGORITHM)
     return {
         "access_token": token,
         "expires_at": expiration.replace(tzinfo=None).isoformat() + "Z",
@@ -103,7 +103,7 @@ def decode_dev_token(token: str) -> Dict[str, Any]:
         try:
             return jwt.decode(
                 token,
-                SECRET_KEY,
+                get_secret_key(),
                 algorithms=[JWT_ALGORITHM],
                 audience=DEV_AUDIENCE,
                 issuer=issuer,

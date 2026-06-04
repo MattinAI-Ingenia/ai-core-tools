@@ -5,9 +5,28 @@ Handles OAuth setup and provides proper error handling for missing configuration
 
 import os
 from typing import Optional, Dict, Any
-from utils.logger import get_logger
+from dotenv import load_dotenv  # noqa: E402 – must precede env-dependent imports
+
+load_dotenv()
+
+from utils.logger import get_logger  # noqa: E402
+from utils.secret_key import get_secret_key  # noqa: E402
 
 logger = get_logger(__name__)
+
+
+def _is_secret_key_valid() -> bool:
+    """Return True when SECRET_KEY passes all validation rules.
+
+    Used by ``AuthConfig.get_config_summary`` to report key health without
+    exposing any value or raising an exception in a diagnostic path.
+    """
+    try:
+        get_secret_key()
+        return True
+    except RuntimeError:
+        return False
+
 
 class AuthConfig:
     """Centralized authentication configuration"""
@@ -28,7 +47,6 @@ class AuthConfig:
     FRONTEND_URL: str = 'http://localhost:5173'
     
     # JWT Configuration
-    JWT_SECRET: str = 'your-secret-key-SXSCDSDASD'
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     
@@ -65,8 +83,6 @@ class AuthConfig:
         # Common Configuration
         cls.FRONTEND_URL = os.getenv('FRONTEND_URL', cls.FRONTEND_URL)
         
-        # JWT Configuration
-        cls.JWT_SECRET = os.getenv('SECRET_KEY', cls.JWT_SECRET)
         cls.JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', cls.JWT_ALGORITHM)
         cls.JWT_EXPIRATION_HOURS = int(os.getenv('JWT_EXPIRATION_HOURS', cls.JWT_EXPIRATION_HOURS))
         
@@ -195,7 +211,7 @@ class AuthConfig:
             "oauth_configured": cls.is_oauth_configured(),
             "oidc_enabled": cls.OIDC_ENABLED,
             "development_mode": cls.is_development_mode(),
-            "jwt_secret_set": bool(cls.JWT_SECRET and cls.JWT_SECRET != 'your-secret-key-SXSCDSDASD'),
+            "jwt_secret_set": _is_secret_key_valid(),
             "frontend_url": cls.FRONTEND_URL,
             "dev_users_count": len(cls.DEV_USERS) if not cls.OIDC_ENABLED else 0
         }

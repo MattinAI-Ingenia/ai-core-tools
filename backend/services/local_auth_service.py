@@ -1,5 +1,4 @@
 """Local email+password authentication service for SaaS mode."""
-import os
 import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional
@@ -13,6 +12,7 @@ from repositories.user_credential_repository import UserCredentialRepository
 from repositories.subscription_repository import SubscriptionRepository
 from models.subscription import SubscriptionTier
 from utils.logger import get_logger
+from utils.secret_key import get_secret_key
 
 logger = get_logger(__name__)
 
@@ -23,8 +23,7 @@ _RESET_TOKEN_MAX_AGE_SECONDS = 1 * 3600   # 1 hour
 
 
 def _get_serializer() -> URLSafeTimedSerializer:
-    secret = os.getenv("SECRET_KEY", "change-me")
-    return URLSafeTimedSerializer(secret)
+    return URLSafeTimedSerializer(get_secret_key())
 
 
 def _hash_password(plain: str) -> str:

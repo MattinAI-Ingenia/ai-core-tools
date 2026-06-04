@@ -58,6 +58,7 @@ from lks_idprovider_fastapi.dependencies import get_default_provider
 
 from utils.logger import get_logger
 from utils.auth_config import AuthConfig
+from utils.secret_key import validate_secret_key
 from deployment_mode import is_saas_mode, validate_saas_env
 
 logger = get_logger(__name__)
@@ -69,6 +70,10 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan (startup and shutdown)"""
     # Startup
     try:
+        # Fail fast if SECRET_KEY is absent, too short, or a known weak default.
+        # This must run before any provider init or DB work.
+        validate_secret_key()
+
         # Validate SaaS mode environment variables early (before anything else)
         if is_saas_mode():
             validate_saas_env()
