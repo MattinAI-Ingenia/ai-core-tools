@@ -1,5 +1,7 @@
 // API Service - Think of this like your backend services!
 import { configService } from '../core/ConfigService';
+import { authService } from './auth';
+import { getCsrfToken } from './cookies';
 import type { StreamEvent } from '../types/streaming';
 import type {
   MarketplaceCatalogParams,
@@ -26,97 +28,189 @@ import type {
 
 type ConflictMode = 'fail' | 'rename' | 'override';
 
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * Auth-mode awareness.
+ *
+ * DeploymentModeContext owns `authMode` but api.ts is a plain class (not a
+ * React hook) and cannot read React context.  The context writes its resolved
+ * value here once via `setApiAuthMode()` so every subsequent request is
+ * correctly branched without coupling the service to React.
+ *
+ * Default is derived synchronously from the runtime/env OIDC flag so that
+ * early requests (e.g. CapabilitiesContext on mount) already use the correct
+ * auth mode before DeploymentModeContext resolves /internal/config.
+ * DeploymentModeContext calls setApiAuthMode() to authoritatively correct it.
+ */
+const _rc = (globalThis as Record<string, unknown>).__RUNTIME_CONFIG__ as Record<string, string> | undefined;
+const _oidcDefault = _rc?.VITE_OIDC_ENABLED === undefined
+  ? import.meta.env.VITE_OIDC_ENABLED === 'true'
+  : _rc.VITE_OIDC_ENABLED === 'true';
+let _apiAuthMode: 'oidc' | 'local' = _oidcDefault ? 'oidc' : 'local';
+
+export function setApiAuthMode(mode: 'oidc' | 'local'): void {
+  _apiAuthMode = mode;
+}
+
 class ApiService {
   private get baseURL(): string {
     return configService.getApiBaseUrl();
   }
 
-  private getAuthToken(): string | null {
-    // Get token from localStorage (same as auth service)
-    const token = localStorage.getItem('auth_token');
-    return token;
+  /**
+   * Single silent-refresh guard.
+   * When a request 401s we attempt exactly ONE refresh.  While the refresh is
+   * in-flight all parallel requests that also 401 wait for the same promise so
+   * we never issue duplicate refresh calls.
+   *
+   * The `isRefreshEndpoint` flag is threaded through `request()` to prevent
+   * the refresh call or the retried request from recursing.
+   */
+  private _refreshPromise: Promise<boolean> | null = null;
+
+  private async _doRefresh(): Promise<boolean> {
+    if (!this._refreshPromise) {
+      this._refreshPromise = authService.refresh().finally(() => {
+        this._refreshPromise = null;
+      });
+    }
+    return this._refreshPromise;
   }
 
-  private prepareHeaders(options: RequestInit): Record<string, string> {
+  /**
+   * Clears all client-side auth state and redirects to /login.
+   * Called when a refresh fails or a retried request still 401s.
+   */
+  private clearClientAuthAndRedirect(): void {
+    // This path is only reachable in LOCAL mode (OIDC 401s throw earlier), so
+    // clear the server-side httpOnly session cookies via logout() rather than
+    // the OIDC-only clearAuth(). Best-effort; always redirect regardless.
+    authService.logout().catch(() => {}).finally(() => {
+      if (typeof globalThis !== 'undefined' && globalThis.location) {
+        globalThis.location.href = '/login';
+      }
+    });
+  }
+
+  /**
+   * Builds headers that are shared by both the central request() and the
+   * inline fetch() helpers used for blob/stream/upload responses.
+   *
+   * For LOCAL mode: cookies carry auth; CSRF header on mutating calls only.
+   * For OIDC mode: Authorization: Bearer <oidc_token>; no CSRF.
+   */
+  private buildAuthHeaders(method: string | undefined, isFormData: boolean): Record<string, string> {
     const headers: Record<string, string> = {};
 
-    // Only set Content-Type if not FormData (browser will set it automatically for FormData)
-    if (!(options.body instanceof FormData)) {
+    if (!isFormData) {
       headers['Content-Type'] = 'application/json';
     }
 
-    // Use token from auth service instead of hardcoded
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    const effectiveMethod = (method ?? 'GET').toUpperCase();
+
+    if (_apiAuthMode === 'oidc') {
+      const token = authService.getOIDCToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+    } else {
+      // LOCAL — cookies carry auth; attach CSRF on mutating requests
+      if (MUTATING_METHODS.has(effectiveMethod)) {
+        const csrf = getCsrfToken();
+        if (csrf) {
+          headers['X-CSRF-Token'] = csrf;
+        }
+      }
     }
 
     return headers;
   }
 
-  private extractErrorMessage(errorData: any): string | null {
-    if (!errorData) return null;
+  private extractErrorMessage(errorData: unknown): string | null {
+    if (!errorData || typeof errorData !== 'object') return null;
+    const data = errorData as Record<string, unknown>;
 
-    if (errorData.error) {
-      return errorData.error;
+    if (typeof data['error'] === 'string') return data['error'];
+    if (data['detail'] !== undefined) {
+      return typeof data['detail'] === 'string'
+        ? data['detail']
+        : JSON.stringify(data['detail']);
     }
-    if (errorData.detail) {
-      return typeof errorData.detail === 'string'
-        ? errorData.detail
-        : JSON.stringify(errorData.detail);
-    }
-    if (errorData.message) {
-      return errorData.message;
-    }
+    if (typeof data['message'] === 'string') return data['message'];
     return null;
   }
 
   private async handleResponseError(response: Response): Promise<never> {
-    // Handle 401 Unauthorized - token expired or invalid
-    if (response.status === 401) {
-      // Clear invalid token
-      localStorage.removeItem('auth_token');
-      localStorage.removeItem('auth_expires');
-
-      // Don't redirect - let the app handle auth state via ProtectedRoute
-      throw new Error('Authentication required');
-    }
-
-    // Try to parse error message from response
     let errorMessage = `API Error: ${response.status} ${response.statusText}`;
 
     try {
-      const errorData = await response.json();
+      const errorData: unknown = await response.json();
       const extracted = this.extractErrorMessage(errorData);
       if (extracted) {
         errorMessage = extracted;
       }
     } catch (error) {
-      // Log error for debugging but continue to check status code
       console.debug('Failed to parse error response JSON:', error);
-
-      // Failed to parse JSON, check for specific status codes
       if (response.status === 403) {
-        errorMessage = "You do not have permission to perform this action.";
+        errorMessage = 'You do not have permission to perform this action.';
       }
     }
 
     throw new Error(errorMessage);
   }
 
-  async request(endpoint: string, options: RequestInit = {}) {
+  async request(
+    endpoint: string,
+    options: RequestInit = {},
+    _isRetryAfterRefresh = false,
+    _requestOptions: { suppressAuthRedirect?: boolean } = {},
+  ): Promise<unknown> {
     const url = `${this.baseURL}${endpoint}`;
-    const defaultHeaders = this.prepareHeaders(options);
+    const authHeaders = this.buildAuthHeaders(
+      typeof options.method === 'string' ? options.method : 'GET',
+      options.body instanceof FormData,
+    );
 
     const config: RequestInit = {
-      headers: {
-        ...defaultHeaders,
-        ...options.headers,
-      },
       ...options,
+      credentials: 'include',
+      headers: {
+        ...authHeaders,
+        ...(options.headers as Record<string, string> | undefined),
+      },
     };
 
     const response = await fetch(url, config);
+
+    if (response.status === 401) {
+      // When the caller opts out of redirect handling (e.g. probing/optional
+      // calls like CapabilitiesContext), just throw so the caller's catch block
+      // handles it gracefully without bouncing the user to /login.
+      if (_requestOptions.suppressAuthRedirect) {
+        throw new Error('Authentication required');
+      }
+
+      // In OIDC mode, do NOT attempt a LOCAL refresh or hard-redirect.
+      // oidc-client-ts / OIDCProvider / ProtectedRoute own re-auth in that mode.
+      // Note: stream-helper paths (chatWithAgentStream etc.) that bypass
+      // request() will not benefit from this guard — acceptable limitation.
+      if (_apiAuthMode === 'oidc') {
+        throw new Error('Authentication required');
+      }
+
+      // LOCAL mode: guard against recursion and the refresh endpoint itself.
+      const isRefreshEndpoint = endpoint.includes('/auth/refresh');
+      if (!_isRetryAfterRefresh && !isRefreshEndpoint) {
+        const refreshed = await this._doRefresh();
+        if (refreshed) {
+          // Rebuild CSRF header (cookie may have rotated) and retry once.
+          return this.request(endpoint, options, true, _requestOptions);
+        }
+      }
+      this.clearClientAuthAndRedirect();
+      throw new Error('Authentication required');
+    }
 
     if (!response.ok) {
       await this.handleResponseError(response);
@@ -268,12 +362,7 @@ class ApiService {
     includeMCPConfigs: boolean = true,
     includeAgentTools: boolean = true
   ): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const params = new URLSearchParams({
       include_ai_service: String(includeAIService),
@@ -287,6 +376,7 @@ class ApiService {
       `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/export?${params}`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -310,12 +400,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/agents/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -333,6 +418,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -404,17 +490,13 @@ class ApiService {
   }
 
   async exportAIService(appId: number, serviceId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/ai-services/${serviceId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -435,12 +517,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/ai-services/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -449,6 +526,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -508,17 +586,13 @@ class ApiService {
   }
 
   async exportEmbeddingService(appId: number, serviceId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/embedding-services/${serviceId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -539,12 +613,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/embedding-services/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -553,6 +622,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -607,17 +677,13 @@ class ApiService {
   }
 
   async exportMCPConfig(appId: number, configId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/mcp-configs/${configId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -638,12 +704,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/mcp-configs/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -652,6 +713,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -659,9 +721,9 @@ class ApiService {
     if (!response.ok) {
       await this.handleResponseError(response);
     }
-  
+
     return response.json();
-}
+  }
   // ==================== SKILLS ====================
   async getSkills(appId: number) {
     return this.request(`/internal/apps/${appId}/skills/`);
@@ -800,17 +862,13 @@ class ApiService {
   }
 
   async exportOutputParser(appId: number, parserId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/output-parsers/${parserId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -831,12 +889,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/output-parsers/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -845,6 +898,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -905,32 +959,25 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
-    
+
     files.forEach(file => formData.append('files', file));
-    
+
     if (folderId !== undefined && folderId !== null) {
       formData.append('folder_id', folderId.toString());
     }
-    
+
     if (config?.forced_language) formData.append('forced_language', config.forced_language);
     if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-        
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
+    // CSRF header is handled by request() via buildAuthHeaders
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media`, {
       method: 'POST',
-      headers: headers,
       body: formData,
     });
   }
-  
+
   async addYouTube(appId: number, repositoryId: number, url: string, folderId?: number, config?: {
     forced_language?: string;
     chunk_min_duration?: number;
@@ -938,8 +985,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
 
     formData.append('url', url);
     if (folderId !== undefined && folderId !== null) {
@@ -949,14 +994,9 @@ class ApiService {
     if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
-        
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
 
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media/youtube`, {
       method: 'POST',
-      headers: headers,
       body: formData,
     });
   }
@@ -1022,17 +1062,13 @@ class ApiService {
   }
 
   async exportSilo(appId: number, siloId: number, includeDependencies: boolean = true): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/export?include_dependencies=${includeDependencies}`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -1054,12 +1090,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/silos/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -1071,6 +1102,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -1118,7 +1150,7 @@ class ApiService {
     siloId: number,
     query: string,
     limit?: number,
-    filterMetadata?: Record<string, any>,
+    filterMetadata?: Record<string, unknown>,
     searchOptions?: {
       searchType?: string;
       scoreThreshold?: number;
@@ -1127,7 +1159,7 @@ class ApiService {
       minContentLength?: number;
       maxContentLength?: number;
     },
-  ): Promise<{ data: any; serverMs: number | null }> {
+  ): Promise<{ data: unknown; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
     const body = JSON.stringify({
       query,
@@ -1144,15 +1176,14 @@ class ApiService {
       ...(searchOptions?.minContentLength != null && { min_content_length: searchOptions.minContentLength }),
       ...(searchOptions?.maxContentLength != null && { max_content_length: searchOptions.maxContentLength }),
     });
-    const options: RequestInit = { method: 'POST', body };
-    const headers = this.prepareHeaders(options);
-    const response = await fetch(url, { ...options, headers });
+    const headers = this.buildAuthHeaders('POST', false);
+    const response = await fetch(url, { method: 'POST', body, credentials: 'include', headers });
     if (!response.ok) {
       await this.handleResponseError(response);
     }
     const serverMsHeader = response.headers.get('x-server-time-ms');
     const serverMs = serverMsHeader !== null ? parseInt(serverMsHeader, 10) : null;
-    const data = await response.json();
+    const data: unknown = await response.json();
     return { data, serverMs };
   }
 
@@ -1249,51 +1280,18 @@ class ApiService {
   }
 
   async uploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {
-    console.log('API: uploadResources called with:', { appId, repositoryId, filesCount: files.length, folderId });
-    
     const formData = new FormData();
-    files.forEach(file => {
-      formData.append('files', file);
-      console.log('API: Added file to FormData:', file.name);
-    });
-    
-    // Add folder_id if provided
+    files.forEach(file => formData.append('files', file));
+
     if (folderId !== undefined && folderId !== null) {
       formData.append('folder_id', folderId.toString());
-      console.log('API: Added folder_id to FormData:', folderId);
-    } else {
-      console.log('API: No folder_id provided or folderId is null/undefined');
     }
 
-    // Get the auth token manually for this request
-    const token = this.getAuthToken();
-    console.log('API: Auth token for upload:', token ? 'Token exists' : 'No token found');
-    
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-      console.log('API: Authorization header set for upload');
-    } else {
-      console.log('API: WARNING - No token found for upload request');
-    }
-
-    console.log('API: Making upload request to:', `/internal/apps/${appId}/repositories/${repositoryId}/resources`);
-    
-    try {
-      const result = await this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
-        method: 'POST',
-        headers: headers, // Only set Authorization, let browser handle Content-Type for FormData
-        body: formData,
-      });
-      console.log('API: Upload successful:', result);
-      console.log('API: Failed files in result:', result.failed_files);
-      console.log('API: Created resources in result:', result.created_resources);
-      return result;
-    } catch (error) {
-      console.error('API: Upload failed:', error);
-      throw error;
-    }
+    // credentials + CSRF handled by request()
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
+      method: 'POST',
+      body: formData,
+    });
   }
 
   async deleteResource(appId: number, repositoryId: number, resourceId: number) {
@@ -1315,17 +1313,16 @@ class ApiService {
   }
 
   async downloadResource(appId: number, repositoryId: number, resourceId: number) {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('GET', false);
 
-    const response = await fetch(`${this.baseURL}/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}/download`, {
-      method: 'GET',
-      headers: headers,
-    });
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}/download`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`Download failed: ${response.status} ${response.statusText}`);
@@ -1394,7 +1391,7 @@ class ApiService {
     message: string,
     options: {
       files?: File[];
-      searchParams?: any;
+      searchParams?: unknown;
       conversationId?: number | null;
       onEvent: (event: StreamEvent) => void;
       signal?: AbortSignal;
@@ -1414,14 +1411,11 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/chat/stream`;
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
       signal: options.signal,
@@ -1880,14 +1874,11 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/marketplace/conversations/${conversationId}/chat/stream`;
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
       signal: options.signal,
@@ -1995,7 +1986,8 @@ class ApiService {
   async exportFullApp(appId: number): Promise<Blob> {
     const response = await fetch(`${this.baseURL}/internal/apps/${appId}/export`, {
       method: 'POST',
-      headers: this.prepareHeaders({}),
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', false),
     });
 
     if (!response.ok) {
@@ -2021,17 +2013,12 @@ class ApiService {
       params.append('new_name', newName);
     }
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    
     // Use fetch directly to avoid issues with FormData
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2048,16 +2035,11 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const url = `${this.baseURL}/internal/apps/${appId}/agents/preview-import`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2072,16 +2054,11 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const url = `${this.baseURL}/internal/apps/preview-import`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2107,12 +2084,6 @@ class ApiService {
   ) {
     const formData = new FormData();
     formData.append('file', file);
-
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
 
     const params = new URLSearchParams();
     params.append('conflict_mode', options.conflictMode);
@@ -2144,7 +2115,8 @@ class ApiService {
     const url = `${this.baseURL}/internal/apps/${appId}/agents/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2173,12 +2145,6 @@ class ApiService {
       params.append('new_name', options.newAppName);
     }
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     if (options.componentSelection) {
       formData.append(
         'component_selection_json',
@@ -2195,7 +2161,8 @@ class ApiService {
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2411,16 +2378,11 @@ class ApiService {
     options: { onEvent: (event: StreamEvent) => void; signal?: AbortSignal }
   ): Promise<void> {
     const url = `${this.baseURL}/internal/platform-chatbot/chat/stream`;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: JSON.stringify({ message, session_id: sessionId }),
       signal: options.signal,

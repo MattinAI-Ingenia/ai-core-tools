@@ -25,10 +25,6 @@ export const OIDCProvider: React.FC<OIDCProviderProps> = ({ config, children }) 
 
   useEffect(() => {
     if (config.type === 'oidc' && config.oidc?.enabled) {
-      // Clear any legacy auth tokens from localStorage when using OIDC
-      // This prevents stale tokens from causing issues
-      localStorage.removeItem('auth_token');
-      localStorage.removeItem('auth_expires');
 
       const managerConfig: UserManagerSettings = {
         authority: config.oidc.authority,
@@ -106,27 +102,22 @@ export const OIDCProvider: React.FC<OIDCProviderProps> = ({ config, children }) 
           });
       }
 
-      // Token loaded event (after login or silent renewal)
-      manager.events.addUserLoaded(user => {
+      // Handlers are captured in named consts so the cleanup can remove the
+      // SAME references (oidc-client-ts compares listeners by identity).
+      const onUserLoaded = (user: User) => {
         console.log('User token loaded/refreshed');
         setUser(user);
         authService.setOIDCToken(user);
-      });
-
-      // Token unloaded event
-      manager.events.addUserUnloaded(() => {
+      };
+      const onUserUnloaded = () => {
         console.log('User token unloaded');
         setUser(null);
         authService.clearAuth();
-      });
-
-      // Token expiring event (triggered before expiration)
-      manager.events.addAccessTokenExpiring(() => {
+      };
+      const onAccessTokenExpiring = () => {
         console.log('Access token expiring, attempting silent renewal...');
-      });
-
-      // Token expired event
-      manager.events.addAccessTokenExpired(() => {
+      };
+      const onAccessTokenExpired = () => {
         console.log('Access token expired');
         authService.clearAuth();
         // Attempt silent renewal
@@ -134,31 +125,34 @@ export const OIDCProvider: React.FC<OIDCProviderProps> = ({ config, children }) 
           console.error('Silent renewal failed:', err);
           setUser(null);
         });
-      });
-
-      // Silent renewal error event
-      manager.events.addSilentRenewError((error) => {
+      };
+      const onSilentRenewError = (error: Error) => {
         console.error('Silent renewal error:', error);
         // Clear auth and potentially redirect to login
         authService.clearAuth();
         setUser(null);
-      });
-
-      // User signed out event
-      manager.events.addUserSignedOut(() => {
+      };
+      const onUserSignedOut = () => {
         console.log('User signed out');
         authService.clearAuth();
         setUser(null);
-      });
+      };
 
-      // Cleanup function
+      manager.events.addUserLoaded(onUserLoaded);
+      manager.events.addUserUnloaded(onUserUnloaded);
+      manager.events.addAccessTokenExpiring(onAccessTokenExpiring);
+      manager.events.addAccessTokenExpired(onAccessTokenExpired);
+      manager.events.addSilentRenewError(onSilentRenewError);
+      manager.events.addUserSignedOut(onUserSignedOut);
+
+      // Cleanup function — remove the exact handler references registered above.
       return () => {
-        manager.events.removeUserLoaded(() => {});
-        manager.events.removeUserUnloaded(() => {});
-        manager.events.removeAccessTokenExpiring(() => {});
-        manager.events.removeAccessTokenExpired(() => {});
-        manager.events.removeSilentRenewError(() => {});
-        manager.events.removeUserSignedOut(() => {});
+        manager.events.removeUserLoaded(onUserLoaded);
+        manager.events.removeUserUnloaded(onUserUnloaded);
+        manager.events.removeAccessTokenExpiring(onAccessTokenExpiring);
+        manager.events.removeAccessTokenExpired(onAccessTokenExpired);
+        manager.events.removeSilentRenewError(onSilentRenewError);
+        manager.events.removeUserSignedOut(onUserSignedOut);
       };
     } else {
       // Use existing session-based auth

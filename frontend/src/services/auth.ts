@@ -1,147 +1,200 @@
 import { configService } from '../core/ConfigService';
 import type { User } from 'oidc-client-ts';
+import { getCsrfToken } from './cookies';
 
 class AuthService {
   private get baseURL(): string {
     return configService.getApiBaseUrl();
   }
-  private readonly TOKEN_KEY = 'auth_token';
-  private readonly EXPIRES_KEY = 'auth_expires';
 
-  // ==================== TOKEN MANAGEMENT ====================
-  
-  setToken(token: string, expiresAt?: string) {
-    localStorage.setItem(this.TOKEN_KEY, token);
-    if (expiresAt) {
-      localStorage.setItem(this.EXPIRES_KEY, expiresAt);
-    }
-  }
+  // ==================== OIDC BRIDGE ====================
+  // The OIDC library manages its own tokens in localStorage under oidc-client-ts
+  // keys.  We only store the access_token in the module-level variable so
+  // api.ts can read it synchronously for the Authorization: Bearer header.
+  private oidcAccessToken: string | null = null;
 
+  /**
+   * Called by OIDCProvider after a successful login or silent-renew.
+   * Stores the access_token in memory — NOT in localStorage under our own key.
+   */
   setOIDCToken(user: User) {
-    if (user.access_token) {
-      const expiresAt = user.expires_at 
-        ? new Date(user.expires_at * 1000).toISOString()
-        : undefined;
-      this.setToken(user.access_token, expiresAt);
-    }
+    this.oidcAccessToken = user.access_token ?? null;
   }
 
-  getToken(): string | null {
-    const token = localStorage.getItem(this.TOKEN_KEY);
-    const expires = localStorage.getItem(this.EXPIRES_KEY);
-    
-    if (!token) return null;
-    
-    // Check if token is expired
-    if (expires) {
-      const expiryDate = new Date(expires);
-      if (expiryDate <= new Date()) {
-        // Token is expired
-        console.warn('Token expired');
-        this.clearAuth();
-        return null;
-      }
-    }
-    
-    return token;
+  /**
+   * Returns the in-memory OIDC access token, or null when not in OIDC mode.
+   */
+  getOIDCToken(): string | null {
+    return this.oidcAccessToken;
   }
 
-  async getValidToken(): Promise<string | null> {
-    // Simply return the current token from localStorage
-    // OIDC token refresh is handled by OIDCProvider
-    return this.getToken();
+  /**
+   * Clears the in-memory OIDC token.  Called by OIDCProvider on logout / expiry.
+   */
+  clearOIDCToken() {
+    this.oidcAccessToken = null;
   }
 
+  // ==================== LEGACY STUB (no-op) ====================
+  // These no-ops keep callers compiled while the references are removed.
   clearAuth() {
-    localStorage.removeItem(this.TOKEN_KEY);
-    localStorage.removeItem(this.EXPIRES_KEY);
+    this.clearOIDCToken();
   }
 
+  /**
+   * Auth state for LOCAL mode is derived from the cookie session (checked via
+   * /internal/me), not from localStorage.  For OIDC mode the OIDC library is
+   * authoritative.  This method is therefore no longer a reliable check and
+   * callers should use UserContext.user instead.
+   */
   isAuthenticated(): boolean {
-    return this.getToken() !== null;
+    return this.oidcAccessToken !== null;
   }
 
-  // ==================== API REQUESTS ====================
+  // ==================== LOCAL AUTH ENDPOINTS ====================
 
-  private async request(endpoint: string, options: RequestInit = {}) {
-    const url = `${this.baseURL}${endpoint}`;
-    
-    const defaultHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-
-    const token = await this.getValidToken();
-    if (token) {
-      defaultHeaders['Authorization'] = `Bearer ${token}`;
-    }
-
-    const config: RequestInit = {
-      ...options,
-      headers: {
-        ...defaultHeaders,
-        ...options.headers,
-      },
-    };
-
-    try {
-      const response = await fetch(url, config);
-      
-      if (!response.ok) {
-        if (response.status === 401) {
-          // Clear auth on 401 but don't redirect
-          // Let the calling code handle the error
-          this.clearAuth();
-        }
-        
-        const errorData = await response.json().catch(
-          () => ({ detail: 'Request failed' })
-        );
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error('API request failed:', error);
-      throw error;
-    }
-  }
-
-  // ==================== AUTHENTICATION FLOW ====================
-
-  // Development mode only - fake login for testing without OIDC
-  async fakeLogin(email: string): Promise<{ access_token: string; user: any; expires_at: string }> {
-    const response = await this.request('/internal/auth/dev-login', {
+  /**
+   * POST /internal/auth/login — sets httpOnly access_token + refresh_token
+   * cookies and a readable csrf_token cookie.  Returns the user object.
+   * Never writes to localStorage.
+   */
+  async localLogin(email: string, password: string): Promise<{ user: { user_id: number; email: string; name?: string; is_admin?: boolean; is_omniadmin?: boolean } }> {
+    const url = `${this.baseURL}/internal/auth/login`;
+    const response = await fetch(url, {
       method: 'POST',
-      body: JSON.stringify({ email }),
-    });
-
-    // Store the token
-    if (response.access_token) {
-      this.setToken(response.access_token, response.expires_at);
-    }
-
-    return response;
-  }
-
-  // SaaS LOCAL mode - email+password login
-  async localLogin(email: string, password: string): Promise<{ access_token: string; user: any; expires_at: string }> {
-    const response = await this.request('/internal/auth/login', {
-      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     });
 
-    if (response.access_token) {
-      this.setToken(response.access_token, response.expires_at);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Login failed' }));
+      const detail = errorData.detail;
+      throw new Error(typeof detail === 'string' ? detail : `HTTP ${response.status}`);
     }
 
-    return response;
+    return response.json();
   }
 
-  // Get current user info (used for fake-login dev mode)
-  // In OIDC mode, user info comes from the OIDC User object
-  async getCurrentUser(): Promise<any> {
-    return this.request('/internal/me');
+  /**
+   * POST /internal/auth/logout — clears session cookies.
+   */
+  async logout(): Promise<void> {
+    const url = `${this.baseURL}/internal/auth/logout`;
+    const csrf = getCsrfToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+
+    await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+    }).catch(() => {
+      // Best-effort — even if this fails we clear local state
+    });
+  }
+
+  /**
+   * POST /internal/auth/refresh — rotates the cookie pair.
+   * Used internally by api.ts for silent-refresh on 401.
+   * Returns true on success, false on failure.
+   */
+  async refresh(): Promise<boolean> {
+    const url = `${this.baseURL}/internal/auth/refresh`;
+    const csrf = getCsrfToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * POST /internal/auth/change-password — authenticated; rotates all sessions.
+   */
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    const url = `${this.baseURL}/internal/auth/change-password`;
+    const csrf = getCsrfToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Password change failed' }));
+      const detail = errorData.detail;
+      throw new Error(typeof detail === 'string' ? detail : `HTTP ${response.status}`);
+    }
+  }
+
+  /**
+   * POST /internal/auth/set-password — unauthenticated one-time token flow.
+   * No session is created; the user must log in after this.
+   */
+  async setPassword(token: string, password: string): Promise<void> {
+    const url = `${this.baseURL}/internal/auth/set-password`;
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, password }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Set password failed' }));
+      const detail = errorData.detail;
+      throw new Error(typeof detail === 'string' ? detail : `HTTP ${response.status}`);
+    }
+  }
+
+  // ==================== SHARED ====================
+
+  /**
+   * GET /internal/me — returns the current user from the backend.
+   * Works for both cookie sessions (LOCAL) and OIDC (bearer header added
+   * by api.ts's normal request path).  Call via authService directly only
+   * for simple probing; prefer apiService for standard requests.
+   */
+  async getCurrentUser(): Promise<{ user_id: number; email: string; name?: string; is_admin?: boolean; is_omniadmin?: boolean }> {
+    const url = `${this.baseURL}/internal/me`;
+    const headers: Record<string, string> = {};
+
+    // For OIDC we attach the bearer; for LOCAL the cookie handles it.
+    const oidcToken = this.oidcAccessToken;
+    if (oidcToken) {
+      headers['Authorization'] = `Bearer ${oidcToken}`;
+    }
+
+    const response = await fetch(url, {
+      credentials: 'include',
+      headers,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    return response.json();
   }
 }
 
-export const authService = new AuthService(); 
+export const authService = new AuthService();

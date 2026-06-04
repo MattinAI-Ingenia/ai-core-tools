@@ -52,6 +52,8 @@ import RegisterPage from '../pages/RegisterPage';
 import VerifyEmailPage from '../pages/VerifyEmailPage';
 import PasswordResetRequestPage from '../pages/PasswordResetRequestPage';
 import PasswordResetPage from '../pages/PasswordResetPage';
+import SetPasswordPage from '../pages/SetPasswordPage';
+import ChangePasswordPage from '../pages/ChangePasswordPage';
 import SubscriptionPage from '../pages/SubscriptionPage';
 import SaasUserListPage from '../pages/admin/SaasUserListPage';
 import SystemAIServicesPage from '../pages/admin/SystemAIServicesPage';
@@ -162,6 +164,14 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                 <Route path="/verify-email" element={<VerifyEmailPage />} />
                 <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
                 <Route path="/password-reset" element={<PasswordResetPage />} />
+                {/* LOCAL auth: one-time token password setup (public) */}
+                <Route path="/set-password" element={<SetPasswordPage />} />
+                {/* LOCAL auth: authenticated password change */}
+                <Route path="/change-password" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <ChangePasswordPage />
+                  </ProtectedLayoutRoute>
+                } />
 
                 {/* Public landing page — handles its own redirect when not in SaaS mode */}
                 <Route path="/" element={<LandingPage />} />

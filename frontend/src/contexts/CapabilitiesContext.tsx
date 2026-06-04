@@ -31,12 +31,15 @@ export const CapabilitiesProvider: React.FC<CapabilitiesProviderProps> = ({ chil
   useEffect(() => {
     const fetchCapabilities = async () => {
       try {
-        const token = localStorage.getItem('auth_token');
-        if (!token) {
-          setIsLoading(false);
-          return;
-        }
-        const data: Capabilities = await apiService.request('/internal/capabilities');
+        // Capabilities is a probing call: if the user is unauthenticated on
+        // cold load the 401 must NOT trigger the global refresh + redirect
+        // loop.  suppressAuthRedirect lets the catch block below handle it.
+        const data = await apiService.request(
+          '/internal/capabilities',
+          {},
+          false,
+          { suppressAuthRedirect: true },
+        ) as Capabilities;
         setCapabilities(data);
       } catch {
         // Leave capabilities empty — feature gating defaults to hidden
