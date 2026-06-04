@@ -44,6 +44,16 @@ logger = get_logger(__name__)
 # HTTP methods that mutate server state and therefore require CSRF protection.
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+# Pre-session auth-entry endpoints that must NOT require a CSRF token even when
+# the browser still holds a stale ``access_token`` cookie from a previous
+# session. These are credential- or one-time-token-gated and (re)establish a
+# session by overwriting the cookies, so a matching CSRF token from a prior
+# session is both unavailable to a legitimate client and meaningless to verify.
+# Cross-site abuse is already blocked by the cookies' ``SameSite=Lax`` flag plus
+# the mandatory credential/token in the request body. Path is matched by suffix
+# so it is robust to the ``/internal`` mount prefix.
+_CSRF_EXEMPT_SUFFIXES = ("/auth/login", "/auth/set-password")
+
 # Generic error message — never reveal whether the cookie or header was absent
 # vs. mismatched, to avoid leaking information to an attacker.
 _CSRF_ERROR_MESSAGE = "CSRF validation failed"
@@ -77,6 +87,10 @@ async def enforce_csrf(
     """
     if request.method not in _MUTATING_METHODS:
         return  # Safe methods (GET, HEAD, OPTIONS) need no CSRF check.
+
+    # Pre-session auth-entry endpoints are exempt regardless of cookie state.
+    if request.url.path.endswith(_CSRF_EXEMPT_SUFFIXES):
+        return
 
     # If there is no access_token cookie the request is not a cookie session
     # (it uses Bearer or API-key auth).  Skip CSRF enforcement entirely.
