@@ -13,6 +13,8 @@ interface ActionDropdownProps {
   actions: ActionItem[];
   triggerText?: string;
   triggerIcon?: React.ReactNode;
+  /** Accessible label for the trigger button (required when the button has no visible text). */
+  triggerAriaLabel?: string;
   className?: string;
   size?: 'sm' | 'md' | 'lg';
   position?: { x: number; y: number } | null;
@@ -24,6 +26,7 @@ const ActionDropdown: React.FC<ActionDropdownProps> = ({
   actions,
   triggerText = 'Actions',
   triggerIcon = <MoreVertical className="w-4 h-4" />,
+  triggerAriaLabel,
   className = '',
   size = 'md',
   position = null,
@@ -33,6 +36,7 @@ const ActionDropdown: React.FC<ActionDropdownProps> = ({
   const [internalIsOpen, setInternalIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
 
@@ -60,12 +64,22 @@ const ActionDropdown: React.FC<ActionDropdownProps> = ({
       }
     };
 
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && isOpen) {
+        event.stopPropagation();
+        setIsOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+
     document.addEventListener('mousedown', handleClickOutside);
     window.addEventListener('scroll', handleScroll, true);
-    
+    document.addEventListener('keydown', handleKeyDown);
+
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       window.removeEventListener('scroll', handleScroll, true);
+      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [setIsOpen, isOpen]);
 
@@ -203,7 +217,11 @@ const ActionDropdown: React.FC<ActionDropdownProps> = ({
       {/* Trigger Button - only show if no external position */}
       {!position && (
         <button
+          ref={triggerRef}
           onClick={handleTriggerClick}
+          aria-haspopup="menu"
+          aria-expanded={isOpen}
+          aria-label={triggerAriaLabel}
           className={`inline-flex items-center justify-center rounded-md border border-gray-300 bg-white ${getSizeStyles()} font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2`}
         >
           {triggerIcon && <span className="mr-1">{triggerIcon}</span>}

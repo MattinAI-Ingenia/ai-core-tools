@@ -1,22 +1,35 @@
 import { apiService } from './api';
 
+export interface LocalUserCreated {
+  readonly user_id: number;
+  readonly email: string;
+  readonly name: string;
+  readonly set_password_token: string;
+  readonly expires_at: string;
+}
+
+export interface ResetLinkResult {
+  readonly set_password_token: string;
+  readonly expires_at: string;
+}
+
 export interface User {
-  user_id: number;
-  email: string;
-  name?: string;
-  created_at: string;
-  owned_apps_count: number;
-  api_keys_count: number;
-  is_active: boolean;
-  is_omniadmin?: boolean;
+  readonly user_id: number;
+  readonly email: string;
+  readonly name?: string;
+  readonly created_at: string;
+  readonly owned_apps_count: number;
+  readonly api_keys_count: number;
+  readonly is_active: boolean;
+  readonly is_omniadmin?: boolean;
 }
 
 export interface UserListResponse {
-  users: User[];
-  total: number;
-  page: number;
-  per_page: number;
-  total_pages: number;
+  readonly users: User[];
+  readonly total: number;
+  readonly page: number;
+  readonly per_page: number;
+  readonly total_pages: number;
 }
 
 export interface SystemStats {
@@ -84,6 +97,20 @@ class AdminService {
       method: 'POST',
     });
   }
+
+  async createLocalUser(email: string, name: string): Promise<LocalUserCreated> {
+    return await apiService.request(`${this.baseUrl}/users/local`, {
+      method: 'POST',
+      body: JSON.stringify({ email, name }),
+    }) as LocalUserCreated;
+  }
+
+  async issueResetLink(userId: number): Promise<ResetLinkResult> {
+    return await apiService.request(`${this.baseUrl}/users/${userId}/reset-link`, {
+      method: 'POST',
+    }) as ResetLinkResult;
+  }
+
 }
 
 export const adminService = new AdminService(); 

@@ -3,6 +3,18 @@ import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { StreamEvent } from '../types/streaming';
+
+/**
+ * Structured error thrown by every API call that returns a non-2xx response.
+ * Callers can branch reliably on the HTTP status without string-sniffing:
+ *   catch (err) { if (err instanceof ApiError && err.status === 409) ... }
+ */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 import type {
   MarketplaceCatalogParams,
   MarketplaceCatalogResponse,
@@ -142,22 +154,22 @@ class ApiService {
   }
 
   private async handleResponseError(response: Response): Promise<never> {
-    let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+    let message = `API Error: ${response.status} ${response.statusText}`;
 
     try {
       const errorData: unknown = await response.json();
       const extracted = this.extractErrorMessage(errorData);
       if (extracted) {
-        errorMessage = extracted;
+        message = extracted;
       }
     } catch (error) {
       console.debug('Failed to parse error response JSON:', error);
       if (response.status === 403) {
-        errorMessage = 'You do not have permission to perform this action.';
+        message = 'You do not have permission to perform this action.';
       }
     }
 
-    throw new Error(errorMessage);
+    throw new ApiError(message, response.status);
   }
 
   async request(
