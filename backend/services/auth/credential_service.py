@@ -98,7 +98,18 @@ class CredentialError(Exception):
 
 
 class AccountLockedError(Exception):
-    """Account temporarily locked after excessive failures.  Maps to HTTP 429."""
+    """Account temporarily locked after excessive failures.  Maps to HTTP 429.
+
+    Attributes:
+        locked_until: UTC-aware datetime at which the lockout expires.  Callers
+            should use this to populate a ``Retry-After`` response header.
+            ``None`` only when the lockout timestamp is unavailable (should not
+            occur in normal operation).
+    """
+
+    def __init__(self, message: str, locked_until: Optional[datetime] = None) -> None:
+        super().__init__(message)
+        self.locked_until: Optional[datetime] = locked_until
 
 
 class TokenError(Exception):
@@ -266,7 +277,8 @@ class CredentialService:
                 )
                 raise AccountLockedError(
                     "Account is temporarily locked due to too many failed attempts. "
-                    "Please try again later."
+                    "Please try again later.",
+                    locked_until=locked,  # UTC-aware; used for Retry-After header
                 )
 
         # Verify password off the event loop.

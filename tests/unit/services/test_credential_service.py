@@ -277,6 +277,37 @@ class TestAuthenticateLockout:
         except AccountLockedError:
             pass  # correct
 
+    @pytest.mark.asyncio
+    async def test_account_locked_error_carries_locked_until(self, db):
+        """AccountLockedError exposes locked_until so callers can set Retry-After.
+
+        Finding B fix: the exception must carry the UTC-aware expiry timestamp
+        so the HTTP handler can compute Retry-After without an extra DB round-trip.
+        """
+        future_lock = datetime.now(timezone.utc) + timedelta(minutes=5)
+        user = _make_user(db)
+        _make_credential(
+            db, user,
+            plain_password="correcthorsebatterystaple",
+            locked_until=future_lock,
+        )
+
+        exc_caught: AccountLockedError | None = None
+        try:
+            await CredentialService.authenticate(db, user.email, "wrongpassword")
+        except AccountLockedError as exc:
+            exc_caught = exc
+
+        assert exc_caught is not None, "AccountLockedError was not raised"
+        assert exc_caught.locked_until is not None, "locked_until must not be None"
+        # Must be UTC-aware so the HTTP handler can subtract datetime.now(timezone.utc)
+        assert exc_caught.locked_until.tzinfo is not None, "locked_until must be timezone-aware"
+
+    def test_account_locked_error_locked_until_defaults_to_none(self):
+        """AccountLockedError can be constructed without locked_until (backward compat)."""
+        exc = AccountLockedError("locked")
+        assert exc.locked_until is None
+
 
 # ---------------------------------------------------------------------------
 # authenticate — omniadmin lockout exemption

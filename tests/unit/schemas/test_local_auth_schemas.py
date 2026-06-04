@@ -18,6 +18,8 @@ from schemas.local_auth_schemas import (
     SetPasswordRequest,
     ChangePasswordRequest,
     AdminSetPasswordRequest,
+    AdminCreateUserRequest,
+    LoginRequest,
     _MIN_LENGTH,
     _COMMON_PASSWORDS,
 )
@@ -206,3 +208,49 @@ class TestOtherSchemasApplyPolicy:
             new_password="correcthorsebatterystaple",
         )
         assert req.new_password.get_secret_value() == "correcthorsebatterystaple"
+
+
+# ---------------------------------------------------------------------------
+# Email normalisation — LoginRequest and AdminCreateUserRequest must align
+# ---------------------------------------------------------------------------
+
+
+class TestEmailNormalisation:
+    """Both write and read paths must produce the same canonical lowercase email.
+
+    Finding A fix: an admin creating ``Bob@Acme.com`` must store
+    ``bob@acme.com`` so that ``LoginRequest`` normalisation (strip+lower) can
+    find the row with a case-sensitive exact match.
+    """
+
+    def test_login_request_lowercases_email(self):
+        """LoginRequest strips and lowercases the email."""
+        req = LoginRequest(email="  Bob@Acme.COM  ", password="correcthorsebatterystaple")
+        assert str(req.email) == "bob@acme.com"
+
+    def test_login_request_strips_whitespace(self):
+        req = LoginRequest(email=" user@example.com ", password="correcthorsebatterystaple")
+        assert str(req.email) == "user@example.com"
+
+    def test_admin_create_user_request_lowercases_email(self):
+        """AdminCreateUserRequest normalises email to canonical lowercase.
+
+        This is the invariant that prevents ``Bob@Acme.com`` from being stored
+        verbatim while login lookups use ``bob@acme.com``.
+        """
+        req = AdminCreateUserRequest(email="Bob@Acme.COM", name="Bob")
+        assert str(req.email) == "bob@acme.com"
+
+    def test_admin_create_user_request_strips_whitespace(self):
+        req = AdminCreateUserRequest(email="  alice@example.com  ", name="Alice")
+        assert str(req.email) == "alice@example.com"
+
+    def test_admin_create_and_login_normalise_to_same_value(self):
+        """Round-trip: admin-create email and login email normalise identically."""
+        raw_admin = "  Admin@MyOrg.COM  "
+        raw_login = "admin@myorg.com"
+
+        create_req = AdminCreateUserRequest(email=raw_admin, name="Admin")
+        login_req = LoginRequest(email=raw_login, password="correcthorsebatterystaple")
+
+        assert str(create_req.email) == str(login_req.email)

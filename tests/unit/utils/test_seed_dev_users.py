@@ -50,6 +50,15 @@ class TestParseUsersSpec:
         result = _parse_users_spec("a@x.com:Ana Maria")
         assert result[0]["name"] == "Ana Maria"
 
+    def test_email_is_normalised_to_lowercase(self):
+        """Finding A fix: seeded emails must be canonical lowercase to match login normalisation."""
+        result = _parse_users_spec("Bob@Acme.COM:Bob")
+        assert result[0]["email"] == "bob@acme.com"
+
+    def test_email_whitespace_and_case_normalised(self):
+        result = _parse_users_spec("  Admin@Example.ORG:Admin  ")
+        assert result[0]["email"] == "admin@example.org"
+
     def test_blank_entries_are_skipped(self):
         result = _parse_users_spec("a@x.com:Ana,,b@x.com:Bob,")
         assert len(result) == 2

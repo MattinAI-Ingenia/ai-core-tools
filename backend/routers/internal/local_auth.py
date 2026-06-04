@@ -32,6 +32,7 @@ Domain exception → HTTP status mapping (enforced in every handler):
   UserAlreadyExistsError → 409
 """
 
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
@@ -49,6 +50,13 @@ from services.auth.credential_service import (
     PasswordPolicyError,
     TokenError,
     CredentialService,
+)
+from services.auth.login_throttle import (
+    ERR_TOO_MANY_REQUESTS,
+    enforce_login_throttle,
+    extract_client_ip,
+    hit_account_throttle,
+    reset_account_throttle,
 )
 from services.auth.refresh_service import RefreshService, RefreshTokenError
 from utils.auth_cookies import (
@@ -74,6 +82,7 @@ _ERR_REFRESH_INVALID = "Session is invalid. Please log in again."
 _ERR_CHANGE_PASSWORD_WRONG = "Current password is incorrect."
 _ERR_PASSWORD_POLICY = "Password does not meet requirements."
 _ERR_SESSION_START = "Unable to start session. Please try again."
+# ERR_TOO_MANY_REQUESTS is imported from login_throttle to keep one canonical string.
 
 # ---------------------------------------------------------------------------
 # Response schemas
@@ -125,6 +134,7 @@ router = APIRouter(tags=["local-auth"])
     status_code=status.HTTP_200_OK,
     summary="LOCAL auth login",
     description="Authenticate with email and password. Session cookies are set on success.",
+    dependencies=[Depends(enforce_login_throttle)],
 )
 async def login(
     body: LoginRequest,
@@ -145,6 +155,10 @@ async def login(
     ``enforce_csrf`` dependency installed on the internal router is a no-op
     here — no ``X-CSRF-Token`` header is required for the login call itself.
 
+    Throttle: the per-IP limit is enforced via ``Depends(enforce_login_throttle)``.
+    The per-account limit is enforced here (before ``authenticate``) because the
+    account key derives from the parsed request body.
+
     Args:
         body: ``LoginRequest`` with email and password.
         request: FastAPI request (used to extract User-Agent and client IP).
@@ -156,18 +170,30 @@ async def login(
 
     Raises:
         HTTPException 401: Invalid credentials.
-        HTTPException 429: Account temporarily locked.
+        HTTPException 429: Account temporarily locked or throttle exceeded.
         HTTPException 403: Account deactivated.
     """
     user_agent: Optional[str] = request.headers.get("user-agent")
-    # Behind Caddy / k8s the real IP is in X-Forwarded-For; fall back to
-    # the socket peer.  A trusted-proxy refinement lands in step_007.
-    forwarded_for: Optional[str] = request.headers.get("x-forwarded-for")
-    client_ip: Optional[str] = (
-        forwarded_for.split(",")[0].strip() if forwarded_for else None
-    )
-    if not client_ip and request.client:
-        client_ip = request.client.host
+    client_ip: Optional[str] = extract_client_ip(request)
+
+    # Per-account throttle — keyed on the submitted email.  Applied before
+    # authenticate() so a flood of wrong-password attempts for a known address
+    # is stopped at the route layer (the DB-backed lockout in authenticate()
+    # is a separate, complementary control).
+    # ``body.email`` is already normalised (strip+lower) by the LoginRequest
+    # schema validator, so the throttle key matches the DB lookup key exactly.
+    account_state = hit_account_throttle(str(body.email))
+    if not account_state.allowed:
+        logger.warning(
+            "auth:throttle_account_exceeded email=%s ip=%s",
+            body.email,
+            client_ip,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=ERR_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(account_state.retry_after_seconds)},
+        )
 
     try:
         user = await CredentialService.authenticate(
@@ -179,17 +205,33 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_ERR_ACCOUNT_INACTIVE,
         )
-    except AccountLockedError:
+    except AccountLockedError as exc:
         logger.warning("auth:login_locked email=%s ip=%s", body.email, client_ip)
+        # Compute Retry-After from the lockout expiry carried on the exception.
+        # Guard against None (should not occur) and naive datetimes (stored
+        # without tzinfo by SQLite in tests; the service normalises to UTC-aware
+        # before raising, so this is a belt-and-suspenders fallback only).
+        locked_until = exc.locked_until
+        if locked_until is not None and locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if locked_until is not None:
+            retry_after = max(0, int((locked_until - datetime.now(timezone.utc)).total_seconds()))
+        else:
+            retry_after = 60  # conservative fallback when timestamp unavailable
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=_ERR_ACCOUNT_LOCKED,
+            headers={"Retry-After": str(retry_after)},
         )
     except CredentialError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=_ERR_INVALID_CREDENTIALS,
         )
+
+    # Successful login: clear the per-account throttle so this user is not
+    # penalised for their own earlier typos in the same minute window.
+    reset_account_throttle(str(body.email))
 
     try:
         access_token, refresh_token_plain, _ = RefreshService.issue_session(
@@ -236,6 +278,7 @@ async def login(
         "Requires X-CSRF-Token header (double-submit CSRF protection is active "
         "because the access_token cookie is present on this call)."
     ),
+    dependencies=[Depends(enforce_login_throttle)],
 )
 async def refresh(
     request: Request,
@@ -244,6 +287,9 @@ async def refresh(
     refresh_token_cookie: Optional[str] = Cookie(default=None, alias=COOKIE_REFRESH_TOKEN),
 ) -> LoginResponse:
     """Rotate refresh token and issue new session cookies.
+
+    The per-IP throttle is enforced via ``Depends(enforce_login_throttle)``
+    to prevent bulk refresh-token probing from a single IP.
 
     Args:
         request: FastAPI request for User-Agent / IP extraction.
@@ -256,6 +302,7 @@ async def refresh(
 
     Raises:
         HTTPException 401: Token absent, invalid, expired, rotated, or reuse detected.
+        HTTPException 429: Per-IP throttle exceeded.
     """
     if not refresh_token_cookie:
         clear_session_cookies(response)
@@ -265,12 +312,7 @@ async def refresh(
         )
 
     user_agent: Optional[str] = request.headers.get("user-agent")
-    forwarded_for: Optional[str] = request.headers.get("x-forwarded-for")
-    client_ip: Optional[str] = (
-        forwarded_for.split(",")[0].strip() if forwarded_for else None
-    )
-    if not client_ip and request.client:
-        client_ip = request.client.host
+    client_ip: Optional[str] = extract_client_ip(request)
 
     try:
         access_token, new_refresh_plain, _ = RefreshService.rotate(
@@ -412,6 +454,7 @@ async def logout_all(
         "after completing this flow. "
         "CSRF no-op: no access_token cookie is present before the user logs in."
     ),
+    dependencies=[Depends(enforce_login_throttle)],
 )
 async def set_password(
     body: SetPasswordRequest,

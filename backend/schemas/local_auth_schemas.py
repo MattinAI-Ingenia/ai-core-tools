@@ -20,6 +20,30 @@ Because the user's email is not always available at schema-validation time (e.g.
 from pydantic import BaseModel, EmailStr, SecretStr, field_validator
 from utils.config import Config
 
+
+# ---------------------------------------------------------------------------
+# Email normalisation helper
+# ---------------------------------------------------------------------------
+
+
+def _normalise_email_value(v: object) -> object:
+    """Strip whitespace and lowercase an email value.
+
+    Used as a shared ``mode="before"`` field validator on all LOCAL auth
+    schemas that store or look up an email address.  LOCAL emails are stored
+    canonical-lowercase so they remain consistent with the normalisation
+    applied at login time — preventing a stored ``Bob@Acme.com`` from becoming
+    permanently unloggable when the login path lowercases to ``bob@acme.com``.
+
+    Args:
+        v: Raw email value (may be any type; non-strings are passed through so
+            Pydantic's ``EmailStr`` validator can raise the appropriate error).
+
+    Returns:
+        Normalised string (strip + lower), or the original value unchanged.
+    """
+    return v.strip().lower() if isinstance(v, str) else v
+
 # ---------------------------------------------------------------------------
 # Common-password denylist
 # ---------------------------------------------------------------------------
@@ -230,16 +254,33 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: SecretStr
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalise_email(cls, v: object) -> object:
+        """Strip whitespace and lowercase so throttle, lockout, and DB keys align."""
+        return _normalise_email_value(v)
+
 
 class AdminCreateUserRequest(BaseModel):
     """Request body for an admin creating a new LOCAL auth user account.
 
     No password field — the admin calls ``issue_set_password_token`` separately
     to generate a first-time setup link.
+
+    Email normalisation: LOCAL emails are stored canonical-lowercase (strip +
+    lower) to stay consistent with the normalisation applied at login time.
+    An email stored with capital letters would be permanently unloggable because
+    ``LoginRequest`` lowercases before the DB lookup.
     """
 
     email: EmailStr
     name: str
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalise_email(cls, v: object) -> object:
+        """Strip whitespace and lowercase the email before storage."""
+        return _normalise_email_value(v)
 
     @field_validator("name", mode="before")
     @classmethod

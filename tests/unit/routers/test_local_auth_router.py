@@ -93,6 +93,70 @@ class TestLoginExceptionMapping:
             )
         assert resp.status_code == 429
 
+    def test_account_locked_includes_retry_after_header(self, local_client):
+        """AccountLockedError → 429 with Retry-After header.
+
+        Finding B fix: the Retry-After header must be present on the lockout
+        response, consistent with the throttle 429s that already carry it.
+        """
+        from datetime import datetime, timedelta, timezone
+        from services.auth.credential_service import AccountLockedError
+
+        future_lock = datetime.now(timezone.utc) + timedelta(seconds=90)
+        with patch(
+            "routers.internal.local_auth.CredentialService.authenticate",
+            new_callable=AsyncMock,
+            side_effect=AccountLockedError("locked", locked_until=future_lock),
+        ):
+            resp = local_client.post(
+                "/auth/login",
+                json={"email": "user@test.com", "password": "SomeP@ss12"},
+            )
+        assert resp.status_code == 429
+        assert "retry-after" in resp.headers, "Retry-After header must be present on lockout 429"
+        retry_after = int(resp.headers["retry-after"])
+        # Value should be positive and within a generous bound (90 ± 5 s).
+        assert 0 < retry_after <= 95, f"Unexpected Retry-After value: {retry_after}"
+
+    def test_account_locked_retry_after_fallback_when_locked_until_none(self, local_client):
+        """When AccountLockedError carries no locked_until, Retry-After uses the fallback (60)."""
+        from services.auth.credential_service import AccountLockedError
+
+        with patch(
+            "routers.internal.local_auth.CredentialService.authenticate",
+            new_callable=AsyncMock,
+            side_effect=AccountLockedError("locked", locked_until=None),
+        ):
+            resp = local_client.post(
+                "/auth/login",
+                json={"email": "user@test.com", "password": "SomeP@ss12"},
+            )
+        assert resp.status_code == 429
+        assert "retry-after" in resp.headers
+        assert resp.headers["retry-after"] == "60"
+
+    def test_account_locked_body_does_not_leak_internal_detail(self, local_client):
+        """Retry-After is in the header; the body must stay generic (no timing leak)."""
+        from datetime import datetime, timedelta, timezone
+        from services.auth.credential_service import AccountLockedError
+
+        future_lock = datetime.now(timezone.utc) + timedelta(minutes=3)
+        with patch(
+            "routers.internal.local_auth.CredentialService.authenticate",
+            new_callable=AsyncMock,
+            side_effect=AccountLockedError("locked", locked_until=future_lock),
+        ):
+            resp = local_client.post(
+                "/auth/login",
+                json={"email": "user@test.com", "password": "SomeP@ss12"},
+            )
+        assert resp.status_code == 429
+        detail = resp.json()["detail"]
+        # The body must use the generic constant, not the exception message.
+        assert "locked" in detail.lower()
+        assert "locked_until" not in detail
+        assert "180" not in detail  # no raw second count in the body
+
     def test_inactive_account_maps_to_403(self, local_client):
         """InactiveAccountError → 403."""
         from services.auth.credential_service import InactiveAccountError

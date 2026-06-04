@@ -146,7 +146,9 @@ def _parse_users_spec(spec: str) -> list:
             continue
 
         parts = chunk.split(":", 2)
-        email = parts[0].strip()
+        # Normalise email to canonical lowercase so seeded emails match the
+        # login normalisation applied by LoginRequest (strip + lower).
+        email = parts[0].strip().lower()
         name = parts[1].strip() if len(parts) > 1 else ""
         password: str | None = parts[2].strip() if len(parts) > 2 else None
 
