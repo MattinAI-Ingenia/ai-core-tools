@@ -217,42 +217,6 @@ def is_seedable_mode() -> bool:
     return current_login_mode() in _SEEDABLE_MODES
 
 
-async def _set_credential(db: Session, user_id: int, password: str) -> None:
-    """Idempotently set a credential for ``user_id``.
-
-    Uses ``admin_set_password`` when a credential row already exists and
-    ``admin_create_user``/``admin_set_password`` is not appropriate for an
-    existing user.  The approach here is:
-
-    1. If no ``UserCredential`` row exists → create one (via the credential
-       repo directly) and then set the password.
-    2. If a row exists → call ``admin_set_password`` to update it.
-
-    This keeps the seeder idempotent: re-running it re-sets the password to
-    the requested value without creating duplicate rows.
-
-    Args:
-        db: Active database session.
-        user_id: Numeric PK of the target user.
-        password: Plaintext password string.
-    """
-    from repositories.user_credential_repository import UserCredentialRepository
-    from services.auth.credential_service import CredentialService, hash_password
-
-    cred_repo = UserCredentialRepository(db)
-    cred = cred_repo.get_by_user_id(user_id)
-
-    if cred is None:
-        # No credential row yet — create a placeholder then set the real password.
-        import secrets as _secrets
-        placeholder_hash = await hash_password(_secrets.token_urlsafe(32))
-        cred_repo.create(user_id=user_id, hashed_password=placeholder_hash)
-        db.flush()
-
-    # admin_set_password updates the hash, resets lockout, revokes sessions.
-    await CredentialService.admin_set_password(db, user_id=user_id, new_password=password)
-
-
 async def seed_dev_users_async(
     db: Session,
     users_data: list = None,
@@ -263,9 +227,19 @@ async def seed_dev_users_async(
     Idempotent: existing users (matched by email) are left untouched in their
     user row; passwords are only updated when a new value is supplied.
 
-    In LOCAL mode, if a user entry has a ``password`` key the credential is
-    created/updated.  Without a ``password`` key no credential row is written
-    and the user must complete an admin-issued set-password link before login.
+    In LOCAL mode:
+    - New users are created via ``CredentialService.admin_create_user`` so that
+      ``auth_method`` is set to ``'local'`` and ``email_verified`` reflects the
+      SMTP state.  This satisfies FR-D4/AC-13: ``CredentialService.authenticate``
+      requires ``auth_method == 'local'`` and would reject users created via the
+      legacy ``get_or_create_user`` path (which defaulted to ``auth_method='oidc'``).
+    - Existing users found with ``auth_method != 'local'`` (e.g. legacy rows from
+      a previous OIDC deployment) are normalised in-place on each seed run so that
+      re-running the seeder repairs previously-unloggable accounts.
+    - If a user entry has a ``password`` key the credential is updated via
+      ``admin_set_password``.  Without a password source no credential update is
+      written and the user must complete an admin-issued set-password link before
+      login.
 
     Args:
         db: Database session.
@@ -281,6 +255,9 @@ async def seed_dev_users_async(
     Returns:
         Dict with ``created``, ``existing`` user lists, and ``total`` count.
     """
+    from services.auth.credential_service import CredentialService, UserAlreadyExistsError
+    from services.email import smtp_configured
+
     if users_data is None:
         users_data = DEV_USERS
 
@@ -302,7 +279,7 @@ async def seed_dev_users_async(
             fallback_password if login_mode == "LOCAL" else None
         )
 
-        # Ensure user row exists.
+        # --- Ensure user row exists with correct auth fields ---
         existing_user = UserService.get_user_by_email(db, email)
         if existing_user:
             user = existing_user
@@ -311,8 +288,55 @@ async def seed_dev_users_async(
                 email,
                 existing_user.user_id,
             )
+            # FR-D4/AC-13 repair: normalise legacy rows that have the wrong
+            # auth_method so that re-running the seed makes them loggable.
+            # Only applies in LOCAL mode when a password is being set; without
+            # a password source there is nothing to repair.
+            if login_mode == "LOCAL" and effective_password and user.auth_method != "local":
+                logger.info(
+                    "Normalising auth_method for existing user %s: %s -> local",
+                    email,
+                    user.auth_method,
+                )
+                user.auth_method = "local"
+                user.email_verified = not smtp_configured()
+                db.flush()
             updated_users.append(user)
+        elif login_mode == "LOCAL":
+            # LOCAL mode: use admin_create_user so auth_method='local' and
+            # email_verified are set correctly.  admin_create_user also creates
+            # the placeholder credential row; use admin_set_password directly
+            # afterwards (it updates the existing row).
+            try:
+                user = await CredentialService.admin_create_user(db, email=email, name=name)
+            except UserAlreadyExistsError:
+                # Race: another process created the row between our check and
+                # this call.  Fall back to the row that's already there.
+                user = UserService.get_user_by_email(db, email)
+                logger.info("User created concurrently: %s (user_id: %s)", email, user.user_id)
+                updated_users.append(user)
+                # Continue to password-setting block below without adding to created_users.
+                if effective_password:
+                    try:
+                        await CredentialService.admin_set_password(db, user_id=user.user_id, new_password=effective_password)
+                        logger.info("Credential set for user: %s (user_id: %s)", email, user.user_id)
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to set credential for user %s: %s",
+                            email,
+                            exc,
+                            exc_info=True,
+                        )
+                continue
+            logger.info(
+                "Created dev user: %s (user_id: %s) - %s",
+                email,
+                user.user_id,
+                user_data.get("description", ""),
+            )
+            created_users.append(user)
         else:
+            # Non-LOCAL mode: use legacy path (no password/credential involved).
             user, created = UserService.get_or_create_user(db=db, email=email, name=name)
             if created:
                 logger.info(
@@ -326,10 +350,12 @@ async def seed_dev_users_async(
                 logger.info("User already exists: %s", email)
                 updated_users.append(user)
 
-        # Set/update credential in LOCAL mode when a password is available.
+        # --- Set/update credential in LOCAL mode when a password is available ---
+        # admin_create_user already created the credential row, so
+        # admin_set_password (which UPDATES the existing row) is the correct call.
         if login_mode == "LOCAL" and effective_password:
             try:
-                await _set_credential(db, user.user_id, effective_password)
+                await CredentialService.admin_set_password(db, user_id=user.user_id, new_password=effective_password)
                 logger.info("Credential set for user: %s (user_id: %s)", email, user.user_id)
             except Exception as exc:
                 logger.error(
@@ -350,27 +376,6 @@ async def seed_dev_users_async(
         "existing": updated_users,
         "total": len(created_users) + len(updated_users),
     }
-
-
-def seed_dev_users(
-    db: Session,
-    users_data: list = None,
-    apply_password_fallback: bool = False,
-) -> dict:
-    """Synchronous wrapper around ``seed_dev_users_async``.
-
-    Runs the async seeder on the current event loop (or creates one if none
-    is running).  Caller is responsible for committing the session.
-
-    Args:
-        db: Database session.
-        users_data: See ``seed_dev_users_async``.
-        apply_password_fallback: See ``seed_dev_users_async``.
-
-    Returns:
-        See ``seed_dev_users_async``.
-    """
-    return asyncio.run(seed_dev_users_async(db, users_data, apply_password_fallback=apply_password_fallback))
 
 
 # ---------------------------------------------------------------------------

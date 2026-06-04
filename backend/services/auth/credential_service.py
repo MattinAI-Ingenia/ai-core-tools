@@ -418,6 +418,12 @@ class CredentialService:
         hashed = await hash_password(new_password)
         cred_repo.update_password(user_id, hashed)
 
+        # An admin-set password counts as completed account setup: mark the
+        # credential verified so it is not treated as "pending setup" (e.g. the
+        # omniadmin bootstrap would otherwise re-issue a set-password link on
+        # every restart for an account that already has a usable password).
+        cred.is_verified = True
+
         # Reset lockout state.
         cred.failed_attempts = 0
         cred.locked_until = None

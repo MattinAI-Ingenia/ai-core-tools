@@ -115,6 +115,25 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Failed to load plugin '{ep.name}': {e}", exc_info=True)
 
+        # Bootstrap omniadmin accounts on first boot (LOCAL mode only).
+        # Issues one-time set-password links delivered out-of-band via WARNING logs.
+        # Gated by AUTH_BOOTSTRAP_OMNIADMINS (default true) and LOCAL mode only.
+        # Safe to run on every restart — idempotent; existing accounts are skipped.
+        if AuthConfig.LOGIN_MODE == "LOCAL":
+            from db.database import SessionLocal as _SessionLocal
+            from services.auth.omniadmin_bootstrap import bootstrap_omniadmins
+            _bootstrap_db = _SessionLocal()
+            try:
+                await bootstrap_omniadmins(_bootstrap_db)
+            except Exception as _bootstrap_exc:
+                logger.error(
+                    "omniadmin_bootstrap: unexpected error during startup bootstrap — %s",
+                    _bootstrap_exc,
+                    exc_info=True,
+                )
+            finally:
+                _bootstrap_db.close()
+
         # Initialize checkpointer connection pool for LangGraph agent memory
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.initialize_pool()

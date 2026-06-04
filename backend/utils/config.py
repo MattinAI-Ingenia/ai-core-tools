@@ -297,16 +297,35 @@ def is_self_hosted() -> bool:
 
 
 def get_omniadmins() -> List[str]:
-    """Get list of omniadmin emails"""
+    """Get list of omniadmin emails, normalised to lowercase and stripped.
+
+    Normalisation is applied here so every caller (bootstrap, lockout-exemption,
+    RBAC checks) operates on the same canonical form and a case difference in
+    ``AICT_OMNIADMINS`` never silently locks an operator out.
+
+    Returns:
+        Deduplicated list of lowercase, whitespace-stripped email strings.
+    """
     omniadmins_str = Config.get_env_var('AICT_OMNIADMINS', Config.DEFAULTS['AICT_OMNIADMINS'])
     if not omniadmins_str:
         return []
-    return [email.strip() for email in omniadmins_str.split(',') if email.strip()]
+    return [email.strip().lower() for email in omniadmins_str.split(',') if email.strip()]
 
 
 def is_omniadmin(email: str) -> bool:
-    """Check if email is in omniadmins list"""
+    """Check if an email address belongs to the omniadmin set.
+
+    Normalises the supplied address to lowercase before comparing, consistent
+    with ``get_omniadmins()`` and the LOCAL-auth login normalisation applied by
+    ``LoginRequest`` and ``AdminCreateUserRequest``.
+
+    Args:
+        email: The email address to test (any casing accepted).
+
+    Returns:
+        ``True`` when the normalised address is in the omniadmin list.
+    """
     if not email:
         return False
     omniadmins = get_omniadmins()
-    return email in omniadmins 
+    return email.strip().lower() in omniadmins 
