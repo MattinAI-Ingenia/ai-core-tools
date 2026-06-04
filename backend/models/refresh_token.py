@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index
+import sqlalchemy as sa
+from sqlalchemy import Column, Integer, String, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from db.database import Base
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class RefreshToken(Base):
@@ -18,10 +19,14 @@ class RefreshToken(Base):
     user_id = Column(Integer, ForeignKey('User.user_id', ondelete='CASCADE'), nullable=False, index=True)
     family_id = Column(String(64), nullable=False, index=True)
     token_hash = Column(String(128), nullable=False)
-    expires_at = Column(DateTime, nullable=False)
-    revoked_at = Column(DateTime, nullable=True)
-    rotated_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(sa.DateTime(timezone=True), nullable=False)
+    revoked_at = Column(sa.DateTime(timezone=True), nullable=True)
+    rotated_at = Column(sa.DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        sa.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
     user_agent = Column(String(255), nullable=True)
     ip = Column(String(45), nullable=True)
 

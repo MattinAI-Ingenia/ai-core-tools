@@ -24,7 +24,7 @@ def upgrade() -> None:
     )
     op.add_column(
         'user_credentials',
-        sa.Column('locked_until', sa.DateTime(), nullable=True),
+        sa.Column('locked_until', sa.DateTime(timezone=True), nullable=True),
     )
 
     # 2. Create refresh_tokens table.
@@ -35,10 +35,10 @@ def upgrade() -> None:
         sa.Column('user_id', sa.Integer(), nullable=False),
         sa.Column('family_id', sa.String(length=64), nullable=False),
         sa.Column('token_hash', sa.String(length=128), nullable=False),
-        sa.Column('expires_at', sa.DateTime(), nullable=False),
-        sa.Column('revoked_at', sa.DateTime(), nullable=True),
-        sa.Column('rotated_at', sa.DateTime(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('revoked_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('rotated_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('user_agent', sa.String(length=255), nullable=True),
         sa.Column('ip', sa.String(length=45), nullable=True),
         sa.PrimaryKeyConstraint('id'),
