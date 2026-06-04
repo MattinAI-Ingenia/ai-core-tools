@@ -758,3 +758,130 @@ async def list_ingestion_sessions(
 
     sessions = IngestionProgressManager.list_sessions_by_silo(silo_id)
     return sessions
+
+
+# ---------------------------------------------------------------------------
+# Indexing metrics endpoints
+# ---------------------------------------------------------------------------
+
+
+@silos_router.get("/{silo_id}/resources/{resource_id}/indexing-metrics")
+def get_resource_indexing_metrics(
+    app_id: int,
+    silo_id: int,
+    resource_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Return the latest indexing metric for a specific resource.
+
+    Returns 204 No Content when no metric has been recorded yet.
+    """
+    from repositories.indexing_metric_repository import IndexingMetricRepository
+    from schemas.indexing_metric_schemas import IndexingMetricSchema
+
+    _validate_silo_app_ownership(silo_id, app_id, db)
+
+    metric = IndexingMetricRepository.get_latest_by_resource(db, resource_id=resource_id, silo_id=silo_id)
+    if metric is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    return IndexingMetricSchema.model_validate(metric)
+
+
+@silos_router.get("/{silo_id}/indexing-metrics")
+def get_silo_indexing_metrics(
+    app_id: int,
+    silo_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return latest indexing metrics for all resources in a silo, with totals."""
+    from repositories.indexing_metric_repository import IndexingMetricRepository
+    from schemas.indexing_metric_schemas import (
+        IndexingMetricSchema,
+        SiloIndexingTotalsSchema,
+        SiloIndexingMetricsResponseSchema,
+    )
+
+    _validate_silo_app_ownership(silo_id, app_id, db)
+
+    rows = IndexingMetricRepository.list_latest_by_silo(db, silo_id=silo_id, limit=limit, offset=offset)
+    raw_totals = IndexingMetricRepository.get_silo_totals(db, silo_id=silo_id)
+
+    metrics = [IndexingMetricSchema.model_validate(r) for r in rows]
+    totals = SiloIndexingTotalsSchema(
+        total_prompt_tokens=raw_totals.get("total_prompt_tokens", 0) or 0,
+        total_completion_tokens=raw_totals.get("total_completion_tokens", 0) or 0,
+        total_tokens=raw_totals.get("total_tokens", 0) or 0,
+        total_cost=raw_totals.get("total_cost"),
+        currency=raw_totals.get("currency"),
+        total_llm_calls=raw_totals.get("total_llm_calls", 0) or 0,
+        indexed_resources=raw_totals.get("indexed_resources", 0) or 0,
+    )
+
+    return SiloIndexingMetricsResponseSchema(
+        metrics=metrics,
+        totals=totals,
+        count=len(metrics),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Knowledge-graph endpoint
+# ---------------------------------------------------------------------------
+
+
+@silos_router.get("/{silo_id}/graph")
+def get_silo_graph(
+    app_id: int,
+    silo_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    max_nodes: int = Query(default=200, ge=1, le=1000),
+    max_depth: int = Query(default=2, ge=1, le=5),
+    node_label: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+):
+    """Return the knowledge graph for a LightRAG silo.
+
+    - **409 Conflict**: silo is not a LightRAG silo.
+    - **503 Service Unavailable**: Neo4j is unreachable or not configured.
+    """
+    from services.silo_graph_service import SiloGraphService
+    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge
+
+    silo = _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if getattr(silo, "vector_db_type", None) != "LIGHTRAG":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge graph is only available for LightRAG silos.",
+        )
+
+    try:
+        data = SiloGraphService.get_silo_graph(
+            silo_id=silo_id,
+            max_nodes=max_nodes,
+            max_depth=max_depth,
+            node_label=node_label,
+            search=search,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        )
+
+    return SiloGraphResponse(
+        nodes=[GraphNode(**n) for n in data["nodes"]],
+        edges=[GraphEdge(**e) for e in data["edges"]],
+        node_count=data["node_count"],
+        edge_count=data["edge_count"],
+        truncated=data["truncated"],
+    )

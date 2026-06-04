@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForRetrieverRun,
@@ -251,6 +252,8 @@ class LightRAGStore(VectorStoreInterface):
         )
         emb_func = build_embedding_func(self.embedding_service)
 
+        import config  # noqa: WPS433
+
         rag = LightRAG(
             working_dir=self._working_dir,
             workspace=collection_name,
@@ -261,6 +264,7 @@ class LightRAGStore(VectorStoreInterface):
             vector_storage=storage_cfg["vector_storage"],
             kv_storage=storage_cfg["kv_storage"],
             doc_status_storage=storage_cfg["doc_status_storage"],
+            entity_extract_max_gleaning=config.ENTITY_EXTRACT_MAX_GLEANING,
         )
 
         # Storages must be initialised before the instance is usable.
@@ -280,9 +284,10 @@ class LightRAGStore(VectorStoreInterface):
         documents: List[Document],
         embedding_service=None,
         progress_callback=None,
-    ) -> None:
+    ) -> Optional[Dict]:
+        """Index documents and return token/timing metrics dict, or None when skipped."""
         if not documents:
-            return
+            return None
 
         logger.info(
             "Indexing %d documents into LightRAG workspace '%s'",
@@ -295,14 +300,36 @@ class LightRAGStore(VectorStoreInterface):
 
         if not texts:
             logger.debug("No non-empty texts to index; skipping.")
-            return
+            return None
 
-        _run_async(_ainsert_with_progress(rag, texts, progress_callback))
+        from tools.vector_stores.lightrag.token_accumulator import IndexingTokenAccumulator
+        from tools.vector_stores.lightrag.adapters import (
+            set_active_accumulator,
+            reset_active_accumulator,
+        )
+
+        accumulator = IndexingTokenAccumulator()
+        ctx_token = set_active_accumulator(accumulator)
+        t_start = time.perf_counter()
+        try:
+            _run_async(_ainsert_with_progress(rag, texts, progress_callback))
+        finally:
+            reset_active_accumulator(ctx_token)
+
+        duration = time.perf_counter() - t_start
+        totals = accumulator.totals()
+        totals["duration_seconds"] = round(duration, 3)
+
         logger.info(
-            "Successfully indexed %d texts into workspace '%s'",
+            "Successfully indexed %d texts into workspace '%s' "
+            "in %.1fs (%d tokens, %d LLM calls)",
             len(texts),
             collection_name,
+            duration,
+            totals["total_tokens"],
+            totals["llm_calls"],
         )
+        return totals
 
     def delete_documents(
         self,

@@ -222,3 +222,25 @@ def test_estimate_cost_empty_documents():
 
     # No documents → 0 chunks
     assert result["total_chunks"] == 0
+
+
+def test_estimate_cost_with_gleaning():
+    """Verify that ENTITY_EXTRACT_MAX_GLEANING scales the mathematical estimates correctly."""
+    silo = _make_lightrag_silo(chunk_size=1200)
+    db = MagicMock()
+    documents = [{"content": "x" * 4800}]  # 2 chunks
+
+    # Patch ENTITY_EXTRACT_MAX_GLEANING to 2
+    with patch("config.ENTITY_EXTRACT_MAX_GLEANING", 2):
+        with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+            result = SiloService.estimate_indexing_cost(1, documents, db)
+
+    assert result["total_chunks"] == 2
+    assert result["chunk_token_size"] == 1200
+    # 2 chunks * (2 + 2 gleaning) = 8 calls
+    assert result["estimated_llm_calls"] == 8
+    assert result["estimated_embedding_calls"] == 2
+    # 8 calls * 1200 = 9600 input tokens
+    assert result["estimated_input_tokens"] == 9600
+    assert result["warnings"] == []
+

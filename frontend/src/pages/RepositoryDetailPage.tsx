@@ -10,6 +10,7 @@ import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
 import IngestionProgressBar from '../components/ui/IngestionProgressBar';
+import ResourceMetrics from '../components/repository/ResourceMetrics';
 
 interface Resource {
   resource_id: number;
@@ -221,7 +222,7 @@ const RepositoryDetailPage: React.FC = () => {
   // When a session is found we set ingestionSessionId so the progress bar picks
   // it up via SSE; we also set isIndexing so the upload button is disabled.
   useEffect(() => {
-    if (!repository || ingestionSessionId || !appId || !repositoryId) return;
+    if (!repository || !appId || !repositoryId) return;
 
     let mounted = true;
     (async () => {
@@ -232,8 +233,11 @@ const RepositoryDetailPage: React.FC = () => {
         );
         if (!mounted) return;
         setIsIndexing(status.is_indexing);
-        if (status.is_indexing && status.active_session_id) {
+        if (status.is_indexing && status.active_session_id && status.active_session_id !== ingestionSessionId) {
           setIngestionSessionId(status.active_session_id);
+        }
+        if (!status.is_indexing) {
+          setIngestionSessionId(null);
         }
       } catch (err) {
         console.error('Error fetching ingestion status:', err);
@@ -269,16 +273,19 @@ const RepositoryDetailPage: React.FC = () => {
         if (!stillActive) {
           setIsIndexing(false);
           setIngestionSessionId(null);
-        } else if (stillActive && !ingestionSessionId) {
-          // Polling sees active indexing but we don't have an SSE session.
-          // This can happen if the page was refreshed or the SSE connection
-          // was lost. Fetch the active session so the SSE can reconnect.
+        } else {
+          // Reconcile session id while indexing is active. This covers stale
+          // local session ids that keep the bar stuck on "Connecting..."
+          // even though indexing is progressing on a different active session.
           try {
             const status = await apiService.getIngestionStatus(
               Number.parseInt(appId!),
               Number.parseInt(repositoryId!),
             );
-            if (status.is_indexing && status.active_session_id && !ingestionSessionId) {
+            if (!status.is_indexing) {
+              setIsIndexing(false);
+              setIngestionSessionId(null);
+            } else if (status.active_session_id && status.active_session_id !== ingestionSessionId) {
               setIngestionSessionId(status.active_session_id);
               setIsIndexing(true);
             }
@@ -989,6 +996,16 @@ const RepositoryDetailPage: React.FC = () => {
                                   Index failed
                                 </span>
                               )}
+                              {repository.vector_db_type === 'LIGHTRAG' &&
+                                repository.silo_id != null && (
+                                  <ResourceMetrics
+                                    appId={Number(appId)}
+                                    siloId={repository.silo_id}
+                                    resourceId={resource.resource_id}
+                                    resourceStatus={resource.status}
+                                    variant="inline"
+                                  />
+                                )}
                             </div>
                             <p className="text-sm text-gray-500">
                               {(resource.file_type || 'unknown').toUpperCase()} • Uploaded{' '}
@@ -1141,14 +1158,6 @@ const RepositoryDetailPage: React.FC = () => {
             </p>
             <p className="mt-1">
               Embedding model: <span className="font-medium">{uploadEstimate?.embedding_model_name || 'Unavailable'}</span>
-            </p>
-            <p className="mt-1">
-              Estimated price range:{' '}
-              <span className="font-medium">
-                {uploadEstimate?.estimated_cost_min != null || uploadEstimate?.estimated_cost_max != null
-                  ? `$${uploadEstimate?.estimated_cost_min ?? '?'} – $${uploadEstimate?.estimated_cost_max ?? '?'} ${uploadEstimate?.currency || 'USD'}`
-                  : 'Not available (model not in pricing catalog)'}
-              </span>
             </p>
             {(uploadEstimate?.estimated_indexing_time_min != null || uploadEstimate?.estimated_indexing_time_avg != null) && (
               <p className="mt-1">

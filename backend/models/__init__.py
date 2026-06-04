@@ -37,6 +37,7 @@ from .tier_config import TierConfig
 from .usage_record import UsageRecord
 from .user_credential import UserCredential
 from .pricing_catalog import PricingCatalog
+from .indexing_metric import IndexingMetric
 
 __all__ = [
     'User', 'App', 'AppCollaborator', 'APIKey',
@@ -55,4 +56,5 @@ __all__ = [
     'UsageRecord',
     'UserCredential',
     'PricingCatalog',
+    'IndexingMetric',
 ]

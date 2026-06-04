@@ -1094,22 +1094,98 @@ class SiloService:
                 return
 
             silo = resource_with_relations.repository.silo
+            app_id = silo.app_id
+            silo_id = silo.silo_id
+            resource_id = resource_with_relations.resource_id
+            content_ref = resource_with_relations.uri
+            ai_service = silo.embedding_service  # embedding_service for model name lookup
+
+            # Resolve LLM service for model name (LightRAG only)
             vector_store = _get_vector_store(silo)
 
-            # Index all chunks in one call (batch is more efficient for most backends)
-            vector_store.index_documents(
-                collection_name,
-                docs,
-                embedding_service,
-                progress_callback=progress_callback,
-            )
+            # ----- Metric scaffolding -----
+            from repositories.indexing_metric_repository import IndexingMetricRepository
+            from services.pricing_service import PricingService
 
-            logger.info(
-                "Indexed resource %s in silo %s (%s chunks)",
-                resource_with_relations.resource_id,
-                silo.silo_id,
-                len(docs),
-            )
+            _metric_kwargs: dict = {}
+            _index_failed = False
+
+            try:
+                # Index all chunks in one call (batch is more efficient for most backends)
+                usage = vector_store.index_documents(
+                    collection_name,
+                    docs,
+                    embedding_service,
+                    progress_callback=progress_callback,
+                )
+            except Exception as exc:
+                _index_failed = True
+                _metric_kwargs["status"] = "failed"
+                logger.error(f"Error indexing resource {resource_id}: {exc}")
+                raise
+            else:
+                _metric_kwargs["status"] = "success"
+                if usage and isinstance(usage, dict):
+                    _metric_kwargs.update({
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                        "tokens_source": usage.get("tokens_source", "estimated"),
+                        "llm_calls": usage.get("llm_calls", 0),
+                        "duration_seconds": usage.get("duration_seconds"),
+                    })
+                    # Attempt to resolve cost via PricingService
+                    try:
+                        # The LLM service attached to the silo for LightRAG runs
+                        # may be stored as silo.ai_service_id; fall back to None gracefully
+                        lightrag_ai_service = getattr(silo, "ai_service", None)
+                        model_name = getattr(lightrag_ai_service, "description", None)
+                        emb_model_name = getattr(embedding_service, "description", None)
+                        _metric_kwargs["model_name"] = model_name
+                        _metric_kwargs["embedding_model_name"] = emb_model_name
+
+                        if model_name:
+                            pricing = PricingService.get_llm_pricing(session, model_name)
+                            if pricing and _metric_kwargs.get("total_tokens"):
+                                input_per_1m, output_per_1m = pricing
+                                cost = (
+                                    _metric_kwargs["prompt_tokens"] / 1_000_000 * input_per_1m
+                                    + _metric_kwargs["completion_tokens"] / 1_000_000 * output_per_1m
+                                )
+                                _metric_kwargs["cost"] = round(cost, 8)
+                                _metric_kwargs["currency"] = "USD"
+                    except Exception as pricing_exc:
+                        logger.debug(f"Could not resolve pricing for metric: {pricing_exc}")
+
+            finally:
+                # Persist metric regardless of success/failure
+                try:
+                    metric_record = IndexingMetricRepository.create(
+                        session,
+                        app_id=app_id,
+                        silo_id=silo_id,
+                        resource_id=resource_id,
+                        content_ref=content_ref,
+                        **_metric_kwargs,
+                    )
+                    session.flush()
+                    logger.debug(
+                        "Persisted IndexingMetric %s for resource %s (status=%s, tokens=%s)",
+                        metric_record.metric_id,
+                        resource_id,
+                        _metric_kwargs.get("status"),
+                        _metric_kwargs.get("total_tokens", 0),
+                    )
+                except Exception as metric_exc:
+                    logger.warning(f"Failed to persist indexing metric for resource {resource_id}: {metric_exc}")
+
+            if not _index_failed:
+                logger.info(
+                    "Indexed resource %s in silo %s (%s chunks)",
+                    resource_id,
+                    silo_id,
+                    len(docs),
+                )
         except Exception as e:
             logger.error(f"Error indexing resource {resource.resource_id}: {str(e)}")
             raise
@@ -1940,14 +2016,19 @@ class SiloService:
 
             num_chunks += doc_chunks
 
-        extraction_calls = num_chunks * 2  # entity + relationship
+        import config
+        max_gleaning = config.ENTITY_EXTRACT_MAX_GLEANING
+
+        # extraction_calls = entity extraction (1 + max_gleaning) + relationship extraction (1)
+        extraction_calls = num_chunks * (2 + max_gleaning)
         embedding_calls = num_chunks
-        # Each of the 2 LLM calls per chunk receives a full chunk as input.
-        estimated_input_tokens = extraction_calls * chunk_token_size
-        # Output varies widely: compact ~150 tokens/call, verbose ~800 tokens/call.
+        # Each extraction call receives a full chunk as input.
         _out_per_call_avg = 250
         _out_per_call_min = 150
         _out_per_call_max = 800
+
+        estimated_llm_calls = extraction_calls
+        estimated_input_tokens = extraction_calls * chunk_token_size
         estimated_output_tokens = extraction_calls * _out_per_call_avg
 
         estimated_cost_min = None
@@ -1995,12 +2076,16 @@ class SiloService:
             emb_tokens = num_chunks * chunk_token_size
             emb_cost = (emb_tokens * emb_price / 1_000_000) if emb_price is not None else 0.0
 
-            llm_input_cost = extraction_calls * chunk_token_size * in_price / 1_000_000
+            llm_input_cost = estimated_input_tokens * in_price / 1_000_000
             estimated_cost_min = round(
-                llm_input_cost + extraction_calls * _out_per_call_min * out_price / 1_000_000 + emb_cost, 4
+                llm_input_cost
+                + (extraction_calls * _out_per_call_min) * out_price / 1_000_000
+                + emb_cost, 4
             )
             estimated_cost_max = round(
-                llm_input_cost + extraction_calls * _out_per_call_max * out_price / 1_000_000 + emb_cost, 4
+                llm_input_cost
+                + (extraction_calls * _out_per_call_max) * out_price / 1_000_000
+                + emb_cost, 4
             )
 
         # --- Time Estimates (seconds) ---
@@ -2010,7 +2095,6 @@ class SiloService:
         embedding_workers = getattr(silo, 'embedding_model_max_sync', 8) or 8
         overhead_factor = 1.2  # 20% overhead
         fixed_overhead_s = 20  # startup/shutdown
-        merge_overhead_s = 20  # graph merge overhead
 
         # Optimistic (50 tok/sec) and pessimistic (10 tok/sec) LLM throughput
         llm_throughput_opt = 50.0
@@ -2018,24 +2102,22 @@ class SiloService:
         embedding_throughput_opt = 500.0
         embedding_throughput_pess = 100.0
 
-        # Time per chunk at single-threaded throughput
-        llm_tokens_per_chunk = chunk_token_size * 2  # entity + relationship
+        # Phase 1 — extraction (initial + gleaning, parallelised across chunks)
+        llm_tokens_per_chunk = chunk_token_size * (2 + max_gleaning)  # initial + gleaning passes
         llm_s_per_chunk_opt = (llm_tokens_per_chunk / llm_throughput_opt) * overhead_factor
         llm_s_per_chunk_pess = (llm_tokens_per_chunk / llm_throughput_pess) * overhead_factor
-
-        # Wall-clock time with concurrency: ceil(chunks / workers) * time_per_chunk
         llm_wall_s_opt = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_opt
         llm_wall_s_pess = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_pess
 
-        # Embedding: total tokens / throughput, then distributed across workers
+        # Embedding (parallel to LLM, but we take the max wall time)
         emb_tokens_total = num_chunks * chunk_token_size
         emb_raw_s_opt = (emb_tokens_total / embedding_throughput_opt) * overhead_factor
         emb_raw_s_pess = (emb_tokens_total / embedding_throughput_pess) * overhead_factor
         emb_wall_s_opt = emb_raw_s_opt / max(1, embedding_workers)
         emb_wall_s_pess = emb_raw_s_pess / max(1, embedding_workers)
 
-        estimated_indexing_time_min = round(fixed_overhead_s + llm_wall_s_opt + emb_wall_s_opt + merge_overhead_s, 1)
-        estimated_indexing_time_max = round(fixed_overhead_s + llm_wall_s_pess + emb_wall_s_pess + merge_overhead_s, 1)
+        estimated_indexing_time_min = round(fixed_overhead_s + max(llm_wall_s_opt, emb_wall_s_opt), 1)
+        estimated_indexing_time_max = round(fixed_overhead_s + max(llm_wall_s_pess, emb_wall_s_pess), 1)
         estimated_indexing_time_avg = round((estimated_indexing_time_min + estimated_indexing_time_max) / 2, 1)
 
         # Emit per-role warnings for every configured role service.
@@ -2056,7 +2138,7 @@ class SiloService:
         return {
             "total_chunks": num_chunks,
             "chunk_token_size": chunk_token_size,
-            "estimated_llm_calls": extraction_calls,
+            "estimated_llm_calls": estimated_llm_calls,
             "estimated_embedding_calls": embedding_calls,
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,

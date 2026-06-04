@@ -132,3 +132,66 @@ Each LightRAG silo maintains strict data isolation:
 - [RAG & Vector Stores](../ai/rag-vector-stores.md) — PGVector and Qdrant backends, silo system, and retrieval
 - [LLM Integration](../ai/llm-integration.md) — AI service configuration for indexing LLMs
 - [Agent System](../ai/agent-system.md) — How agents use RAG for retrieval
+
+---
+
+## Per-Document Indexing Metrics
+
+After a document finishes indexing into a LightRAG silo, Mattin AI records exact provider-reported LLM token usage, wall-clock duration, and monetary cost in the `indexing_metric` table.
+
+### What is captured
+
+| Field | Description |
+|-------|-------------|
+| `prompt_tokens` | Input tokens reported by the LLM provider |
+| `completion_tokens` | Output tokens reported by the LLM provider |
+| `total_tokens` | Sum of prompt + completion |
+| `tokens_source` | `provider` (exact) or `estimated` (tiktoken fallback) |
+| `llm_calls` | Number of LLM calls made during indexing |
+| `duration_seconds` | Wall-clock time for the full indexing run |
+| `cost` | Computed cost in USD (null when pricing unavailable) |
+| `status` | `success` / `failed` / `partial` |
+
+### How it works
+
+Token counts are captured via a `contextvars`-scoped accumulator in `backend/tools/vector_stores/lightrag/adapters.py`. Each call to `llm_model_func` extracts usage from `response.usage_metadata` (standard LangChain contract); when the provider omits it, tiktoken is used as a fallback and the record is labelled `estimated`.
+
+### API endpoints
+
+```
+GET /internal/apps/{app_id}/silos/{silo_id}/resources/{resource_id}/indexing-metrics
+→ Latest IndexingMetric for that resource (204 when none exists yet)
+
+GET /internal/apps/{app_id}/silos/{silo_id}/indexing-metrics
+→ Latest metric per resource + aggregate totals for the silo
+```
+
+### Frontend
+
+Metrics appear inline next to each file in the repository file list (tokens, duration, cost) for LightRAG silos only. No data = silent (no error shown).
+
+---
+
+## Knowledge Graph Visualization
+
+LightRAG silos expose a read-only knowledge graph endpoint for exploring the Neo4j entity/relationship graph from the frontend.
+
+### API endpoint
+
+```
+GET /internal/apps/{app_id}/silos/{silo_id}/graph
+  ?max_nodes=200   (1–1000, default 200)
+  &max_depth=2     (1–5, default 2)
+  &node_label=...  (optional Cypher label filter)
+  &search=...      (optional full-text entity filter)
+→ SiloGraphResponse { nodes, edges, node_count, edge_count, truncated }
+→ 409 when silo.vector_db_type != LIGHTRAG
+→ 503 when Neo4j is unreachable
+```
+
+**Isolation guarantee**: every node and relationship in Neo4j carries a `workspace` property set to `silo_{silo_id}`. The endpoint enforces `WHERE n.workspace = $ws` on every query path — cross-silo data leakage is impossible.
+
+### Frontend
+
+A **Knowledge Graph** tab appears in the Silo Playground for LIGHTRAG silos. It shows a canvas-based force-directed graph with pan, zoom, node selection, and a detail panel. Results are truncated at `max_nodes` with a visible notice.
+

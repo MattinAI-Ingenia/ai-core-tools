@@ -71,3 +71,11 @@ LIGHTRAG_ENABLED: bool = os.getenv('LIGHTRAG_ENABLED', 'false').lower() == 'true
 NEO4J_URI: Optional[str] = os.getenv('NEO4J_URI') or None
 NEO4J_USERNAME: str = os.getenv('NEO4J_USERNAME', 'neo4j')
 NEO4J_PASSWORD: Optional[str] = os.getenv('NEO4J_PASSWORD') or None
+# Entity extraction configuration
+# Maximum number of "gleaning" iterations the entity-extraction pipeline
+# should perform when processing documents during indexing. Set to 0 to
+# disable additional gleaning. This value is configurable via the
+# ENTITY_EXTRACT_MAX_GLEANING environment variable (or entity_extract_max_gleaning).
+ENTITY_EXTRACT_MAX_GLEANING: int = int(
+    os.getenv('ENTITY_EXTRACT_MAX_GLEANING', os.getenv('entity_extract_max_gleaning', '0'))
+)

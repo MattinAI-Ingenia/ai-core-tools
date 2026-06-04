@@ -1454,6 +1454,30 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/ingestion-sessions`);
   }
 
+  async getResourceIndexingMetrics(appId: number, siloId: number, resourceId: number) {
+    return this.request(`/internal/apps/${appId}/silos/${siloId}/resources/${resourceId}/indexing-metrics`);
+  }
+
+  async getSiloIndexingMetrics(appId: number, siloId: number, limit = 50, offset = 0) {
+    return this.request(
+      `/internal/apps/${appId}/silos/${siloId}/indexing-metrics?limit=${limit}&offset=${offset}`,
+    );
+  }
+
+  async getSiloGraph(
+    appId: number,
+    siloId: number,
+    params: { maxNodes?: number; maxDepth?: number; nodeLabel?: string; search?: string } = {},
+  ) {
+    const qs = new URLSearchParams();
+    if (params.maxNodes !== undefined) qs.set('max_nodes', String(params.maxNodes));
+    if (params.maxDepth !== undefined) qs.set('max_depth', String(params.maxDepth));
+    if (params.nodeLabel) qs.set('node_label', params.nodeLabel);
+    if (params.search) qs.set('search', params.search);
+    const query = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request(`/internal/apps/${appId}/silos/${siloId}/graph${query}`);
+  }
+
   async getIngestionStatus(appId: number, repositoryId: number): Promise<{ is_indexing: boolean; active_session_id: string | null }> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/ingestion-status`);
   }

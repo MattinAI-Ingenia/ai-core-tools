@@ -22,8 +22,17 @@ module can be imported even when ``lightrag-hku`` is not installed or when
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, List, Optional
+
+from tools.vector_stores.lightrag.token_accumulator import IndexingTokenAccumulator
+
+# contextvars slot: holds the active accumulator during an indexing run,
+# or None when not in an indexing context (e.g. during query).
+_active_accumulator: contextvars.ContextVar[Optional[IndexingTokenAccumulator]] = (
+    contextvars.ContextVar("_lightrag_active_accumulator", default=None)
+)
 
 import numpy as np
 
@@ -198,9 +207,67 @@ def build_llm_model_func(
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in content
             )
+
+        # --- Token usage capture ---
+        acc = _active_accumulator.get()
+        if acc is not None:
+            prompt_toks: int = 0
+            completion_toks: int = 0
+            source = "estimated"
+
+            # 1. Try LangChain usage_metadata (OpenAI, Anthropic, Mistral …)
+            usage_meta = getattr(response, "usage_metadata", None)
+            if usage_meta and isinstance(usage_meta, dict):
+                prompt_toks = usage_meta.get("input_tokens", 0) or 0
+                completion_toks = usage_meta.get("output_tokens", 0) or 0
+                if prompt_toks or completion_toks:
+                    source = "provider"
+
+            # 2. Fallback: response_metadata["token_usage"] (some providers)
+            if source == "estimated":
+                resp_meta = getattr(response, "response_metadata", {}) or {}
+                token_usage = resp_meta.get("token_usage") or {}
+                if isinstance(token_usage, dict):
+                    prompt_toks = token_usage.get("prompt_tokens", 0) or 0
+                    completion_toks = token_usage.get("completion_tokens", 0) or 0
+                    if prompt_toks or completion_toks:
+                        source = "provider"
+
+            # 3. Tiktoken fallback: estimate from prompt text + response content
+            if source == "estimated":
+                try:
+                    import tiktoken  # noqa: WPS433
+                    enc = tiktoken.get_encoding("cl100k_base")
+                    prompt_toks = sum(len(enc.encode(m["content"])) for m in messages if isinstance(m.get("content"), str))
+                    completion_toks = len(enc.encode(str(content)))
+                except Exception:
+                    prompt_toks = len(" ".join(m.get("content", "") for m in messages)) // 4
+                    completion_toks = len(str(content)) // 4
+
+            acc.add_llm_usage(prompt=prompt_toks, completion=completion_toks, source=source)
+
         return str(content)
 
     return llm_model_func
+
+
+def set_active_accumulator(acc: Optional[IndexingTokenAccumulator]) -> Any:
+    """Set the active token accumulator for the current context.
+
+    Returns a ``contextvars.Token`` that can be passed to :func:`reset_active_accumulator`
+    to restore the previous value.
+    """
+    return _active_accumulator.set(acc)
+
+
+def reset_active_accumulator(token: Any) -> None:
+    """Restore the accumulator context var to its previous value."""
+    _active_accumulator.reset(token)
+
+
+def get_active_accumulator() -> Optional[IndexingTokenAccumulator]:
+    """Return the active accumulator, or ``None`` when not in an indexing run."""
+    return _active_accumulator.get()
 
 
 # ---------------------------------------------------------------------------
