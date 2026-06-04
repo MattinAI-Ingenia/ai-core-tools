@@ -1,5 +1,21 @@
-"""Local email+password authentication service for SaaS mode."""
-import bcrypt
+"""Local email+password authentication service for SaaS mode.
+
+Delegation note (step_005)
+--------------------------
+``_hash_password`` and ``_verify_password`` now delegate to the shared sync
+helpers in ``services.auth.credential_service`` (``_sync_hash`` /
+``_sync_verify``) so the SaaS and LOCAL code paths use the same bcrypt
+parameters (rounds=12).
+
+What changed vs left intact:
+- ``_hash_password`` / ``_verify_password``: now thin wrappers around the
+  shared sync functions — bcrypt import removed from this module.
+- Everything else (register / verify_email / login / request_password_reset /
+  complete_password_reset, SubscriptionRepository, SaaS email calls): unchanged.
+  SaaS register still creates a Subscription(FREE); that logic is intentional
+  and lives here exclusively.
+- No async changes; this service remains synchronous (called from sync routes).
+"""
 from datetime import datetime, timedelta
 from typing import Optional
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
@@ -13,6 +29,8 @@ from repositories.subscription_repository import SubscriptionRepository
 from models.subscription import SubscriptionTier
 from utils.logger import get_logger
 from utils.secret_key import get_secret_key
+# Shared sync bcrypt helpers — same rounds parameter for both SaaS and LOCAL.
+from services.auth.credential_service import _sync_hash, _sync_verify
 
 logger = get_logger(__name__)
 
@@ -27,11 +45,11 @@ def _get_serializer() -> URLSafeTimedSerializer:
 
 
 def _hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return _sync_hash(plain)
 
 
 def _verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    return _sync_verify(plain, hashed)
 
 
 class LocalAuthService:
