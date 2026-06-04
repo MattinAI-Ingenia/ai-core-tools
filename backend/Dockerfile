@@ -86,5 +86,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
-# Comando de inicio: ejecutar migraciones y luego la aplicación
-CMD ["sh", "-c", "cd / && python -m alembic upgrade head && cd /aict_backend && python -m uvicorn main:app --host=0.0.0.0 --port=8000 --workers 4 --limit-concurrency 100"]
+# Comando de inicio: ejecutar migraciones y luego la aplicación.
+# Workers y concurrencia parametrizables via env vars para poder ajustar el
+# consumo de memoria por despliegue sin rebuild. Cada worker uvicorn carga
+# FastAPI + SQLAlchemy + LangChain en su propio proceso (~0.5–1.5 GB RSS),
+# asi que en hosts pequeños conviene bajarlo a 1.
+#   UVICORN_WORKERS              (default 2)
+#   UVICORN_LIMIT_CONCURRENCY    (default 100 por worker)
+CMD ["sh", "-c", "cd / && python -m alembic upgrade head && cd /aict_backend && python -m uvicorn main:app --host=0.0.0.0 --port=8000 --workers ${UVICORN_WORKERS:-2} --limit-concurrency ${UVICORN_LIMIT_CONCURRENCY:-100}"]

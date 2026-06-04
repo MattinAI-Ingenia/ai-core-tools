@@ -70,7 +70,8 @@ class QdrantStore(VectorStoreInterface):
         self.client = QdrantClient(
             url=url,
             api_key=api_key,
-            prefer_grpc=prefer_grpc
+            prefer_grpc=prefer_grpc,
+            timeout=60,
         )
         
         self._QdrantVectorStore = QdrantVectorStore

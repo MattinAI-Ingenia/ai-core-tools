@@ -73,7 +73,7 @@ Handles all database migration tasks:
 - PostgreSQL specifics: pgvector, JSONB, indexes
 - Troubleshooting: merge conflicts, failed migrations, multiple heads
 
-**Companion instruction**: `.alembic.instructions.md` (auto-applied to `alembic/**`)
+**Companion instruction**: `alembic.instructions.md` (auto-applied to `alembic/**`)
 
 **Delegates to**: `@backend-expert` (model implementation), `@git-github` (version control), `@version-bumper` (versioning)
 
@@ -109,7 +109,7 @@ Comprehensive Git and GitHub CLI agent:
 - Multi-remote operations: GitHub (`origin`) + GitLab (`lks`)
 - Release management with `gh release`
 
-**Companion instructions**: `.gh-commit.instructions.md` (GPG signing), `.gh-issues.instructions.md` (`--body-file` rule), `.git-github.instructions.md` (global rules including GitFlow)
+**Companion instruction**: `git-github.instructions.md` (GPG signing, `--body-file` rule, global rules including GitFlow)
 
 **See**: [Git Workflow & Release Process](git-workflow.md) — full GitFlow documentation
 
@@ -203,12 +203,13 @@ Instructions are **auto-applied rules** that activate based on file glob pattern
 
 | Instruction | File | Applies To |
 |-------------|------|------------|
-| Alembic Conventions | `.alembic.instructions.md` | `alembic/**` |
-| Documentation Conventions | `.docs.instructions.md` | `docs/**` |
-| Git Commit Rules | `.gh-commit.instructions.md` | *(global)* |
-| GitHub Issue Rules | `.gh-issues.instructions.md` | *(global)* |
+| Alembic Conventions | `alembic.instructions.md` | `alembic/**` |
+| Documentation Conventions | `docs.instructions.md` | `docs/**` |
+| Git & GitHub Rules | `git-github.instructions.md` | *(global)* |
+| Handoff Protocol | `handoff.instructions.md` | `.github/agents/*.agent.md` |
+| Plan Extensions | `plan-extensions.instructions.md` | `plans/**` |
 
-### Alembic Conventions (`.alembic.instructions.md`)
+### Alembic Conventions (`alembic.instructions.md`)
 
 Auto-applied when editing files under `alembic/`. Enforces:
 
@@ -222,7 +223,7 @@ Auto-applied when editing files under `alembic/`. Enforces:
 - New models must be imported in `backend/models/__init__.py`
 - Ignore LangChain-managed tables (`langchain_pg_collection`, `langchain_pg_embedding`)
 
-### Documentation Conventions (`.docs.instructions.md`)
+### Documentation Conventions (`docs.instructions.md`)
 
 Auto-applied when editing files under `docs/`. Enforces:
 
@@ -235,23 +236,27 @@ Auto-applied when editing files under `docs/`. Enforces:
 - Document what **exists**, not what is planned
 - Don't duplicate content from `CLAUDE.md` or root `README.md`
 
-### Git Commit Rules (`.gh-commit.instructions.md`)
+### Git & GitHub Rules (`git-github.instructions.md`)
 
 Always active (global scope). Enforces:
 
-- All commits must be **GPG-signed** before pushing
-- Use `git commit -S -m "message"` for signing
-- Ensure GPG key is associated with GitHub account
-- Verify with `git log --show-signature -1`
-
-### GitHub Issue Rules (`.gh-issues.instructions.md`)
-
-Always active (global scope). Enforces:
-
-- Always use `--body-file` with `gh issue create` (never `--body` or heredoc `<<EOF`)
-- Workflow: create temp markdown file → `gh issue create --body-file` → add labels → clean up
-- Default repo: `https://github.com/lksnext-ai-lab/ai-core-tools`
+- All commits must be **GPG-signed** before pushing (`git commit -S -m "message"`)
+- Verify signatures with `git log --show-signature -1`
+- Pull before push to avoid rejected pushes
+- Remote conventions: `origin` (GitHub primary), `gitlab` (LKS DevOps mirror), `mattinai` (MattinAI org mirror) — push to mirrors only on explicit request
+- Branch naming: `feat/`, `feature/`, `bug/`, `fix/`, `clean/`, `release/<version>`, `hotfix/`
+- GitFlow release workflow (release branches from `develop`, back-merge to `develop` after tag)
+- Conventional Commits format: `type(scope): description`
+- `gh` CLI must use `--body-file` (never `--body` inline or heredoc); default repo `lksnext-ai-lab/ai-core-tools`
 - Available labels: `enhancement`, `bug`, `documentation`, `technical-debt`, `good-first-issue`, `help-wanted`, `question`, `discussion`, `invalid`, `wontfix`, `duplicate`
+
+### Handoff Protocol (`handoff.instructions.md`)
+
+Applied to all `.github/agents/*.agent.md`. Enforces the standard pattern for VS Code native handoff buttons defined in agent frontmatter (`handoffs:` field with `label`, `agent`, `prompt`, `send`).
+
+### Plan Extensions (`plan-extensions.instructions.md`)
+
+Applied to `plans/**`. Defines how to create plan extensions in `execution/extensions/extension-N.plan.md`, with continuous global step numbering and a single shared `status.yaml`.
 
 ---
 
@@ -287,10 +292,11 @@ The file `.github/copilot-instructions.md` provides **repository-wide guidance**
 │   ├── new-skill.skill.md           ← Used by @ai-dev-architect
 │   └── new-instruction.skill.md     ← Used by @ai-dev-architect
 └── instructions/
-    ├── .alembic.instructions.md     ← Auto-applied to alembic/**
-    ├── .docs.instructions.md        ← Auto-applied to docs/**
-    ├── .gh-commit.instructions.md   ← Global (GPG signing)
-    └── .gh-issues.instructions.md   ← Global (--body-file rule)
+    ├── alembic.instructions.md         ← Auto-applied to alembic/**
+    ├── docs.instructions.md            ← Auto-applied to docs/**
+    ├── git-github.instructions.md      ← Global (GPG signing, GitFlow, --body-file rule)
+    ├── handoff.instructions.md         ← Applied to .github/agents/*.agent.md
+    └── plan-extensions.instructions.md ← Applied to plans/**
 ```
 
 ### Delegation Graph

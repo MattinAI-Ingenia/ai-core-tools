@@ -1,7 +1,7 @@
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
-from models.agent import DEFAULT_AGENT_TEMPERATURE
+from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
 
 
 # ==================== RETRIEVAL CONFIG ====================
@@ -86,7 +86,7 @@ class AgentDetailSchema(BaseModel):
     server_tools: List[str] = []
     memory_max_messages: int = 20
     memory_max_tokens: Optional[int] = 4000
-    memory_summarize_threshold: int = 4000
+    memory_summarize_threshold: int = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     service_id: Optional[int] = None
     silo_id: Optional[int] = None
     output_parser_id: Optional[int] = None
@@ -134,7 +134,7 @@ class CreateUpdateAgentSchema(BaseModel):
     server_tools: Optional[List[str]] = []
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
-    memory_summarize_threshold: Optional[int] = 4000
+    memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     service_id: Optional[int] = None
     silo_id: Optional[int] = None
     output_parser_id: Optional[int] = None
@@ -186,7 +186,7 @@ class PublicAgentDetailSchema(BaseModel):
     has_memory: Optional[bool] = None
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
-    memory_summarize_threshold: Optional[int] = 4000
+    memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     system_prompt: Optional[str] = None
     prompt_template: Optional[str] = None
     create_date: Optional[datetime] = None
@@ -211,7 +211,7 @@ class CreateAgentRequestSchema(BaseModel):
     has_memory: bool = False
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
-    memory_summarize_threshold: Optional[int] = 4000
+    memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     system_prompt: Optional[str] = ""
     prompt_template: Optional[str] = ""
     service_id: Optional[int] = None
@@ -232,7 +232,7 @@ class CreateOCRAgentRequestSchema(BaseModel):
     has_memory: bool = False
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
-    memory_summarize_threshold: Optional[int] = 4000
+    memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     service_id: Optional[int] = None
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = ""

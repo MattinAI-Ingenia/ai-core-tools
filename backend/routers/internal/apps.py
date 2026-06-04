@@ -89,7 +89,8 @@ async def preview_import_app(
         export_data = AppExportFileSchema(**export_dict)
 
         import_service = FullAppImportService(db)
-        return import_service.preview_import(export_data)
+        user_id = int(auth_context.identity.id)
+        return import_service.preview_import(export_data, user_id)
     except (json.JSONDecodeError, ValidationError) as e:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

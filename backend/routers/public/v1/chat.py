@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional, Annotated
+from typing import AsyncGenerator, List, Optional, Annotated
 
 from .schemas import (
     AgentResponseSchema,
@@ -106,20 +106,23 @@ async def call_agent(
     - Documents (.doc, .docx): Basic support
     """
     validate_api_key_for_app(app_id, api_key, db)
-    validate_agent_ownership(db, agent_id, app_id)
+    agent = validate_agent_ownership(db, agent_id, app_id)
 
+    fms = FileManagementService()
+    all_file_references: List = []
     try:
         parsed_search_params = _parse_json_param(search_params, "search_params")
         parsed_file_references = _parse_json_param(file_references, "file_references")
 
         user_context = create_api_key_user_context(app_id, api_key)
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_file_references,
             agent_id=agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         execution_service = AgentExecutionService()
@@ -147,6 +150,11 @@ async def call_agent(
     except Exception as e:
         logger.error(f"Error in public chat endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail="Agent execution failed")
+    finally:
+        # Remove ephemeral uploads from this turn. Persistent uploads (agent
+        # with memory + conversation_id) are kept and expire via the
+        # background cleanup worker after TMP_PERSISTENT_TTL_DAYS.
+        await fms.cleanup_ephemeral_refs(all_file_references)
 
 
 @chat_router.post(
@@ -192,7 +200,7 @@ async def call_agent_stream(
     non-streaming `/call` endpoint.
     """
     validate_api_key_for_app(app_id, api_key, db)
-    validate_agent_ownership(db, agent_id, app_id)
+    agent = validate_agent_ownership(db, agent_id, app_id)
 
     try:
         parsed_search_params = _parse_json_param(search_params, "search_params")
@@ -200,16 +208,18 @@ async def call_agent_stream(
 
         user_context = create_api_key_user_context(app_id, api_key)
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        fms = FileManagementService()
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_file_references,
             agent_id=agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         streaming_service = AgentStreamingService(db)
-        generator = streaming_service.stream_agent_chat(
+        base_generator = streaming_service.stream_agent_chat(
             agent_id=agent_id,
             message=message,
             file_references=all_file_references,
@@ -219,9 +229,18 @@ async def call_agent_stream(
             db=db,
         )
 
+        # Wrap the upstream generator so ephemeral files uploaded for this
+        # turn are removed once the consumer finishes reading (or disconnects).
+        async def generator() -> AsyncGenerator[str, None]:
+            try:
+                async for chunk in base_generator:
+                    yield chunk
+            finally:
+                await fms.cleanup_ephemeral_refs(all_file_references)
+
         logger.info(f"Public API streaming chat for agent {agent_id}")
         return StreamingResponse(
-            generator,
+            generator(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

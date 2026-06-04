@@ -81,7 +81,7 @@ SECRET_KEY=your-256-bit-secret-key-here
 | `MISTRAL_API_KEY` | No | — | MistralAI API key |
 | `AZURE_OPENAI_API_KEY` | No | — | Azure OpenAI API key |
 | `AZURE_OPENAI_ENDPOINT` | No | — | Azure OpenAI endpoint URL |
-| `GOOGLE_API_KEY` | No | — | Google Gemini API key |
+| `GOOGLE_API_KEY` | No | — | Google Gemini API key for AI Studio LLMs and embeddings |
 
 **Example**:
 ```bash
@@ -91,6 +91,8 @@ MISTRAL_API_KEY=...
 ```
 
 **Note**: API keys are optional. Configure only the providers you plan to use.
+
+Google AI Studio and Vertex AI credentials can also be configured per AI Service or Embedding Service in the Mattin AI UI. Vertex AI uses a service-account JSON, project ID, and region stored on the service configuration rather than a global environment variable.
 
 ### Vector Database
 
@@ -143,18 +145,23 @@ GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
 
 ### LangSmith
 
+> **LangChain 1.x naming**: Since v0.4.2, Mattin AI uses the `LANGSMITH_*` prefix (not the older `LANGCHAIN_*` prefix). The central module `backend/tools/langsmith_config.py` handles both per-app keys (stored on the `App` model) and the global env-var fallback.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `LANGCHAIN_TRACING_V2` | No | `false` | Enable LangSmith tracing |
-| `LANGCHAIN_API_KEY` | No | — | LangSmith API key |
-| `LANGCHAIN_PROJECT` | No | — | LangSmith project name |
+| `LANGSMITH_TRACING` | No | `false` | Enable global LangSmith tracing fallback (`true`/`1`/`on`/`yes`) |
+| `LANGSMITH_API_KEY` | No | — | LangSmith API key (global fallback; per-app key takes precedence) |
+| `LANGSMITH_PROJECT` | No | `default` | LangSmith project name (global fallback) |
+| `LANGSMITH_ENDPOINT` | No | `https://api.smith.langchain.com` | Custom LangSmith endpoint |
 
 **Example**:
 ```bash
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=lsv2_pt_...
-LANGCHAIN_PROJECT=mattin-ai-production
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_pt_...
+LANGSMITH_PROJECT=mattin-ai-production
 ```
+
+**Per-app tracing**: Each app can store its own LangSmith API key (`App.langsmith_api_key`). This takes priority over the global env vars. Test connectivity via `POST /internal/apps/{id}/langsmith/test`.
 
 ### Application Settings
 

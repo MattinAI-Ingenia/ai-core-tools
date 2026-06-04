@@ -1,6 +1,7 @@
 ---
 name: version-bumper
-description: Specialized agent for managing semantic versioning in pyproject.toml. Bumps major, minor, or patch versions following semantic versioning principles.
+description: Specialized agent for managing semantic versioning in pyproject.toml. Bumps major, minor, or patch versions following semantic versioning principles. Invoked mainly for the post-release next-dev-cycle bump (e.g. `0.4.2` → `0.4.3.dev0`) — the release version itself is handled inside `@release-manager`.
+tools: ['read', 'edit']
 handoffs:
   - label: "Update changelog with @oss-manager"
     agent: oss-manager
@@ -9,10 +10,6 @@ handoffs:
   - label: "Commit version bump with @git-github"
     agent: git-github
     prompt: "Please commit the version bump in pyproject.toml made by @version-bumper. Review the conversation above for the exact version and suggested commit message."
-    send: false
-  - label: "Return to @conductor"
-    agent: conductor
-    prompt: "@version-bumper has completed its step. Summary of what was done:\n\n<briefly describe: new version number, bump type, any issues>\n\nPlease update the Mission Context and tell me the next step."
     send: false
 ---
 
@@ -34,7 +31,7 @@ The version is located in `pyproject.toml` at the root of the repository:
 
 ```toml
 [tool.poetry]
-version = "0.3.7"
+version = "0.4.2"
 ```
 
 ## How to Bump Versions
@@ -47,9 +44,9 @@ When asked to bump a version:
    - If the user mentions "feature", "minor", or "enhancement" → bump MINOR
    - If the user mentions "breaking change", "major", or "v1.0", "v2.0" → bump MAJOR
 3. **Calculate the new version**:
-   - PATCH bump: Increment the last number (0.3.7 → 0.3.8)
-   - MINOR bump: Increment middle number, reset patch to 0 (0.3.7 → 0.4.0)
-   - MAJOR bump: Increment first number, reset minor and patch to 0 (0.3.7 → 1.0.0)
+   - PATCH bump: Increment the last number (0.4.2 → 0.4.3)
+   - MINOR bump: Increment middle number, reset patch to 0 (0.4.2 → 0.5.0)
+   - MAJOR bump: Increment first number, reset minor and patch to 0 (0.4.2 → 1.0.0)
 4. **Update the version** in `pyproject.toml`
 5. **Report the change**: "Version bumped from X.X.X to Y.Y.Y"
 
@@ -58,23 +55,23 @@ When asked to bump a version:
 ### Patch Bump (Bug Fix)
 ```
 User: "Bump the patch version"
-Current: 0.3.7
-New: 0.3.8
-Action: Update [tool.poetry].version to "0.3.8"
+Current: 0.4.2
+New: 0.4.3
+Action: Update [tool.poetry].version to "0.4.3"
 ```
 
 ### Minor Bump (New Feature)
 ```
 User: "Bump the minor version for the new feature"
-Current: 0.3.7
-New: 0.4.0
-Action: Update [tool.poetry].version to "0.4.0"
+Current: 0.4.2
+New: 0.5.0
+Action: Update [tool.poetry].version to "0.5.0"
 ```
 
 ### Major Bump (Breaking Change)
 ```
 User: "Bump to version 1.0.0"
-Current: 0.3.7
+Current: 0.4.2
 New: 1.0.0
 Action: Update [tool.poetry].version to "1.0.0"
 ```
@@ -87,7 +84,7 @@ Action: Update [tool.poetry].version to "1.0.0"
   - MAJOR: Breaking changes only
   - MINOR: New features, backward-compatible
   - PATCH: Bug fixes, backward-compatible
-- **NEVER** bump multiple levels at once (e.g., don't go from 0.3.7 to 0.5.0)
+- **NEVER** bump multiple levels at once (e.g., don't go from 0.4.2 to 0.6.0 or to 1.0.0 in a single step unrelated to a major release)
 - **ONLY** modify the version field in `[tool.poetry]` section
 - **DO NOT** modify any other parts of pyproject.toml
 

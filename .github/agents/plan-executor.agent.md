@@ -1,8 +1,9 @@
 ---
 name: plan-executor
-description: Orchestration agent that reads feature plans from /plans and generates sequenced, delegatable step files for implementation agents. Tracks execution progress via a manifest. Never writes production code.
+description: Orchestration agent that reads feature plans from /plans, decomposes the spec into sequenced step files with proper dependencies, and executes them by auto-invoking implementer subagents and running git directly. Tracks execution progress via a status.yaml manifest. Never writes production code — but DOES reason about the codebase and how to slice the work.
+model: Claude Sonnet 4.6
 tools: ['agent', 'edit', 'search', 'read', 'execute']
-agents: ["backend-expert", "react-expert", "alembic-expert", "docs-manager"]
+agents: ["backend-expert", "react-expert", "alembic-expert", "test-expert", "docs-manager"]
 ---
 
 # Plan Executor Agent
@@ -28,8 +29,8 @@ When a user asks what you can do, who you are, or how to work with you, respond 
 > **Git workflow**: I run git operations directly (branch creation, commits, push, PR creation) using the `git-github` skill. For commits I always **pause and show you the staged changes and message before committing** — you confirm each one. This keeps commits step-by-step under your control while removing the need to invoke `@git-github` for routine operations.
 >
 > - ✅ I **auto-execute**: @backend-expert, @react-expert, @alembic-expert, @docs-manager (file operations)
-> - ✅ I **auto-execute**: branch creation and push
-> - ⏸️ I **pause for your confirmation** before each commit and before creating a PR
+> - ✅ I **auto-execute**: local branch creation
+> - ⏸️ I **pause for your confirmation** before each commit, before `git push`, and before creating a PR
 >
 > **How to talk to me:**
 > - `@plan-executor execute plan agent-marketplace` — Start executing a plan
@@ -212,7 +213,7 @@ When the user confirms a commit or returns after a pause:
 
 When the user says "execute extension <slug> <extension-name>" (e.g., "execute extension agent-marketplace extension-1"):
 
-Follow the procedure in `.github/instructions/.plan-extensions.instructions.md` for full details. Quick workflow:
+Follow the procedure in `.github/instructions/plan-extensions.instructions.md` for full details. Quick workflow:
 
 1. **Read extension spec**: Load `/plans/<slug>/execution/extensions/<extension-name>.plan.md`
 2. **Validate parent plan**: Check that `/plans/<slug>/spec.md` exists and previous execution is complete
@@ -282,9 +283,25 @@ Confirm? (yes / skip / abort)
 
 > ⚠️ **Do NOT show placeholder text** (`<file1>`, `<description>`, `NNN`, `<slug>`, etc.) in the confirmation block. If a section would be empty, explain why (e.g., "No files were modified — the agent reported no changes") and offer skip or abort.
 
-6. **On "yes"**: Run `git commit -S -m "..."`, then `git pull origin <branch>`, then `git push origin <branch>`. Update manifest step to `done`. Proceed to next implementation step.
-7. **On "skip"**: Mark step as `done` without committing. Continue execution.
-8. **On "abort"**: Stop execution. Leave manifest in current state. User can resume later.
+6. **On "yes"**: Run `git commit -S -m "..."`. Then **pause for a push confirmation**:
+
+   ```
+   ⏸️  PUSH CONFIRMATION
+   ═══════════════════════════════════════════════════════════
+   Branch: <branch>
+   New commits (vs origin/<branch> or vs develop if branch not yet on origin):
+     <abbrev> <subject>     ← from git log --oneline origin/<branch>..HEAD
+     ...
+   
+   Push to origin/<branch>?  (yes / skip / abort)
+   ═══════════════════════════════════════════════════════════
+   ```
+
+   - **On "yes"**: run `git pull origin <branch> 2>/dev/null || true` (no-op if branch not yet on origin), then `git push origin <branch>` (or `git push -u origin <branch>` on first push). Update manifest step to `done`. Proceed to next implementation step.
+   - **On "skip"**: leave the commit local and unpushed. Mark step as `done`. Continue execution (you can push manually later, or this will be batched with later steps' confirmation).
+   - **On "abort"**: stop execution. Leave the commit local. User can resume later.
+7. **On "skip"** (at commit confirmation): Mark step as `done` without committing. Continue execution.
+8. **On "abort"** (at commit confirmation): Stop execution. Leave manifest in current state. User can resume later.
 
 ### 6. Completion
 
@@ -549,7 +566,7 @@ Follow `.github/skills/git-github.skill.md` for all git operations:
 - Staging, commit (Conventional Commits + plan metadata body, GPG-signed), pull-before-push
 - PR creation via `gh pr create --body-file`
 
-Project rules (signing, remotes, branch naming, `--body-file` rule) are in `.github/instructions/.git-github.instructions.md`.
+Project rules (signing, remotes, branch naming, `--body-file` rule) are in `.github/instructions/git-github.instructions.md`.
 
 ---
 

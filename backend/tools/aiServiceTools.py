@@ -1,4 +1,3 @@
-import logging
 import base64
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -17,13 +16,11 @@ from tools.outputParserTools import get_parser_model_by_id
 from typing import List
 from langchain_core.documents import Document
 from tools.embeddingTools import get_embeddings_model
+from utils.logger import get_logger
+
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Initialize VectorStore lazily when needed
 

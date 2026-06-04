@@ -630,6 +630,7 @@ async def list_system_embedding_services(
             model_name=svc.description or "",
             api_key=mask_api_key(svc.api_key) if svc.api_key else "",
             base_url=svc.endpoint or "",
+            api_version=svc.api_version,
             created_at=svc.create_date,
         )
         for svc in services
@@ -655,6 +656,7 @@ async def create_system_embedding_service(
     svc.description = body.model_name  # model name stored in description
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.api_version = body.api_version
     svc.create_date = datetime.now()
     svc = EmbeddingServiceRepository.create(db, svc)
     return EmbeddingServiceService._to_list_item(svc, is_system=True)
@@ -682,6 +684,7 @@ async def update_system_embedding_service(
     if not is_masked_key(body.api_key):
         svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.api_version = body.api_version
     svc = EmbeddingServiceRepository.update(db, svc)
     return EmbeddingServiceService._to_list_item(svc, is_system=True)
 
@@ -866,7 +869,7 @@ async def test_system_embedding_service_connection_with_config(
     config: CreateUpdateEmbeddingServiceSchema,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
+    service_id: Annotated[Optional[int], Query(description="Edit-mode: recover stored API key when the request sends a masked placeholder")] = None,
 ):
     """Test a system embedding service connection with the provided config (OMNIADMIN).
 
@@ -894,6 +897,7 @@ async def test_system_embedding_service_connection_with_config(
             "description": config.model_name,
             "api_key": api_key,
             "endpoint": config.base_url,
+            "api_version": config.api_version,
         }
         return EmbeddingServiceService.test_connection_with_config(service_config)
     except HTTPException:

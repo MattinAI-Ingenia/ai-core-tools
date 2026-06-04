@@ -119,7 +119,7 @@ async def test_embedding_service_connection_with_config(
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("administrator"))],
-    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
+    service_id: Annotated[Optional[int], Query(description="Edit-mode: recover stored API key when the request sends a masked placeholder")] = None,
 ):
     """Test connection to an embedding service using provided configuration.
 
@@ -146,6 +146,7 @@ async def test_embedding_service_connection_with_config(
             "description": config.model_name,
             "api_key": api_key,
             "endpoint": config.base_url,
+            "api_version": config.api_version,
         }
         result = EmbeddingServiceService.test_connection_with_config(service_config)
         return result

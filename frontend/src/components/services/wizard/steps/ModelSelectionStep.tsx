@@ -102,11 +102,15 @@ function ModelSelectionStep({
     if (provider === 'Azure') {
       manualHelp = 'Enter the deployment name configured in your Azure OpenAI resource.';
     } else if (provider === 'GoogleCloud') {
-      manualHelp = 'Enter the Vertex AI model id you want to use.';
+      manualHelp = kind === 'embedding'
+        ? 'Enter the Vertex AI Gemini embedding model id you want to use.'
+        : 'Enter the Vertex AI model id you want to use.';
     }
     let manualPlaceholder = 'sentence-transformers/all-MiniLM-L6-v2';
     if (provider === 'Azure') manualPlaceholder = 'my-gpt-4o-deployment';
-    else if (provider === 'GoogleCloud') manualPlaceholder = 'gemini-2.5-pro';
+    else if (provider === 'GoogleCloud') {
+      manualPlaceholder = kind === 'embedding' ? 'gemini-embedding-2-preview' : 'gemini-2.5-pro';
+    }
 
     return (
       <div className="space-y-4">

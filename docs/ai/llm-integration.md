@@ -242,6 +242,10 @@ Embeddings are handled separately via the **EmbeddingService** model (see [RAG &
 
 Supported embedding providers:
 - **OpenAI**: `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`
+- **MistralAI**: Mistral embedding models
+- **Azure OpenAI**: Azure embedding deployments
+- **Google AI Studio**: Gemini embedding models via API key
+- **Google Cloud Vertex AI**: Gemini embedding models via service-account JSON, project ID, and region
 - **HuggingFace**: Custom embedding models via `sentence-transformers`
 - **Ollama**: Local embedding models
 

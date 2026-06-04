@@ -602,6 +602,8 @@ async def marketplace_chat(
     user_id = int(current_user.identity.id)
     _, agent = _prepare_marketplace_chat(conversation_id, user_id, db)
 
+    fms = FileManagementService()
+    all_file_references: list = []
     try:
         parsed_refs = _parse_file_references_json(file_references)
         jwt_token = _extract_jwt_token(request)
@@ -614,12 +616,13 @@ async def marketplace_chat(
             "token": jwt_token,
         }
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_refs,
             agent_id=agent.agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         execution_service = AgentExecutionService()
@@ -649,6 +652,8 @@ async def marketplace_chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error",
         )
+    finally:
+        await fms.cleanup_ephemeral_refs(all_file_references)
 
 
 @marketplace_router.post(
@@ -685,12 +690,14 @@ async def marketplace_chat_stream(
             "token": jwt_token,
         }
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        fms = FileManagementService()
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_refs,
             agent_id=agent.agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         streaming_service = AgentStreamingService(db)
@@ -714,6 +721,11 @@ async def marketplace_chat_stream(
             finally:
                 if stream_completed:
                     _safe_increment_marketplace_usage(user_id, db)
+                # Cleanup ephemeral artifacts uploaded for this turn. Runs
+                # when the consumer has finished reading the stream (or when
+                # the connection is dropped), so it fires after the agent
+                # has actually used the files.
+                await fms.cleanup_ephemeral_refs(all_file_references)
 
         logger.info(
             f"Streaming marketplace chat for agent {agent.agent_id}, "
