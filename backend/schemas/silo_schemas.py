@@ -13,6 +13,7 @@ class SiloListItemSchema(BaseModel):
     created_at: Optional[datetime] = None
     docs_count: int
     vector_db_type: Optional[str] = None
+    lightrag_vector_db_type: Optional[str] = None
     is_frozen: bool = False
 
     model_config = ConfigDict(from_attributes=True)
@@ -27,6 +28,7 @@ class SiloDetailSchema(BaseModel):
     created_at: Optional[datetime] = None
     docs_count: int
     vector_db_type: Optional[str] = None
+    lightrag_vector_db_type: Optional[str] = None
     # Current values for editing
     metadata_definition_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
@@ -60,6 +62,7 @@ class CreateSiloSchema(BaseModel):
     output_parser_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
     vector_db_type: Optional[str] = None
+    lightrag_vector_db_type: Optional[str] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
     # LightRAG 2026.05 role-specific LLM configuration
     query_service_id: Optional[int] = None

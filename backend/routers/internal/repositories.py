@@ -822,6 +822,18 @@ async def stream_ingestion_progress(
         last_processed = -1
 
         try:
+            # Emit initial state immediately on connect — no 0.5 s wait.
+            # This flushes the response buffer through any intermediate proxy,
+            # causing isConnected to flip to true AND the progress bar to render
+            # actual data right away instead of staying at "Connecting…".
+            initial = IngestionProgressManager.get_progress(session_id)
+            if initial is not None:
+                last_processed = initial.processed_chunks
+                if initial.processed_chunks >= initial.total_chunks:
+                    yield "event: complete\ndata: {}\n\n"
+                    return
+                yield f"data: {json.dumps(initial.to_dict())}\n\n"
+
             while elapsed < max_wait:
                 await asyncio.sleep(0.5)
                 elapsed += 0.5

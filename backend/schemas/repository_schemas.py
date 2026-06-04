@@ -37,6 +37,7 @@ class RepositoryDetailSchema(BaseModel):
     embedding_service_id: Optional[int] = None
     silo_id: Optional[int] = None
     vector_db_type: Optional[str] = None
+    lightrag_vector_db_type: Optional[str] = None
     vector_db_options: List[Dict[str, Any]] = []
     metadata_fields: Optional[List[MetadataFieldSchema]] = []
     media: List[MediaResponse] = []
@@ -60,6 +61,7 @@ class CreateRepositorySchema(BaseModel):
     status: Optional[str] = None
     embedding_service_id: Optional[int] = None
     vector_db_type: Optional[str] = None
+    lightrag_vector_db_type: Optional[str] = None
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id

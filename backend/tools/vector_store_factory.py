@@ -159,4 +159,5 @@ class VectorStoreFactory:
             query_service=kwargs.get('query_service'),
             keywords_service=kwargs.get('keywords_service'),
             vlm_service=kwargs.get('vlm_service'),
+            lightrag_vector_db_type=kwargs.get('lightrag_vector_db_type'),
         )

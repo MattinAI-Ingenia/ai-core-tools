@@ -28,6 +28,7 @@ REPO_BASE_FOLDER = os.path.abspath(os.getenv("REPO_BASE_FOLDER"))
 COLLECTION_PREFIX = 'silo_'
 DEFAULT_SEARCH_LIMIT = 100
 MAX_SEARCH_LIMIT = 200
+LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 
 logger = get_logger(__name__)
 
@@ -224,6 +225,7 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
             query_service=getattr(silo, 'query_service', None),
             keywords_service=getattr(silo, 'keywords_service', None),
             vlm_service=getattr(silo, 'vlm_service', None),
+            lightrag_vector_db_type=getattr(silo, 'lightrag_vector_db_type', None) or 'QDRANT',
         )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
@@ -505,6 +507,20 @@ class SiloService:
                     f"Unsupported vector_db_type '{requested_vector_db_type}'. Supported types: {supported}"
                 )
 
+        requested_lightrag_vector_db_type = silo_data.get('lightrag_vector_db_type')
+        if requested_lightrag_vector_db_type is not None:
+            if not isinstance(requested_lightrag_vector_db_type, str):
+                raise ValidationError("lightrag_vector_db_type must be a string")
+            requested_lightrag_vector_db_type = requested_lightrag_vector_db_type.strip().upper()
+            if not requested_lightrag_vector_db_type:
+                requested_lightrag_vector_db_type = None
+            elif requested_lightrag_vector_db_type not in LIGHTRAG_VECTOR_DB_TYPES:
+                supported = ', '.join(LIGHTRAG_VECTOR_DB_TYPES)
+                raise ValidationError(
+                    "Unsupported lightrag_vector_db_type "
+                    f"'{requested_lightrag_vector_db_type}'. Supported types: {supported}"
+                )
+
         # Validate required fields
         required_fields = ['name', 'app_id']
         validate_required_fields(silo_data, required_fields)
@@ -559,6 +575,16 @@ class SiloService:
                 logger.info("Creating new silo")
 
             silo.vector_db_type = _resolve_vector_db_type(silo, requested_vector_db_type)
+
+            if silo.vector_db_type == 'LIGHTRAG':
+                resolved_lightrag_vector_db_type = (
+                    requested_lightrag_vector_db_type
+                    or getattr(silo, 'lightrag_vector_db_type', None)
+                    or 'QDRANT'
+                )
+                silo.lightrag_vector_db_type = resolved_lightrag_vector_db_type
+            else:
+                silo.lightrag_vector_db_type = None
 
             # LightRAG validation: require at least one extraction LLM (query
             # is the primary; extract is auto-filled from query in the UI but
@@ -1584,6 +1610,7 @@ class SiloService:
                 created_at=None,
                 docs_count=0,
                 vector_db_type=default_vector_db_type,
+                lightrag_vector_db_type='QDRANT',
                 # Form data
                 output_parsers=[],
                 embedding_services=[],
@@ -1669,6 +1696,7 @@ class SiloService:
                 extract_service_id=getattr(silo, 'extract_service_id', None) or silo.indexing_service_id,
                 keywords_service_id=getattr(silo, 'keywords_service_id', None),
                 vlm_service_id=getattr(silo, 'vlm_service_id', None),
+                lightrag_vector_db_type=getattr(silo, 'lightrag_vector_db_type', None) or 'QDRANT',
                 lightrag_chunk_strategy=silo.lightrag_chunk_strategy,
                 lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
                 lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
@@ -1707,6 +1735,7 @@ class SiloService:
             'output_parser_id': silo_data.output_parser_id,
             'embedding_service_id': getattr(silo_data, 'embedding_service_id', None),
             'vector_db_type': getattr(silo_data, 'vector_db_type', None),
+            'lightrag_vector_db_type': getattr(silo_data, 'lightrag_vector_db_type', None),
             'indexing_service_id': getattr(silo_data, 'indexing_service_id', None),
             'query_service_id': getattr(silo_data, 'query_service_id', None),
             'extract_service_id': getattr(silo_data, 'extract_service_id', None),

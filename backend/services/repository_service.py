@@ -24,6 +24,7 @@ from tools.vector_store_factory import VectorStoreFactory
 load_dotenv()
 REPO_BASE_FOLDER = os.path.abspath(os.getenv("REPO_BASE_FOLDER"))
 logger = get_logger(__name__)
+LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 
 _REPOSITORY_NOT_FOUND = "Repository not found"
 
@@ -64,6 +65,7 @@ class RepositoryService:
         repository: Repository,
         embedding_service_id: Optional[int] = None,
         vector_db_type: Optional[str] = None,
+        lightrag_vector_db_type: Optional[str] = None,
         indexing_service_id: Optional[int] = None,
         db: Session = None,
         *,
@@ -109,6 +111,7 @@ class RepositoryService:
             'metadata_definition_id': parser_id,
             'embedding_service_id': embedding_service_id,
             'vector_db_type': resolved_vector_db_type,
+            'lightrag_vector_db_type': lightrag_vector_db_type,
             'indexing_service_id': indexing_service_id,
             'query_service_id': query_service_id,
             'extract_service_id': extract_service_id,
@@ -318,6 +321,7 @@ class RepositoryService:
                 silo_id=None,
                 metadata_fields=[],
                 vector_db_type='PGVECTOR',
+                lightrag_vector_db_type='QDRANT',
                 vector_db_options=vector_db_options,
                 media=[],
                 ai_services=ai_services,
@@ -437,6 +441,11 @@ class RepositoryService:
             vector_db_type = repo.silo.vector_db_type
         else:
             vector_db_type = 'PGVECTOR'
+
+        lightrag_vector_db_type = 'QDRANT'
+        if repo.silo and getattr(repo.silo, 'lightrag_vector_db_type', None):
+            lightrag_vector_db_type = repo.silo.lightrag_vector_db_type
+
         return RepositoryDetailSchema(
             repository_id=repo.repository_id,
             name=repo.name,
@@ -450,6 +459,7 @@ class RepositoryService:
             silo_id=silo_id,
             metadata_fields=metadata_fields,
             vector_db_type=vector_db_type,
+            lightrag_vector_db_type=lightrag_vector_db_type,
             vector_db_options=vector_db_options,
             media=media_list,
             ai_services=ai_services,
@@ -474,6 +484,7 @@ class RepositoryService:
         from fastapi import HTTPException, status
 
         normalized_vector_db_type = None
+        normalized_lightrag_vector_db_type = None
         if repo_data.vector_db_type is not None:
             if not isinstance(repo_data.vector_db_type, str):
                 raise HTTPException(
@@ -488,6 +499,27 @@ class RepositoryService:
                 )
             normalized_vector_db_type = candidate_type or None
 
+        if normalized_vector_db_type == 'LIGHTRAG':
+            candidate_lightrag_type = (
+                (repo_data.lightrag_vector_db_type or 'QDRANT')
+                if hasattr(repo_data, 'lightrag_vector_db_type')
+                else 'QDRANT'
+            )
+            if not isinstance(candidate_lightrag_type, str):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="lightrag_vector_db_type must be a string",
+                )
+            normalized_lightrag_vector_db_type = candidate_lightrag_type.strip().upper()
+            if normalized_lightrag_vector_db_type not in LIGHTRAG_VECTOR_DB_TYPES:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"Unsupported lightrag_vector_db_type '{normalized_lightrag_vector_db_type}'. "
+                        f"Supported values: {', '.join(LIGHTRAG_VECTOR_DB_TYPES)}"
+                    ),
+                )
+
         repo = Repository()
         repo.app_id = app_id
         repo.name = repo_data.name
@@ -501,6 +533,7 @@ class RepositoryService:
             repo,
             repo_data.embedding_service_id,
             normalized_vector_db_type,
+            normalized_lightrag_vector_db_type,
             repo_data.indexing_service_id,
             db,
             query_service_id=getattr(repo_data, 'query_service_id', None),

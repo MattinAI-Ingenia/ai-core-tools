@@ -148,6 +148,16 @@ class IngestionProgressManager:
             return [p.to_dict() for p in _trackers.values() if p.silo_id == silo_id]
 
     @staticmethod
+    def update_total_chunks(session_id: str, total_chunks: int) -> Optional[IngestionProgress]:
+        """Update total_chunks once the real count is known (after Phase 1)."""
+        with _lock:
+            progress = _trackers.get(session_id)
+            if progress is None:
+                return None
+            progress.total_chunks = total_chunks
+            return progress
+
+    @staticmethod
     def cleanup_session(session_id: str) -> None:
         """Remove session from memory after SSE stream closes."""
         with _lock:

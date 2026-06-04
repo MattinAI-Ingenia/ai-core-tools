@@ -299,34 +299,60 @@ class ResourceService:
             save_filename = file.filename
         
         try:
-            resource = Resource(
-                name=name,
-                uri=save_filename,
-                repository_id=repository_id,
-                folder_id=folder_id,
-                type=file_extension,  # Set the file type based on extension
-                status='indexing',    # Will be updated to 'ready' or 'error' by background thread
-            )
             file_path = os.path.join(target_path, save_filename)
-            
-            # Save the file with the new name
+
+            # Read file content first (needed both for saving and for reuse check)
             if hasattr(file, 'save'):
                 file.save(file_path)
+                content = None  # already saved
             else:
-                # For FastAPI UploadFile - read content properly
                 if hasattr(file, 'file'):
-                    # Reset file position to beginning
                     file.file.seek(0)
                     content = file.file.read()
                 else:
                     content = file.read()
-                
+
+            # Re-upload edge case: if a resource with the same URI already exists
+            # in an error state, reset it instead of creating a duplicate record.
+            # This prevents orphaned DB rows and LightRAG conflicts from stale data.
+            existing = (
+                db.query(Resource)
+                .filter(
+                    Resource.uri == save_filename,
+                    Resource.repository_id == repository_id,
+                    Resource.folder_id == folder_id,
+                    Resource.status == 'error',
+                )
+                .first()
+            )
+            if existing:
+                existing.status = 'pending'
+                existing.name = name
+                existing.type = file_extension
+                db.commit()
+                resource = existing
+                logger.info(
+                    "Re-upload: reset existing error resource %s → pending (resource_id=%s)",
+                    save_filename, existing.resource_id,
+                )
+            else:
+                resource = Resource(
+                    name=name,
+                    uri=save_filename,
+                    repository_id=repository_id,
+                    folder_id=folder_id,
+                    type=file_extension,
+                    status='pending',    # Will be updated to 'indexing', then 'ready' or 'error' by background thread
+                )
+                ResourceRepository.create(db, resource)
+
+            # Write file to disk (overwrite if re-upload)
+            if content is not None:
                 with open(file_path, 'wb') as f:
                     f.write(content)
-            
-            ResourceRepository.create(db, resource)
+
             return resource
-            
+
         except Exception as e:
             logger.error(f"Error processing file {file.filename}: {str(e)}")
             return {'filename': file.filename, 'error': str(e)}
@@ -361,6 +387,14 @@ class ResourceService:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
+            # Create the session immediately (before Phase 1) so the SSE client
+            # can connect right away instead of waiting for chunk counting to finish.
+            IngestionProgressManager.create_session(
+                session_id=session_id,
+                silo_id=silo_id,
+                total_chunks=len(resource_snapshots),  # placeholder; updated after Phase 1
+            )
+
             # Phase 1: extract docs per resource to get the real chunk count.
             # Extraction is CPU-only (no LLM calls), so this adds only seconds.
             chunk_counts = {}
@@ -372,11 +406,8 @@ class ResourceService:
                     chunk_counts[resource_id] = SiloService.count_resource_chunks(resource_obj)
 
             total_chunks = sum(chunk_counts.values()) or len(resource_snapshots)
-            IngestionProgressManager.create_session(
-                session_id=session_id,
-                silo_id=silo_id,
-                total_chunks=total_chunks,
-            )
+            # Update with real chunk count so progress math is correct for Phase 2.
+            IngestionProgressManager.update_total_chunks(session_id, total_chunks)
 
             # Phase 2: index each resource, reporting progress by chunk count.
             cumulative = 0
@@ -395,6 +426,16 @@ class ResourceService:
                         resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
                         _db.close()
                         if resource_obj:
+                            # Transition resource to 'indexing' before processing starts
+                            _db_pre = _SessionLocal()
+                            try:
+                                r_pre = _db_pre.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                if r_pre:
+                                    r_pre.status = 'indexing'
+                                    _db_pre.commit()
+                            finally:
+                                _db_pre.close()
+
                             offset = cumulative
                             def _on_progress(n, _offset=offset, _failed=failed):
                                 IngestionProgressManager.update_progress(

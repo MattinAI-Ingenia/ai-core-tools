@@ -44,6 +44,10 @@ class Silo(Base):
 
     vector_db_type = Column(String(45), default='PGVECTOR')
 
+    # Secondary selector used only when vector_db_type == LIGHTRAG.
+    # Determines which vector storage backend LightRAG should use.
+    lightrag_vector_db_type = Column(String(45), nullable=True, default='QDRANT')
+
     lightrag_chunk_strategy = Column(String(45), nullable=True)
     lightrag_chunk_token_size = Column(Integer, nullable=True)
     lightrag_chunk_overlap_token_size = Column(Integer, nullable=True)

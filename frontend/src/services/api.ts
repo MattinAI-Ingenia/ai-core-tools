@@ -1358,14 +1358,38 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`);
   }
 
-  async createRepository(appId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number; indexing_service_id?: number }) {
+  async createRepository(appId: number, data: {
+    name: string;
+    embedding_service_id?: number;
+    vector_db_type?: string;
+    lightrag_vector_db_type?: string;
+    transcription_service_id?: number;
+    video_ai_service_id?: number;
+    indexing_service_id?: number;
+    query_service_id?: number;
+    extract_service_id?: number;
+    keywords_service_id?: number;
+    vlm_service_id?: number;
+  }) {
     return this.request(`/internal/apps/${appId}/repositories/`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateRepository(appId: number, repositoryId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number; indexing_service_id?: number }) {
+  async updateRepository(appId: number, repositoryId: number, data: {
+    name: string;
+    embedding_service_id?: number;
+    vector_db_type?: string;
+    lightrag_vector_db_type?: string;
+    transcription_service_id?: number;
+    video_ai_service_id?: number;
+    indexing_service_id?: number;
+    query_service_id?: number;
+    extract_service_id?: number;
+    keywords_service_id?: number;
+    vlm_service_id?: number;
+  }) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`, {
       method: 'PUT',
       body: JSON.stringify(data),

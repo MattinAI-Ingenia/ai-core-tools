@@ -4,10 +4,11 @@ Builds the storage-backend dict that future steps will pass to ``LightRAG(...)``
 and exports the matching environment variables that LightRAG's storage
 implementations read directly via ``os.environ``.
 
-Per D2 in ``plans/lightrag-integration/decisions.md`` the chosen backends are:
+The chosen backends are:
 
 * ``graph_storage="Neo4JStorage"`` (Neo4j)
-* ``vector_storage="QdrantVectorDBStorage"`` (Qdrant)
+* ``vector_storage`` selectable between ``QdrantVectorDBStorage`` and
+    ``PGVectorStorage``
 * ``kv_storage="PGKVStorage"`` (PostgreSQL)
 * ``doc_status_storage="PGDocStatusStorage"`` (PostgreSQL)
 
@@ -26,9 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 GRAPH_STORAGE = "Neo4JStorage"
-VECTOR_STORAGE = "QdrantVectorDBStorage"
+VECTOR_STORAGE_QDRANT = "QdrantVectorDBStorage"
+VECTOR_STORAGE_PGVECTOR = "PGVectorStorage"
 KV_STORAGE = "PGKVStorage"
 DOC_STATUS_STORAGE = "PGDocStatusStorage"
+
+SUPPORTED_LIGHTRAG_VECTOR_DB_TYPES = {
+    "QDRANT": VECTOR_STORAGE_QDRANT,
+    "PGVECTOR": VECTOR_STORAGE_PGVECTOR,
+}
 
 
 def _parse_postgres_uri(uri: str) -> Dict[str, str]:
@@ -62,7 +69,7 @@ def _require(name: str, value: Optional[str]) -> str:
     return value
 
 
-def build_storage_config() -> Dict[str, str]:
+def build_storage_config(vector_db_type: Optional[str] = None) -> Dict[str, str]:
     """Validate config and return the storage-backend dict for ``LightRAG``.
 
     Side effect: also calls ``os.environ.setdefault(...)`` for each variable
@@ -91,6 +98,14 @@ def build_storage_config() -> Dict[str, str]:
     )
     postgres_env = _parse_postgres_uri(postgres_uri)
 
+    selected_vector_db_type = (vector_db_type or "QDRANT").upper()
+    if selected_vector_db_type not in SUPPORTED_LIGHTRAG_VECTOR_DB_TYPES:
+        supported = ", ".join(SUPPORTED_LIGHTRAG_VECTOR_DB_TYPES.keys())
+        raise RuntimeError(
+            f"Unsupported LightRAG vector DB type: {selected_vector_db_type}. "
+            f"Supported values: {supported}."
+        )
+
     qdrant_url = getattr(config, "QDRANT_URL", None) or "http://localhost:6333"
     qdrant_api_key = getattr(config, "QDRANT_API_KEY", None)
 
@@ -98,18 +113,20 @@ def build_storage_config() -> Dict[str, str]:
         "NEO4J_URI": neo4j_uri,
         "NEO4J_USERNAME": neo4j_username,
         "NEO4J_PASSWORD": neo4j_password,
-        "QDRANT_URL": qdrant_url,
         **postgres_env,
     }
-    if qdrant_api_key:
-        env_vars["QDRANT_API_KEY"] = qdrant_api_key
+
+    if selected_vector_db_type == "QDRANT":
+        env_vars["QDRANT_URL"] = qdrant_url
+        if qdrant_api_key:
+            env_vars["QDRANT_API_KEY"] = qdrant_api_key
 
     for key, value in env_vars.items():
         os.environ.setdefault(key, value)
 
     return {
         "graph_storage": GRAPH_STORAGE,
-        "vector_storage": VECTOR_STORAGE,
+        "vector_storage": SUPPORTED_LIGHTRAG_VECTOR_DB_TYPES[selected_vector_db_type],
         "kv_storage": KV_STORAGE,
         "doc_status_storage": DOC_STATUS_STORAGE,
     }
@@ -119,6 +136,8 @@ __all__ = [
     "DOC_STATUS_STORAGE",
     "GRAPH_STORAGE",
     "KV_STORAGE",
-    "VECTOR_STORAGE",
+    "SUPPORTED_LIGHTRAG_VECTOR_DB_TYPES",
+    "VECTOR_STORAGE_PGVECTOR",
+    "VECTOR_STORAGE_QDRANT",
     "build_storage_config",
 ]

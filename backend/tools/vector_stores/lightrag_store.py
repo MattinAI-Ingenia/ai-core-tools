@@ -193,6 +193,7 @@ class LightRAGStore(VectorStoreInterface):
         query_service=None,
         keywords_service=None,
         vlm_service=None,
+        lightrag_vector_db_type: Optional[str] = None,
     ):
         self.db = db
         # ``ai_service`` is the legacy single-LLM parameter — it acts as the
@@ -204,6 +205,7 @@ class LightRAGStore(VectorStoreInterface):
         self.query_service = query_service
         self.keywords_service = keywords_service
         self.vlm_service = vlm_service
+        self.lightrag_vector_db_type = (lightrag_vector_db_type or "QDRANT").upper()
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
         self._rag_instances: Dict[str, Any] = {}
@@ -232,7 +234,7 @@ class LightRAGStore(VectorStoreInterface):
             build_storage_config,
         )
 
-        storage_cfg = build_storage_config()
+        storage_cfg = build_storage_config(vector_db_type=self.lightrag_vector_db_type)
 
         # Base LLM callable — used as fallback for any role not explicitly
         # configured in ``role_llm_configs``.
@@ -342,7 +344,8 @@ class LightRAGStore(VectorStoreInterface):
         # LightRAG does not expose a single "drop workspace" API so we reach
         # into each backend directly.
         self._cleanup_neo4j(collection_name)
-        self._cleanup_qdrant(collection_name)
+        if self.lightrag_vector_db_type == "QDRANT":
+            self._cleanup_qdrant(collection_name)
         self._cleanup_postgres(collection_name)
 
     # -- Backend-specific cleanup helpers ---------------------------------

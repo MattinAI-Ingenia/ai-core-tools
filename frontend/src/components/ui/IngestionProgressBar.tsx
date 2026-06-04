@@ -81,6 +81,17 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
         </div>
       );
     }
+    // HTTP connection established but no progress data yet — SSE events may be
+    // buffered by a proxy.  Show a different message so the user knows we are
+    // connected and indexing is happening, not still waiting to connect.
+    if (isConnected) {
+      return (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
+          <Loader className="w-5 h-5 text-blue-600 animate-spin" />
+          <p className="text-blue-800 font-medium">Indexing in progress...</p>
+        </div>
+      );
+    }
     return (
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
         <Loader className="w-5 h-5 text-blue-600 animate-spin" />

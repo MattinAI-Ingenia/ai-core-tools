@@ -9,12 +9,21 @@
 }
 
 :80 {
-	encode zstd gzip
+	# Compression — exclude SSE endpoints so they are never buffered.
+	@compressible {
+		not path */ingestion-progress/*
+	}
+	encode @compressible zstd gzip
 
 	@backend path /internal/* /public/* /mcp/* /docs/* /scalar /openapi-internal.json /openapi-public.json /static/* /health
 
 	handle @backend {
-		reverse_proxy backend:8000
+		reverse_proxy backend:8000 {
+			# Flush upstream data immediately — required for SSE and streaming
+			# responses.  Without this Caddy buffers chunks and the EventSource
+			# open event never fires on the client.
+			flush_interval -1
+		}
 	}
 
 	handle {

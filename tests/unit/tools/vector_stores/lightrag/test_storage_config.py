@@ -84,6 +84,20 @@ class TestBuildStorageConfig:
             "doc_status_storage": "PGDocStatusStorage",
         }
 
+    def test_supports_pgvector_backend_selection(self, patched_config):
+        result = storage_config.build_storage_config(vector_db_type="PGVECTOR")
+
+        assert result == {
+            "graph_storage": "Neo4JStorage",
+            "vector_storage": "PGVectorStorage",
+            "kv_storage": "PGKVStorage",
+            "doc_status_storage": "PGDocStatusStorage",
+        }
+
+    def test_raises_for_unsupported_lightrag_vector_db_type(self, patched_config):
+        with pytest.raises(RuntimeError, match="Unsupported LightRAG vector DB type"):
+            storage_config.build_storage_config(vector_db_type="MILVUS")
+
     def test_exports_neo4j_and_qdrant_env_vars(self, patched_config):
         storage_config.build_storage_config()
 
@@ -92,6 +106,12 @@ class TestBuildStorageConfig:
         assert os.environ["NEO4J_PASSWORD"] == "secret"
         assert os.environ["QDRANT_URL"] == "http://qdrant:6333"
         # No API key configured => env var must not be set.
+        assert "QDRANT_API_KEY" not in os.environ
+
+    def test_does_not_export_qdrant_env_for_pgvector_backend(self, patched_config):
+        storage_config.build_storage_config(vector_db_type="PGVECTOR")
+
+        assert "QDRANT_URL" not in os.environ
         assert "QDRANT_API_KEY" not in os.environ
 
     def test_decomposes_postgres_uri_into_env_vars(self, patched_config):

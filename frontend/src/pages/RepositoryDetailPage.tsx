@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader } from 'lucide-react';
+import { ArrowLeft, CheckCircle, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader } from 'lucide-react';
 import { apiService } from '../services/api';
 import Modal from '../components/ui/Modal';
 import FolderTree from '../components/FolderTree';
@@ -244,6 +244,55 @@ const RepositoryDetailPage: React.FC = () => {
       mounted = false;
     };
   }, [repository, ingestionSessionId, appId, repositoryId]);
+
+  // Polling fallback for resource status updates.  When any resource is still
+  // pending or indexing we refresh the repository data every 3 s so that
+  // status badges update without requiring F5 — even if the SSE stream is
+  // delayed or missed.  This mirrors the media polling in ChatInterface.tsx.
+  useEffect(() => {
+    const hasActive = (repository?.resources ?? []).some(
+      (r: { status: string }) => r.status === 'indexing' || r.status === 'pending',
+    );
+
+    if (!hasActive && !isIndexing) return;
+
+    const intervalId = setInterval(async () => {
+      try {
+        const data = await apiService.getRepository(
+          Number.parseInt(appId!),
+          Number.parseInt(repositoryId!),
+        );
+        setRepository(data);
+        const stillActive = (data.resources ?? []).some(
+          (r: { status: string }) => r.status === 'indexing' || r.status === 'pending',
+        );
+        if (!stillActive) {
+          setIsIndexing(false);
+          setIngestionSessionId(null);
+        } else if (stillActive && !ingestionSessionId) {
+          // Polling sees active indexing but we don't have an SSE session.
+          // This can happen if the page was refreshed or the SSE connection
+          // was lost. Fetch the active session so the SSE can reconnect.
+          try {
+            const status = await apiService.getIngestionStatus(
+              Number.parseInt(appId!),
+              Number.parseInt(repositoryId!),
+            );
+            if (status.is_indexing && status.active_session_id && !ingestionSessionId) {
+              setIngestionSessionId(status.active_session_id);
+              setIsIndexing(true);
+            }
+          } catch {
+            // best effort — if this fails, polling will keep running
+          }
+        }
+      } catch {
+        // transient errors should not kill polling
+      }
+    }, 3000);
+
+    return () => clearInterval(intervalId);
+  }, [repository, isIndexing, ingestionSessionId, appId, repositoryId]);
 
   useEffect(() => {
     return () => {
@@ -560,10 +609,9 @@ const RepositoryDetailPage: React.FC = () => {
   // Filter media by selected folder
   const filteredMedia = filterByFolder(repository?.media, selectedFolderId);
 
-  // Keep uploads blocked while any resource is still indexing, even if the
-  // SSE session is temporarily disconnected.
+  // Keep uploads blocked while any resource is still pending or indexing.
   const hasIndexingResources = (repository?.resources ?? []).some(
-    (resource) => resource.status === 'indexing',
+    (resource) => resource.status === 'indexing' || resource.status === 'pending',
   );
   const indexingInProgress = isIndexing || hasIndexingResources;
   const uploadDisabled = uploading || estimatingUpload || indexingInProgress;
@@ -921,9 +969,19 @@ const RepositoryDetailPage: React.FC = () => {
                               <h3 className="font-medium text-gray-900">
                                 {resource.name}
                               </h3>
+                              {resource.status === 'pending' && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700">
+                                  Pending
+                                </span>
+                              )}
                               {resource.status === 'indexing' && (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
                                   <Loader className="w-3 h-3 animate-spin" /> Indexing
+                                </span>
+                              )}
+                              {resource.status === 'ready' && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+                                  <CheckCircle className="w-3 h-3" /> Indexed
                                 </span>
                               )}
                               {resource.status === 'error' && (

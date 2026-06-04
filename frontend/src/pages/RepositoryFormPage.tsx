@@ -14,6 +14,7 @@ interface RepositoryFormData {
   name: string;
   embedding_service_id?: number;
   vector_db_type: string;
+  lightrag_vector_db_type: string;
   transcription_service_id?: number;
   video_ai_service_id?: number;
   indexing_service_id?: number; // legacy alias for extract_service_id
@@ -62,6 +63,7 @@ const RepositoryFormPage: React.FC = () => {
     name: '',
     embedding_service_id: undefined,
     vector_db_type: 'PGVECTOR',
+    lightrag_vector_db_type: 'QDRANT',
     transcription_service_id: undefined,
     video_ai_service_id: undefined,
     indexing_service_id: undefined,
@@ -119,6 +121,7 @@ const RepositoryFormPage: React.FC = () => {
           name: repository.name ?? '',
           embedding_service_id: nextEmbeddingServiceId,
           vector_db_type: resolvedVectorDbType,
+          lightrag_vector_db_type: (repository.lightrag_vector_db_type || 'QDRANT').toUpperCase(),
           transcription_service_id: repository.transcription_service_id ?? undefined,
           video_ai_service_id: repository.video_ai_service_id ?? undefined,
           indexing_service_id: repository.indexing_service_id ?? undefined,
@@ -159,6 +162,7 @@ const RepositoryFormPage: React.FC = () => {
     }
 
     const normalizedVectorDbType = formData.vector_db_type.toUpperCase();
+    const normalizedLightRAGVectorDbType = (formData.lightrag_vector_db_type || 'QDRANT').toUpperCase();
 
     if (isNewRepository && !formData.vector_db_type) {
       setError('Vector database selection is required');
@@ -171,6 +175,11 @@ const RepositoryFormPage: React.FC = () => {
     }
 
     if (isNewRepository && normalizedVectorDbType === 'LIGHTRAG') {
+      if (!['PGVECTOR', 'QDRANT'].includes(normalizedLightRAGVectorDbType)) {
+        setError('LightRAG Vector DB must be either PGVECTOR or QDRANT');
+        return;
+      }
+
       const hasExtractLlm = formData.extract_service_id || formData.query_service_id || formData.indexing_service_id;
       if (!hasExtractLlm) {
         setError('LightRAG repositories require at least a Query or Extract AI service');
@@ -198,6 +207,7 @@ const RepositoryFormPage: React.FC = () => {
       name: trimmedName,
       embedding_service_id: formData.embedding_service_id,
       vector_db_type: normalizedVectorDbType,
+      lightrag_vector_db_type: normalizedVectorDbType === 'LIGHTRAG' ? normalizedLightRAGVectorDbType : undefined,
       transcription_service_id: formData.transcription_service_id,
       video_ai_service_id: formData.video_ai_service_id,
       // Mirror extract → legacy indexing_service_id for backward compat.
@@ -327,6 +337,32 @@ const RepositoryFormPage: React.FC = () => {
               </p>
             )}
           </div>
+
+          {isNewRepository && formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
+            <div>
+              <label htmlFor="lightrag_vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
+                LightRAG Vector DB <span className="text-red-500">*</span>
+              </label>
+              <select
+                id="lightrag_vector_db_type"
+                value={formData.lightrag_vector_db_type}
+                onChange={(e) =>
+                  setFormData({
+                    ...formData,
+                    lightrag_vector_db_type: e.target.value.toUpperCase(),
+                  })
+                }
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                required
+              >
+                <option value="QDRANT">Qdrant</option>
+                <option value="PGVECTOR">PGVector</option>
+              </select>
+              <p className="text-sm text-gray-500 mt-1">
+                Select the internal vector backend used by LightRAG for this repository.
+              </p>
+            </div>
+          )}
 
           {/* Embedding Service (only for new repositories) */}
           {isNewRepository && (
