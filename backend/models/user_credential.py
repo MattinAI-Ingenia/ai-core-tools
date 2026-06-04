@@ -16,6 +16,8 @@ class UserCredential(Base):
     is_verified = Column(Boolean, nullable=False, default=False)
     reset_token = Column(String(512), nullable=True)
     reset_token_expiry = Column(DateTime, nullable=True)
+    failed_attempts = Column(Integer, nullable=False, server_default='0')
+    locked_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

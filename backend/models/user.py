@@ -20,6 +20,7 @@ class User(Base):
     api_keys = relationship('APIKey', back_populates='user', lazy=True)
     subscription = relationship('Subscription', back_populates='user', uselist=False, lazy=True)
     credential = relationship('UserCredential', back_populates='user', uselist=False, lazy=True)
+    refresh_tokens = relationship('RefreshToken', back_populates='user', lazy=True)
 
     def get_id(self):
         return self.user_id
