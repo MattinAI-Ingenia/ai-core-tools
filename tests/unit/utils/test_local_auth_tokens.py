@@ -112,7 +112,7 @@ class TestTokenIsolation:
     """A LOCAL decode must reject tokens from any other issuer/audience."""
 
     def test_dev_issuer_token_is_rejected(self):
-        """Token from FAKE login (DEV_ISSUER) must not pass LOCAL validation."""
+        """Token carrying a legacy DEV_ISSUER must not pass LOCAL validation."""
         token = _mint_with_issuer(DEV_ISSUER, DEV_AUDIENCE)
         with pytest.raises(jwt.InvalidTokenError):
             decode_access_token(token)

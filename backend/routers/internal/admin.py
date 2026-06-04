@@ -869,7 +869,7 @@ async def test_system_ai_service_connection_with_config(
 
 # ==================== LOCAL AUTH USER PROVISIONING (AD-12) ====================
 # These endpoints are only meaningful when AICT_LOGIN=LOCAL.  A mode guard at
-# the top of each handler rejects requests in OIDC/FAKE modes with HTTP 404.
+# the top of each handler rejects requests in OIDC mode with HTTP 404.
 
 from schemas.local_auth_schemas import AdminCreateUserRequest, AdminSetPasswordRequest
 from services.auth.credential_service import (
@@ -936,7 +936,7 @@ async def create_local_user(
 ) -> _LocalUserCreatedResponse:
     """Create a LOCAL auth user and issue a first-time set-password token.
 
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
 
     The new user has no usable password until they consume the token.
     Login identifier is email + name only — no separate username column (FR-D3).
@@ -1007,7 +1007,7 @@ async def admin_set_user_password(
 ) -> _PasswordUpdatedResponse:
     """Forcibly set a user's password (admin panel emergency reset).
 
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
 
     Args:
         user_id: Numeric PK of the target user.
@@ -1063,7 +1063,7 @@ async def issue_reset_link(
 ) -> _ResetLinkResponse:
     """Issue a new set-password token for a LOCAL auth user.
 
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
 
     The previous token (if any) is invalidated by this operation since only
     one token per user is stored in the ``reset_token`` column.
@@ -1117,7 +1117,7 @@ async def admin_revoke_sessions(
 ) -> _SessionsRevokedResponse:
     """Revoke all active refresh tokens for a user.
 
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
 
     Args:
         user_id: Numeric PK of the target user.

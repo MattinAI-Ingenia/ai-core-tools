@@ -97,12 +97,12 @@ class TestLoginModeGuard:
         assert current_login_mode() == "OIDC"
         assert is_seedable_mode() is False
 
-    @pytest.mark.parametrize("value", ["FAKE", "fake", " local ", "LOCAL"])
+    @pytest.mark.parametrize("value", [" local ", "LOCAL"])
     def test_seedable_modes(self, monkeypatch, value):
         monkeypatch.setenv("AICT_LOGIN", value)
         assert is_seedable_mode() is True
 
-    @pytest.mark.parametrize("value", ["OIDC", "oidc", "bogus"])
+    @pytest.mark.parametrize("value", ["FAKE", "fake", "OIDC", "oidc", "bogus"])
     def test_non_seedable_modes(self, monkeypatch, value):
         monkeypatch.setenv("AICT_LOGIN", value)
         assert is_seedable_mode() is False

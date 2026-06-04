@@ -1,8 +1,7 @@
 """Integration tests for LOCAL auth HTTP endpoints.
 
 Tests run against the real test PostgreSQL DB (port 5433).
-They require ``AICT_LOGIN=LOCAL`` and are designed to be run in isolation
-from the normal FAKE-mode test suite.
+They require ``AICT_LOGIN=LOCAL`` (which is now the default test mode).
 
 The conftest ``client`` fixture overrides ``get_db`` to the rollback-isolated
 test session.  Because ``AuthConfig.LOGIN_MODE`` is evaluated at import time
@@ -65,7 +64,7 @@ def local_auth_env():
 
     yield
 
-    # Restore original env state (FAKE mode is the conftest default).
+    # Restore original env state (LOCAL mode is the conftest default).
     if _prev_login is None:
         os.environ.pop("AICT_LOGIN", None)
     else:

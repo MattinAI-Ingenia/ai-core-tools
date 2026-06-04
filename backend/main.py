@@ -244,7 +244,7 @@ cors_origins = [
     os.getenv('CORS_ORIGIN_DOCKER_ALT', 'http://127.0.0.1:3000'),  # Alternative localhost for Docker
 ]
 
-# In non-OIDC modes (FAKE, etc.), allow additional dev ports for easier testing
+# In LOCAL mode, allow additional dev ports for easier testing
 if AuthConfig.LOGIN_MODE != "OIDC":
     cors_origins.extend([
         os.getenv('CORS_ORIGIN_DEV_8080', 'http://localhost:8080'),  # Additional dev ports

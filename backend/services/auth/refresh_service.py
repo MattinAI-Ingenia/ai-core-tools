@@ -254,7 +254,15 @@ class RefreshService:
 
         now = datetime.now(timezone.utc)
 
-        if row.expires_at < now:
+        # Postgres stores ``expires_at`` in a naive ``DateTime`` column, so the
+        # value read back is timezone-naive.  Coerce it to UTC-aware before the
+        # comparison; otherwise ``naive < aware`` raises ``TypeError`` on every
+        # rotation against a real database.
+        expires_at = row.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if expires_at < now:
             logger.warning(
                 "auth:rotate_rejected reason=expired user_id=%s family_id=%s",
                 row.user_id,

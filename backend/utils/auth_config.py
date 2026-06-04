@@ -51,7 +51,7 @@ class AuthConfig:
     JWT_EXPIRATION_HOURS: int = 24
     
     # Login Mode Configuration
-    LOGIN_MODE: str = "OIDC"  # Options: OIDC, FAKE
+    LOGIN_MODE: str = "OIDC"  # Options: OIDC, LOCAL
     
     # OIDC Configuration
     OIDC_ENABLED: bool = True
@@ -88,7 +88,12 @@ class AuthConfig:
         
         # Login Mode Configuration
         cls.LOGIN_MODE = os.getenv('AICT_LOGIN', 'OIDC').upper()
-        if cls.LOGIN_MODE not in ['OIDC', 'FAKE', 'LOCAL']:
+        if cls.LOGIN_MODE == 'FAKE':
+            raise RuntimeError(
+                "AICT_LOGIN=FAKE mode has been retired. "
+                "Use AICT_LOGIN=LOCAL (self-hosted email+password) or AICT_LOGIN=OIDC."
+            )
+        if cls.LOGIN_MODE not in ['OIDC', 'LOCAL']:
             logger.warning(f"Invalid AICT_LOGIN value '{cls.LOGIN_MODE}', defaulting to OIDC")
             cls.LOGIN_MODE = 'OIDC'
         
@@ -134,20 +139,11 @@ class AuthConfig:
         logger.info(f"[LOCK] Login mode: {cls.LOGIN_MODE}")
         logger.info(f"[KEY] OAuth Provider: {cls.OAUTH_PROVIDER}")
 
-        if cls.LOGIN_MODE == 'FAKE':
-            cls._log_fake_mode_status()
-            return
-
         if cls.is_oauth_configured():
             cls._log_configured_oauth_status()
             return
 
         cls._log_unconfigured_oauth_status()
-
-    @classmethod
-    def _log_fake_mode_status(cls) -> None:
-        logger.warning("[WARN] FAKE LOGIN MODE - For development/testing only!")
-        logger.info("   Any existing user email can log in without password")
 
     @classmethod
     def _log_configured_oauth_status(cls) -> None:
@@ -191,12 +187,7 @@ class AuthConfig:
     def is_development_mode(cls) -> bool:
         """Check if running in development mode (OIDC disabled)"""
         return not cls.OIDC_ENABLED
-    
-    @classmethod
-    def is_fake_login_mode(cls) -> bool:
-        """Check if running in fake login mode"""
-        return cls.LOGIN_MODE == 'FAKE'
-    
+
     @classmethod
     def get_dev_user(cls, token: str) -> Optional[Dict[str, Any]]:
         """Get development user by token"""

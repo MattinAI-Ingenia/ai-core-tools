@@ -1,15 +1,14 @@
 """Development user seeding utility.
 
 Creates users in the database so they can log in while the platform runs in
-development authentication mode (``AICT_LOGIN=FAKE`` or ``AICT_LOGIN=LOCAL``).
+LOCAL authentication mode (``AICT_LOGIN=LOCAL``).
 
-In FAKE mode, pre-seeded users log in without a password.
 In LOCAL mode, users must have a password.  This script can set passwords via
 the ``email:Name:password`` CSV format or via the ``AICT_DEV_SEED_PASSWORD``
 env var.
 
 CSV formats accepted:
-    "email:Name"              — user only, no password (FAKE mode)
+    "email:Name"              — user only (seeded without credentials; admin must issue a set-password link)
     "email:Name:password"     — user + password (LOCAL mode)
     "email::password"         — email + password, name derived from email local-part
 
@@ -44,7 +43,7 @@ Omniadmin recovery path:
     admin panel or the database directly to flip ``is_active=True``.
 
 Safety:
-    The script refuses to run unless ``AICT_LOGIN`` is ``FAKE`` or ``LOCAL``,
+    The script refuses to run unless ``AICT_LOGIN`` is ``LOCAL``,
     to avoid creating users in an OIDC deployment.  Use ``--force`` to
     override that guard deliberately.
 
@@ -118,14 +117,14 @@ SEED_USERS_ENV = "AICT_DEV_SEED_USERS"
 SEED_PASSWORD_ENV = "AICT_DEV_SEED_PASSWORD"
 
 # Auth modes under which seeding dev users is meaningful
-_SEEDABLE_MODES = ("FAKE", "LOCAL")
+_SEEDABLE_MODES = ("LOCAL",)
 
 
 def _parse_users_spec(spec: str) -> list:
     """Parse a CSV user specification string into seed user dicts.
 
     Supports two formats:
-    - ``email:Name``          — user without password (FAKE mode)
+    - ``email:Name``          — user without password (seeded without credentials)
     - ``email:Name:password`` — user with password (LOCAL mode)
     - ``email::password``     — name defaults to email local-part
 
@@ -265,8 +264,8 @@ async def seed_dev_users_async(
     user row; passwords are only updated when a new value is supplied.
 
     In LOCAL mode, if a user entry has a ``password`` key the credential is
-    created/updated.  In FAKE mode, the ``password`` key is ignored and no
-    credential row is written.
+    created/updated.  Without a ``password`` key no credential row is written
+    and the user must complete an admin-issued set-password link before login.
 
     Args:
         db: Database session.
@@ -382,7 +381,7 @@ def seed_dev_users(
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="seed_dev_users",
-        description="Seed development users for FAKE/LOCAL login mode.",
+        description="Seed development users for LOCAL login mode.",
     )
     parser.add_argument(
         "-y", "--yes",
@@ -393,7 +392,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Seed even if AICT_LOGIN is not FAKE/LOCAL. Use with care.",
+        help="Seed even if AICT_LOGIN is not LOCAL. Use with care.",
     )
     parser.add_argument(
         "--users",
@@ -451,7 +450,7 @@ def main():
     if not is_seedable_mode() and not args.force:
         message = (
             f"AICT_LOGIN={login_mode} is not a development mode. "
-            "Seeding dev users is only intended for FAKE/LOCAL. "
+            "Seeding dev users is only intended for LOCAL. "
             "Re-run with --force to override."
         )
         if args.yes:
@@ -502,7 +501,7 @@ def main():
                 "  POST /internal/admin/users/{user_id}/reset-link\n"
             )
         else:
-            print("\n  These emails can now log in while AICT_LOGIN=FAKE.\n")
+            print("\n  These emails can now log in while AICT_LOGIN=LOCAL.\n")
 
     except Exception as exc:
         db.rollback()

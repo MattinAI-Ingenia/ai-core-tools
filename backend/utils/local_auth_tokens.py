@@ -1,24 +1,23 @@
 """JWT token utilities for LOCAL auth mode (email+password SaaS login).
 
 This module is the single point of truth for minting and decoding LOCAL-issuer
-access tokens.  It intentionally uses a different issuer/audience pair from the
-DEV mode (``ia-core-tools-dev``) so that a dev-mode token or an OIDC token is
-**rejected** by ``decode_access_token`` at the issuer/audience check level.
+access tokens.  It intentionally uses a different issuer/audience pair from any
+legacy DEV mode issuer (``ia-core-tools-dev``) so that OIDC tokens or tokens
+from any other issuer are **rejected** by ``decode_access_token`` at the
+issuer/audience check level.
 
 Constants are loaded once at import time from environment variables; the module
 has no FastAPI dependencies so it can be exercised in unit tests without starting
 the application.
 
-Public API: ``mint_access_token``, ``decode_access_token``.
-The ``generate_local_auth_token`` shim is intentionally NOT present here;
-it remains in ``utils.dev_auth`` until step_008 completes the decoder cutover
-and dev_auth.py is deleted.
+Public API: ``mint_access_token``, ``decode_access_token``,
+``generate_local_auth_token``.
 """
 
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Dict
 
 import jwt
 
@@ -110,4 +109,30 @@ def decode_access_token(token: str) -> dict[str, Any]:
         leeway=timedelta(seconds=_LEEWAY_SECONDS),
     )
 
+
+def generate_local_auth_token(user_id: int, email: str, name: str | None = None) -> Dict[str, Any]:
+    """Generate a LOCAL-issuer access token for SaaS email+password login.
+
+    This is the canonical shim used by ``saas_auth.py`` to build the JSON
+    response payload after a successful credential check.  It delegates entirely
+    to ``mint_access_token`` so the token carries the LOCAL issuer/audience
+    (``mattin-local-auth`` / ``mattin-internal``) and is therefore accepted by
+    ``decode_access_token`` — the only surviving internal-auth decoder since
+    step_008 retired FAKE mode.
+
+    Args:
+        user_id: Numeric primary key of the User record.
+        email: User's verified email address.
+        name: User's display name; falls back to email when ``None``.
+
+    Returns:
+        Dict with keys ``access_token`` (str), ``expires_at`` (naive ISO-8601
+        string with trailing ``"Z"``), and ``token_type`` (``"Bearer"``).
+    """
+    token, expires_at = mint_access_token(user_id, email, name)
+    return {
+        "access_token": token,
+        "expires_at": expires_at.replace(tzinfo=None).isoformat() + "Z",
+        "token_type": "Bearer",
+    }
 
