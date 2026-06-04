@@ -109,6 +109,15 @@ class UserAlreadyExistsError(Exception):
     """Admin create: email already registered.  Maps to HTTP 409 Conflict."""
 
 
+class PasswordPolicyError(Exception):
+    """Password rejected by policy (e.g. matches email local-part).
+
+    Intentionally NOT a subclass of ``CredentialError`` so that HTTP handlers
+    can distinguish a policy rejection (400) from an authentication failure
+    (401) without relying on exception message text.  Maps to HTTP 400.
+    """
+
+
 class InactiveAccountError(CredentialError):
     """Account is deactivated.  Maps to HTTP 403 Forbidden."""
 

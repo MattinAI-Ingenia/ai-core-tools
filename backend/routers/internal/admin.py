@@ -1,20 +1,23 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from lks_idprovider import AuthContext
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
 from db.database import get_db
-from models.app import App
 from models.agent import Agent
 from models.api_key import APIKey
-from services.user_service import UserService
-from services.system_settings_service import SystemSettingsService
-from services.marketplace_quota_service import MarketplaceQuotaService
-from utils.config import is_omniadmin
+from models.app import App
 from routers.internal.auth_utils import get_current_user_oauth
-from schemas.admin_schemas import UserListResponse, UserDetailResponse, SystemStatsResponse, MarketplaceQuotaResetResponse
+from schemas.admin_schemas import MarketplaceQuotaResetResponse, SystemStatsResponse, UserDetailResponse, UserListResponse
 from schemas.system_setting_schemas import SystemSettingRead, SystemSettingUpdate
+from services.marketplace_quota_service import MarketplaceQuotaService
+from services.system_settings_service import SystemSettingsService
+from services.user_service import UserService
+from utils.config import is_omniadmin
 from utils.logger import get_logger
-from datetime import datetime, timezone
 
 logger = get_logger(__name__)
 
@@ -862,6 +865,288 @@ async def test_system_ai_service_connection_with_config(
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail="Test failed")
+
+
+# ==================== LOCAL AUTH USER PROVISIONING (AD-12) ====================
+# These endpoints are only meaningful when AICT_LOGIN=LOCAL.  A mode guard at
+# the top of each handler rejects requests in OIDC/FAKE modes with HTTP 404.
+
+from schemas.local_auth_schemas import AdminCreateUserRequest, AdminSetPasswordRequest
+from services.auth.credential_service import (
+    CredentialError as _CredentialError,
+    CredentialService as _CredentialService,
+    UserAlreadyExistsError as _UserAlreadyExistsError,
+)
+from services.auth.refresh_service import RefreshService as _RefreshService
+from utils.config import Config as _Config
+
+
+def _set_password_token_expires_at() -> str:
+    """Compute the ISO-8601 expiry timestamp for a set-password token."""
+    max_age_hours: int = _Config.get_int_env_var(
+        "LOCAL_SET_PASSWORD_TOKEN_MAX_AGE_HOURS", default=48
+    )
+    return (datetime.now(timezone.utc) + timedelta(hours=max_age_hours)).isoformat()
+
+
+class _LocalUserCreatedResponse(BaseModel):
+    """Response returned to an admin after creating a LOCAL auth user account."""
+
+    user_id: int
+    email: str
+    name: Optional[str]
+    set_password_token: str
+    expires_at: str
+
+
+class _ResetLinkResponse(BaseModel):
+    """Response returned to an admin when issuing a reset link."""
+
+    set_password_token: str
+    expires_at: str
+
+
+class _PasswordUpdatedResponse(BaseModel):
+    """Response for admin set-password."""
+
+    message: str
+
+
+class _SessionsRevokedResponse(BaseModel):
+    """Response for admin revoke-sessions."""
+
+    message: str
+
+
+@router.post(
+    "/users/local",
+    response_model=_LocalUserCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create LOCAL auth user (admin)",
+    description=(
+        "Create a new LOCAL auth user account and return a one-time set-password "
+        "token (FR-C4/FR-D1/AD-12). The token is returned in the response body for "
+        "the admin to hand to the user. It is NOT logged."
+    ),
+)
+async def create_local_user(
+    body: AdminCreateUserRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _LocalUserCreatedResponse:
+    """Create a LOCAL auth user and issue a first-time set-password token.
+
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+
+    The new user has no usable password until they consume the token.
+    Login identifier is email + name only — no separate username column (FR-D3).
+
+    Args:
+        body: ``AdminCreateUserRequest`` with ``email`` and ``name``.
+        auth_context: Resolved OMNIADMIN auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``_LocalUserCreatedResponse`` with ``user_id``, ``email``, ``name``,
+        ``set_password_token``, and ``expires_at``.
+
+    Raises:
+        HTTPException 404: Endpoint not available in current auth mode.
+        HTTPException 409: A user with that email already exists.
+    """
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    try:
+        user = await _CredentialService.admin_create_user(db, email=str(body.email), name=body.name)
+    except _UserAlreadyExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    try:
+        token = _CredentialService.issue_set_password_token(db, user.user_id)
+    except _CredentialError as exc:
+        logger.error("admin:create_local_user token_issue_failed user_id=%s — %s", user.user_id, exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to issue setup link.")
+    except Exception as exc:
+        logger.error("admin:create_local_user unexpected user_id=%s — %s", user.user_id, type(exc).__name__, exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to issue setup link.")
+
+    logger.info(
+        "admin:create_local_user user_id=%s email=%s by=%s",
+        user.user_id,
+        user.email,
+        auth_context.identity.email,
+    )
+
+    return _LocalUserCreatedResponse(
+        user_id=user.user_id,
+        email=user.email,
+        name=user.name,
+        set_password_token=token,  # Never logged — admin's responsibility to handle securely.
+        expires_at=_set_password_token_expires_at(),
+    )
+
+
+@router.post(
+    "/users/{user_id}/set-password",
+    response_model=_PasswordUpdatedResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Admin: forcibly set user password",
+    description=(
+        "Directly set a LOCAL auth user's password (emergency admin reset). "
+        "Resets lockout state and revokes all existing sessions."
+    ),
+)
+async def admin_set_user_password(
+    user_id: int,
+    body: AdminSetPasswordRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _PasswordUpdatedResponse:
+    """Forcibly set a user's password (admin panel emergency reset).
+
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+
+    Args:
+        user_id: Numeric PK of the target user.
+        body: ``AdminSetPasswordRequest`` with ``new_password`` (policy-validated).
+        auth_context: Resolved OMNIADMIN auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``_PasswordUpdatedResponse`` with a success message.
+
+    Raises:
+        HTTPException 404: User not found or endpoint not available.
+        HTTPException 400: Credential record not found.
+    """
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    user = UserService.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=USER_NOT_FOUND)
+
+    try:
+        await _CredentialService.admin_set_password(
+            db, user_id=user_id, new_password=body.new_password.get_secret_value()
+        )
+    except _CredentialError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    logger.info(
+        "admin:set_password user_id=%s by=%s",
+        user_id,
+        auth_context.identity.email,
+    )
+    return _PasswordUpdatedResponse(message="Password updated.")
+
+
+@router.post(
+    "/users/{user_id}/reset-link",
+    response_model=_ResetLinkResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Admin: issue set-password reset link",
+    description=(
+        "Generate a new one-time set-password token for an existing LOCAL auth user. "
+        "Returns the token in the response body for the admin to forward to the user."
+    ),
+)
+async def issue_reset_link(
+    user_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _ResetLinkResponse:
+    """Issue a new set-password token for a LOCAL auth user.
+
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+
+    The previous token (if any) is invalidated by this operation since only
+    one token per user is stored in the ``reset_token`` column.
+
+    Args:
+        user_id: Numeric PK of the target user.
+        auth_context: Resolved OMNIADMIN auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``_ResetLinkResponse`` with ``set_password_token`` and ``expires_at``.
+
+    Raises:
+        HTTPException 404: User not found or endpoint not available.
+        HTTPException 400: Credential record not found.
+    """
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    user = UserService.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=USER_NOT_FOUND)
+
+    try:
+        token = _CredentialService.issue_set_password_token(db, user_id)
+    except _CredentialError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    logger.info(
+        "admin:reset_link_issued user_id=%s by=%s",
+        user_id,
+        auth_context.identity.email,
+    )
+
+    return _ResetLinkResponse(set_password_token=token, expires_at=_set_password_token_expires_at())
+
+
+@router.post(
+    "/users/{user_id}/revoke-sessions",
+    response_model=_SessionsRevokedResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Admin: revoke all sessions for a user",
+    description="Revoke all refresh tokens for a user, forcing re-authentication on all devices.",
+)
+async def admin_revoke_sessions(
+    user_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _SessionsRevokedResponse:
+    """Revoke all active refresh tokens for a user.
+
+    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC/FAKE modes.
+
+    Args:
+        user_id: Numeric PK of the target user.
+        auth_context: Resolved OMNIADMIN auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``_SessionsRevokedResponse`` with a success message.
+
+    Raises:
+        HTTPException 404: User not found or endpoint not available.
+    """
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    user = UserService.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=USER_NOT_FOUND)
+
+    _RefreshService.revoke_all(db, user_id)
+
+    logger.info(
+        "admin:revoke_sessions user_id=%s by=%s",
+        user_id,
+        auth_context.identity.email,
+    )
+    return _SessionsRevokedResponse(message=f"All sessions revoked for user {user_id}.")
 
 
 @router.post("/system-embedding-services/test-connection")

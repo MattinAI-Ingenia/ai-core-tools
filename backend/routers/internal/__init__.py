@@ -45,3 +45,23 @@ if is_saas_mode():
     from .subscription import router as subscription_router
     internal_router.include_router(saas_auth_router, prefix="/auth")
     internal_router.include_router(subscription_router)
+
+# LOCAL auth router (email+password, httpOnly cookies, CSRF-protected).
+# Registered when AICT_LOGIN=LOCAL.  Intentionally NOT gated by is_saas_mode()
+# because LOCAL is the self-hosted production path, completely separate from
+# the SaaS deployment path.
+from utils.auth_config import AuthConfig
+
+# Startup guard: LOCAL+SaaS is never a supported combination.  Fail fast with a
+# clear message rather than silently registering conflicting auth routes.
+if is_saas_mode() and AuthConfig.LOGIN_MODE == "LOCAL":
+    raise RuntimeError(
+        "Unsupported configuration: AICT_DEPLOYMENT_MODE=saas and AICT_LOGIN=LOCAL "
+        "cannot be used together.  LOCAL auth is the self-hosted path; SaaS mode "
+        "requires OIDC or the built-in SaaS auth flow.  "
+        "Set AICT_LOGIN=OIDC or AICT_DEPLOYMENT_MODE=self_managed."
+    )
+
+if AuthConfig.LOGIN_MODE == "LOCAL":
+    from .local_auth import router as local_auth_router
+    internal_router.include_router(local_auth_router, prefix="/auth")

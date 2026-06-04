@@ -153,32 +153,32 @@ def _validate_password_strength(plain: str) -> str:
 
 
 def check_password_not_email(plain: str, email: str) -> None:
-    """Raise CredentialError when the password matches the user's email local-part.
+    """Raise PasswordPolicyError when the password matches the user's email local-part.
 
     Call this explicitly in service layer when the email is available (e.g.
     inside ``consume_set_password_token`` and ``change_password``).
 
-    Note: This function raises ``CredentialError`` (not ``ValueError``) so that
-    service call sites receive a properly typed domain exception that the HTTP
-    layer maps to a 401 response — not an unhandled 500.  Schema-level validators
-    that need a ``ValueError`` must perform the same check inline.
+    Note: This function raises ``PasswordPolicyError`` (not ``CredentialError``)
+    so that HTTP handlers can map it to HTTP 400 (policy rejection) independently
+    from authentication failures (HTTP 401).  Schema-level validators that need a
+    ``ValueError`` must perform the same check inline.
 
     Args:
         plain: The candidate password (plain text, already policy-validated).
         email: The user's email address.
 
     Raises:
-        CredentialError: When the password (case-insensitive) matches the
+        PasswordPolicyError: When the password (case-insensitive) matches the
             local-part of the email address.
     """
     # Import here to avoid a circular import: schemas → services → schemas.
     # This helper is only called from service-layer code, so the deferred import
     # is safe and the circular reference never materialises at module load time.
-    from services.auth.credential_service import CredentialError  # noqa: PLC0415
+    from services.auth.credential_service import PasswordPolicyError  # noqa: PLC0415
 
     local_part = email.split("@")[0].lower()
     if local_part and plain.lower() == local_part:
-        raise CredentialError(
+        raise PasswordPolicyError(
             "Password must not match your email address."
         )
 
