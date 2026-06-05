@@ -103,7 +103,8 @@ class Agent(Base):
 
     app = relationship('App',
                            back_populates='agents',
-                           foreign_keys=[app_id])
+                           foreign_keys=[app_id],
+                           overlaps='ocr_agents')
     
     output_parser = relationship('OutputParser',
                            foreign_keys=[output_parser_id])

@@ -16,8 +16,8 @@ class App(Base):
     langsmith_api_key = Column(String(255))
     repositories = relationship('Repository', lazy=True)
     domains = relationship('Domain', back_populates='app', lazy=True)
-    agents = relationship('Agent', lazy=True)
-    ocr_agents = relationship('OCRAgent', lazy=True)
+    agents = relationship('Agent', lazy=True, overlaps='ocr_agents')
+    ocr_agents = relationship('OCRAgent', lazy=True, overlaps='agents')
     output_parsers = relationship('OutputParser', 
                                 back_populates='app',
                                 lazy=True)
