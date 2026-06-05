@@ -166,7 +166,6 @@ class AgentStreamingService:
             # ----------------------------------------------------------------
             # 3. Build agent chain
             # ----------------------------------------------------------------
-            agent_chain, mcp_client = await create_agent(
             # Resolve temporary playground media silos
             temp_silo_ids = None
             session_id_for_media = ctx.conversation.session_id if ctx.conversation else None

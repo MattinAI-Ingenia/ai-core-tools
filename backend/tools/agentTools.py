@@ -128,8 +128,6 @@ class MCPClientManager:
         if self._client is not None:
             self._client = None
 
-async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None):
-
 def _build_summarization_llm_from_service(agent, ai_service_id: int):
     """Build a summarization LLM from a specific AIService ID.
 
@@ -244,14 +242,6 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         max_messages = agent.memory_max_messages or 20
         from models.agent import DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
         trim_tokens = agent.memory_summarize_threshold or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
-        summarization = SummarizationMiddleware(
-            model=llm,
-            trigger=("tokens", max_tokens),
-            keep=("messages", max_messages),
-            trim_tokens_to_summarize=trim_tokens,
-        trim_tokens = agent.memory_summarize_threshold or 4000
-        summarization_llm = llm
-
         if summarization_assoc_config is not None:
             max_tokens = summarization_assoc_config.get('trigger_tokens', max_tokens)
             max_messages = summarization_assoc_config.get('keep_messages', max_messages)
