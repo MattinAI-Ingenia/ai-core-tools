@@ -28,7 +28,7 @@ class Conversation(Base):
     
     # Foreign keys
     agent_id = Column(Integer, ForeignKey('Agent.agent_id'), nullable=False)
-    user_id = Column(Integer, ForeignKey('User.user_id'), nullable=True)  # Null for API key users
+    user_id = Column(Integer, ForeignKey('User.user_id', ondelete='SET NULL'), nullable=True)  # Null for API key users / deleted users
     
     # Conversation metadata
     title = Column(String(255), nullable=True)  # User-defined or auto-generated title

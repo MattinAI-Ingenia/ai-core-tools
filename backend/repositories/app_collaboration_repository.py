@@ -1,6 +1,6 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_
+from sqlalchemy import and_, select
 from models.app_collaborator import AppCollaborator, CollaborationStatus, CollaborationRole
 from models.app import App
 from models.user import User
@@ -181,3 +181,24 @@ class AppCollaborationRepository:
     def get_collaborations_by_app(self, app_id: int) -> List[AppCollaborator]:
         """Get all collaborations for an app (for deletion)"""
         return self.db.query(AppCollaborator).filter(AppCollaborator.app_id == app_id).all()
+
+    def get_collaborations_by_user(self, user_id: int) -> List[AppCollaborator]:
+        """Return every AppCollaborator row where the target is the member (class-C grant cleanup).
+
+        This intentionally returns rows across *all* apps so that the user-deletion
+        orchestration can remove every membership in a single pass before calling
+        ``db.delete(user)``.  It does NOT include rows where the user is only the
+        inviter (``invited_by``) — those are class-D audit rows handled by the DB
+        ``ON DELETE SET NULL`` constraint.
+
+        Args:
+            user_id: Primary key of the target user.
+
+        Returns:
+            List of ``AppCollaborator`` rows where ``user_id`` matches the target.
+        """
+        return list(
+            self.db.execute(
+                select(AppCollaborator).where(AppCollaborator.user_id == user_id)
+            ).scalars().all()
+        )

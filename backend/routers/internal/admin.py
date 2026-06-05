@@ -11,7 +11,17 @@ from models.agent import Agent
 from models.api_key import APIKey
 from models.app import App
 from routers.internal.auth_utils import get_current_user_oauth
-from schemas.admin_schemas import MarketplaceQuotaResetResponse, SystemStatsResponse, UserDetailResponse, UserListResponse
+from schemas.admin_schemas import (
+    AppTransferSummary,
+    DeleteUserRequest,
+    MarketplaceQuotaResetResponse,
+    OwnedAppsConflictResponse,
+    OwnedAppConflictItem,
+    SystemStatsResponse,
+    TransferOwnerRequest,
+    UserDetailResponse,
+    UserListResponse,
+)
 from schemas.system_setting_schemas import SystemSettingRead, SystemSettingUpdate
 from services.marketplace_quota_service import MarketplaceQuotaService
 from services.system_settings_service import SystemSettingsService
@@ -103,8 +113,16 @@ async def get_user(
 
 @router.delete(
     "/users/{user_id}",
+    status_code=status.HTTP_200_OK,
     responses={
+        400: {"description": "Bad request — self-deletion or invalid transfer recipient"},
+        403: {"description": "Forbidden — target user is an omniadmin"},
         404: {"description": "User not found"},
+        409: {
+            "description": "Conflict — user owns apps (mode=block) or tier limit exceeded",
+            "model": OwnedAppsConflictResponse,
+        },
+        501: {"description": "Not implemented — transfer_apps stub not yet wired"},
         500: {"description": "Internal server error"},
     },
 )
@@ -112,22 +130,234 @@ async def delete_user(
     user_id: int,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-):
-    """Delete a user and all associated data"""
+    body: Optional[DeleteUserRequest] = None,
+    mode: Annotated[
+        Optional[str],
+        Query(description="Deletion mode: block | cascade_apps | transfer_apps (query-param fallback)"),
+    ] = None,
+    transfer_to_user_id: Annotated[
+        Optional[int],
+        Query(description="Recipient user_id for mode=transfer_apps (query-param fallback)"),
+    ] = None,
+) -> dict:
+    """Delete a user account and orchestrate all associated data.
+
+    The actor identity is always resolved from the session — never from the
+    request body or query parameters (NFR-1 / IDOR prevention).
+
+    **Parameter priority**: the JSON body fields take precedence when supplied;
+    query parameters serve as a fallback for clients that cannot attach a body
+    to a DELETE request.  Both are optional — omitting everything defaults to
+    ``mode='block'``, which is safe for callers that do not yet send either.
+
+    Args:
+        user_id: Path parameter — primary key of the user to delete.
+        auth_context: Resolved OMNIADMIN auth context (from ``require_admin``).
+        db: Synchronous database session.
+        body: Optional ``DeleteUserRequest`` with ``mode`` and
+            ``transfer_to_user_id``.  Body fields take precedence over query params.
+        mode: Query-param fallback for ``mode``.
+        transfer_to_user_id: Query-param fallback for ``transfer_to_user_id``.
+
+    Returns:
+        ``{"message": "<email> ... deleted successfully"}`` on HTTP 200.
+
+    Raises:
+        HTTPException 400: Self-deletion attempt or invalid transfer recipient.
+        HTTPException 403: Target user is an omniadmin.
+        HTTPException 404: Target user does not exist.
+        HTTPException 409: User owns apps and ``mode='block'``, or transfer would
+            exceed the recipient's SaaS app limit.  The 409 body contains
+            ``detail`` and ``owned_apps: [{app_id, name}, …]`` for the client
+            dialog when the conflict is an owned-apps block.
+        HTTPException 501: ``mode='transfer_apps'`` stub not yet fully wired.
+        HTTPException 500: Unexpected internal error.
+    """
+    from services.user_deletion_errors import (
+        OmniadminDeletionError,
+        OwnedAppsPresentError,
+        SelfDeletionError,
+        UserNotFoundError,
+    )
+    from services.app_ownership_errors import (
+        TierLimitExceededError,
+        TransferRecipientInvalidError,
+    )
+
+    # Resolve effective mode and transfer_to_user_id: body takes precedence.
+    _VALID_MODES = {"block", "cascade_apps", "transfer_apps"}
+    effective_mode: str = "block"
+    effective_transfer_to: Optional[int] = None
+
+    if body is not None:
+        effective_mode = body.mode  # already Literal-validated by Pydantic
+        effective_transfer_to = body.transfer_to_user_id
+    elif mode is not None:
+        if mode not in _VALID_MODES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid mode '{mode}'. Must be one of: {sorted(_VALID_MODES)}.",
+            )
+        effective_mode = mode
+        effective_transfer_to = transfer_to_user_id
+    # else: both absent — keep safe defaults (block, None)
+
+    # Actor identity always comes from the session (NFR-1 / IDOR prevention).
+    actor_user_id: int = int(auth_context.identity.id)
+
     try:
-        user = UserService.get_user_by_id(db, user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
-        
-        success = UserService.delete_user(db, user_id)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to delete user")
-        
-        return {"message": f"User {user.email} and all associated data have been deleted successfully"}
+        UserService.delete_user(
+            db,
+            user_id,
+            actor_user_id=actor_user_id,
+            mode=effective_mode,  # type: ignore[arg-type]  # validated by Pydantic or kept as-is
+            transfer_to_user_id=effective_transfer_to,
+        )
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except SelfDeletionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except OmniadminDeletionError as exc:
+        # Use exc.message ("Cannot delete an administrator account.") — never exc.email.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
+    except OwnedAppsPresentError as exc:
+        # Build a structured 409 body with the owned-app summaries so the
+        # frontend can render the transfer/cascade dialog without a preflight.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=OwnedAppsConflictResponse(
+                detail=exc.message,
+                owned_apps=[
+                    OwnedAppConflictItem(app_id=a["app_id"], name=a["name"])
+                    for a in exc.owned_apps
+                ],
+            ).model_dump(),
+        )
+    except TransferRecipientInvalidError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except TierLimitExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+    except NotImplementedError as exc:
+        logger.warning(
+            "delete_user: transfer_apps stub hit — user_id=%s actor=%s",
+            user_id,
+            auth_context.identity.email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc) or "transfer_apps mode is not yet implemented.",
+        )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting user: {str(e)}")
+    except Exception:
+        logger.error(
+            "delete_user: unexpected error user_id=%s actor=%s",
+            user_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete user due to an unexpected error.",
+        )
+
+    logger.info(
+        "admin:delete_user user_id=%s mode=%s actor=%s",
+        user_id,
+        effective_mode,
+        auth_context.identity.email,
+    )
+    return {"message": f"User {user_id} and all associated data have been deleted successfully"}
+
+
+@router.post(
+    "/apps/{app_id}/transfer",
+    response_model=AppTransferSummary,
+    status_code=status.HTTP_200_OK,
+    responses={
+        400: {"description": "Recipient user is invalid (inactive, same as current owner, or does not exist)"},
+        404: {"description": "App not found"},
+        409: {"description": "Transfer would exceed the recipient's SaaS app-count limit"},
+    },
+)
+async def transfer_app_ownership(
+    app_id: int,
+    body: TransferOwnerRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AppTransferSummary:
+    """Immediately reassign ownership of an app to another user (OMNIADMIN only).
+
+    Administrative-direct transfer: no recipient handshake required.  The actor
+    identity is always derived from the session; ``new_owner_id`` comes from the
+    request body.
+
+    Args:
+        app_id: Path parameter — PK of the app to transfer.
+        body: ``TransferOwnerRequest`` with ``new_owner_id``.
+        auth_context: Resolved OMNIADMIN auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``AppTransferSummary`` with ``app_id``, ``name``, ``previous_owner_id``,
+        and ``new_owner_id`` for the admin UI to update its local state.
+
+    Raises:
+        HTTPException 404: App not found.
+        HTTPException 400: Recipient is invalid (non-existent, inactive, or already owner).
+        HTTPException 409: Transfer would push the recipient over their SaaS app limit.
+    """
+    from services.app_ownership_service import AppOwnershipService
+    from services.app_ownership_errors import (
+        AppNotFoundError,
+        TierLimitExceededError,
+        TransferRecipientInvalidError,
+    )
+
+    # Actor identity always comes from the session (NFR-1 / IDOR prevention).
+    actor_user_id: int = int(auth_context.identity.id)
+
+    try:
+        # previous_owner_id is captured from the FOR UPDATE-locked row inside the
+        # service (authoritative under concurrency — no stale pre-fetch snapshot).
+        app, previous_owner_id = AppOwnershipService.transfer_direct(
+            db,
+            app_id=app_id,
+            new_owner_id=body.new_owner_id,
+            actor_user_id=actor_user_id,
+        )
+    except AppNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except TransferRecipientInvalidError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except TierLimitExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "transfer_app_ownership: unexpected error app_id=%s new_owner_id=%s actor=%s",
+            app_id,
+            body.new_owner_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Transfer failed due to an unexpected error.")
+
+    logger.info(
+        "admin:transfer_app app_id=%s previous_owner_id=%s new_owner_id=%s by=%s",
+        app_id,
+        previous_owner_id,
+        body.new_owner_id,
+        auth_context.identity.email,
+    )
+
+    return AppTransferSummary(
+        app_id=app.app_id,
+        name=app.name,
+        previous_owner_id=previous_owner_id,
+        new_owner_id=app.owner_id,
+    )
 
 
 @router.post(
