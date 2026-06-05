@@ -139,14 +139,30 @@ function PendingInvitationsNotification() {
               {invitations.map((invitation) => (
                 <div key={invitation.id} className="p-3 border-b border-gray-100 last:border-b-0">
                   <div className="space-y-2">
-                    {/* Invitation Info */}
+                    {/* Invitation Info — ownership offers (role=owner) are rendered
+                        distinctly from normal collaboration invitations. */}
                     <div>
-                      <h4 className="font-medium text-gray-900 text-sm">{invitation.app_name}</h4>
-                      <p className="text-xs text-gray-600">
-                        {invitation.inviter_name || invitation.inviter_email} invited you as an{' '}
-                        <span className="font-medium">{invitation.role}</span>
-                      </p>
-                      <p className="text-xs text-gray-500 mt-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="font-medium text-gray-900 dark:text-slate-100 text-sm">{invitation.app_name}</h4>
+                        {invitation.role.toLowerCase() === 'owner' && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                            Ownership transfer
+                          </span>
+                        )}
+                      </div>
+                      {invitation.role.toLowerCase() === 'owner' ? (
+                        <p className="text-xs text-gray-600 dark:text-slate-300">
+                          {invitation.inviter_name || invitation.inviter_email} wants to transfer{' '}
+                          <span className="font-medium">ownership</span> of this app to you. Accepting makes you
+                          the owner; the current owner becomes an administrator.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-gray-600 dark:text-slate-300">
+                          {invitation.inviter_name || invitation.inviter_email} invited you as an{' '}
+                          <span className="font-medium">{invitation.role}</span>
+                        </p>
+                      )}
+                      <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
                         {new Date(invitation.invited_at).toLocaleDateString()}
                       </p>
                     </div>
