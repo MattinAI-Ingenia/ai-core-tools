@@ -449,3 +449,4 @@ if is_omniadmin(user_email):
 - [Public API](../api/public-api.md) — API key authentication
 - [Role Authorization](../reference/role-authorization.md) — RBAC system
 - [Backend Architecture](../architecture/backend.md) — Auth router implementation
+- [User Deletion and App Ownership Transfer](user-deletion-and-app-transfer.md) — Safe user deletion, cascade/transfer modes, and app ownership handoff
