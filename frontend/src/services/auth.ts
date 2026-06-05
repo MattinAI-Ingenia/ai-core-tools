@@ -37,16 +37,21 @@ class AuthService {
 
   // ==================== OIDC BRIDGE ====================
   // The OIDC library manages its own tokens in localStorage under oidc-client-ts
-  // keys.  We only store the access_token in the module-level variable so
+  // keys.  We only store the OIDC ID token in this module-level variable so
   // api.ts can read it synchronously for the Authorization: Bearer header.
   private oidcAccessToken: string | null = null;
 
   /**
    * Called by OIDCProvider after a successful login or silent-renew.
-   * Stores the access_token in memory — NOT in localStorage under our own key.
+   * Stores the OIDC ID token in memory — NOT in localStorage under our own key.
+   *
+   * We send the ID token (aud = client_id), NOT the access token: Azure AD issues
+   * the access token for the `<audience>/.default` scope with aud = api://<client_id>,
+   * which fails the backend's ID-token audience validation
+   * (ENTRA_TOKEN_TYPE=id_token, validate_audience=true) → 401 on every endpoint.
    */
   setOIDCToken(user: User) {
-    this.oidcAccessToken = user.access_token ?? null;
+    this.oidcAccessToken = user.id_token ?? null;
   }
 
   /**

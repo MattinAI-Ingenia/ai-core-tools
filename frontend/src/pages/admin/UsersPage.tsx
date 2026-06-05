@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Crown, Check, X, Ban, Trash2, RefreshCcw, UserPlus, Link } from 'lucide-react';
+import { Crown, Check, X, Ban, Trash2, RefreshCcw, UserPlus, Link, UserCheck, Eye, Pencil } from 'lucide-react';
 import { adminService, OwnedAppsError } from '../../services/admin';
 import type { User, UserListResponse } from '../../services/admin';
 import ActionDropdown from '../../components/ui/ActionDropdown';
@@ -8,6 +8,7 @@ import CreateLocalUserModal from '../../components/ui/CreateLocalUserModal';
 import OneTimeLinkModal from '../../components/ui/OneTimeLinkModal';
 import DeleteUserDialog from '../../components/admin/DeleteUserDialog';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useUser } from '../../contexts/UserContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { useDeploymentMode } from '../../contexts/DeploymentModeContext';
 import { errorMessage } from '../../constants/messages';
@@ -21,6 +22,7 @@ function UsersPage() {
   const confirm = useConfirm();
   const mutate = useApiMutation();
   const { authMode, isLoading: modeLoading } = useDeploymentMode();
+  const { user: currentUser } = useUser();
 
   // Only expose LOCAL-only provisioning controls once the auth mode is known,
   // so they don't flicker/mis-evaluate during the /internal/config fetch.
@@ -36,6 +38,7 @@ function UsersPage() {
   const [activatingUser, setActivatingUser] = useState<number | null>(null);
   const [resettingQuota, setResettingQuota] = useState<number | null>(null);
   const [issuingResetLink, setIssuingResetLink] = useState<number | null>(null);
+  const [settingRole, setSettingRole] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // LOCAL mode modals
@@ -47,7 +50,7 @@ function UsersPage() {
 
   const perPage = 10;
 
-  // Wrap in useCallback so the useEffect dependency array is stable (item 4).
+  // Wrap in useCallback so the useEffect dependency array is stable.
   const loadUsers = useCallback(async () => {
     try {
       setLoading(true);
@@ -100,7 +103,7 @@ function UsersPage() {
       await loadUsers();
     } catch (err: unknown) {
       // Stale-count race: user acquired an app between list load and delete attempt.
-      // Open the owned-apps dialog retroactively instead of showing a generic error (item 3).
+      // Open the owned-apps dialog retroactively instead of showing a generic error.
       if (err instanceof OwnedAppsError) {
         setDeleteDialogUser(target);
         return;
@@ -191,6 +194,38 @@ function UsersPage() {
     }
   }
 
+  async function handleSetPlatformRole(userId: number, role: 'viewer' | 'editor' | 'admin', userName: string) {
+    const labels: Record<string, string> = { viewer: 'Viewer', editor: 'Editor', admin: 'Admin' };
+
+    const target = users.find((u) => u.user_id === userId);
+    const ownedApps = target?.owned_apps_count ?? 0;
+    const isDowngradeWithApps = role === 'viewer' && ownedApps > 0;
+
+    const ok = await confirm({
+      title: `Set role to ${labels[role]}?`,
+      message: isDowngradeWithApps
+        ? `${userName} owns ${ownedApps} app${ownedApps !== 1 ? 's' : ''}. As a viewer they will no longer be able to modify them, but will retain ownership. Are you sure you want to downgrade their role to Viewer?`
+        : `Change ${userName}'s platform role to ${labels[role]}?`,
+      variant: isDowngradeWithApps ? 'warning' : undefined,
+      confirmLabel: 'Confirm',
+    });
+    if (!ok) return;
+
+    setSettingRole(userId);
+    const result = await mutate(
+      () => adminService.setPlatformRole(userId, role),
+      {
+        loading: 'Updating role…',
+        success: (data) => data?.message ?? 'Role updated',
+        error: (err) => errorMessage(err, 'Failed to update role'),
+      },
+    );
+    setSettingRole(null);
+    if (result === undefined) return;
+
+    await loadUsers();
+  }
+
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
     setCurrentPage(1);
@@ -267,6 +302,9 @@ function UsersPage() {
                   User
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-slate-400 uppercase tracking-wider">
+                  Role
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-slate-400 uppercase tracking-wider">
                   Status
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-slate-400 uppercase tracking-wider">
@@ -286,7 +324,7 @@ function UsersPage() {
             <tbody className="bg-white dark:bg-slate-800 divide-y divide-gray-200 dark:divide-slate-700">
               {users.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center">
+                  <td colSpan={7} className="px-6 py-8 text-center">
                     <div className="text-gray-500 dark:text-slate-400">
                       <p className="text-lg font-medium">No users found</p>
                       <p className="text-sm mt-1">
@@ -306,12 +344,27 @@ function UsersPage() {
                           </span>
                           {user.is_omniadmin && (
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300">
-                              <Crown className="w-3 h-3 mr-1" aria-hidden="true" /> Admin
+                              <Crown className="w-3 h-3 mr-1" aria-hidden="true" /> Omniadmin
                             </span>
                           )}
                         </div>
                         <div className="text-sm text-gray-500 dark:text-slate-400">{user.email}</div>
                       </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {user.platform_role === 'admin' ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300">
+                          <Crown className="w-3 h-3 mr-1" aria-hidden="true" /> Admin
+                        </span>
+                      ) : user.platform_role === 'editor' ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
+                          <Pencil className="w-3 h-3 mr-1" aria-hidden="true" /> Editor
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300">
+                          <Eye className="w-3 h-3 mr-1" aria-hidden="true" /> Viewer
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       {user.is_active ? (
@@ -336,11 +389,33 @@ function UsersPage() {
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                       {user.is_omniadmin ? (
                         <span className="text-xs text-gray-500 dark:text-slate-500 italic">Protected account</span>
+                      ) : user.email === currentUser?.email ? (
+                        <span className="text-xs text-gray-500 dark:text-slate-500 italic">Your account</span>
                       ) : (
                         <ActionDropdown
                           triggerAriaLabel={`Actions for ${user.name || user.email}`}
                           actions={[
-                            // activate / deactivate
+                            ...(user.platform_role !== 'viewer' ? [{
+                              label: settingRole === user.user_id ? 'Setting...' : 'Set as Viewer',
+                              onClick: () => { void handleSetPlatformRole(user.user_id, 'viewer', user.name || user.email); },
+                              icon: <Eye className="w-4 h-4" />,
+                              variant: 'default' as const,
+                              disabled: settingRole === user.user_id,
+                            }] : []),
+                            ...(user.platform_role !== 'editor' ? [{
+                              label: settingRole === user.user_id ? 'Setting...' : 'Set as Editor',
+                              onClick: () => { void handleSetPlatformRole(user.user_id, 'editor', user.name || user.email); },
+                              icon: <Pencil className="w-4 h-4" />,
+                              variant: 'default' as const,
+                              disabled: settingRole === user.user_id,
+                            }] : []),
+                            ...(user.platform_role !== 'admin' ? [{
+                              label: settingRole === user.user_id ? 'Setting...' : 'Set as Admin',
+                              onClick: () => { void handleSetPlatformRole(user.user_id, 'admin', user.name || user.email); },
+                              icon: <UserCheck className="w-4 h-4" />,
+                              variant: 'default' as const,
+                              disabled: settingRole === user.user_id,
+                            }] : []),
                             ...(user.is_active ? [
                               {
                                 label: activatingUser === user.user_id ? 'Deactivating...' : 'Deactivate',

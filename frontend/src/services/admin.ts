@@ -22,6 +22,7 @@ export interface User {
   readonly api_keys_count: number;
   readonly is_active: boolean;
   readonly is_omniadmin?: boolean;
+  readonly platform_role?: 'viewer' | 'editor' | 'admin';
 }
 
 export interface UserListResponse {
@@ -182,6 +183,12 @@ class AdminService {
     }) as ResetLinkResult;
   }
 
+  async setPlatformRole(userId: number, role: 'viewer' | 'editor' | 'admin'): Promise<{ message: string; user_id: number; platform_role: string; warnings?: string[] }> {
+    return await apiService.request(`${this.baseUrl}/users/${userId}/set-platform-role`, {
+      method: 'POST',
+      body: JSON.stringify({ role }),
+    });
+  }
 }
 
 export const adminService = new AdminService(); 

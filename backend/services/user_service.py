@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from models.user import User
+from models.user import User, PlatformRole
 from models.api_key import APIKey
 from models.app import App
 from repositories.user_repository import UserRepository
@@ -49,7 +49,8 @@ class UserService:
                 'owned_apps_count': len(user.owned_apps) if user.owned_apps else 0,
                 'api_keys_count': len(user.api_keys) if user.api_keys else 0,
                 'is_active': user.is_active if hasattr(user, 'is_active') else True,
-                'is_omniadmin': is_omniadmin(user.email)
+                'is_omniadmin': is_omniadmin(user.email),
+                'platform_role': user.platform_role if user.platform_role else 'editor',
             })
         
         return user_dict
@@ -607,6 +608,33 @@ class UserService:
         
         return user
     
+    @staticmethod
+    def set_platform_role(db: Session, user_id: int, role: str, admin_email: str) -> dict:
+        from models.app import App
+        logger = get_logger(__name__)
+        valid_roles = {r.value for r in PlatformRole}
+        if role not in valid_roles:
+            raise ValueError(f"Invalid platform role '{role}'. Must be one of: {', '.join(valid_roles)}")
+
+        user = UserService._get_user_or_raise(db, user_id)
+
+        if user.email == admin_email:
+            raise ValueError("Cannot change your own platform role")
+
+        user.platform_role = role
+        db.commit()
+        db.refresh(user)
+
+        logger.info(f"Platform role set to '{role}' - Admin: {admin_email}, Target: {user.email} (ID: {user_id})")
+
+        warnings: List[str] = []
+        if role == 'viewer':
+            owned = db.query(App).filter(App.owner_id == user_id).count()
+            if owned:
+                warnings.append(f"User owns {owned} app(s). They retain ownership but cannot modify them while a viewer.")
+
+        return {"user": user, "warnings": warnings}
+
     @staticmethod
     def get_active_users_count(db: Session) -> int:
         """

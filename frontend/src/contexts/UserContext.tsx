@@ -11,6 +11,9 @@ export interface User {
   is_authenticated: boolean;
   is_admin?: boolean;
   is_omniadmin?: boolean;
+  platform_role?: 'viewer' | 'editor' | 'admin';
+  /** True for editors and admins; false for viewers */
+  is_editor?: boolean;
 }
 
 interface UserContextType {
@@ -63,6 +66,7 @@ async function fetchUserFromBackend(
       name?: string;
       is_admin?: boolean;
       is_omniadmin?: boolean;
+      platform_role?: 'viewer' | 'editor' | 'admin';
     } = await response.json();
 
     return {
@@ -72,6 +76,8 @@ async function fetchUserFromBackend(
       is_authenticated: true,
       is_admin: userData.is_admin ?? userData.is_omniadmin ?? false,
       is_omniadmin: userData.is_omniadmin ?? false,
+      platform_role: userData.platform_role,
+      is_editor: (userData.is_admin ?? false) || userData.platform_role !== 'viewer',
     };
   } catch {
     return null;
@@ -88,8 +94,8 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
   const refreshUser = useCallback(async () => {
     try {
       if (oidcContext?.user) {
-        // OIDC mode: attach the OIDC access token as bearer
-        const token = oidcContext.user.access_token;
+        // OIDC mode: attach the OIDC ID token as bearer (aud = client_id).
+        const token = oidcContext.user.id_token ?? null;
         const resolved = await fetchUserFromBackend(token);
 
         if (resolved) {
@@ -97,7 +103,7 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
           return;
         }
 
-        // Fallback: use OIDC profile fields when the backend call fails
+        // Fallback: use OIDC profile fields when the backend call fails.
         const oidcUser = oidcContext.user;
         setUser({
           user_id: 0,
@@ -107,6 +113,8 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
           is_authenticated: true,
           is_admin: false,
           is_omniadmin: false,
+          platform_role: 'viewer',
+          is_editor: false,
         });
       } else {
         // LOCAL cookie mode (or unauthenticated): probe /internal/me with cookies.
@@ -134,7 +142,8 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
     const initializeUser = async () => {
       try {
         if (oidcContext?.user) {
-          const token = oidcContext.user.access_token;
+          // OIDC mode: attach the OIDC ID token as bearer (aud = client_id).
+          const token = oidcContext.user.id_token ?? null;
           const resolved = await fetchUserFromBackend(token);
 
           if (resolved) {
@@ -143,7 +152,7 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
             return;
           }
 
-          // Fallback to OIDC profile
+          // Fallback to OIDC profile when the backend call fails.
           const oidcUser = oidcContext.user;
           setUser({
             user_id: 0,
@@ -153,6 +162,8 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
             is_authenticated: true,
             is_admin: false,
             is_omniadmin: false,
+            platform_role: 'viewer',
+            is_editor: false,
           });
         } else {
           // LOCAL mode: probe with cookies
