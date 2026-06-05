@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Crown, Check, X, Ban, Trash2, RefreshCcw, UserPlus, Link } from 'lucide-react';
-import { adminService } from '../../services/admin';
+import { adminService, OwnedAppsError } from '../../services/admin';
 import type { User, UserListResponse } from '../../services/admin';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import Alert from '../../components/ui/Alert';
 import CreateLocalUserModal from '../../components/ui/CreateLocalUserModal';
 import OneTimeLinkModal from '../../components/ui/OneTimeLinkModal';
+import DeleteUserDialog from '../../components/admin/DeleteUserDialog';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { useDeploymentMode } from '../../contexts/DeploymentModeContext';
@@ -41,13 +42,13 @@ function UsersPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [resetLinkState, setResetLinkState] = useState<ResetLinkState | null>(null);
 
+  // Delete-with-owned-apps dialog
+  const [deleteDialogUser, setDeleteDialogUser] = useState<User | null>(null);
+
   const perPage = 10;
 
-  useEffect(() => {
-    loadUsers();
-  }, [currentPage, searchQuery]);
-
-  async function loadUsers() {
+  // Wrap in useCallback so the useEffect dependency array is stable (item 4).
+  const loadUsers = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -61,33 +62,60 @@ function UsersPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [currentPage, perPage, searchQuery]);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
 
   async function handleDeleteUser(userId: number) {
     const target = users.find((u) => u.user_id === userId);
+    if (!target) return;
+
+    // Users with owned apps get the multi-step dialog instead of the simple confirm.
+    if (target.owned_apps_count > 0) {
+      setDeleteDialogUser(target);
+      return;
+    }
+
     const ok = await confirm({
       title: 'Delete user?',
-      message: target
-        ? `Delete ${target.name || target.email}? This will also delete all their apps and data. This action cannot be undone.`
-        : 'Delete this user? This action cannot be undone.',
+      message: `Delete ${target.name || target.email}? This action cannot be undone.`,
       variant: 'danger',
       confirmLabel: 'Delete',
     });
     if (!ok) return;
 
     setDeletingUser(userId);
-    const result = await mutate(
-      () => adminService.deleteUser(userId),
-      {
-        loading: 'Deleting user…',
-        success: 'User deleted',
-        error: (err) => errorMessage(err, 'Failed to delete user'),
-      },
-    );
-    setDeletingUser(null);
-    if (result === undefined) return;
-
-    await loadUsers();
+    try {
+      await adminService.deleteUser(userId);
+      mutate(
+        () => Promise.resolve({ message: 'User deleted' }),
+        {
+          loading: 'Deleting user…',
+          success: 'User deleted',
+          error: (err) => errorMessage(err, 'Failed to delete user'),
+        },
+      );
+      await loadUsers();
+    } catch (err: unknown) {
+      // Stale-count race: user acquired an app between list load and delete attempt.
+      // Open the owned-apps dialog retroactively instead of showing a generic error (item 3).
+      if (err instanceof OwnedAppsError) {
+        setDeleteDialogUser(target);
+        return;
+      }
+      mutate(
+        () => Promise.reject(err),
+        {
+          loading: 'Deleting user…',
+          success: 'User deleted',
+          error: (e) => errorMessage(e, 'Failed to delete user'),
+        },
+      );
+    } finally {
+      setDeletingUser(null);
+    }
   }
 
   async function handleActivateUser(userId: number) {
@@ -411,6 +439,19 @@ function UsersPage() {
           token={resetLinkState.token}
           expiresAt={resetLinkState.expiresAt}
           title="Password reset link"
+        />
+      )}
+
+      {/* Delete-with-owned-apps dialog */}
+      {deleteDialogUser && (
+        <DeleteUserDialog
+          isOpen={true}
+          targetUser={deleteDialogUser}
+          onClose={() => setDeleteDialogUser(null)}
+          onDeleted={() => {
+            setDeleteDialogUser(null);
+            void loadUsers();
+          }}
         />
       )}
     </div>

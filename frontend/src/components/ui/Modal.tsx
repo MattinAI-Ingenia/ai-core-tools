@@ -23,6 +23,12 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
   const panelRef = useRef<HTMLDivElement>(null);
   // Capture the element that had focus when the modal opened so we can restore it.
   const returnFocusRef = useRef<Element | null>(null);
+  // Hold onClose in a ref so the open/focus effect can depend on `isOpen` ALONE.
+  // Otherwise a parent that passes a fresh onClose on every render (e.g. while the
+  // user types in an input inside the modal) would re-run the effect and steal
+  // focus back to the first focusable element on every keystroke.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   // Define size classes
   const sizeClasses = {
@@ -48,7 +54,7 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
 
@@ -90,7 +96,7 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
         returnFocusRef.current.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
