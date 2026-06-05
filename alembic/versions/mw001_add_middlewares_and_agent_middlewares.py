@@ -1,14 +1,14 @@
 """Add middlewares and agent_middlewares tables.
 
 Revision ID: mw001
-Revises: spoint001
+Revises: platform_role002
 Create Date: 2026-05-13
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = 'mw001'
-down_revision = 'spoint001'
+down_revision = 'platform_role002'
 branch_labels = None
 depends_on = None
 

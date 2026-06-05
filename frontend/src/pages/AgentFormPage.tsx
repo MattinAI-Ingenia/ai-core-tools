@@ -207,7 +207,6 @@ function AgentFormPage() {
     temperature: DEFAULT_AGENT_TEMPERATURE,
     tool_ids: [],
     mcp_config_ids: [],
-    skill_ids: []
     skill_ids: [],
     retrieval_config: null,
     middleware_ids: []
@@ -1449,10 +1448,10 @@ function AgentFormPage() {
                               key={mw.middleware_id}
                               type="button"
                               className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full relative ${isDisabled
-                                  ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
-                                  : isSelected
-                                    ? 'border-indigo-500 bg-indigo-50 cursor-pointer'
-                                    : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
+                                ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                                : isSelected
+                                  ? 'border-indigo-500 bg-indigo-50 cursor-pointer'
+                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
                                 }`}
                               onClick={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
                               disabled={isDisabled}
