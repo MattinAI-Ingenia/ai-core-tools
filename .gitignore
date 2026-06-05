@@ -56,6 +56,7 @@ plans/
 
 nginx/
 develop/
+reports/
 
 # Spec-kit
 .github/agents/speckit.*
