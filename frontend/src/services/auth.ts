@@ -7,6 +7,34 @@ class AuthService {
     return configService.getApiBaseUrl();
   }
 
+  /**
+   * Extracts a human-readable message from a failed FastAPI response.
+   *
+   * Handles both shapes the backend can emit:
+   * - ``{ detail: "string" }`` — HTTPException raised in the route handler.
+   * - ``{ detail: [{ msg, loc, ... }] }`` — Pydantic 422 schema-validation error.
+   *
+   * Without this, a 422 (e.g. password fails the schema-level policy check)
+   * surfaces to the user as a bare ``HTTP 422`` because ``detail`` is an array,
+   * not a string.
+   */
+  private async extractErrorMessage(response: Response, fallback: string): Promise<string> {
+    const data = await response.json().catch(() => null);
+    const detail = (data as { detail?: unknown } | null)?.detail;
+
+    if (typeof detail === 'string') {
+      return detail;
+    }
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0] as { msg?: unknown };
+      if (typeof first.msg === 'string') {
+        // Pydantic v2 prefixes ValueError messages with "Value error, ".
+        return first.msg.replace(/^Value error,\s*/i, '');
+      }
+    }
+    return fallback;
+  }
+
   // ==================== OIDC BRIDGE ====================
   // The OIDC library manages its own tokens in localStorage under oidc-client-ts
   // keys.  We only store the access_token in the module-level variable so
@@ -68,9 +96,7 @@ class AuthService {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Login failed' }));
-      const detail = errorData.detail;
-      throw new Error(typeof detail === 'string' ? detail : `HTTP ${response.status}`);
+      throw new Error(await this.extractErrorMessage(response, 'Login failed'));
     }
 
     return response.json();
@@ -140,9 +166,7 @@ class AuthService {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Password change failed' }));
-      const detail = errorData.detail;
-      throw new Error(typeof detail === 'string' ? detail : `HTTP ${response.status}`);
+      throw new Error(await this.extractErrorMessage(response, 'Password change failed'));
     }
   }
 
@@ -156,13 +180,11 @@ class AuthService {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, password }),
+      body: JSON.stringify({ token, new_password: password }),
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Set password failed' }));
-      const detail = errorData.detail;
-      throw new Error(typeof detail === 'string' ? detail : `HTTP ${response.status}`);
+      throw new Error(await this.extractErrorMessage(response, 'Set password failed. The link may have expired.'));
     }
   }
 

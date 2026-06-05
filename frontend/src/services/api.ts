@@ -2371,7 +2371,16 @@ class ApiService {
     agent_name: string | null;
     agent_description: string | null;
   }> {
-    return this.request('/internal/platform-chatbot/config');
+    // Probing call: the provider mounts on every route (including public pages
+    // like /login and /set-password). A 401 here must NOT trigger the global
+    // refresh + hard-redirect to /login — that yanks unauthenticated users off
+    // public pages. The provider's catch block disables the widget instead.
+    return this.request(
+      '/internal/platform-chatbot/config',
+      {},
+      false,
+      { suppressAuthRedirect: true },
+    );
   }
 
   async sendPlatformChatbotMessage(
