@@ -18,6 +18,7 @@ from services.rate_limit_service import rate_limit_service
 from schemas.apps_schemas import (
     AppListItemSchema, AppDetailSchema, CreateAppSchema, UpdateAppSchema, AppUsageStatsSchema,
     LangSmithTestRequestSchema, LangSmithTestResponseSchema,
+    OwnershipOfferRequest, OwnershipOfferResponse, OwnershipAcceptResponse,
 )
 from schemas.common_schemas import MessageResponseSchema
 from schemas.export_schemas import AppExportFileSchema
@@ -241,6 +242,366 @@ async def import_full_app(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Import failed: {str(e)}",
         )
+
+
+# ==================== OWNERSHIP TRANSFER ENDPOINTS ====================
+
+@apps_router.post(
+    "/{app_id}/ownership/offer",
+    response_model=OwnershipOfferResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Offer app ownership to another user",
+    tags=["Apps", "Ownership"],
+    responses={
+        400: {"description": "Recipient is invalid (non-existent, inactive, or already owner)"},
+        403: {"description": "Insufficient permissions — OWNER or OMNIADMIN required"},
+        404: {"description": "App not found"},
+    },
+)
+async def offer_app_ownership(
+    app_id: int,
+    body: OwnershipOfferRequest,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role(AppRole.OWNER))],
+) -> OwnershipOfferResponse:
+    """Offer ownership of an app to another user (voluntary transfer).
+
+    Creates a pending ownership offer modelled as an ``AppCollaborator`` row with
+    ``role=OWNER, status=PENDING`` (AD-5).  No ownership change occurs until the
+    recipient accepts via the collaboration invitation surface.  The operation is
+    idempotent: a second call for the same ``(app_id, new_owner_id)`` refreshes
+    the existing offer rather than creating a duplicate.
+
+    The actor identity is always resolved from the session (NFR-1 / IDOR prevention).
+    Authorization requires OWNER or OMNIADMIN on the app.
+
+    Args:
+        app_id: Path parameter — PK of the app for which ownership is being offered.
+        body: ``OwnershipOfferRequest`` with ``new_owner_id``.
+        auth_context: Session-resolved auth context.
+        db: Synchronous database session.
+        role: Resolved ``AppRole`` (injected by ``require_min_role``).
+
+    Returns:
+        ``OwnershipOfferResponse`` with the collaboration row ID, app ID, and recipient.
+
+    Raises:
+        HTTPException 404: App not found.
+        HTTPException 400: Recipient is invalid.
+        HTTPException 403: Insufficient permissions.
+    """
+    from services.app_ownership_service import AppOwnershipService
+    from services.app_ownership_errors import (
+        AppNotFoundError,
+        TransferRecipientInvalidError,
+    )
+
+    actor_user_id: int = int(auth_context.identity.id)
+
+    try:
+        offer = AppOwnershipService.offer(
+            db,
+            app_id=app_id,
+            new_owner_id=body.new_owner_id,
+            actor_user_id=actor_user_id,
+        )
+    except AppNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except TransferRecipientInvalidError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "offer_app_ownership: unexpected error app_id=%s new_owner_id=%s actor=%s",
+            app_id,
+            body.new_owner_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create ownership offer due to an unexpected error.",
+        )
+
+    logger.info(
+        "apps:offer_ownership app_id=%s new_owner_id=%s collab_id=%s by=%s",
+        app_id,
+        body.new_owner_id,
+        offer.id,
+        auth_context.identity.email,
+    )
+
+    return OwnershipOfferResponse(
+        collaboration_id=offer.id,
+        app_id=app_id,
+        new_owner_id=body.new_owner_id,
+        actor_user_id=actor_user_id,
+    )
+
+
+@apps_router.post(
+    "/{app_id}/ownership/accept/{collaboration_id}",
+    response_model=OwnershipAcceptResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Accept an ownership offer (recipient only)",
+    tags=["Apps", "Ownership"],
+    responses={
+        403: {"description": "Actor is not the offer recipient"},
+        404: {"description": "Pending ownership offer not found"},
+        409: {"description": "Transfer would exceed the recipient's SaaS app-count limit"},
+    },
+)
+async def accept_app_ownership_offer(
+    app_id: int,
+    collaboration_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+) -> OwnershipAcceptResponse:
+    """Accept a pending ownership offer (recipient only).
+
+    Only the user named as recipient in the ``AppCollaborator`` offer row may call
+    this endpoint.  On success:
+    - ``App.owner_id`` is set to the actor (the recipient).
+    - The previous owner is demoted to an ADMINISTRATOR collaborator.
+    - The pending offer row is deleted.
+    - The response includes both owner IDs so the frontend can update local state.
+
+    The existing collaboration ``/invitations/{id}/respond`` endpoint also accepts
+    ownership offers for backwards compatibility, returning ``MessageResponseSchema``.
+    This endpoint returns the richer ``OwnershipAcceptResponse`` for clients that
+    need the ownership transition details.
+
+    The actor identity is always resolved from the session (NFR-1 / IDOR prevention).
+
+    Args:
+        app_id: Path parameter — PK of the app (used for URL namespace; validated inside service).
+        collaboration_id: Path parameter — PK of the ``AppCollaborator`` offer row.
+        auth_context: Session-resolved auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``OwnershipAcceptResponse`` with app ID, app name, and both owner IDs.
+
+    Raises:
+        HTTPException 404: Offer not found or not a PENDING OWNER offer.
+        HTTPException 403: Actor is not the offer recipient.
+        HTTPException 409: Tier limit exceeded for the new owner.
+    """
+    from services.app_ownership_service import AppOwnershipService
+    from services.app_ownership_errors import (
+        AppNotFoundError,
+        NotOfferRecipientError,
+        OwnershipOfferNotFoundError,
+        TierLimitExceededError,
+        TransferRecipientInvalidError,
+    )
+
+    actor_user_id: int = int(auth_context.identity.id)
+
+    try:
+        app, previous_owner_id = AppOwnershipService.accept(
+            db,
+            collaboration_id=collaboration_id,
+            actor_user_id=actor_user_id,
+            app_id=app_id,
+        )
+    except OwnershipOfferNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except NotOfferRecipientError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
+    except (TransferRecipientInvalidError, AppNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except TierLimitExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "accept_app_ownership_offer: unexpected error app_id=%s collab_id=%s actor=%s",
+            app_id,
+            collaboration_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to accept ownership offer due to an unexpected error.",
+        )
+
+    logger.info(
+        "apps:accept_ownership app_id=%s collab_id=%s new_owner=%s prev_owner=%s by=%s",
+        app_id,
+        collaboration_id,
+        actor_user_id,
+        previous_owner_id,
+        auth_context.identity.email,
+    )
+
+    return OwnershipAcceptResponse(
+        app_id=app.app_id,
+        name=app.name,
+        new_owner_id=actor_user_id,
+        previous_owner_id=previous_owner_id,
+    )
+
+
+@apps_router.post(
+    "/{app_id}/ownership/decline/{collaboration_id}",
+    response_model=MessageResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Decline an ownership offer (recipient only)",
+    tags=["Apps", "Ownership"],
+    responses={
+        403: {"description": "Actor is not the offer recipient"},
+        404: {"description": "Pending ownership offer not found"},
+    },
+)
+async def decline_app_ownership_offer(
+    app_id: int,
+    collaboration_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+) -> MessageResponseSchema:
+    """Decline a pending ownership offer (recipient only).
+
+    Sets the offer status to DECLINED.  No ownership change occurs.  The caller
+    must be the intended recipient of the offer.
+
+    This endpoint mirrors what the existing collaboration ``/invitations/{id}/respond``
+    endpoint does for the decline case but with explicit typed error mapping.
+
+    The actor identity is always resolved from the session (NFR-1 / IDOR prevention).
+
+    Args:
+        app_id: Path parameter — PK of the app (URL namespace; validated inside service).
+        collaboration_id: Path parameter — PK of the ``AppCollaborator`` offer row.
+        auth_context: Session-resolved auth context.
+        db: Synchronous database session.
+
+    Returns:
+        ``MessageResponseSchema`` confirming the decline.
+
+    Raises:
+        HTTPException 404: Offer not found or not a PENDING OWNER offer.
+        HTTPException 403: Actor is not the offer recipient.
+    """
+    from services.app_ownership_service import AppOwnershipService
+    from services.app_ownership_errors import (
+        NotOfferRecipientError,
+        OwnershipOfferNotFoundError,
+    )
+
+    actor_user_id: int = int(auth_context.identity.id)
+
+    try:
+        AppOwnershipService.decline(
+            db,
+            collaboration_id=collaboration_id,
+            actor_user_id=actor_user_id,
+            app_id=app_id,
+        )
+    except OwnershipOfferNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except NotOfferRecipientError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "decline_app_ownership_offer: unexpected error app_id=%s collab_id=%s actor=%s",
+            app_id,
+            collaboration_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to decline ownership offer due to an unexpected error.",
+        )
+
+    logger.info(
+        "apps:decline_ownership app_id=%s collab_id=%s by=%s",
+        app_id,
+        collaboration_id,
+        auth_context.identity.email,
+    )
+
+    return MessageResponseSchema(message="Ownership offer declined.")
+
+
+@apps_router.delete(
+    "/{app_id}/ownership/offer",
+    response_model=MessageResponseSchema,
+    status_code=status.HTTP_200_OK,
+    summary="Cancel pending ownership offer",
+    tags=["Apps", "Ownership"],
+    responses={
+        403: {"description": "Insufficient permissions — OWNER or OMNIADMIN required"},
+        404: {"description": "App not found or no pending offer exists"},
+    },
+)
+async def cancel_app_ownership_offer(
+    app_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role(AppRole.OWNER))],
+) -> MessageResponseSchema:
+    """Cancel the pending ownership offer for an app (owner/omniadmin only).
+
+    Deletes the PENDING OWNER ``AppCollaborator`` row.  No ownership change occurs.
+    If there is no active pending offer the endpoint returns 404.
+
+    The actor identity is always resolved from the session (NFR-1 / IDOR prevention).
+
+    Args:
+        app_id: Path parameter — PK of the app whose pending offer to cancel.
+        auth_context: Session-resolved auth context.
+        db: Synchronous database session.
+        role: Resolved ``AppRole`` (injected by ``require_min_role``).
+
+    Returns:
+        ``MessageResponseSchema`` confirming cancellation.
+
+    Raises:
+        HTTPException 404: No pending ownership offer found for this app.
+        HTTPException 403: Insufficient permissions.
+    """
+    from services.app_ownership_service import AppOwnershipService
+    from services.app_ownership_errors import OwnershipOfferNotFoundError
+
+    actor_user_id: int = int(auth_context.identity.id)
+
+    try:
+        AppOwnershipService.cancel(
+            db,
+            app_id=app_id,
+            actor_user_id=actor_user_id,
+        )
+    except OwnershipOfferNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "cancel_app_ownership_offer: unexpected error app_id=%s actor=%s",
+            app_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel ownership offer due to an unexpected error.",
+        )
+
+    logger.info(
+        "apps:cancel_ownership_offer app_id=%s by=%s",
+        app_id,
+        auth_context.identity.email,
+    )
+
+    return MessageResponseSchema(message="Ownership offer cancelled successfully.")
 
 
 # ==================== INCLUDE NESTED ROUTERS (dynamic routes) ====================

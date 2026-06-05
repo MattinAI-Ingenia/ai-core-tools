@@ -188,37 +188,103 @@ class AppCollaborationService:
             raise
     
     def respond_to_invitation(self, invitation_id: int, user_id: int, action: str) -> bool:
-        """Respond to a collaboration invitation"""
+        """Respond to a collaboration invitation (accept or decline).
+
+        If the invitation has ``role=OWNER`` and ``status=PENDING``, it is an
+        ownership-transfer offer.  Accepting it delegates to
+        ``AppOwnershipService.accept`` (which calls ``_reassign_owner``, demotes
+        the previous owner, and clears the offer row).  Declining delegates to
+        ``AppOwnershipService.decline``.  This keeps the recipient's existing
+        pending-invitations surface working for both collaboration and ownership
+        offers without a separate UI path (AD-5 / FR-D5).
+
+        Regular collaboration invitations (non-OWNER roles) follow the existing
+        status-update path unchanged.
+
+        Args:
+            invitation_id: PK of the ``AppCollaborator`` row.
+            user_id: PK of the acting user (must be the invitation recipient).
+            action: ``'accept'`` or ``'decline'``.
+
+        Returns:
+            ``True`` on success, ``False`` on any validation failure.
+        """
         try:
             collaboration = self.repo.get_collaboration_by_id(invitation_id)
-            
+
             if not collaboration:
                 logger.warning(f"Invitation {invitation_id} not found")
                 return False
-            
+
             if int(collaboration.user_id) != int(user_id):
-                logger.warning(f"Invitation {invitation_id} belongs to user {collaboration.user_id}, not {user_id}")
+                logger.warning(
+                    f"Invitation {invitation_id} belongs to user {collaboration.user_id}, not {user_id}"
+                )
                 return False
-                
+
             if collaboration.status != CollaborationStatus.PENDING:
-                logger.warning(f"Invitation {invitation_id} status is {collaboration.status}, not PENDING")
+                logger.warning(
+                    f"Invitation {invitation_id} status is {collaboration.status}, not PENDING"
+                )
                 return False
-            
-            update_data = {}
+
+            # Ownership offers (role=OWNER) delegate to AppOwnershipService so that
+            # the accept path runs _reassign_owner + old-owner demotion atomically.
+            if collaboration.role == CollaborationRole.OWNER:
+                from services.app_ownership_service import AppOwnershipService
+                from services.app_ownership_errors import (
+                    NotOfferRecipientError,
+                    OwnershipOfferNotFoundError,
+                )
+
+                if action == 'accept':
+                    try:
+                        # accept returns (app, previous_owner_id); discard both here —
+                        # the collaboration layer only needs success/failure.
+                        AppOwnershipService.accept(
+                            self.db, invitation_id, actor_user_id=user_id
+                        )
+                        return True
+                    except (OwnershipOfferNotFoundError, NotOfferRecipientError) as exc:
+                        logger.warning(
+                            f"respond_to_invitation: ownership accept rejected "
+                            f"invitation_id={invitation_id} user_id={user_id} — {exc}"
+                        )
+                        return False
+                elif action == 'decline':
+                    try:
+                        AppOwnershipService.decline(
+                            self.db, invitation_id, actor_user_id=user_id
+                        )
+                        return True
+                    except (OwnershipOfferNotFoundError, NotOfferRecipientError) as exc:
+                        logger.warning(
+                            f"respond_to_invitation: ownership decline rejected "
+                            f"invitation_id={invitation_id} user_id={user_id} — {exc}"
+                        )
+                        return False
+                else:
+                    logger.warning(
+                        f"Invalid action '{action}' for ownership offer {invitation_id}"
+                    )
+                    return False
+
+            # Regular (non-OWNER) collaboration invitation.
+            update_data: dict = {}
             if action == 'accept':
                 update_data = {
                     'status': CollaborationStatus.ACCEPTED,
-                    'accepted_at': datetime.now()
+                    'accepted_at': datetime.now(),
                 }
             elif action == 'decline':
                 update_data = {'status': CollaborationStatus.DECLINED}
             else:
                 logger.warning(f"Invalid action {action} for invitation {invitation_id}")
                 return False
-            
+
             self.repo.update_collaboration(collaboration, update_data)
             return True
-            
+
         except Exception as e:
             logger.error(f"Error responding to invitation: {str(e)}")
             return False

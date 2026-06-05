@@ -183,7 +183,58 @@ class CollaborationResponseSchema(BaseModel):
     success: bool
     message: str
     collaborator: Optional[CollaboratorDetailSchema] = None
-    
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==================== OWNERSHIP TRANSFER SCHEMAS ====================
+
+class OwnershipOfferRequest(BaseModel):
+    """Request body for ``POST /internal/apps/{app_id}/ownership/offer``.
+
+    Args:
+        new_owner_id: Primary key of the user being offered ownership.
+            Must be an active user and not the current owner.
+    """
+
+    new_owner_id: int
+
+
+class OwnershipOfferResponse(BaseModel):
+    """Response returned after a pending ownership offer is created or refreshed.
+
+    Args:
+        collaboration_id: PK of the ``AppCollaborator`` offer row.
+        app_id: PK of the app for which ownership is being offered.
+        new_owner_id: PK of the intended recipient.
+        actor_user_id: PK of the user who created the offer.
+    """
+
+    collaboration_id: int
+    app_id: int
+    new_owner_id: int
+    actor_user_id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OwnershipAcceptResponse(BaseModel):
+    """Response returned after the recipient accepts an ownership offer.
+
+    Returns a minimal app summary so the frontend can update its local state.
+
+    Args:
+        app_id: PK of the transferred app.
+        name: Display name of the app.
+        new_owner_id: PK of the user who is now the owner (the actor).
+        previous_owner_id: PK of the former owner (now an ADMINISTRATOR collaborator).
+    """
+
+    app_id: int
+    name: Optional[str] = None
+    new_owner_id: int
+    previous_owner_id: int
+
     model_config = ConfigDict(from_attributes=True)
 
 
