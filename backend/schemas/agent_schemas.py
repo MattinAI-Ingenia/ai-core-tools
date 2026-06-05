@@ -92,7 +92,7 @@ class CreateUpdateAgentSchema(BaseModel):
     tool_ids: Optional[List[int]] = []
     mcp_config_ids: Optional[List[int]] = []
     skill_ids: Optional[List[int]] = []
-    retrieval_config: Optional[RetrievalConfig] = None
+    retrieval_config: Optional[Dict[str, Any]] = None
     middleware_ids: Optional[List[int]] = []
     # OCR-specific fields
     vision_service_id: Optional[int] = None
