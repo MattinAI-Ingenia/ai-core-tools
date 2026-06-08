@@ -44,7 +44,7 @@
 - [Client Project Setup](guides/client-setup.md) — Creating and customizing client frontends
 - [Plugin Development](guides/plugin-development.md) — Building plugins for client projects
 - [Deployment Guide](guides/deployment.md) — Docker, Docker Compose, and Kubernetes deployment
-- [Authentication Guide](guides/authentication.md) — OIDC, Entra ID, FAKE mode, and session auth
+- [Authentication Guide](guides/authentication.md) — OIDC (Entra ID) and LOCAL (admin-provisioned email+password) modes, cookie transport, provisioning workflow, and FAKE-mode migration
 - [App Export and Import](guides/app-export-import.md) — Export app configuration and import into a new workspace
 - [Agent Marketplace](guides/marketplace.md) — Publish agents to the platform-wide marketplace, manage profiles, ratings, and quotas
 - [SaaS Mode](guides/saas-mode.md) — SaaS deployment: Stripe billing, subscription tiers, quota enforcement, and `system_defaults.yaml` configuration
