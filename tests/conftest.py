@@ -34,6 +34,21 @@ if _backend_dir not in sys.path:
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
+# Belt-and-suspenders env defaults
+#
+# pytest.ini is the active config file (it takes precedence over pyproject.toml),
+# so the pytest-env `env=` block lives in pytest.ini.  These setdefault calls are
+# a fallback so that running a single file directly (e.g. `python -m pytest
+# tests/unit/...`) without pytest-env loaded never aborts at collection time with
+# "SECRET_KEY not set".  An explicitly-set shell value always wins.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("SECRET_KEY", "test-secret-key-32chars-minimum-ok")
+os.environ.setdefault("AICT_LOGIN", "LOCAL")
+os.environ.setdefault("AICT_OMNIADMINS", "admin@test.com")
+os.environ.setdefault("AICT_MODE", "SELF-HOSTED")
+os.environ.setdefault("FRONTEND_URL", "http://localhost:5173")
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
