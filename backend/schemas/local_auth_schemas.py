@@ -1,56 +1,21 @@
 """Pydantic v2 schemas for LOCAL auth mode endpoints.
 
-All password fields are typed as ``SecretStr`` so that:
-- Pydantic never includes them in ``model_dump()`` output by default.
-- The Python repr never echoes the plain value.
-- They are never accidentally serialised to JSON logs.
-
-Password policy (NIST SP 800-63B aligned):
-- Minimum length configurable via ``LOCAL_PASSWORD_MIN_LENGTH`` env var (default 12).
-- Rejects passwords found in the common-password denylist loaded at import time.
-- No mandatory composition rules (no "must contain uppercase, digit, symbol").
-- Rejects passwords whose normalised form exactly matches the user's email local-part
-  where the local-part can be injected (``SetPasswordRequest``, ``ChangePasswordRequest``).
-
-Because the user's email is not always available at schema-validation time (e.g.
-``AdminSetPasswordRequest``), the email-match check is an optional validator helper
-``check_password_not_email`` that callers invoke explicitly when the email is known.
+Password fields use SecretStr to prevent accidental serialisation to logs.
+Password policy is NIST SP 800-63B aligned (min-length + denylist; no composition rules).
+Email-match check (check_password_not_email) is a service-layer helper for when
+the email is not available at schema-validation time.
 """
 
 from pydantic import BaseModel, EmailStr, SecretStr, field_validator
 from utils.config import Config
 
 
-# ---------------------------------------------------------------------------
-# Email normalisation helper
-# ---------------------------------------------------------------------------
-
-
 def _normalise_email_value(v: object) -> object:
-    """Strip whitespace and lowercase an email value.
-
-    Used as a shared ``mode="before"`` field validator on all LOCAL auth
-    schemas that store or look up an email address.  LOCAL emails are stored
-    canonical-lowercase so they remain consistent with the normalisation
-    applied at login time — preventing a stored ``Bob@Acme.com`` from becoming
-    permanently unloggable when the login path lowercases to ``bob@acme.com``.
-
-    Args:
-        v: Raw email value (may be any type; non-strings are passed through so
-            Pydantic's ``EmailStr`` validator can raise the appropriate error).
-
-    Returns:
-        Normalised string (strip + lower), or the original value unchanged.
-    """
+    """Lowercase and strip an email value; non-strings pass through for EmailStr to validate."""
     return v.strip().lower() if isinstance(v, str) else v
 
-# ---------------------------------------------------------------------------
-# Common-password denylist
-# ---------------------------------------------------------------------------
-# Top ~200 passwords from the Have I Been Pwned / SecLists corpus.
-# Using an inline frozenset avoids file-path dependencies in containers and
-# makes the import entirely self-contained.  The set contains only lowercase
-# normalised forms; comparison is case-insensitive.
+
+# Top ~200 passwords from Have I Been Pwned / SecLists; normalised to lowercase.
 
 _COMMON_PASSWORDS: frozenset[str] = frozenset({
     "password", "password1", "password123", "password1234", "password12345",
@@ -137,32 +102,11 @@ _COMMON_PASSWORDS: frozenset[str] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 _MIN_LENGTH: int = Config.get_int_env_var("LOCAL_PASSWORD_MIN_LENGTH", default=12)
 
 
-# ---------------------------------------------------------------------------
-# Policy helpers
-# ---------------------------------------------------------------------------
-
-
 def _validate_password_strength(plain: str) -> str:
-    """Apply password policy and return the plain value if it passes.
-
-    Args:
-        plain: The candidate password string (already extracted from SecretStr
-            by the field validator before this helper is called).
-
-    Returns:
-        The unmodified ``plain`` value when policy is satisfied.
-
-    Raises:
-        ValueError: Describing why the password was rejected (message is safe
-            to surface to the end user — contains no internal detail).
-    """
+    """Apply password policy; raises ValueError with a user-safe message on rejection."""
     if len(plain) < _MIN_LENGTH:
         raise ValueError(
             f"Password must be at least {_MIN_LENGTH} characters long."
@@ -177,27 +121,11 @@ def _validate_password_strength(plain: str) -> str:
 
 
 def check_password_not_email(plain: str, email: str) -> None:
-    """Raise PasswordPolicyError when the password matches the user's email local-part.
+    """Raise PasswordPolicyError (HTTP 400) when password matches the email local-part.
 
-    Call this explicitly in service layer when the email is available (e.g.
-    inside ``consume_set_password_token`` and ``change_password``).
-
-    Note: This function raises ``PasswordPolicyError`` (not ``CredentialError``)
-    so that HTTP handlers can map it to HTTP 400 (policy rejection) independently
-    from authentication failures (HTTP 401).  Schema-level validators that need a
-    ``ValueError`` must perform the same check inline.
-
-    Args:
-        plain: The candidate password (plain text, already policy-validated).
-        email: The user's email address.
-
-    Raises:
-        PasswordPolicyError: When the password (case-insensitive) matches the
-            local-part of the email address.
+    Called explicitly from the service layer where the email is known; deferred import
+    avoids a circular dependency (schemas -> services -> schemas).
     """
-    # Import here to avoid a circular import: schemas → services → schemas.
-    # This helper is only called from service-layer code, so the deferred import
-    # is safe and the circular reference never materialises at module load time.
     from services.auth.credential_service import PasswordPolicyError  # noqa: PLC0415
 
     local_part = email.split("@")[0].lower()
@@ -207,16 +135,8 @@ def check_password_not_email(plain: str, email: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Request schemas
-# ---------------------------------------------------------------------------
-
-
 class SetPasswordRequest(BaseModel):
-    """Request body for the set-password-via-token flow (admin-issued link).
-
-    Used by both first-time password setup and admin-triggered resets.
-    """
+    """Request body for the set-password-via-token flow (first-time setup and admin resets)."""
 
     token: str
     new_password: SecretStr
@@ -257,21 +177,11 @@ class LoginRequest(BaseModel):
     @field_validator("email", mode="before")
     @classmethod
     def _normalise_email(cls, v: object) -> object:
-        """Strip whitespace and lowercase so throttle, lockout, and DB keys align."""
         return _normalise_email_value(v)
 
 
 class AdminCreateUserRequest(BaseModel):
-    """Request body for an admin creating a new LOCAL auth user account.
-
-    No password field — the admin calls ``issue_set_password_token`` separately
-    to generate a first-time setup link.
-
-    Email normalisation: LOCAL emails are stored canonical-lowercase (strip +
-    lower) to stay consistent with the normalisation applied at login time.
-    An email stored with capital letters would be permanently unloggable because
-    ``LoginRequest`` lowercases before the DB lookup.
-    """
+    """Request body for an admin creating a LOCAL auth user. No password — admin issues a set-password token separately."""
 
     email: EmailStr
     name: str
@@ -279,7 +189,6 @@ class AdminCreateUserRequest(BaseModel):
     @field_validator("email", mode="before")
     @classmethod
     def _normalise_email(cls, v: object) -> object:
-        """Strip whitespace and lowercase the email before storage."""
         return _normalise_email_value(v)
 
     @field_validator("name", mode="before")
@@ -289,11 +198,7 @@ class AdminCreateUserRequest(BaseModel):
 
 
 class AdminSetPasswordRequest(BaseModel):
-    """Request body for an admin forcibly setting a user's password directly.
-
-    Used for emergency password resets from the admin panel when the email
-    token flow is not appropriate.
-    """
+    """Request body for an admin forcibly setting a user's password (emergency reset)."""
 
     new_password: SecretStr
 

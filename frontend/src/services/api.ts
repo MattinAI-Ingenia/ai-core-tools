@@ -1,14 +1,9 @@
-// API Service - Think of this like your backend services!
 import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { StreamEvent } from '../types/streaming';
 
-/**
- * Structured error thrown by every API call that returns a non-2xx response.
- * Callers can branch reliably on the HTTP status without string-sniffing:
- *   catch (err) { if (err instanceof ApiError && err.status === 409) ... }
- */
+/** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -42,19 +37,10 @@ type ConflictMode = 'fail' | 'rename' | 'override';
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-/**
- * Auth-mode awareness.
- *
- * DeploymentModeContext owns `authMode` but api.ts is a plain class (not a
- * React hook) and cannot read React context.  The context writes its resolved
- * value here once via `setApiAuthMode()` so every subsequent request is
- * correctly branched without coupling the service to React.
- *
- * Default is derived synchronously from the runtime/env OIDC flag so that
- * early requests (e.g. CapabilitiesContext on mount) already use the correct
- * auth mode before DeploymentModeContext resolves /internal/config.
- * DeploymentModeContext calls setApiAuthMode() to authoritatively correct it.
- */
+// DeploymentModeContext cannot be read here (not a hook), so it writes the
+// resolved auth mode via setApiAuthMode(). The default is derived from the
+// env/runtime OIDC flag so early requests (e.g. CapabilitiesContext) already
+// use the correct mode before the context resolves /internal/config.
 const _rc = (globalThis as Record<string, unknown>).__RUNTIME_CONFIG__ as Record<string, string> | undefined;
 const _oidcDefault = _rc?.VITE_OIDC_ENABLED === undefined
   ? import.meta.env.VITE_OIDC_ENABLED === 'true'
@@ -70,15 +56,7 @@ class ApiService {
     return configService.getApiBaseUrl();
   }
 
-  /**
-   * Single silent-refresh guard.
-   * When a request 401s we attempt exactly ONE refresh.  While the refresh is
-   * in-flight all parallel requests that also 401 wait for the same promise so
-   * we never issue duplicate refresh calls.
-   *
-   * The `isRefreshEndpoint` flag is threaded through `request()` to prevent
-   * the refresh call or the retried request from recursing.
-   */
+  // Coalesces concurrent 401-triggered refreshes into a single in-flight promise.
   private _refreshPromise: Promise<boolean> | null = null;
 
   private async _doRefresh(): Promise<boolean> {
@@ -90,14 +68,9 @@ class ApiService {
     return this._refreshPromise;
   }
 
-  /**
-   * Clears all client-side auth state and redirects to /login.
-   * Called when a refresh fails or a retried request still 401s.
-   */
+  // Called when a refresh fails or a retried request still 401s (LOCAL mode only).
   private clearClientAuthAndRedirect(): void {
-    // This path is only reachable in LOCAL mode (OIDC 401s throw earlier), so
-    // clear the server-side httpOnly session cookies via logout() rather than
-    // the OIDC-only clearAuth(). Best-effort; always redirect regardless.
+    // Use logout() (not clearAuth()) to clear the httpOnly session cookies. Best-effort.
     authService.logout().catch(() => {}).finally(() => {
       if (typeof globalThis !== 'undefined' && globalThis.location) {
         globalThis.location.href = '/login';
@@ -105,13 +78,7 @@ class ApiService {
     });
   }
 
-  /**
-   * Builds headers that are shared by both the central request() and the
-   * inline fetch() helpers used for blob/stream/upload responses.
-   *
-   * For LOCAL mode: cookies carry auth; CSRF header on mutating calls only.
-   * For OIDC mode: Authorization: Bearer <oidc_token>; no CSRF.
-   */
+  // LOCAL: cookies carry auth; CSRF header on mutating calls. OIDC: Authorization bearer.
   private buildAuthHeaders(method: string | undefined, isFormData: boolean): Record<string, string> {
     const headers: Record<string, string> = {};
 
@@ -127,7 +94,6 @@ class ApiService {
         headers['Authorization'] = `Bearer ${token}`;
       }
     } else {
-      // LOCAL — cookies carry auth; attach CSRF on mutating requests
       if (MUTATING_METHODS.has(effectiveMethod)) {
         const csrf = getCsrfToken();
         if (csrf) {
@@ -196,27 +162,21 @@ class ApiService {
     const response = await fetch(url, config);
 
     if (response.status === 401) {
-      // When the caller opts out of redirect handling (e.g. probing/optional
-      // calls like CapabilitiesContext), just throw so the caller's catch block
-      // handles it gracefully without bouncing the user to /login.
+      // Callers that probe optional endpoints can suppress the hard redirect.
       if (_requestOptions.suppressAuthRedirect) {
         throw new Error('Authentication required');
       }
 
-      // In OIDC mode, do NOT attempt a LOCAL refresh or hard-redirect.
-      // oidc-client-ts / OIDCProvider / ProtectedRoute own re-auth in that mode.
-      // Note: stream-helper paths (chatWithAgentStream etc.) that bypass
-      // request() will not benefit from this guard — acceptable limitation.
+      // OIDC re-auth is owned by oidc-client-ts / OIDCProvider / ProtectedRoute.
       if (_apiAuthMode === 'oidc') {
         throw new Error('Authentication required');
       }
 
-      // LOCAL mode: guard against recursion and the refresh endpoint itself.
       const isRefreshEndpoint = endpoint.includes('/auth/refresh');
       if (!_isRetryAfterRefresh && !isRefreshEndpoint) {
         const refreshed = await this._doRefresh();
         if (refreshed) {
-          // Rebuild CSRF header (cookie may have rotated) and retry once.
+          // Cookie may have rotated — rebuild headers on retry.
           return this.request(endpoint, options, true, _requestOptions);
         }
       }
@@ -232,7 +192,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== APPS API ====================
   async getApps() {
     return this.request('/internal/apps/');
   }
@@ -286,7 +245,6 @@ class ApiService {
     });
   }
 
-  // ==================== USAGE STATS API ====================
   async getUsageStats() {
     return this.request('/internal/usage-stats/');
   }
@@ -313,7 +271,6 @@ class ApiService {
     });
   }
 
-  // ==================== AGENTS API ====================
   async getAgents(appId: number) {
     return this.request(`/internal/apps/${appId}/agents/`);
   }
@@ -442,7 +399,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== AI SERVICES API ====================
   async getAIServices(appId: number) {
     return this.request(`/internal/apps/${appId}/ai-services/`);
   }
@@ -550,7 +506,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== EMBEDDING SERVICES ====================
   async getEmbeddingServices(appId: number) {
     return this.request(`/internal/apps/${appId}/embedding-services/`);
   }
@@ -646,7 +601,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== MCP CONFIGS ====================
   async getMCPConfigs(appId: number) {
     return this.request(`/internal/apps/${appId}/mcp-configs/`);
   }
@@ -736,7 +690,6 @@ class ApiService {
 
     return response.json();
   }
-  // ==================== SKILLS ====================
   async getSkills(appId: number) {
     return this.request(`/internal/apps/${appId}/skills/`);
   }
@@ -765,7 +718,6 @@ class ApiService {
     });
   }
 
-  // ==================== MCP SERVERS (Expose Agents as MCP Tools) ====================
   async getMCPServers(appId: number) {
     return this.request(`/internal/apps/${appId}/mcp-servers/`);
   }
@@ -809,7 +761,6 @@ class ApiService {
     });
   }
 
-  // ==================== API KEYS ====================
   async getAPIKeys(appId: number) {
     return this.request(`/internal/apps/${appId}/api-keys/`);
   }
@@ -844,7 +795,6 @@ class ApiService {
     });
   }
 
-  // ==================== OUTPUT PARSERS (DATA STRUCTURES) ====================
   async getOutputParsers(appId: number) {
     return this.request(`/internal/apps/${appId}/output-parsers/`);
   }
@@ -922,12 +872,10 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== USER SEARCH ====================
   async searchPlatformUsers(q: string): Promise<Array<{ user_id: number; name: string; email: string; platform_role: string }>> {
     return this.request(`/internal/users/search?q=${encodeURIComponent(q)}`);
   }
 
-  // ==================== COLLABORATION ====================
   async getCollaborators(appId: number) {
     return this.request(`/internal/collaboration/?app_id=${appId}`);
   }
@@ -968,7 +916,6 @@ class ApiService {
     });
   }
 
-  // ==================== MEDIA API ====================
   async uploadMedia(appId: number, repositoryId: number, files: File[], folderId?: number, config?: {
     forced_language?: string;
     chunk_min_duration?: number;
@@ -988,7 +935,6 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    // CSRF header is handled by request() via buildAuthHeaders
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media`, {
       method: 'POST',
       body: formData,
@@ -1045,7 +991,6 @@ class ApiService {
     })
   }
 
-  // ==================== SILOS API ====================
   async getSilos(appId: number) {
     return this.request(`/internal/apps/${appId}/silos/`);
   }
@@ -1264,12 +1209,8 @@ class ApiService {
     );
   }
 
-  // ==================== REPOSITORIES API ====================
   async getRepositories(appId: number) {
-    console.log('API: Getting repositories for appId:', appId);
-    const result = await this.request(`/internal/apps/${appId}/repositories/`);
-    console.log('API: Repositories result:', result);
-    return result;
+    return this.request(`/internal/apps/${appId}/repositories/`);
   }
 
   async getRepository(appId: number, repositoryId: number) {
@@ -1304,7 +1245,6 @@ class ApiService {
       formData.append('folder_id', folderId.toString());
     }
 
-    // credentials + CSRF handled by request()
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
       method: 'POST',
       body: formData,
@@ -1359,7 +1299,6 @@ class ApiService {
     });
   }
 
-  // ==================== PLAYGROUND API ====================
   async chatWithAgent(appId: number, agentId: number, message: string, files?: File[], searchParams?: any, conversationId?: number | null) {
     const formData = new FormData();
     formData.append('message', message);
@@ -1397,11 +1336,7 @@ class ApiService {
     }
   }
 
-  /**
-   * Chat with agent using Server-Sent Events streaming.
-   * Posts to /internal/apps/{appId}/agents/{agentId}/chat/stream
-   * and reads the SSE response via ReadableStream (needed because EventSource only supports GET).
-   */
+  // EventSource only supports GET, so SSE is consumed via ReadableStream over fetch POST.
   async chatWithAgentStream(
     appId: number,
     agentId: number,
@@ -1457,9 +1392,7 @@ class ApiService {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE lines: each event is "data: {json}\n\n"
         const lines = buffer.split('\n\n');
-        // Keep the last incomplete chunk in the buffer
         buffer = lines.pop() || '';
 
         this.parseSSELines(lines, options.onEvent);
@@ -1469,12 +1402,10 @@ class ApiService {
     }
   }
 
-  // ==================== FILE MANAGEMENT API ====================
   async uploadFileForChat(appId: number, agentId: number, file: File, conversationId?: number | null) {
     const formData = new FormData();
     formData.append('file', file);
-    
-    // Associate file with specific conversation if provided
+
     if (conversationId) {
       formData.append('conversation_id', conversationId.toString());
     }
@@ -1486,15 +1417,13 @@ class ApiService {
   }
 
   async listAttachedFiles(appId: number, agentId: number, conversationId?: number | null) {
-    // Filter files by conversation if provided
-    const url = conversationId 
+    const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files`;
     return this.request(url);
   }
 
   async removeAttachedFile(appId: number, agentId: number, fileId: string, conversationId?: number | null) {
-    // Include conversation_id for proper file lookup
     const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files/${fileId}?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files/${fileId}`;
@@ -1520,7 +1449,6 @@ class ApiService {
     });
   }
 
-  // ==================== DOMAINS API ====================
   async getDomains(appId: number) {
     return this.request(`/internal/apps/${appId}/domains/`);
   }
@@ -1571,8 +1499,6 @@ class ApiService {
       method: 'DELETE',
     });
   }
-
-  // ==================== DOMAIN URLS API ====================
 
   async listDomainUrls(
     appId: number,
@@ -1641,8 +1567,6 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/urls/${urlId}/content`);
   }
 
-  // ==================== CRAWL POLICY API ====================
-
   async getCrawlPolicy(appId: number, domainId: number): Promise<CrawlPolicy> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/crawl-policy`);
   }
@@ -1653,8 +1577,6 @@ class ApiService {
       body: JSON.stringify(data),
     });
   }
-
-  // ==================== CRAWL JOBS API ====================
 
   async triggerCrawl(appId: number, domainId: number): Promise<TriggerCrawlResponse> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/crawl-jobs`, {
@@ -1684,15 +1606,11 @@ class ApiService {
     });
   }
 
-  // ==================== VERSION API ====================
-
   async getVersion(): Promise<{ name: string; version: string }> {
     const response = await this.request('/internal/version/');
     return response;
   }
 
-  // ==================== FOLDERS API ====================
-  
   async getFolders(appId: number, repositoryId: number) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/`);
   }
@@ -1741,7 +1659,6 @@ class ApiService {
     return this.uploadResources(appId, repositoryId, files, folderId);
   }
 
-  // ==================== CONVERSATION METHODS ====================
   async createConversation(agentId: number, title?: string) {
     const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
     return this.request(`/internal/conversations?agent_id=${agentId}${titleParam}`, {
@@ -1773,8 +1690,6 @@ class ApiService {
       method: 'DELETE',
     });
   }
-
-  // ==================== MARKETPLACE ====================
 
   async getMarketplaceCatalog(
     params: MarketplaceCatalogParams = {},
@@ -1866,10 +1781,7 @@ class ApiService {
     );
   }
 
-  /**
-   * Stream a marketplace chat turn as Server-Sent Events.
-   * Mirrors `chatWithAgentStream` so the marketplace UI can reuse `useStreamingChat`.
-   */
+  // Mirrors chatWithAgentStream so marketplace UI can reuse useStreamingChat.
   async chatMarketplaceStream(
     conversationId: number,
     message: string,
@@ -1960,8 +1872,6 @@ class ApiService {
     return this.request('/internal/marketplace/quota-usage');
   }
 
-  // Agent marketplace management (EDITOR+)
-
   async getAgentMarketplaceProfile(
     appId: number,
     agentId: number,
@@ -1999,7 +1909,6 @@ class ApiService {
     );
   }
 
-  // ==================== FULL APP EXPORT/IMPORT ====================
   async exportFullApp(appId: number): Promise<Blob> {
     const response = await fetch(`${this.baseURL}/internal/apps/${appId}/export`, {
       method: 'POST',
@@ -2022,15 +1931,13 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
     
-    // Build query params
     const params = new URLSearchParams();
     params.append('conflict_mode', conflictMode);
-    
+
     if (newName) {
       params.append('new_name', newName);
     }
 
-    // Use fetch directly to avoid issues with FormData
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -2045,8 +1952,6 @@ class ApiService {
 
     return response.json();
   }
-
-  // ==================== IMPORT PREVIEW API ====================
 
   async previewAgentImport(appId: number, file: File) {
     const formData = new FormData();
@@ -2190,7 +2095,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== SYSTEM SETTINGS (ADMIN) ====================
   async fetchSystemSettings() {
     return this.request('/internal/admin/settings');
   }
@@ -2207,8 +2111,6 @@ class ApiService {
       method: 'DELETE',
     });
   }
-
-  // ==================== SAAS / SUBSCRIPTION METHODS ====================
 
   async getSubscription() {
     return this.request('/internal/subscription');
@@ -2230,8 +2132,6 @@ class ApiService {
   async getUsage() {
     return this.request('/internal/usage');
   }
-
-  // ==================== SAAS ADMIN METHODS ====================
 
   async getAdminSaasUsers() {
     return this.request('/internal/admin/saas/users');
@@ -2369,17 +2269,13 @@ class ApiService {
     });
   }
 
-  // ==================== PLATFORM CHATBOT API ====================
-
   async getPlatformChatbotConfig(): Promise<{
     enabled: boolean;
     agent_name: string | null;
     agent_description: string | null;
   }> {
-    // Probing call: the provider mounts on every route (including public pages
-    // like /login and /set-password). A 401 here must NOT trigger the global
-    // refresh + hard-redirect to /login — that yanks unauthenticated users off
-    // public pages. The provider's catch block disables the widget instead.
+    // Mounted on public pages (/login, /set-password); 401 must not trigger
+    // global redirect — the provider's catch block disables the widget instead.
     return this.request(
       '/internal/platform-chatbot/config',
       {},
@@ -2433,9 +2329,7 @@ class ApiService {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE lines: each event is "data: {json}\n\n"
         const lines = buffer.split('\n\n');
-        // Keep the last incomplete chunk in the buffer
         buffer = lines.pop() || '';
 
         this.parseSSELines(lines, options.onEvent);
@@ -2444,9 +2338,6 @@ class ApiService {
       reader.releaseLock();
     }
   }
-
-  // ==================== UTILITY METHODS ====================
 }
 
-// Export singleton instance - like how you'd use services in backend
 export const apiService = new ApiService();

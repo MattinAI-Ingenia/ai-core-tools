@@ -151,36 +151,8 @@ async def delete_user(
 ) -> dict:
     """Delete a user account and orchestrate all associated data.
 
-    The actor identity is always resolved from the session — never from the
-    request body or query parameters (NFR-1 / IDOR prevention).
-
-    **Parameter priority**: the JSON body fields take precedence when supplied;
-    query parameters serve as a fallback for clients that cannot attach a body
-    to a DELETE request.  Both are optional — omitting everything defaults to
-    ``mode='block'``, which is safe for callers that do not yet send either.
-
-    Args:
-        user_id: Path parameter — primary key of the user to delete.
-        auth_context: Resolved OMNIADMIN auth context (from ``require_admin``).
-        db: Synchronous database session.
-        body: Optional ``DeleteUserRequest`` with ``mode`` and
-            ``transfer_to_user_id``.  Body fields take precedence over query params.
-        mode: Query-param fallback for ``mode``.
-        transfer_to_user_id: Query-param fallback for ``transfer_to_user_id``.
-
-    Returns:
-        ``{"message": "<email> ... deleted successfully"}`` on HTTP 200.
-
-    Raises:
-        HTTPException 400: Self-deletion attempt or invalid transfer recipient.
-        HTTPException 403: Target user is an omniadmin.
-        HTTPException 404: Target user does not exist.
-        HTTPException 409: User owns apps and ``mode='block'``, or transfer would
-            exceed the recipient's SaaS app limit.  The 409 body contains
-            ``detail`` and ``owned_apps: [{app_id, name}, …]`` for the client
-            dialog when the conflict is an owned-apps block.
-        HTTPException 501: ``mode='transfer_apps'`` stub not yet fully wired.
-        HTTPException 500: Unexpected internal error.
+    Body fields take precedence over query-param fallbacks; omitting both defaults to ``mode='block'``.
+    Actor identity is always resolved from the session (NFR-1 / IDOR prevention).
     """
     from services.user_deletion_errors import (
         OmniadminDeletionError,
@@ -193,13 +165,12 @@ async def delete_user(
         TransferRecipientInvalidError,
     )
 
-    # Resolve effective mode and transfer_to_user_id: body takes precedence.
     _VALID_MODES = {"block", "cascade_apps", "transfer_apps"}
     effective_mode: str = "block"
     effective_transfer_to: Optional[int] = None
 
     if body is not None:
-        effective_mode = body.mode  # already Literal-validated by Pydantic
+        effective_mode = body.mode
         effective_transfer_to = body.transfer_to_user_id
     elif mode is not None:
         if mode not in _VALID_MODES:
@@ -209,9 +180,6 @@ async def delete_user(
             )
         effective_mode = mode
         effective_transfer_to = transfer_to_user_id
-    # else: both absent — keep safe defaults (block, None)
-
-    # Actor identity always comes from the session (NFR-1 / IDOR prevention).
     actor_user_id: int = int(auth_context.identity.id)
 
     try:
@@ -219,7 +187,7 @@ async def delete_user(
             db,
             user_id,
             actor_user_id=actor_user_id,
-            mode=effective_mode,  # type: ignore[arg-type]  # validated by Pydantic or kept as-is
+            mode=effective_mode,  # type: ignore[arg-type]
             transfer_to_user_id=effective_transfer_to,
         )
     except UserNotFoundError as exc:
@@ -227,11 +195,8 @@ async def delete_user(
     except SelfDeletionError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
     except OmniadminDeletionError as exc:
-        # Use exc.message ("Cannot delete an administrator account.") — never exc.email.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
     except OwnedAppsPresentError as exc:
-        # Build a structured 409 body with the owned-app summaries so the
-        # frontend can render the transfer/cascade dialog without a preflight.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=OwnedAppsConflictResponse(
@@ -295,27 +260,7 @@ async def transfer_app_ownership(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AppTransferSummary:
-    """Immediately reassign ownership of an app to another user (OMNIADMIN only).
-
-    Administrative-direct transfer: no recipient handshake required.  The actor
-    identity is always derived from the session; ``new_owner_id`` comes from the
-    request body.
-
-    Args:
-        app_id: Path parameter — PK of the app to transfer.
-        body: ``TransferOwnerRequest`` with ``new_owner_id``.
-        auth_context: Resolved OMNIADMIN auth context.
-        db: Synchronous database session.
-
-    Returns:
-        ``AppTransferSummary`` with ``app_id``, ``name``, ``previous_owner_id``,
-        and ``new_owner_id`` for the admin UI to update its local state.
-
-    Raises:
-        HTTPException 404: App not found.
-        HTTPException 400: Recipient is invalid (non-existent, inactive, or already owner).
-        HTTPException 409: Transfer would push the recipient over their SaaS app limit.
-    """
+    """Immediately reassign app ownership to another user (OMNIADMIN only, no handshake)."""
     from services.app_ownership_service import AppOwnershipService
     from services.app_ownership_errors import (
         AppNotFoundError,
@@ -323,12 +268,9 @@ async def transfer_app_ownership(
         TransferRecipientInvalidError,
     )
 
-    # Actor identity always comes from the session (NFR-1 / IDOR prevention).
     actor_user_id: int = int(auth_context.identity.id)
 
     try:
-        # previous_owner_id is captured from the FOR UPDATE-locked row inside the
-        # service (authoritative under concurrency — no stale pre-fetch snapshot).
         app, previous_owner_id = AppOwnershipService.transfer_direct(
             db,
             app_id=app_id,
@@ -471,41 +413,24 @@ async def reset_user_marketplace_quota(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)]
 ):
-    """
-    Reset a user's current month marketplace quota to 0.
-    
-    This endpoint is only accessible to OMNIADMIN users and is used for:
-    - Granting additional quota when a user reports counting errors
-    - Providing extra quota to VIP users
-    - Testing/debugging purposes
-    
-    The reset only affects the current UTC month; previous months remain unchanged.
-    """
+    """Reset a user's current-month marketplace quota to 0 (OMNIADMIN only)."""
     try:
-        # Get the target user and validate exists
         user = UserService.get_user_by_id(db, user_id)
         if not user:
             raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
         
-        # Get current usage before reset
         previous_count = MarketplaceQuotaService.get_current_month_usage(user_id, db)
-        
-        # Perform the reset (handle case where no record exists - idempotent behavior)
         try:
             MarketplaceQuotaService.reset_user_current_month_usage(user_id, db)
         except ValueError:
-            # No usage record exists for current month - user already at 0, which is desired state
-            # Log this and return success anyway (idempotent)
+            # No usage record for the current month — idempotent, already at 0.
             logger.info(
                 f"OMNIADMIN {auth_context.identity.email} attempted to reset marketplace quota "
                 f"for user {user.email} (ID: {user_id}) but no usage record exists. "
                 f"User already has 0 usage for current month."
             )
         
-        # Get current timestamp
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        
-        # Log the reset action for audit trail
         logger.info(
             f"OMNIADMIN {auth_context.identity.email} (email) reset marketplace quota "
             f"for user {user.email} (ID: {user_id}). Previous count: {previous_count}, New count: 0. "
@@ -539,12 +464,9 @@ async def get_system_stats(
 ):
     """Get system-wide statistics"""
     try:
-        # Get user stats
         user_stats = UserService.get_user_stats(db)
         active_users = UserService.get_active_users_count(db)
         inactive_users = UserService.get_inactive_users_count(db)
-        
-        # Get other counts using the same db session
         total_apps = db.query(App).count()
         total_agents = db.query(Agent).count()
         total_api_keys = db.query(APIKey).count()
@@ -605,8 +527,6 @@ async def update_setting(
     try:
         service = SystemSettingsService(db)
         service.update_setting(key, update.value)
-        
-        # Get full setting with resolved value for response
         all_settings = service.get_all_settings()
         updated_setting = next((s for s in all_settings if s["key"] == key), None)
         
@@ -648,10 +568,6 @@ async def reset_setting(
         logger.error(f"Error resetting setting '{key}': {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error resetting setting: {str(e)}")
 
-
-# ==================== SAAS ADMIN ENDPOINTS ====================
-# These endpoints are always registered but guarded by OMNIADMIN requirement.
-# SaaS-specific functionality is a no-op / returns empty data in self-managed mode.
 
 from schemas.admin_schemas import UserAdminRead, TierOverrideRequest
 from schemas.tier_config_schemas import TierConfigRead, TierConfigUpdate
@@ -741,7 +657,6 @@ async def override_user_tier(
     sub_repo.set_admin_override(user_id, body.tier)
     db.commit()
 
-    # Recalculate freeze state based on new effective tier
     try:
         FreezeService.apply_freeze(db, user_id, body.tier)
         db.commit()
@@ -836,10 +751,10 @@ async def create_system_ai_service(
     from datetime import datetime
 
     svc = AIService()
-    svc.app_id = None  # NULL = system/platform service
+    svc.app_id = None
     svc.name = body.name
     svc.provider = body.provider
-    svc.description = body.model_name  # model name stored in description
+    svc.description = body.model_name  # stored in description column
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
     svc.create_date = datetime.now()
@@ -925,10 +840,10 @@ async def create_system_embedding_service(
     from datetime import datetime
 
     svc = EmbeddingService()
-    svc.app_id = None  # NULL = system/platform service
+    svc.app_id = None
     svc.name = body.name
     svc.provider = body.provider
-    svc.description = body.model_name  # model name stored in description
+    svc.description = body.model_name  # stored in description column
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
     svc.api_version = body.api_version
@@ -1018,14 +933,10 @@ async def delete_system_embedding_service(
     if not svc or svc.app_id is not None:
         raise HTTPException(status_code=404, detail=SYSTEM_EMBEDDING_SERVICE_NOT_FOUND)
 
-    # Nullify references in silos before deleting
     db.query(Silo).filter(Silo.embedding_service_id == service_id).update(
         {Silo.embedding_service_id: None}, synchronize_session='fetch'
     )
     EmbeddingServiceRepository.delete(db, svc)
-
-
-# ==================== PROVIDER MODEL DISCOVERY (system) ====================
 
 
 @router.post(
@@ -1036,9 +947,7 @@ async def list_system_ai_service_provider_models(
     body: ListProviderModelsRequest,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
 ):
-    """List models for a provider using the credentials in the body.
-    Used by the System AI Service wizard (OMNIADMIN only).
-    """
+    """List models for a provider using the credentials in the body (System AI Service wizard, OMNIADMIN only)."""
     body.purpose = "chat"
     try:
         return ProviderModelsService.list_models(body)
@@ -1065,9 +974,7 @@ async def list_system_embedding_service_provider_models(
     body: ListProviderModelsRequest,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
 ):
-    """List embedding models for a provider using the credentials in the
-    body. Used by the System Embedding Service wizard (OMNIADMIN only).
-    """
+    """List embedding models for a provider using the credentials in the body (System Embedding Service wizard, OMNIADMIN only)."""
     body.purpose = "embedding"
     try:
         return ProviderModelsService.list_models(body)
@@ -1093,11 +1000,7 @@ async def test_system_ai_service_connection_with_config(
     db: Annotated[Session, Depends(get_db)],
     service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
 ):
-    """Test a system AI service connection with the provided config (OMNIADMIN).
-
-    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
-    persisted key for that system service is used.
-    """
+    """Test a system AI service connection (OMNIADMIN). Falls back to the stored key when api_key is empty or masked."""
     from services.ai_service_service import AIServiceService
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import is_masked_key
@@ -1111,8 +1014,7 @@ async def test_system_ai_service_connection_with_config(
             or is_masked_key(api_key)
         ):
             stored = AIServiceRepository.get_by_id(db, service_id)
-            # Only honor the stored key when the target is actually a system
-            # service (app_id is NULL) — never leak an app-scoped key here.
+            # Only use stored key for system services (app_id IS NULL) — never leak an app-scoped key.
             if stored and stored.app_id is None and stored.api_key:
                 api_key = stored.api_key
 
@@ -1138,10 +1040,6 @@ async def test_system_ai_service_connection_with_config(
         )
         raise HTTPException(status_code=500, detail="Test failed")
 
-
-# ==================== LOCAL AUTH USER PROVISIONING (AD-12) ====================
-# These endpoints are only meaningful when AICT_LOGIN=LOCAL.  A mode guard at
-# the top of each handler rejects requests in OIDC mode with HTTP 404.
 
 from schemas.local_auth_schemas import AdminCreateUserRequest, AdminSetPasswordRequest
 from services.auth.credential_service import (
@@ -1206,26 +1104,7 @@ async def create_local_user(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> _LocalUserCreatedResponse:
-    """Create a LOCAL auth user and issue a first-time set-password token.
-
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
-
-    The new user has no usable password until they consume the token.
-    Login identifier is email + name only — no separate username column (FR-D3).
-
-    Args:
-        body: ``AdminCreateUserRequest`` with ``email`` and ``name``.
-        auth_context: Resolved OMNIADMIN auth context.
-        db: Synchronous database session.
-
-    Returns:
-        ``_LocalUserCreatedResponse`` with ``user_id``, ``email``, ``name``,
-        ``set_password_token``, and ``expires_at``.
-
-    Raises:
-        HTTPException 404: Endpoint not available in current auth mode.
-        HTTPException 409: A user with that email already exists.
-    """
+    """Create a LOCAL auth user and issue a first-time set-password token. Returns 404 in OIDC mode."""
     from utils.auth_config import AuthConfig
 
     if AuthConfig.LOGIN_MODE != "LOCAL":
@@ -1256,7 +1135,7 @@ async def create_local_user(
         user_id=user.user_id,
         email=user.email,
         name=user.name,
-        set_password_token=token,  # Never logged — admin's responsibility to handle securely.
+        set_password_token=token,
         expires_at=_set_password_token_expires_at(),
     )
 
@@ -1277,23 +1156,7 @@ async def admin_set_user_password(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> _PasswordUpdatedResponse:
-    """Forcibly set a user's password (admin panel emergency reset).
-
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
-
-    Args:
-        user_id: Numeric PK of the target user.
-        body: ``AdminSetPasswordRequest`` with ``new_password`` (policy-validated).
-        auth_context: Resolved OMNIADMIN auth context.
-        db: Synchronous database session.
-
-    Returns:
-        ``_PasswordUpdatedResponse`` with a success message.
-
-    Raises:
-        HTTPException 404: User not found or endpoint not available.
-        HTTPException 400: Credential record not found.
-    """
+    """Forcibly set a LOCAL auth user's password (admin emergency reset). Returns 404 in OIDC mode."""
     from utils.auth_config import AuthConfig
 
     if AuthConfig.LOGIN_MODE != "LOCAL":
@@ -1333,25 +1196,7 @@ async def issue_reset_link(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> _ResetLinkResponse:
-    """Issue a new set-password token for a LOCAL auth user.
-
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
-
-    The previous token (if any) is invalidated by this operation since only
-    one token per user is stored in the ``reset_token`` column.
-
-    Args:
-        user_id: Numeric PK of the target user.
-        auth_context: Resolved OMNIADMIN auth context.
-        db: Synchronous database session.
-
-    Returns:
-        ``_ResetLinkResponse`` with ``set_password_token`` and ``expires_at``.
-
-    Raises:
-        HTTPException 404: User not found or endpoint not available.
-        HTTPException 400: Credential record not found.
-    """
+    """Issue a new set-password token for a LOCAL auth user. Returns 404 in OIDC mode."""
     from utils.auth_config import AuthConfig
 
     if AuthConfig.LOGIN_MODE != "LOCAL":
@@ -1387,21 +1232,7 @@ async def admin_revoke_sessions(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> _SessionsRevokedResponse:
-    """Revoke all active refresh tokens for a user.
-
-    Only available when ``AICT_LOGIN=LOCAL``.  Returns 404 in OIDC mode.
-
-    Args:
-        user_id: Numeric PK of the target user.
-        auth_context: Resolved OMNIADMIN auth context.
-        db: Synchronous database session.
-
-    Returns:
-        ``_SessionsRevokedResponse`` with a success message.
-
-    Raises:
-        HTTPException 404: User not found or endpoint not available.
-    """
+    """Revoke all active refresh tokens for a LOCAL auth user. Returns 404 in OIDC mode."""
     from utils.auth_config import AuthConfig
 
     if AuthConfig.LOGIN_MODE != "LOCAL":
@@ -1428,11 +1259,7 @@ async def test_system_embedding_service_connection_with_config(
     db: Annotated[Session, Depends(get_db)],
     service_id: Annotated[Optional[int], Query(description="Edit-mode: recover stored API key when the request sends a masked placeholder")] = None,
 ):
-    """Test a system embedding service connection with the provided config (OMNIADMIN).
-
-    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
-    persisted key for that system service is used.
-    """
+    """Test a system embedding service connection (OMNIADMIN). Falls back to the stored key when api_key is empty or masked."""
     from services.embedding_service_service import EmbeddingServiceService
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from utils.secret_utils import is_masked_key

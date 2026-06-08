@@ -7,17 +7,7 @@ class AuthService {
     return configService.getApiBaseUrl();
   }
 
-  /**
-   * Extracts a human-readable message from a failed FastAPI response.
-   *
-   * Handles both shapes the backend can emit:
-   * - ``{ detail: "string" }`` — HTTPException raised in the route handler.
-   * - ``{ detail: [{ msg, loc, ... }] }`` — Pydantic 422 schema-validation error.
-   *
-   * Without this, a 422 (e.g. password fails the schema-level policy check)
-   * surfaces to the user as a bare ``HTTP 422`` because ``detail`` is an array,
-   * not a string.
-   */
+  // Handles both { detail: string } (HTTPException) and Pydantic 422 array shapes.
   private async extractErrorMessage(response: Response, fallback: string): Promise<string> {
     const data = await response.json().catch(() => null);
     const detail = (data as { detail?: unknown } | null)?.detail;
@@ -28,69 +18,41 @@ class AuthService {
     if (Array.isArray(detail) && detail.length > 0) {
       const first = detail[0] as { msg?: unknown };
       if (typeof first.msg === 'string') {
-        // Pydantic v2 prefixes ValueError messages with "Value error, ".
+        // Pydantic v2 prefixes ValueError messages with "Value error, "
         return first.msg.replace(/^Value error,\s*/i, '');
       }
     }
     return fallback;
   }
 
-  // ==================== OIDC BRIDGE ====================
-  // The OIDC library manages its own tokens in localStorage under oidc-client-ts
-  // keys.  We only store the OIDC ID token in this module-level variable so
-  // api.ts can read it synchronously for the Authorization: Bearer header.
+  // In-memory OIDC ID token; api.ts reads it synchronously for the bearer header.
   private oidcAccessToken: string | null = null;
 
-  /**
-   * Called by OIDCProvider after a successful login or silent-renew.
-   * Stores the OIDC ID token in memory — NOT in localStorage under our own key.
-   *
-   * We send the ID token (aud = client_id), NOT the access token: Azure AD issues
-   * the access token for the `<audience>/.default` scope with aud = api://<client_id>,
-   * which fails the backend's ID-token audience validation
-   * (ENTRA_TOKEN_TYPE=id_token, validate_audience=true) → 401 on every endpoint.
-   */
+  /** Stores the ID token (not the access token) — Azure AD access tokens fail
+   *  backend audience validation (aud = api://<client_id> vs. aud = client_id). */
   setOIDCToken(user: User) {
     this.oidcAccessToken = user.id_token ?? null;
   }
 
-  /**
-   * Returns the in-memory OIDC access token, or null when not in OIDC mode.
-   */
   getOIDCToken(): string | null {
     return this.oidcAccessToken;
   }
 
-  /**
-   * Clears the in-memory OIDC token.  Called by OIDCProvider on logout / expiry.
-   */
   clearOIDCToken() {
     this.oidcAccessToken = null;
   }
 
-  // ==================== LEGACY STUB (no-op) ====================
-  // These no-ops keep callers compiled while the references are removed.
+  // Alias kept for callers being migrated off clearAuth().
   clearAuth() {
     this.clearOIDCToken();
   }
 
-  /**
-   * Auth state for LOCAL mode is derived from the cookie session (checked via
-   * /internal/me), not from localStorage.  For OIDC mode the OIDC library is
-   * authoritative.  This method is therefore no longer a reliable check and
-   * callers should use UserContext.user instead.
-   */
+  /** @deprecated Prefer UserContext.user — unreliable for LOCAL cookie sessions. */
   isAuthenticated(): boolean {
     return this.oidcAccessToken !== null;
   }
 
-  // ==================== LOCAL AUTH ENDPOINTS ====================
-
-  /**
-   * POST /internal/auth/login — sets httpOnly access_token + refresh_token
-   * cookies and a readable csrf_token cookie.  Returns the user object.
-   * Never writes to localStorage.
-   */
+  /** Sets httpOnly access_token + refresh_token cookies and a readable csrf_token cookie. */
   async localLogin(email: string, password: string): Promise<{ user: { user_id: number; email: string; name?: string; is_admin?: boolean; is_omniadmin?: boolean } }> {
     const url = `${this.baseURL}/internal/auth/login`;
     const response = await fetch(url, {
@@ -107,9 +69,6 @@ class AuthService {
     return response.json();
   }
 
-  /**
-   * POST /internal/auth/logout — clears session cookies.
-   */
   async logout(): Promise<void> {
     const url = `${this.baseURL}/internal/auth/logout`;
     const csrf = getCsrfToken();
@@ -122,16 +81,10 @@ class AuthService {
       method: 'POST',
       credentials: 'include',
       headers,
-    }).catch(() => {
-      // Best-effort — even if this fails we clear local state
-    });
+    }).catch(() => {}); // best-effort
   }
 
-  /**
-   * POST /internal/auth/refresh — rotates the cookie pair.
-   * Used internally by api.ts for silent-refresh on 401.
-   * Returns true on success, false on failure.
-   */
+  /** Rotates the cookie pair; used by api.ts for silent-refresh on 401. */
   async refresh(): Promise<boolean> {
     const url = `${this.baseURL}/internal/auth/refresh`;
     const csrf = getCsrfToken();
@@ -152,9 +105,6 @@ class AuthService {
     }
   }
 
-  /**
-   * POST /internal/auth/change-password — authenticated; rotates all sessions.
-   */
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
     const url = `${this.baseURL}/internal/auth/change-password`;
     const csrf = getCsrfToken();
@@ -175,10 +125,7 @@ class AuthService {
     }
   }
 
-  /**
-   * POST /internal/auth/set-password — unauthenticated one-time token flow.
-   * No session is created; the user must log in after this.
-   */
+  /** One-time token flow; no session created — user must log in after. */
   async setPassword(token: string, password: string): Promise<void> {
     const url = `${this.baseURL}/internal/auth/set-password`;
     const response = await fetch(url, {
@@ -193,19 +140,10 @@ class AuthService {
     }
   }
 
-  // ==================== SHARED ====================
-
-  /**
-   * GET /internal/me — returns the current user from the backend.
-   * Works for both cookie sessions (LOCAL) and OIDC (bearer header added
-   * by api.ts's normal request path).  Call via authService directly only
-   * for simple probing; prefer apiService for standard requests.
-   */
   async getCurrentUser(): Promise<{ user_id: number; email: string; name?: string; is_admin?: boolean; is_omniadmin?: boolean }> {
     const url = `${this.baseURL}/internal/me`;
     const headers: Record<string, string> = {};
 
-    // For OIDC we attach the bearer; for LOCAL the cookie handles it.
     const oidcToken = this.oidcAccessToken;
     if (oidcToken) {
       headers['Authorization'] = `Bearer ${oidcToken}`;

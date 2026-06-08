@@ -15,9 +15,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # 1. Add lockout columns to user_credentials.
-    #    failed_attempts: server_default='0' ensures existing rows are backfilled safely
-    #    without a separate UPDATE pass.
+    # server_default='0' backfills existing rows without a separate UPDATE pass.
     op.add_column(
         'user_credentials',
         sa.Column('failed_attempts', sa.Integer(), nullable=False, server_default='0'),
@@ -27,7 +25,6 @@ def upgrade() -> None:
         sa.Column('locked_until', sa.DateTime(timezone=True), nullable=True),
     )
 
-    # 2. Create refresh_tokens table.
     op.create_table(
         'refresh_tokens',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
@@ -48,19 +45,15 @@ def upgrade() -> None:
         ),
     )
 
-    # 3. Indexes on refresh_tokens for the common query paths.
     op.create_index('ix_refresh_tokens_jti', 'refresh_tokens', ['jti'], unique=True)
     op.create_index('ix_refresh_tokens_user_id', 'refresh_tokens', ['user_id'], unique=False)
     op.create_index('ix_refresh_tokens_family_id', 'refresh_tokens', ['family_id'], unique=False)
 
 
 def downgrade() -> None:
-    # Drop refresh_tokens indexes first, then the table.
     op.drop_index('ix_refresh_tokens_family_id', table_name='refresh_tokens')
     op.drop_index('ix_refresh_tokens_user_id', table_name='refresh_tokens')
     op.drop_index('ix_refresh_tokens_jti', table_name='refresh_tokens')
     op.drop_table('refresh_tokens')
-
-    # Remove lockout columns from user_credentials.
     op.drop_column('user_credentials', 'locked_until')
     op.drop_column('user_credentials', 'failed_attempts')

@@ -38,10 +38,6 @@ interface UserProviderProps {
   children: ReactNode;
 }
 
-/**
- * Fetches /internal/me with the given Authorization header (OIDC) or relying
- * on cookies (LOCAL).  Returns a User or null.
- */
 async function fetchUserFromBackend(
   bearerToken: string | null,
 ): Promise<User | null> {
@@ -88,13 +84,11 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Access OIDC context directly to avoid circular dependency with useAuth
   const oidcContext = useContext(OIDCContext);
 
   const refreshUser = useCallback(async () => {
     try {
       if (oidcContext?.user) {
-        // OIDC mode: attach the OIDC ID token as bearer (aud = client_id).
         const token = oidcContext.user.id_token ?? null;
         const resolved = await fetchUserFromBackend(token);
 
@@ -103,7 +97,7 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
           return;
         }
 
-        // Fallback: use OIDC profile fields when the backend call fails.
+        // Backend unreachable — fall back to OIDC profile fields.
         const oidcUser = oidcContext.user;
         setUser({
           user_id: 0,
@@ -117,8 +111,7 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
           is_editor: false,
         });
       } else {
-        // LOCAL cookie mode (or unauthenticated): probe /internal/me with cookies.
-        // No bearer token; the httpOnly access_token cookie is sent automatically.
+        // LOCAL mode: httpOnly cookie sent automatically; no bearer needed.
         const resolved = await fetchUserFromBackend(null);
         setUser(resolved);
       }
@@ -129,10 +122,8 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
 
   const logout = useCallback(async () => {
     if (oidcContext?.user) {
-      // OIDC logout
       await oidcContext.logout();
     } else {
-      // LOCAL cookie logout — clears server-side session and cookies
       await authService.logout();
     }
     setUser(null);
@@ -142,7 +133,6 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
     const initializeUser = async () => {
       try {
         if (oidcContext?.user) {
-          // OIDC mode: attach the OIDC ID token as bearer (aud = client_id).
           const token = oidcContext.user.id_token ?? null;
           const resolved = await fetchUserFromBackend(token);
 
@@ -152,7 +142,7 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
             return;
           }
 
-          // Fallback to OIDC profile when the backend call fails.
+          // Backend unreachable — fall back to OIDC profile fields.
           const oidcUser = oidcContext.user;
           setUser({
             user_id: 0,
@@ -166,7 +156,6 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
             is_editor: false,
           });
         } else {
-          // LOCAL mode: probe with cookies
           const resolved = await fetchUserFromBackend(null);
           setUser(resolved);
         }
@@ -177,14 +166,12 @@ export const UserProvider: React.FC<UserProviderProps> = ({ children }) => {
       }
     };
 
-    // Wait for OIDC library to finish its own initialization
     if (!oidcContext?.loading) {
       initializeUser();
     }
   }, [oidcContext?.user, oidcContext?.loading]);
 
-  // Mirror OIDC loading state so the app doesn't flash an unauthenticated
-  // state while the OIDC library is processing the callback or silent-renew.
+  // Mirrors OIDC loading to prevent auth-flash during callback or silent-renew.
   useEffect(() => {
     if (oidcContext) {
       setLoading(oidcContext.loading);

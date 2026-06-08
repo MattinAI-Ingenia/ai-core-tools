@@ -12,7 +12,6 @@ class PlatformRole(str, enum.Enum):
 
 
 class User(Base):
-    '''User model class constructor'''
     __tablename__ = 'User'
     user_id = Column(Integer, primary_key=True)
     email = Column(String(255))
@@ -23,14 +22,9 @@ class User(Base):
     email_verified = Column(Boolean, default=True, nullable=False)
     platform_role = Column(String(50), default=PlatformRole.VIEWER.value, nullable=False)
 
-    # Relationships
-    # Deletion taxonomy (see spec user-deletion-and-app-transfer, AD-1):
-    #  - owned_apps / api_keys / app_collaborations are Class-B/C: emptied explicitly
-    #    by UserService.delete_user BEFORE db.delete(user). passive_deletes=True stops
-    #    the ORM from emitting an UPDATE ... SET <fk>=NULL on a delete (those FKs are
-    #    NO ACTION + NOT NULL and would raise); the orchestration leaves these empty.
-    #  - subscription is Class-A: DB-level ON DELETE CASCADE handles it; passive_deletes
-    #    lets the DB cascade run instead of an ORM SET NULL that fights it.
+    # passive_deletes=True on owned_apps/api_keys/app_collaborations (NO ACTION FKs):
+    # UserService.delete_user empties these before db.delete(user), so ORM must not
+    # emit SET NULL itself. On subscription (CASCADE FK) it lets the DB cascade run.
     owned_apps = relationship('App', foreign_keys='App.owner_id', back_populates='owner', lazy=True,
                               passive_deletes=True)
     app_collaborations = relationship('AppCollaborator', foreign_keys='AppCollaborator.user_id', back_populates='user', lazy=True,
@@ -49,6 +43,5 @@ class User(Base):
     
     @property
     def apps(self):
-        """Get all apps user has access to (owned + collaborated)"""
         from services.user_service import UserService
         return UserService.get_user_accessible_apps(self.user_id) 

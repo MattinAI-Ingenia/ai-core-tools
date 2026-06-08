@@ -1,10 +1,8 @@
 """Single source of truth for SECRET_KEY resolution and validation.
 
-All application code that needs the secret key must call ``get_secret_key()``
-or ``validate_secret_key()`` rather than reading ``os.getenv`` directly.
-This module is intentionally free of any FastAPI, SQLAlchemy, or heavy
-third-party imports so it can be loaded at the very top of the lifespan
-without triggering circular imports.
+All code needing the secret key must call ``get_secret_key()`` or
+``validate_secret_key()`` rather than reading ``os.getenv`` directly.
+Free of FastAPI/SQLAlchemy imports to avoid circular-import issues at startup.
 """
 
 import os
@@ -27,16 +25,9 @@ _GENERATE_CMD = 'python -c "import secrets; print(secrets.token_hex(32))"'
 def get_secret_key() -> str:
     """Return the application secret key, failing fast if it is unsafe.
 
-    Reads ``SECRET_KEY`` from the process environment. Raises
-    ``RuntimeError`` if the value is absent, empty/whitespace, shorter than
-    32 characters, or equal to one of the well-known insecure defaults.
-
-    Returns:
-        The validated secret key string.
-
-    Raises:
-        RuntimeError: When ``SECRET_KEY`` is missing, too short, or a known
-            insecure default.
+    Reads ``SECRET_KEY`` from the environment. Raises ``RuntimeError`` when
+    the value is absent, empty, shorter than 32 characters, or a known insecure
+    default.
     """
     value = os.getenv("SECRET_KEY")
 
@@ -74,15 +65,6 @@ def get_secret_key() -> str:
 
 
 def validate_secret_key() -> None:
-    """Validate SECRET_KEY at application startup.
-
-    Calls ``get_secret_key()`` and discards the return value.  Designed to
-    be invoked at the top of the lifespan startup block so the process aborts
-    with a clear error before any other initialisation occurs.
-
-    Raises:
-        RuntimeError: Propagated from ``get_secret_key()`` when the key is
-            invalid.
-    """
+    """Validate SECRET_KEY at startup; abort with a clear error if invalid."""
     get_secret_key()
     logger.info("SECRET_KEY validation passed.")

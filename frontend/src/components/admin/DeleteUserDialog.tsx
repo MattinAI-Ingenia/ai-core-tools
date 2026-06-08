@@ -6,7 +6,6 @@ import { adminService } from '../../services/admin';
 import type { User } from '../../services/admin';
 import { errorMessage } from '../../constants/messages';
 
-// The three mutually-exclusive branches the dialog can be in.
 type DialogBranch = 'choose' | 'transfer' | 'cascade';
 
 export interface DeleteUserDialogProps {
@@ -18,10 +17,8 @@ export interface DeleteUserDialogProps {
   readonly onDeleted: () => void;
 }
 
-// Require the user to type this confirmation phrase to enable cascade delete.
 const CASCADE_CONFIRM_PHRASE = 'delete all apps';
 
-// IDs for aria-describedby references
 const TRANSFER_PICKER_ID = 'delete-dialog-transfer-section';
 const CASCADE_INPUT_ID = 'cascade-confirm-input';
 const CASCADE_ERROR_ID = 'cascade-confirm-error';
@@ -38,7 +35,6 @@ function DeleteUserDialog({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Refs for focus management when branch changes (item 12).
   const transferFocusRef = useRef<HTMLDivElement>(null);
   const cascadeFocusRef = useRef<HTMLDivElement>(null);
 
@@ -46,8 +42,7 @@ function DeleteUserDialog({
   const appCount = targetUser.owned_apps_count;
   const appWord = appCount === 1 ? 'app' : 'apps';
 
-  // Move focus to the entry point of the new branch when it changes (item 12).
-  // Do not focus on the initial 'choose' branch — Modal handles initial focus.
+  // Focus the entry point of each branch on transition; Modal handles 'choose' initial focus.
   useEffect(() => {
     if (branch === 'transfer') {
       transferFocusRef.current?.focus();
@@ -58,7 +53,6 @@ function DeleteUserDialog({
 
   function handleClose() {
     if (isSubmitting) return;
-    // Reset all local state on close so re-opening starts fresh.
     setBranch('choose');
     setTransferTarget(null);
     setCascadeConfirm('');
@@ -78,7 +72,6 @@ function DeleteUserDialog({
       handleClose();
       onDeleted();
     } catch (err: unknown) {
-      // errorMessage already extracts ApiError.message and handles OwnedAppsError (item 2).
       setSubmitError(errorMessage(err, 'Failed to delete user'));
     } finally {
       setIsSubmitting(false);
@@ -93,7 +86,6 @@ function DeleteUserDialog({
       handleClose();
       onDeleted();
     } catch (err: unknown) {
-      // errorMessage already extracts ApiError.message and handles OwnedAppsError (item 2).
       setSubmitError(errorMessage(err, 'Failed to delete user'));
     } finally {
       setIsSubmitting(false);
@@ -103,7 +95,6 @@ function DeleteUserDialog({
   const cascadeConfirmPhraseMatches =
     cascadeConfirm.trim().toLowerCase() === CASCADE_CONFIRM_PHRASE;
 
-  // True when user has typed something but it doesn't match yet (item 14).
   const showCascadeInputError = cascadeConfirm.length > 0 && !cascadeConfirmPhraseMatches;
 
   return (
@@ -114,7 +105,6 @@ function DeleteUserDialog({
       size="medium"
     >
       <div className="space-y-5">
-        {/* Ownership warning banner — text uses text-amber-800 dark:text-amber-200 (item 13) */}
         <div className="flex gap-3 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
           <AlertTriangle
             className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5"
@@ -129,7 +119,6 @@ function DeleteUserDialog({
           </div>
         </div>
 
-        {/* Inline submission error */}
         {submitError && (
           <div
             role="alert"
@@ -143,14 +132,12 @@ function DeleteUserDialog({
           </div>
         )}
 
-        {/* ── Branch: choose ─────────────────────────────────────────────── */}
         {branch === 'choose' && (
           <div className="space-y-3">
             <p className="text-sm font-medium text-gray-700 dark:text-slate-300">
               Choose an option:
             </p>
 
-            {/* Option A: Transfer */}
             <button
               type="button"
               onClick={() => setBranch('transfer')}
@@ -171,7 +158,6 @@ function DeleteUserDialog({
               </div>
             </button>
 
-            {/* Option B: Cascade delete */}
             <button
               type="button"
               onClick={() => setBranch('cascade')}
@@ -204,14 +190,9 @@ function DeleteUserDialog({
           </div>
         )}
 
-        {/* ── Branch: transfer ───────────────────────────────────────────── */}
         {branch === 'transfer' && (
           <div className="space-y-4">
-            {/*
-              tabIndex={-1} allows programmatic focus on branch entry (item 12).
-              The ref is on a wrapper div so focus goes to the section heading
-              without interfering with the UserPicker's own focus management.
-            */}
+            {/* tabIndex={-1} allows programmatic focus on branch entry without disrupting UserPicker focus */}
             <div
               ref={transferFocusRef}
               id={TRANSFER_PICKER_ID}
@@ -272,13 +253,9 @@ function DeleteUserDialog({
           </div>
         )}
 
-        {/* ── Branch: cascade ────────────────────────────────────────────── */}
         {branch === 'cascade' && (
           <div className="space-y-4">
-            {/*
-              tabIndex={-1} allows programmatic focus on branch entry (item 12).
-              dark:border-red-600 replaces dark:border-red-800 for 3:1 non-text contrast (item 16).
-            */}
+            {/* tabIndex={-1} allows programmatic focus on branch entry; dark:border-red-600 meets 3:1 non-text contrast */}
             <div
               ref={cascadeFocusRef}
               tabIndex={-1}
@@ -322,7 +299,6 @@ function DeleteUserDialog({
                 placeholder={CASCADE_CONFIRM_PHRASE}
                 className="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded-lg text-sm text-gray-900 dark:text-slate-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
               />
-              {/* Inline error shown when text is typed but doesn't match (item 14) */}
               {showCascadeInputError && (
                 <p
                   id={CASCADE_ERROR_ID}

@@ -49,10 +49,7 @@ function UserPicker({
   const listRef = useRef<HTMLUListElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Fetch candidates whenever the debounced query changes.
-  // We over-fetch by 2x+1 to give client-side exclusion (target user + omniadmins)
-  // enough headroom — without this buffer a page of MAX_RESULTS could collapse to
-  // an empty list after filtering even when matching users exist on the server (item 6).
+  // Over-fetch by 2x+1 so client-side exclusion (target user + omniadmins) still yields MAX_RESULTS.
   const fetchCandidates = useCallback(
     async (search: string) => {
       setIsLoading(true);
@@ -75,9 +72,8 @@ function UserPicker({
     [excludeUserId],
   );
 
-  // Debounce input changes.
   useEffect(() => {
-    if (value) return; // Selection made — don't re-search until cleared.
+    if (value) return; // Don't re-search while a selection is active.
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!query.trim()) {
       setCandidates([]);
@@ -92,7 +88,6 @@ function UserPicker({
     };
   }, [query, value, fetchCandidates]);
 
-  // Close listbox when clicking outside.
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       const target = e.target as Node;
@@ -120,12 +115,10 @@ function UserPicker({
     setCandidates([]);
     setIsOpen(false);
     setActiveIndex(-1);
-    // Return focus to the input after clearing.
-    setTimeout(() => inputRef.current?.focus(), 0);
+    setTimeout(() => inputRef.current?.focus(), 0); // Restore focus after clear.
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    // Tab always closes the listbox so focus can move naturally (item 10).
     if (e.key === 'Tab') {
       setIsOpen(false);
       return;
@@ -134,7 +127,7 @@ function UserPicker({
     if (!isOpen || candidates.length === 0) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        e.stopPropagation(); // Prevent bubble to Modal (item 10).
+        e.stopPropagation(); // Prevent Escape from bubbling to and closing the Modal.
         setIsOpen(false);
       }
       return;
@@ -153,13 +146,12 @@ function UserPicker({
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      e.stopPropagation(); // Prevent bubble to Modal (item 10).
+      e.stopPropagation(); // Prevent Escape from bubbling to and closing the Modal.
       setIsOpen(false);
       setActiveIndex(-1);
     }
   }
 
-  // Scroll active option into view.
   useEffect(() => {
     if (activeIndex < 0 || !listRef.current) return;
     const item = listRef.current.children[activeIndex] as HTMLElement | undefined;
@@ -169,7 +161,6 @@ function UserPicker({
   const activeOptionId =
     activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined;
 
-  // Live-region text for screen readers (item 9).
   const liveRegionText = isLoading
     ? 'Searching…'
     : candidates.length > 0
@@ -186,7 +177,6 @@ function UserPicker({
       </label>
 
       {value ? (
-        // Selected state: show a chip with the chosen user and a clear button.
         <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/30 border border-blue-300 dark:border-blue-700 rounded-lg">
           <div className="flex-1 min-w-0">
             <span className="text-sm font-medium text-gray-900 dark:text-slate-100 truncate block">
@@ -209,7 +199,6 @@ function UserPicker({
           </button>
         </div>
       ) : (
-        // Search input.
         <div className="relative">
           <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
             {isLoading ? (
@@ -218,7 +207,6 @@ function UserPicker({
               <Search className="w-4 h-4 text-gray-400 dark:text-slate-500" aria-hidden="true" />
             )}
           </span>
-          {/* Visually-hidden live region announces result counts to AT (item 9). */}
           <span role="status" aria-live="polite" className="sr-only">
             {liveRegionText}
           </span>
@@ -247,14 +235,12 @@ function UserPicker({
         </div>
       )}
 
-      {/* Error message */}
       {fetchError && (
         <p id={errorId} role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
           {fetchError}
         </p>
       )}
 
-      {/* Listbox dropdown */}
       {isOpen && !value && (
         <ul
           ref={listRef}
@@ -264,7 +250,6 @@ function UserPicker({
           className="absolute z-50 w-full mt-1 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-600 rounded-lg shadow-lg max-h-60 overflow-y-auto focus:outline-none"
         >
           {candidates.length === 0 && !isLoading && (
-            // role="presentation" so AT does not treat this as a selectable option (item 8).
             <li role="presentation" className="px-4 py-3 text-sm text-gray-500 dark:text-slate-400 select-none">
               No users found
             </li>
@@ -278,8 +263,7 @@ function UserPicker({
                 role="option"
                 aria-selected={isActive}
                 onMouseDown={(e) => {
-                  // Prevent the input from losing focus before we register the click.
-                  e.preventDefault();
+                  e.preventDefault(); // Prevent input blur before the click registers.
                   handleSelect(user);
                 }}
                 onMouseEnter={() => setActiveIndex(index)}
@@ -301,7 +285,6 @@ function UserPicker({
                     )}
                   </div>
                   {!user.is_active && (
-                    // gray-500 on white = ~7:1, slate-400 on dark = passes 4.5:1 (item 11).
                     <span className="flex-shrink-0 text-xs text-gray-500 dark:text-slate-400 italic">
                       inactive
                     </span>

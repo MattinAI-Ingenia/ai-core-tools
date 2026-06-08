@@ -21,16 +21,12 @@ const FOCUSABLE_SELECTORS = [
 function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<ModalProps>) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
-  // Capture the element that had focus when the modal opened so we can restore it.
   const returnFocusRef = useRef<Element | null>(null);
-  // Hold onClose in a ref so the open/focus effect can depend on `isOpen` ALONE.
-  // Otherwise a parent that passes a fresh onClose on every render (e.g. while the
-  // user types in an input inside the modal) would re-run the effect and steal
-  // focus back to the first focusable element on every keystroke.
+  // Stable ref so the effect depends on `isOpen` only — avoids re-running (and re-stealing focus)
+  // when the parent passes a new onClose reference on each render (e.g. while user types).
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  // Define size classes
   const sizeClasses = {
     small: 'max-w-md max-h-96',
     medium: 'max-w-2xl max-h-[70vh]',
@@ -41,10 +37,8 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
   useEffect(() => {
     if (!isOpen) return;
 
-    // Capture current focus target so we can restore it on close.
     returnFocusRef.current = document.activeElement;
 
-    // Move focus into the modal panel (first focusable element or the panel itself).
     const panel = panelRef.current;
     if (panel) {
       const first = panel.querySelector<HTMLElement>(FOCUSABLE_SELECTORS);
@@ -91,7 +85,6 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
-      // Restore focus to the element that was active before the modal opened.
       if (returnFocusRef.current instanceof HTMLElement) {
         returnFocusRef.current.focus();
       }
@@ -102,14 +95,12 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
-      {/* Backdrop */}
       <div
         className="fixed inset-0 bg-black bg-opacity-50 transition-opacity"
         aria-hidden="true"
         onClick={onClose}
       />
 
-      {/* Modal */}
       <div className="flex min-h-full items-center justify-center p-4">
         <div
           ref={panelRef}
@@ -119,7 +110,6 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
           tabIndex={-1}
           className={`relative bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full overflow-hidden focus:outline-none ${sizeClasses[size]}`}
         >
-          {/* Header */}
           <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-slate-600 bg-gray-50 dark:bg-slate-700 sticky top-0 z-10">
             <h3 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-slate-100">
               {title}
@@ -133,7 +123,6 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
             </button>
           </div>
 
-          {/* Content */}
           <div className="p-6 overflow-y-auto" style={{ maxHeight: 'calc(80vh - 88px)' }}>
             {children}
           </div>

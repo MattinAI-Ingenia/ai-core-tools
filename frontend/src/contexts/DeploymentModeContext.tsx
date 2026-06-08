@@ -20,12 +20,8 @@ export interface Tiers {
 
 export type AuthMode = 'oidc' | 'local';
 
-/**
- * Resolve the auth mode from the build-time / runtime OIDC env flag.
- * Used as the fallback when GET /internal/config does not report auth_mode
- * (older backend) or is unreachable — so an OIDC deployment with a transient
- * config failure is NOT silently degraded to LOCAL.
- */
+// Fallback when /internal/config is unreachable or lacks auth_mode — prevents
+// an OIDC deployment from silently degrading to LOCAL on a transient failure.
 function resolveEnvAuthMode(): AuthMode {
   const runtimeConfig = (globalThis as unknown as Record<string, Record<string, string>>).__RUNTIME_CONFIG__;
   const oidcEnabled = runtimeConfig?.VITE_OIDC_ENABLED === undefined
@@ -38,12 +34,7 @@ interface DeploymentModeContextType {
   readonly isSaasMode: boolean;
   readonly isLoading: boolean;
   readonly tiers: Tiers | null;
-  /**
-   * The auth mode reported by the backend's GET /internal/config endpoint.
-   * 'local'  — admin-provisioned email+password with cookie sessions.
-   * 'oidc'   — enterprise OIDC (Microsoft Entra, etc.).
-   * null     — not yet resolved (while isLoading is true).
-   */
+  /** 'local' | 'oidc' from /internal/config; null while loading. */
   readonly authMode: AuthMode | null;
 }
 
@@ -80,8 +71,6 @@ export const DeploymentModeProvider: React.FC<DeploymentModeProviderProps> = ({ 
           setIsSaasMode(data.deployment_mode === 'saas');
           setTiers(data.tiers ?? null);
 
-          // Prefer the backend-reported auth_mode; fall back to the env flag
-          // when absent (older backend) so existing deployments are not broken.
           const resolvedMode: AuthMode =
             data.auth_mode === 'oidc' || data.auth_mode === 'local'
               ? data.auth_mode
@@ -90,9 +79,7 @@ export const DeploymentModeProvider: React.FC<DeploymentModeProviderProps> = ({ 
           setApiAuthMode(resolvedMode);
         }
       } catch {
-        // Endpoint unreachable: preserve the env-intended mode rather than
-        // hardcoding 'local', which would break OIDC logins on a transient
-        // config failure.
+        // Preserve the env-intended mode so OIDC deployments survive a transient failure.
         const fallbackMode = resolveEnvAuthMode();
         setIsSaasMode(false);
         setTiers(null);

@@ -30,5 +30,4 @@ class RefreshToken(Base):
     user_agent = Column(String(255), nullable=True)
     ip = Column(String(45), nullable=True)
 
-    # Relationships
     user = relationship('User', back_populates='refresh_tokens')

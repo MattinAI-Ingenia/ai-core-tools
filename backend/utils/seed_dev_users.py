@@ -69,7 +69,6 @@ import os
 import sys
 from pathlib import Path
 
-# Add backend directory to path for imports
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
@@ -80,7 +79,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Default dev users to create when no CLI/env list is provided
 DEV_USERS = [
     {
         "email": "admin@example.com",
@@ -108,36 +106,13 @@ DEV_USERS = [
     },
 ]
 
-# Env var holding a declarative, comma-separated user list
-# Formats: "email:Name,email2:Name2" or "email:Name:password,email2:Name2:pw"
 SEED_USERS_ENV = "AICT_DEV_SEED_USERS"
-
-# Env var holding a fallback password applied to all users without an explicit
-# per-user password in LOCAL mode.
 SEED_PASSWORD_ENV = "AICT_DEV_SEED_PASSWORD"
-
-# Auth modes under which seeding dev users is meaningful
 _SEEDABLE_MODES = ("LOCAL",)
 
 
 def _parse_users_spec(spec: str) -> list:
-    """Parse a CSV user specification string into seed user dicts.
-
-    Supports two formats:
-    - ``email:Name``          — user without password (seeded without credentials)
-    - ``email:Name:password`` — user with password (LOCAL mode)
-    - ``email::password``     — name defaults to email local-part
-
-    The name part is optional; when omitted, the local part of the email is
-    used as a fallback display name.  Blank entries are ignored.
-
-    Args:
-        spec: Comma-separated user specification.
-
-    Returns:
-        List of user dicts with ``email``, ``name``, ``description``, and
-        ``password`` (``None`` when not supplied) keys.
-    """
+    """Parse comma-separated ``email:Name[:password]`` entries into seed user dicts."""
     users = []
     for chunk in spec.split(","):
         chunk = chunk.strip()
@@ -145,8 +120,6 @@ def _parse_users_spec(spec: str) -> list:
             continue
 
         parts = chunk.split(":", 2)
-        # Normalise email to canonical lowercase so seeded emails match the
-        # login normalisation applied by LoginRequest (strip + lower).
         email = parts[0].strip().lower()
         name = parts[1].strip() if len(parts) > 1 else ""
         password: str | None = parts[2].strip() if len(parts) > 2 else None
@@ -156,7 +129,6 @@ def _parse_users_spec(spec: str) -> list:
         if not name:
             name = email.split("@", 1)[0]
 
-        # Treat empty-string password as no password
         if password == "":
             password = None
 
@@ -171,14 +143,7 @@ def _parse_users_spec(spec: str) -> list:
 
 
 def resolve_users(cli_spec: str = None) -> list:
-    """Resolve the user list from CLI arg, env var, or built-in defaults.
-
-    Args:
-        cli_spec: Value of the ``--users`` argument, if provided.
-
-    Returns:
-        List of user dicts to seed.
-    """
+    """Resolve user list from ``--users`` arg, ``AICT_DEV_SEED_USERS`` env var, or built-in defaults."""
     if cli_spec:
         return _parse_users_spec(cli_spec)
 
@@ -190,17 +155,10 @@ def resolve_users(cli_spec: str = None) -> list:
 
 
 def _is_explicit_user_spec(cli_spec: str = None) -> bool:
-    """Return True when users came from an explicit source (CLI arg or env var).
+    """Return True when users came from ``--users`` or ``AICT_DEV_SEED_USERS`` (not built-in defaults).
 
-    Used to decide whether ``AICT_DEV_SEED_PASSWORD`` should be applied as a
-    fallback password.  The built-in ``DEV_USERS`` defaults must NOT receive the
-    fallback to avoid silently giving well-known example accounts a shared password.
-
-    Args:
-        cli_spec: Value of the ``--users`` argument, if provided.
-
-    Returns:
-        ``True`` when ``cli_spec`` is set or ``AICT_DEV_SEED_USERS`` is non-empty.
+    Used to gate whether ``AICT_DEV_SEED_PASSWORD`` is applied as a fallback —
+    built-in example accounts must not silently receive a shared env-var password.
     """
     if cli_spec:
         return True
@@ -208,12 +166,12 @@ def _is_explicit_user_spec(cli_spec: str = None) -> bool:
 
 
 def current_login_mode() -> str:
-    """Return the configured login mode (``AICT_LOGIN``), uppercased."""
+    """Return ``AICT_LOGIN`` uppercased."""
     return os.getenv("AICT_LOGIN", "OIDC").strip().upper()
 
 
 def is_seedable_mode() -> bool:
-    """Whether the current login mode allows seeding dev users safely."""
+    """Return True when the current login mode supports dev user seeding."""
     return current_login_mode() in _SEEDABLE_MODES
 
 
@@ -222,38 +180,16 @@ async def seed_dev_users_async(
     users_data: list = None,
     apply_password_fallback: bool = False,
 ) -> dict:
-    """Seed development users into the database (async variant).
-
-    Idempotent: existing users (matched by email) are left untouched in their
-    user row; passwords are only updated when a new value is supplied.
-
-    In LOCAL mode:
-    - New users are created via ``CredentialService.admin_create_user`` so that
-      ``auth_method`` is set to ``'local'`` and ``email_verified`` reflects the
-      SMTP state.  This satisfies FR-D4/AC-13: ``CredentialService.authenticate``
-      requires ``auth_method == 'local'`` and would reject users created via the
-      legacy ``get_or_create_user`` path (which defaulted to ``auth_method='oidc'``).
-    - Existing users found with ``auth_method != 'local'`` (e.g. legacy rows from
-      a previous OIDC deployment) are normalised in-place on each seed run so that
-      re-running the seeder repairs previously-unloggable accounts.
-    - If a user entry has a ``password`` key the credential is updated via
-      ``admin_set_password``.  Without a password source no credential update is
-      written and the user must complete an admin-issued set-password link before
-      login.
+    """Idempotently seed dev users.  In LOCAL mode uses ``CredentialService``
+    so ``auth_method='local'`` is set correctly.
 
     Args:
-        db: Database session.
-        users_data: List of user dicts with ``email``, ``name``,
-                    ``description``, and optional ``password`` keys.
-                    If ``None``, uses ``DEV_USERS`` default list.
-        apply_password_fallback: When ``True``, ``AICT_DEV_SEED_PASSWORD`` is
-            applied to users that have no explicit password.  Should only be
-            ``True`` when ``users_data`` came from ``--users`` / ``AICT_DEV_SEED_USERS``
-            (i.e., explicitly-provided users), never when using the built-in
-            ``DEV_USERS`` defaults.
+        apply_password_fallback: When True, ``AICT_DEV_SEED_PASSWORD`` is
+            applied to explicit users without a per-user password.  Never set
+            for the built-in ``DEV_USERS`` defaults.
 
     Returns:
-        Dict with ``created``, ``existing`` user lists, and ``total`` count.
+        Dict with ``created``, ``existing`` lists, and ``total`` count.
     """
     from services.auth.credential_service import CredentialService, UserAlreadyExistsError
     from services.email import smtp_configured
@@ -274,12 +210,10 @@ async def seed_dev_users_async(
         name = user_data["name"]
         explicit_password: str | None = user_data.get("password")
 
-        # Determine effective password for LOCAL mode.
         effective_password: str | None = explicit_password or (
             fallback_password if login_mode == "LOCAL" else None
         )
 
-        # --- Ensure user row exists with correct auth fields ---
         existing_user = UserService.get_user_by_email(db, email)
         if existing_user:
             user = existing_user
@@ -288,10 +222,7 @@ async def seed_dev_users_async(
                 email,
                 existing_user.user_id,
             )
-            # FR-D4/AC-13 repair: normalise legacy rows that have the wrong
-            # auth_method so that re-running the seed makes them loggable.
-            # Only applies in LOCAL mode when a password is being set; without
-            # a password source there is nothing to repair.
+            # Repair legacy rows with wrong auth_method so they can log in.
             if login_mode == "LOCAL" and effective_password and user.auth_method != "local":
                 logger.info(
                     "Normalising auth_method for existing user %s: %s -> local",
@@ -303,19 +234,13 @@ async def seed_dev_users_async(
                 db.flush()
             updated_users.append(user)
         elif login_mode == "LOCAL":
-            # LOCAL mode: use admin_create_user so auth_method='local' and
-            # email_verified are set correctly.  admin_create_user also creates
-            # the placeholder credential row; use admin_set_password directly
-            # afterwards (it updates the existing row).
             try:
                 user = await CredentialService.admin_create_user(db, email=email, name=name)
             except UserAlreadyExistsError:
-                # Race: another process created the row between our check and
-                # this call.  Fall back to the row that's already there.
+                # Concurrent creation — fall back to the existing row.
                 user = UserService.get_user_by_email(db, email)
                 logger.info("User created concurrently: %s (user_id: %s)", email, user.user_id)
                 updated_users.append(user)
-                # Continue to password-setting block below without adding to created_users.
                 if effective_password:
                     try:
                         await CredentialService.admin_set_password(db, user_id=user.user_id, new_password=effective_password)
@@ -336,7 +261,6 @@ async def seed_dev_users_async(
             )
             created_users.append(user)
         else:
-            # Non-LOCAL mode: use legacy path (no password/credential involved).
             user, created = UserService.get_or_create_user(db=db, email=email, name=name)
             if created:
                 logger.info(
@@ -350,9 +274,6 @@ async def seed_dev_users_async(
                 logger.info("User already exists: %s", email)
                 updated_users.append(user)
 
-        # --- Set/update credential in LOCAL mode when a password is available ---
-        # admin_create_user already created the credential row, so
-        # admin_set_password (which UPDATES the existing row) is the correct call.
         if login_mode == "LOCAL" and effective_password:
             try:
                 await CredentialService.admin_set_password(db, user_id=user.user_id, new_password=effective_password)
@@ -451,7 +372,6 @@ def main():
         print()
         return
 
-    # Safety guard: only seed users in dev/local modes.
     if not is_seedable_mode() and not args.force:
         message = (
             f"AICT_LOGIN={login_mode} is not a development mode. "

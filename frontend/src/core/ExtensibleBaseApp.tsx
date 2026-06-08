@@ -16,7 +16,6 @@ import { defaultNavigation } from './defaultNavigation';
 import type { LibraryConfig, ExtraRoute } from './types';
 import { baseTheme } from '../themes/baseTheme';
 
-// Import base pages
 import LandingPage from '../pages/LandingPage';
 import AppsPage from '../pages/AppsPage';
 import AppDashboard from '../pages/AppDashboard';
@@ -85,9 +84,7 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
   config,
   extraRoutes = [],
 }) => {
-  // Merge routes from config and extraRoutes prop
   const allExtraRoutes = [...(config.routes || []), ...extraRoutes];
-  // Convert LibraryConfig to ClientConfig for backward compatibility
   const clientConfig = {
     clientId: 'library-client',
     name: config.name || 'AI Core Tools',
@@ -116,19 +113,16 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
     navigation: config.navigationConfig
   };
 
-  // Initialize configuration service
   useEffect(() => {
     configService.setClientConfig(clientConfig);
   }, [clientConfig]);
 
   const features = config.features || {};
   
-  // Merge navigation configuration
-  const mergedNavigationConfig = config.navigation 
+  const mergedNavigationConfig = config.navigation
     ? mergeNavigationConfig(config.navigation)
     : (config.navigationConfig || defaultNavigation);
 
-  // Common layout props used across all routes
   const commonLayoutProps = useMemo(() => ({
     navigationConfig: mergedNavigationConfig,
     headerProps: {
@@ -164,16 +158,13 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                 <Route path="/verify-email" element={<VerifyEmailPage />} />
                 <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
                 <Route path="/password-reset" element={<PasswordResetPage />} />
-                {/* LOCAL auth: one-time token password setup (public) */}
                 <Route path="/set-password" element={<SetPasswordPage />} />
-                {/* LOCAL auth: authenticated password change */}
                 <Route path="/change-password" element={
                   <ProtectedLayoutRoute {...commonLayoutProps}>
                     <ChangePasswordPage />
                   </ProtectedLayoutRoute>
                 } />
 
-                {/* Public landing page — handles its own redirect when not in SaaS mode */}
                 <Route path="/" element={<LandingPage />} />
 
                 <Route path="/apps" element={
@@ -212,7 +203,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                   </ProtectedLayoutRoute>
                 } />
 
-                {/* App routes — editor and admin only */}
                 <Route path="/apps/:appId" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <AppDashboard />
@@ -399,7 +389,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                   </EditorLayoutRoute>
                 } />
 
-                {/* Admin routes */}
                 <Route path="/admin/users" element={
                   <AdminLayoutRoute {...commonLayoutProps}>
                     <UsersPage />
@@ -454,18 +443,13 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                     </ProtectedLayoutRoute>
                 } />
 
-                {/* Client-specific extra routes */}
                 {allExtraRoutes.map(route => {
-                  // Determine which route protection to use
                   let element;
                   if (route.adminOnly) {
-                    // Admin-only route (requires authentication AND admin privileges)
                     element = <AdminLayoutRoute {...commonLayoutProps}>{route.element}</AdminLayoutRoute>;
                   } else if (route.protected) {
-                    // Protected route (requires authentication only)
                     element = <ProtectedLayoutRoute {...commonLayoutProps}>{route.element}</ProtectedLayoutRoute>;
                   } else {
-                    // Public route
                     element = (
                       <Layout {...commonLayoutProps}>
                         {route.element}
@@ -482,7 +466,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                   );
                 })}
 
-                {/* Default redirect for unmatched paths */}
                 <Route path="*" element={<Navigate to="/apps" replace />} />
               </Routes>
               <PlatformChatbotWidget />

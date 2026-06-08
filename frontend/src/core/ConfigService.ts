@@ -33,15 +33,9 @@ class ConfigService {
   }
 
   private getDefaultApiConfig(): ApiConfig {
-    // Try to get runtime configuration first (injected at container startup)
     const runtimeConfig = (globalThis as any).__RUNTIME_CONFIG__;
-    
-    // Fallback chain: runtime config -> build-time env vars -> default.
-    // Use `||` so an empty value is treated as "not set". The dev public/config.js
-    // ships VITE_API_BASE_URL:"" and is served as-is by Vite in local dev; with `??`
-    // that "" was preserved, so requests went to the Vite dev server instead of the
-    // backend. Docker/k8s inject an absolute, non-empty URL (see docker-compose
-    // frontend env / the platform ConfigMap), which is used as-is.
+    // Use || (not ??) — dev public/config.js ships VITE_API_BASE_URL:"" and Vite
+    // serves it as-is; ?? would preserve the empty string instead of falling through.
     const baseUrl = runtimeConfig?.VITE_API_BASE_URL ||
              import.meta.env.VITE_API_BASE_URL ||
              import.meta.env.VITE_API_URL ||
@@ -54,17 +48,12 @@ class ConfigService {
     };
   }
 
-  // Helper method to get configuration from backend
   async loadConfigFromBackend(): Promise<Partial<ClientConfig> | null> {
     try {
-      // Get runtime configuration if available
       const runtimeConfig = (globalThis as any).__RUNTIME_CONFIG__;
-      
-      // Check if OIDC is enabled via runtime config
       const oidcEnabled = runtimeConfig?.VITE_OIDC_ENABLED === 'true';
-      
+
       if (oidcEnabled && runtimeConfig) {
-        // Use runtime configuration for OIDC
         return {
           clientId: runtimeConfig.VITE_OIDC_CLIENT_ID || '',
           name: 'IA Core Tools',
@@ -81,8 +70,7 @@ class ConfigService {
           }
         };
       }
-      
-      // Fallback to backend API config
+
       const baseUrl = this.getApiBaseUrl();
       const response = await fetch(`${baseUrl}/api/internal/client-config`);
       

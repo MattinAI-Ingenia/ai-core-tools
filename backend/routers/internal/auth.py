@@ -1,9 +1,4 @@
-"""
-Authentication and invitation endpoints for internal API.
-
-Provides pending-invitations list and invitation-respond endpoints used by
-the frontend.  The legacy FAKE-mode dev-login endpoint was removed in step_008.
-"""
+"""Pending-invitation list and respond endpoints for the internal API."""
 
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
@@ -20,14 +15,12 @@ from schemas.apps_schemas import InvitationResponseSchema
 
 logger = get_logger(__name__)
 
-# Load authentication configuration
 AuthConfig.load_config()
 
 router = APIRouter(tags=["auth"])
 
 
 class PendingInvitationSchema(BaseModel):
-    """Schema for pending invitations"""
     id: int
     app_id: int
     app_name: str
@@ -47,7 +40,6 @@ async def get_pending_invitations(
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Get pending invitations for the current user"""
     user_id = auth_context.identity.id
     collaboration_service = AppCollaborationService(db)
     
@@ -79,7 +71,6 @@ async def respond_to_invitation(
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Respond to a collaboration invitation"""
     user_id = auth_context.identity.id
     collaboration_service = AppCollaborationService(db)
     

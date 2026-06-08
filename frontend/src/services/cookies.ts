@@ -1,12 +1,4 @@
-/**
- * Utilities for reading browser cookies.
- * Used to extract the non-httpOnly csrf_token set by the LOCAL auth backend.
- */
-
-/**
- * Parses document.cookie and returns the value of the named cookie,
- * or null if not present.
- */
+/** Returns the value of the named cookie, or null if absent. */
 export function getCookieValue(name: string): string | null {
   if (typeof document === 'undefined') return null;
 
@@ -24,11 +16,7 @@ export function getCookieValue(name: string): string | null {
   return null;
 }
 
-/**
- * Returns the current CSRF token from the csrf_token cookie set by the
- * LOCAL auth backend (readable, non-httpOnly).  Returns null when the
- * cookie is absent (OIDC mode or unauthenticated).
- */
+/** Returns the non-httpOnly csrf_token cookie, or null in OIDC/unauthenticated states. */
 export function getCsrfToken(): string | null {
   return getCookieValue('csrf_token');
 }

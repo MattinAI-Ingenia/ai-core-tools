@@ -22,7 +22,7 @@ function ChangePasswordPage() {
 
   const successHeadingRef = useRef<HTMLHeadingElement>(null);
 
-  // Move focus to the success heading once the success state activates.
+  // Move focus to the success heading so screen readers announce the state change.
   useEffect(() => {
     if (success && successHeadingRef.current) {
       successHeadingRef.current.focus();
@@ -106,7 +106,7 @@ function ChangePasswordPage() {
           </p>
         </div>
 
-        {/* Always-rendered alert live region — screen readers need it in the DOM before the error fires */}
+        {/* Always-rendered so screen readers receive the alert before the error fires */}
         <div
           role="alert"
           aria-live="assertive"
@@ -124,10 +124,7 @@ function ChangePasswordPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-5" noValidate>
-          {/*
-            Hidden username input to help password managers associate the new
-            password with the authenticated user's account.
-          */}
+          {/* Hidden username field — helps password managers associate the new password with this account */}
           {user?.email && (
             <input
               type="email"

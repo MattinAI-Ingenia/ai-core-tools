@@ -1,20 +1,7 @@
-"""Local email+password authentication service for SaaS mode.
+"""Email+password authentication service for SaaS mode.
 
-Delegation note (step_005)
---------------------------
-``_hash_password`` and ``_verify_password`` now delegate to the shared sync
-helpers in ``services.auth.credential_service`` (``_sync_hash`` /
-``_sync_verify``) so the SaaS and LOCAL code paths use the same bcrypt
-parameters (rounds=12).
-
-What changed vs left intact:
-- ``_hash_password`` / ``_verify_password``: now thin wrappers around the
-  shared sync functions — bcrypt import removed from this module.
-- Everything else (register / verify_email / login / request_password_reset /
-  complete_password_reset, SubscriptionRepository, SaaS email calls): unchanged.
-  SaaS register still creates a Subscription(FREE); that logic is intentional
-  and lives here exclusively.
-- No async changes; this service remains synchronous (called from sync routes).
+Delegates hashing to ``_sync_hash`` / ``_sync_verify`` from
+``services.auth.credential_service`` to share bcrypt parameters (rounds=12).
 """
 from datetime import datetime, timedelta
 from typing import Optional
@@ -29,7 +16,6 @@ from repositories.subscription_repository import SubscriptionRepository
 from models.subscription import SubscriptionTier
 from utils.logger import get_logger
 from utils.secret_key import get_secret_key
-# Shared sync bcrypt helpers — same rounds parameter for both SaaS and LOCAL.
 from services.auth.credential_service import _sync_hash, _sync_verify
 
 logger = get_logger(__name__)
@@ -71,7 +57,6 @@ class LocalAuthService:
                 detail="An account with this email address already exists.",
             )
 
-        # Create user record
         user = User(
             email=email,
             name=email.split("@")[0],
@@ -81,27 +66,23 @@ class LocalAuthService:
             platform_role="viewer",
         )
         db.add(user)
-        db.flush()  # Get user_id
+        db.flush()
 
-        # Create credential
         cred_repo = UserCredentialRepository(db)
         hashed = _hash_password(password)
         cred_repo.create(user_id=user.user_id, hashed_password=hashed)
 
-        # Generate and store verification token
         token = LocalAuthService._generate_verification_token(user.email)
         expiry = datetime.utcnow() + timedelta(seconds=_VERIFY_TOKEN_MAX_AGE_SECONDS)
         cred_repo.set_verification_token(user.user_id, token, expiry)
 
-        # Create Free subscription
         sub_repo = SubscriptionRepository(db)
         sub_repo.create(user_id=user.user_id, tier=SubscriptionTier.FREE)
 
         db.commit()
         db.refresh(user)
 
-        # Send verification email (best-effort — do not fail registration on email error)
-        try:
+        try:  # best-effort: do not fail registration on email error
             from services.email_service import EmailService
             EmailService.send_verification_email(to=email, token=token)
         except Exception as exc:
@@ -125,12 +106,10 @@ class LocalAuthService:
         cred_repo = UserCredentialRepository(db)
         cred = cred_repo.get_by_user_id(user.user_id)
         if not cred or cred.is_verified:
-            # Already verified or no credential — treat as success
             if cred and cred.is_verified:
                 return user
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token.")
 
-        # Check stored token matches and is not expired
         if cred.verification_token != token:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token.")
         if cred.verification_token_expiry and datetime.utcnow() > cred.verification_token_expiry:
@@ -181,7 +160,7 @@ class LocalAuthService:
         user_repo = UserRepository(db)
         user = user_repo.get_by_email(email)
         if not user or user.auth_method != "local":
-            return  # Silent: do not reveal whether account exists
+            return  # anti-enumeration: always silent
 
         token = LocalAuthService._generate_reset_token(email)
         expiry = datetime.utcnow() + timedelta(seconds=_RESET_TOKEN_MAX_AGE_SECONDS)
@@ -221,8 +200,6 @@ class LocalAuthService:
         db.commit()
         db.refresh(user)
         return user
-
-    # ── Private helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _generate_verification_token(email: str) -> str:

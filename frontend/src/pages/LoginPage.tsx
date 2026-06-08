@@ -8,8 +8,6 @@ import { useDeploymentMode } from '../contexts/DeploymentModeContext';
 import Particles from '../components/ui/Particles';
 import AIRobot3D from '../components/ui/AIRobot3D';
 
-/* ─────────────────────── Feature cards data ─────────────────────── */
-
 const FEATURES = [
   {
     title: 'Intelligent Agents',
@@ -52,8 +50,6 @@ const FEATURES = [
     color: '#f59e0b',
   },
 ];
-
-/* ─────────────────────── Robot greeting ─────────────────────── */
 
 const PHRASES = [
   'Hey! Ready to build something amazing?',
@@ -165,15 +161,7 @@ function RobotGreeting() {
   );
 }
 
-/* ─────────────────────────── LoginPage ─────────────────────────── */
-
-/**
- * Tracks which field(s) the current error is attributed to.
- * - null    → no error
- * - 'email' → email field only
- * - 'password' → password field only
- * - 'both'  → both fields (e.g. server credential rejection)
- */
+// null = no error; 'both' = server credential rejection (avoids hinting which field was wrong)
 type LoginErrorField = 'email' | 'password' | 'both' | null;
 
 function LoginPage() {
@@ -231,8 +219,6 @@ function LoginPage() {
       await refreshUser();
       navigate(from, { replace: true });
     } catch (err: unknown) {
-      // Server credential rejection: mark both fields invalid (common UX pattern;
-      // avoids hinting which credential was wrong).
       triggerError(err instanceof Error ? err.message : 'Login failed', 'both');
       setLoading(false);
     }
@@ -244,7 +230,6 @@ function LoginPage() {
 
   return (
     <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-indigo-50 via-slate-50 to-blue-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800">
-      {/* Animated background blobs */}
       <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
         <div
           className="animate-blob-drift-a absolute -top-32 -right-32 h-96 w-96 rounded-full opacity-[0.18] blur-3xl"
@@ -260,7 +245,6 @@ function LoginPage() {
         />
       </div>
 
-      {/* Subtle particles */}
       <div className="absolute inset-0 opacity-30">
         <Particles
           particleCount={80}
@@ -276,9 +260,7 @@ function LoginPage() {
         />
       </div>
 
-      {/* Main content */}
       <main className="relative z-10 min-h-screen flex flex-col items-center justify-center px-4 py-8 sm:px-6">
-        {/* Logo + brand */}
         <div className="flex items-center gap-4 mb-8 animate-fade-in-up">
           {theme.logo ? (
             <img src={theme.logo} alt={theme.name} className="h-14 w-auto" />
@@ -297,15 +279,12 @@ function LoginPage() {
           </span>
         </div>
 
-        {/* Robot greeting */}
         <div className="mb-6">
           <RobotGreeting />
         </div>
 
-        {/* Glass card — login form */}
         <div className="w-full max-w-sm animate-fade-in-up-d2">
           <div className="card-login-shimmer backdrop-blur-2xl rounded-2xl shadow-xl border p-7 space-y-5 bg-white/80 dark:bg-slate-800/80 border-slate-200/60 dark:border-slate-700/60 shadow-slate-200/50">
-            {/* Title */}
             <div className="text-center">
               <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
                 Welcome back
@@ -318,7 +297,7 @@ function LoginPage() {
               </p>
             </div>
 
-            {/* Always-rendered alert live region — screen readers need it in the DOM before the error fires */}
+            {/* Always-rendered so screen readers receive the alert before the error fires */}
             <div
               role="alert"
               aria-live="assertive"
@@ -338,7 +317,6 @@ function LoginPage() {
               )}
             </div>
 
-            {/* Config still loading — neutral skeleton */}
             {configLoading && (
               <div className="flex justify-center py-4" aria-label="Loading sign-in options" aria-busy="true">
                 <svg className="animate-spin h-6 w-6 text-slate-400" fill="none" viewBox="0 0 24 24" aria-hidden="true">
@@ -348,7 +326,6 @@ function LoginPage() {
               </div>
             )}
 
-            {/* LOCAL mode — email + password form */}
             {!configLoading && authMode === 'local' && (
               <form onSubmit={handleLocalLogin} className="space-y-4" noValidate>
                 <div>
@@ -414,7 +391,6 @@ function LoginPage() {
               </form>
             )}
 
-            {/* OIDC mode — single button, behavior unchanged */}
             {!configLoading && authMode === 'oidc' && (
               <button
                 type="button"
@@ -439,7 +415,6 @@ function LoginPage() {
               </button>
             )}
 
-            {/* SaaS-only links: register + forgot password */}
             {!configLoading && isSaasMode && (
               <div className="mt-4 text-center space-y-2">
                 <p className="text-sm text-slate-500 dark:text-slate-400">
@@ -464,7 +439,7 @@ function LoginPage() {
               </div>
             )}
 
-            {/* LOCAL self-hosted: no public reset link (admin-initiated) */}
+            {/* Self-hosted LOCAL: no public reset link — admin-initiated only */}
             {!configLoading && !isSaasMode && authMode === 'local' && (
               <p className="text-xs text-center text-slate-400 dark:text-slate-500 mt-2">
                 Forgot your password? Contact your administrator.
@@ -473,7 +448,6 @@ function LoginPage() {
           </div>
         </div>
 
-        {/* Feature cards — 2x2 grid */}
         <div className="grid grid-cols-2 gap-3 mt-8 max-w-lg w-full animate-fade-in-up-d3">
           {FEATURES.map((f) => (
             <div
@@ -495,7 +469,6 @@ function LoginPage() {
           ))}
         </div>
 
-        {/* Legal footer */}
         <div className="mt-8 text-center animate-fade-in-up-d3">
           <p className="text-xs text-slate-400">
             By signing in, you agree to our{' '}

@@ -1,16 +1,12 @@
 """HTTP-only cookie helpers for LOCAL auth mode session transport.
 
-Centralises all cookie attribute constants and the set/clear helpers so that
-every call site uses the same secure defaults.  Only imported by the LOCAL auth
-code paths; OIDC and FAKE modes do not use cookies.
+Cookie layout:
+- ``access_token``  — httpOnly, SameSite=Lax, Path=/
+- ``refresh_token`` — httpOnly, SameSite=Lax, Path=/internal/auth
+- ``csrf_token``    — NOT httpOnly, SameSite=Lax, Path=/ (JS must read it)
 
-Cookie design:
-- ``access_token``  — httpOnly, SameSite=Lax, Path=/            (JS cannot read it)
-- ``refresh_token`` — httpOnly, SameSite=Lax, Path=/internal/auth (narrow path)
-- ``csrf_token``    — NOT httpOnly, SameSite=Lax, Path=/         (JS must read it)
-
-The ``Secure`` flag is enabled by default (``AUTH_COOKIE_SECURE=true``) and may
-be disabled via env var only for local HTTP development (never in production).
+``Secure`` is enabled by default; set ``AUTH_COOKIE_SECURE=false`` only for
+local HTTP development.
 """
 
 import secrets
@@ -25,50 +21,25 @@ from services.auth.refresh_service import REFRESH_TTL_DAYS as _SERVICE_REFRESH_T
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Cookie configuration constants
-# ---------------------------------------------------------------------------
-
-#: Set ``AUTH_COOKIE_SECURE=false`` (or ``0``/``no``/``off``) to opt-out of
-#: the Secure flag for local HTTP development only.  Must never be false in
-#: production deployments.  Uses Config.get_bool_env_var so that "0", "false",
-#: "no", and "off" all correctly disable the flag (unlike a raw != "false"
-#: comparison which would treat "0" as True).
 _COOKIE_SECURE: bool = Config.get_bool_env_var("AUTH_COOKIE_SECURE", default=True)
 
-#: Access-token TTL in minutes — imported directly from local_auth_tokens so
-#: cookie max-age and JWT exp share a single source of truth.
+# Cookie max-ages share a single source of truth with the token TTL constants.
 _ACCESS_TTL_MINUTES: int = _TOKEN_ACCESS_TTL_MINUTES
-
-#: Refresh-token TTL in days — imported directly from refresh_service so
-#: cookie max-age and token exp share a single source of truth.
 _REFRESH_TTL_DAYS: int = _SERVICE_REFRESH_TTL_DAYS
 
-# Cookie name constants
 COOKIE_ACCESS_TOKEN = "access_token"
 COOKIE_REFRESH_TOKEN = "refresh_token"
 COOKIE_CSRF_TOKEN = "csrf_token"
 
-# Cookie path constants
 _PATH_ROOT = "/"
 _PATH_AUTH = "/internal/auth"
 
-# Max-age values derived from TTL constants
 _ACCESS_MAX_AGE: int = _ACCESS_TTL_MINUTES * 60
 _REFRESH_MAX_AGE: int = _REFRESH_TTL_DAYS * 24 * 60 * 60
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def generate_csrf_token() -> str:
-    """Generate a cryptographically random CSRF token.
-
-    Returns:
-        A URL-safe base64 token string with 256 bits of entropy.
-    """
+    """Return a URL-safe random CSRF token with 256 bits of entropy."""
     return secrets.token_urlsafe(32)
 
 
@@ -80,20 +51,15 @@ def set_session_cookies(
 ) -> None:
     """Attach all three session cookies to an outgoing response.
 
-    Sets ``access_token`` and ``refresh_token`` as httpOnly cookies (not
-    readable by JavaScript) and ``csrf_token`` as a readable cookie so the
-    frontend can extract it and echo it back via the ``X-CSRF-Token`` header
-    on mutating requests.
-
-    Token values are never logged.
+    ``access_token`` and ``refresh_token`` are httpOnly; ``csrf_token`` is
+    readable by JS so the frontend can echo it via ``X-CSRF-Token``. Token
+    values are never logged.
 
     Args:
-        response: The FastAPI ``Response`` (or ``JSONResponse``) to attach
-            cookies to.
-        access_token: The signed LOCAL access JWT.
-        refresh_token: The opaque refresh token wire string.
-        csrf_token: Optional CSRF token string.  If ``None`` a new token is
-            generated with ``generate_csrf_token()``.
+        response: FastAPI response to attach cookies to.
+        access_token: Signed LOCAL access JWT.
+        refresh_token: Opaque refresh token wire string.
+        csrf_token: CSRF token; generated if ``None``.
     """
     if csrf_token is None:
         csrf_token = generate_csrf_token()
@@ -137,11 +103,11 @@ def set_session_cookies(
 def clear_session_cookies(response: Response) -> None:
     """Remove all three session cookies from the client.
 
-    Path attributes must match exactly those used in ``set_session_cookies``
+    Path attributes must exactly match those used in ``set_session_cookies``
     or the browser will not delete the cookies.
 
     Args:
-        response: The FastAPI ``Response`` to attach the delete directives to.
+        response: FastAPI response to attach the delete directives to.
     """
     response.delete_cookie(
         key=COOKIE_ACCESS_TOKEN,

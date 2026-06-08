@@ -36,8 +36,7 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
 
   const link = buildSetPasswordLink(token);
 
-  // Move focus to the input when the modal opens so screen-reader users
-  // immediately land on the copyable value.
+  // Move focus to the copyable input on open so screen-reader users land on the value immediately.
   useEffect(() => {
     if (isOpen && inputRef.current) {
       inputRef.current.focus();
@@ -51,8 +50,7 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
-      // Auto-copy unavailable (no clipboard permission / insecure context):
-      // select the text and tell the user to copy manually.
+      // Clipboard unavailable (permission denied or insecure context) — select text for manual copy.
       inputRef.current?.select();
       setCopied(false);
       setCopyFailed(true);
@@ -68,7 +66,6 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
   return (
     <Modal isOpen={isOpen} onClose={handleClose} title={title} size="medium">
       <div className="space-y-5">
-        {/* Success notice */}
         <div className="flex items-start gap-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 p-4">
           <CheckCircle2 className="w-5 h-5 text-green-500 dark:text-green-400 flex-shrink-0 mt-0.5" aria-hidden="true" />
           <p className="text-sm text-green-800 dark:text-green-300">
@@ -78,7 +75,6 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
           </p>
         </div>
 
-        {/* Copyable link */}
         <div>
           <label htmlFor="onetimelink-value" className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1.5">
             Set-password link
@@ -112,7 +108,7 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
               )}
             </button>
           </div>
-          {/* Always-rendered live region so the mutation is reliably announced. */}
+          {/* Always-rendered so copy status is reliably announced to AT */}
           <p
             role="status"
             aria-live="polite"
@@ -123,7 +119,6 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
           </p>
         </div>
 
-        {/* Security warning */}
         <div className="flex items-start gap-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-4">
           <AlertTriangle className="w-5 h-5 text-amber-500 dark:text-amber-400 flex-shrink-0 mt-0.5" aria-hidden="true" />
           <div className="space-y-1 text-sm text-amber-800 dark:text-amber-300">
@@ -136,7 +131,6 @@ function OneTimeLinkModal({ isOpen, onClose, token, expiresAt, title = 'Set-Pass
           </div>
         </div>
 
-        {/* Footer action */}
         <div className="flex justify-end border-t border-gray-200 dark:border-slate-700 pt-4">
           <button
             type="button"

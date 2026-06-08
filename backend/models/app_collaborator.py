@@ -18,7 +18,6 @@ class CollaborationStatus(enum.Enum):
     DECLINED = "declined"
 
 class AppCollaborator(Base):
-    '''AppCollaborator model for managing app collaborations'''
     __tablename__ = 'AppCollaborator'
     
     id = Column(Integer, primary_key=True)
@@ -31,7 +30,6 @@ class AppCollaborator(Base):
     status = Column(Enum(CollaborationStatus), nullable=False, default=CollaborationStatus.PENDING)
     is_frozen = Column(Boolean, default=False, nullable=False)
     
-    # Relationships
     app = relationship('App', back_populates='collaborators')
     user = relationship('User', foreign_keys=[user_id], back_populates='app_collaborations')
     inviter = relationship('User', foreign_keys=[invited_by])

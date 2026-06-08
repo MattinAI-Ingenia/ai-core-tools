@@ -21,7 +21,7 @@ function SetPasswordPage() {
   const successHeadingRef = useRef<HTMLHeadingElement>(null);
   const invalidHeadingRef = useRef<HTMLHeadingElement>(null);
 
-  // Move focus to success/invalid headings when those states become active.
+  // Move focus to success/invalid headings so screen readers announce the state change.
   useEffect(() => {
     if (success && successHeadingRef.current) {
       successHeadingRef.current.focus();
@@ -140,7 +140,7 @@ function SetPasswordPage() {
           </p>
         </div>
 
-        {/* Always-rendered alert live region — screen readers need it in the DOM before the error fires */}
+        {/* Always-rendered so screen readers receive the alert before the error fires */}
         <div
           role="alert"
           aria-live="assertive"
@@ -158,11 +158,7 @@ function SetPasswordPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-5" noValidate>
-          {/*
-            Hidden username input to help password managers associate the new
-            password with an account. Token-based set-password pages don't
-            have the email available, so we omit the value but keep the field.
-          */}
+          {/* Hidden username field — helps password managers; email unavailable on token-based flow so value is omitted */}
           <input
             type="email"
             autoComplete="username"

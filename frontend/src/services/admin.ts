@@ -120,18 +120,9 @@ class AdminService {
       }) as { message: string };
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
-        // Parse the owned_apps payload out of the error message.
-        // api.ts already JSON-parsed the body and put `detail` into the message;
-        // the full payload is available via a re-parse attempt.  Because we only
-        // have the stringified message here we fall back to an empty array when
-        // the owned_apps field is not recoverable from the string alone.
-        // The 409 body is: { detail: string, owned_apps: [{app_id, name}] }
-        // api.ts's extractErrorMessage picks `detail` as the message string.
-        // To get owned_apps we attempt to parse the raw response — but api.ts
-        // has already consumed it.  The caller therefore has two options:
-        //   (a) check `user.owned_apps_count > 0` before calling (preferred, used by the dialog),
-        //   (b) catch OwnedAppsError and read .ownedApps (may be empty if only the string survived).
-        // We still throw a typed OwnedAppsError so callers can branch on type alone.
+        // api.ts has already consumed the response body, so owned_apps cannot be
+        // recovered here. Callers should pre-check owned_apps_count; typed error
+        // still allows instanceof branching.
         throw new OwnedAppsError(err.message, []);
       }
       throw err;

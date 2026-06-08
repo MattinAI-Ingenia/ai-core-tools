@@ -20,26 +20,21 @@ function CreateLocalUserModal({ isOpen, onClose, onCreated }: CreateLocalUserMod
   const [name, setName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  // Set when the server rejects the email as already-taken (409) so the email
-  // field can be marked invalid even though it is well-formed.
+  // Track 409 duplicate-email separately so the field can be marked invalid despite passing format validation.
   const [emailTaken, setEmailTaken] = useState(false);
-
-  // Once a user is created we hold the result here and show the one-time link modal.
   const [createdUser, setCreatedUser] = useState<LocalUserCreated | null>(null);
   const [showLink, setShowLink] = useState(false);
 
   const emailInputRef = useRef<HTMLInputElement>(null);
 
-  // Focus the email input when the modal opens.
   useEffect(() => {
     if (isOpen && !showLink) {
-      // Defer one tick so the Modal has rendered.
+      // Defer one tick so Modal has finished rendering before focusing.
       const id = setTimeout(() => emailInputRef.current?.focus(), 50);
       return () => clearTimeout(id);
     }
   }, [isOpen, showLink]);
 
-  // Reset local state whenever the modal is closed from the outside.
   useEffect(() => {
     if (!isOpen) {
       setEmail('');
@@ -75,7 +70,6 @@ function CreateLocalUserModal({ isOpen, onClose, onCreated }: CreateLocalUserMod
       setCreatedUser(result);
       setShowLink(true);
     } catch (err: unknown) {
-      // Reliable status-based branch for the duplicate-email 409 case.
       if (err instanceof ApiError && err.status === 409) {
         setEmailTaken(true);
         setFormError('A user with this email address already exists.');
@@ -89,12 +83,10 @@ function CreateLocalUserModal({ isOpen, onClose, onCreated }: CreateLocalUserMod
 
   function handleLinkClose() {
     setShowLink(false);
-    // Refresh the list only once the admin has acknowledged the one-time link.
     onCreated();
     onClose();
   }
 
-  // When the link modal is active we render it on top instead of the form.
   if (showLink && createdUser) {
     return (
       <OneTimeLinkModal
@@ -111,7 +103,7 @@ function CreateLocalUserModal({ isOpen, onClose, onCreated }: CreateLocalUserMod
     <Modal isOpen={isOpen} onClose={onClose} title="Create user" size="medium">
       <form onSubmit={handleSubmit} noValidate className="space-y-5">
         <p className="text-xs text-gray-500 dark:text-slate-400">Fields marked * are required.</p>
-        {/* Inline error — always in DOM for screen readers (role=alert implies aria-live) */}
+        {/* Always in DOM — role=alert implies aria-live=assertive */}
         <div
           id="create-user-error"
           role="alert"

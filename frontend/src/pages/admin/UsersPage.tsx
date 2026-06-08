@@ -24,8 +24,7 @@ function UsersPage() {
   const { authMode, isLoading: modeLoading } = useDeploymentMode();
   const { user: currentUser } = useUser();
 
-  // Only expose LOCAL-only provisioning controls once the auth mode is known,
-  // so they don't flicker/mis-evaluate during the /internal/config fetch.
+  // Guard against flicker during the /internal/config fetch.
   const isLocalMode = !modeLoading && authMode === 'local';
 
   const [users, setUsers] = useState<User[]>([]);
@@ -41,16 +40,12 @@ function UsersPage() {
   const [settingRole, setSettingRole] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // LOCAL mode modals
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [resetLinkState, setResetLinkState] = useState<ResetLinkState | null>(null);
-
-  // Delete-with-owned-apps dialog
   const [deleteDialogUser, setDeleteDialogUser] = useState<User | null>(null);
 
   const perPage = 10;
 
-  // Wrap in useCallback so the useEffect dependency array is stable.
   const loadUsers = useCallback(async () => {
     try {
       setLoading(true);
@@ -75,7 +70,6 @@ function UsersPage() {
     const target = users.find((u) => u.user_id === userId);
     if (!target) return;
 
-    // Users with owned apps get the multi-step dialog instead of the simple confirm.
     if (target.owned_apps_count > 0) {
       setDeleteDialogUser(target);
       return;
@@ -103,7 +97,6 @@ function UsersPage() {
       await loadUsers();
     } catch (err: unknown) {
       // Stale-count race: user acquired an app between list load and delete attempt.
-      // Open the owned-apps dialog retroactively instead of showing a generic error.
       if (err instanceof OwnedAppsError) {
         setDeleteDialogUser(target);
         return;
@@ -244,7 +237,6 @@ function UsersPage() {
     <div className="space-y-6">
       {error && <Alert type="error" message={error} onDismiss={() => setError(null)} />}
 
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">User Management</h1>
@@ -263,7 +255,6 @@ function UsersPage() {
         )}
       </div>
 
-      {/* Search */}
       <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6">
         <form onSubmit={handleSearch} className="flex gap-4">
           <div className="flex-1">
@@ -286,7 +277,6 @@ function UsersPage() {
         </form>
       </div>
 
-      {/* Users Table */}
       <div className="bg-white dark:bg-slate-800 rounded-lg shadow overflow-visible">
         <div className="px-6 py-4 border-b border-gray-200 dark:border-slate-700">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">
@@ -440,7 +430,6 @@ function UsersPage() {
                               variant: 'warning' as const,
                               disabled: resettingQuota === user.user_id,
                             },
-                            // LOCAL-mode-only: reset password link
                             ...(isLocalMode ? [
                               {
                                 label: issuingResetLink === user.user_id ? 'Generating...' : 'Reset password link',
@@ -469,7 +458,6 @@ function UsersPage() {
           </table>
         </div>
 
-        {/* Pagination */}
         {totalPages > 1 && (
           <div className="px-6 py-4 border-t border-gray-200 dark:border-slate-700">
             <div className="flex items-center justify-between">
@@ -497,7 +485,6 @@ function UsersPage() {
         )}
       </div>
 
-      {/* LOCAL mode — create user modal */}
       {isLocalMode && (
         <CreateLocalUserModal
           isOpen={showCreateModal}
@@ -506,7 +493,6 @@ function UsersPage() {
         />
       )}
 
-      {/* LOCAL mode — reset-link result modal */}
       {resetLinkState && (
         <OneTimeLinkModal
           isOpen={true}
@@ -517,7 +503,6 @@ function UsersPage() {
         />
       )}
 
-      {/* Delete-with-owned-apps dialog */}
       {deleteDialogUser && (
         <DeleteUserDialog
           isOpen={true}

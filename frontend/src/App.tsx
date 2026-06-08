@@ -33,7 +33,6 @@ const getConfig = (key: string, fallback: string = ''): string => {
   return runtimeConfig?.[key] || import.meta.env[key] || fallback;
 };
 
-// Demo configuration for the base application
 const demoConfig: LibraryConfig = {
   name: 'Mattin AI',
   logo: '/mattin-small.png',

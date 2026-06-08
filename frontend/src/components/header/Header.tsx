@@ -52,7 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className={`bg-white border-b border-gray-200 h-14 flex items-center ${className}`}>
 
-      {/* Logo + Platform name — w-64 to match sidebar width */}
+      {/* w-64 matches sidebar width */}
       <div className="flex-shrink-0 w-64 flex items-center gap-2 pl-4 pr-3 min-w-0">
         <Link to="/apps" className="flex-shrink-0 flex items-center gap-2">
           <img
@@ -66,22 +66,16 @@ export const Header: React.FC<HeaderProps> = ({
         </Link>
       </div>
 
-      {/* Vertical divider — aligns with sidebar right border */}
       <div className="self-stretch w-px bg-gray-200 flex-shrink-0 my-2" />
 
-      {/* Spacer + custom children + right actions */}
       <div className="flex-1 min-w-0 flex items-center justify-between pl-4 pr-4 gap-4">
-
-        {/* Slot for custom children (e.g. search bar, breadcrumbs) */}
         <div className="flex-1 min-w-0">
           {children}
         </div>
 
-        {/* Right section — never shrinks */}
         <div className="flex-shrink-0 flex items-center gap-2">
           <PendingInvitationsNotification />
 
-          {/* User Menu Dropdown */}
           <div className="relative" ref={userMenuRef}>
             <button
               onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
