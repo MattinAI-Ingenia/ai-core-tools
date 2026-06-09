@@ -99,6 +99,7 @@ async def get_user(
             api_keys_count=len(user.api_keys) if user.api_keys else 0,
             is_active=user.is_active,
             platform_role=user.platform_role or 'editor',
+            is_omniadmin=is_omniadmin(user.email),
         )
     except HTTPException:
         raise
@@ -194,7 +195,8 @@ async def deactivate_user(
 @router.post(
     "/users/{user_id}/set-platform-role",
     responses={
-        400: {"description": "Bad request"},
+        400: {"description": "Bad request — invalid role value or self-change attempt"},
+        403: {"description": "Forbidden — cannot modify an omniadmin"},
         404: {"description": "User not found"},
         500: {"description": "Internal server error"},
     },
@@ -217,6 +219,8 @@ async def set_user_platform_role(
             "platform_role": user.platform_role,
             "warnings": warnings,
         }
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
