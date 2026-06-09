@@ -37,7 +37,7 @@ const AboutPage: React.FC = () => {
             </p>
             <p className="text-lg text-gray-700 mb-4">
               Whether you're a developer looking to integrate AI into your applications, a data scientist 
-              working with vector databases, or an organization seeking to leverage AI agents and 
+              working with database types, or an organization seeking to leverage AI agents and 
               automation, Mattin AI provides the tools and infrastructure you need.
             </p>
           </div>
@@ -95,7 +95,7 @@ const AboutPage: React.FC = () => {
             <div className="w-12 h-12 bg-purple-500 rounded-lg flex items-center justify-center mb-4">
               <Database className="w-8 h-8 text-white" />
             </div>
-            <h3 className="text-xl font-semibold text-gray-900 mb-3">Vector Databases</h3>
+            <h3 className="text-xl font-semibold text-gray-900 mb-3">Database Types</h3>
             <p className="text-gray-700">
               Efficient storage and retrieval of vector embeddings using PostgreSQL with pgvector 
               extension for high-performance semantic search.

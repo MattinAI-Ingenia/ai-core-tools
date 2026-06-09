@@ -72,18 +72,11 @@ class SiloGraphService:
         """
         workspace = cls._workspace_name(silo_id)
 
-        # --- Path 1: Try LightRAG get_knowledge_graph ---
-        result = cls._try_lightrag_api(
-            workspace=workspace,
-            max_nodes=max_nodes,
-            max_depth=max_depth,
-            node_label=node_label,
-            search=search,
-        )
-        if result is not None:
-            return result
-
-        # --- Path 2: Direct Cypher (fallback) ---
+        # Always use direct Cypher queries — LightRAG stores the workspace as
+        # a node *label* (e.g. ``silo_14``), not as a property, so the
+        # built-in ``get_knowledge_graph`` API returns empty results when it
+        # filters by workspace property.  The Cypher path uses label-based
+        # matching which works correctly.
         return cls._cypher_graph(
             workspace=workspace,
             max_nodes=max_nodes,
@@ -186,6 +179,7 @@ class SiloGraphService:
             "edges": edges,
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "total_nodes": len(nodes),
             "truncated": truncated,
         }
 
@@ -201,28 +195,50 @@ class SiloGraphService:
         node_label: Optional[str],
         search: Optional[str],
     ) -> Dict[str, Any]:
-        """Query Neo4j directly with mandatory workspace filter."""
+        """Query Neo4j directly scoped to the workspace label.
+
+        LightRAG stores the workspace as a node *label* (e.g. ``silo_14``),
+        not as a ``workspace`` property.  All queries therefore match by label
+        using backtick-escaped dynamic label syntax.
+        """
         driver = cls._neo4j_driver()
         nodes: List[Dict] = []
         edges: List[Dict] = []
+        total_nodes = 0
 
         try:
             with driver.session() as neo_session:
+                # --- Total node count (without limit, for slider upper bound) ---
+                # Only count entity nodes (those with entity_id set) — LightRAG also
+                # stores text-chunk nodes in the same workspace that don't have entity_id
+                # and never appear in the UI, so the count must exclude them.
+                count_q = f"MATCH (n:`{workspace}`) WHERE n.entity_id IS NOT NULL RETURN count(n) AS total"
+                count_result = neo_session.run(count_q)
+                count_record = count_result.single()
+                total_nodes = count_record["total"] if count_record else 0
+
                 # --- Nodes ---
+                # LightRAG tags every node with the workspace as a label.
+                # When an additional entity-type label filter is requested,
+                # both labels must match (workspace AND entity_type).
                 if node_label:
-                    node_q = (
-                        f"MATCH (n:`{node_label}`) "
-                        "WHERE n.workspace = $ws "
-                    )
+                    node_q = f"MATCH (n:`{workspace}`:`{node_label}`) "
                 else:
-                    node_q = "MATCH (n) WHERE n.workspace = $ws "
+                    node_q = f"MATCH (n:`{workspace}`) "
 
                 if search:
-                    node_q += "AND (toLower(n.entity_name) CONTAINS toLower($search) OR toLower(n.description) CONTAINS toLower($search)) "
+                    node_q += (
+                        "WHERE (toLower(n.entity_id) CONTAINS toLower($search) "
+                        "OR toLower(n.description) CONTAINS toLower($search)) "
+                    )
 
-                node_q += "RETURN n LIMIT $limit"
+                node_q += (
+                    "WITH n, size([(n)-[]-() | 1]) AS degree "
+                    "ORDER BY degree DESC "
+                    "RETURN n LIMIT $limit"
+                )
 
-                params: Dict[str, Any] = {"ws": workspace, "limit": max_nodes}
+                params: Dict[str, Any] = {"limit": max_nodes}
                 if search:
                     params["search"] = search
 
@@ -230,28 +246,30 @@ class SiloGraphService:
                 node_ids = set()
                 for record in result:
                     n = record["n"]
-                    nid = str(n.get("entity_name") or n.get("id") or n.element_id)
+                    # LightRAG stores the entity identifier in entity_id
+                    nid = str(n.get("entity_id") or n.get("entity_name") or n.element_id)
                     props = dict(n.items())
-                    props.pop("workspace", None)
                     nodes.append({
                         "id": nid,
-                        "labels": list(n.labels),
+                        # Expose only the non-workspace labels for the UI
+                        "labels": [lb for lb in n.labels if lb != workspace] or list(n.labels),
                         "properties": props,
                     })
                     node_ids.add(nid)
 
                 # --- Edges between fetched nodes ---
+                # Match relationships where BOTH endpoints are in the fetched node set
+                # to prevent dangling relationships that crash the renderer.
                 if node_ids:
                     edge_q = (
-                        "MATCH (a)-[r]->(b) "
-                        "WHERE a.workspace = $ws AND b.workspace = $ws "
-                        "AND (a.entity_name IN $ids OR b.entity_name IN $ids) "
-                        "RETURN a.entity_name AS src, b.entity_name AS tgt, type(r) AS rel_type, id(r) AS rid, properties(r) AS props "
+                        f"MATCH (a:`{workspace}`)-[r]->(b) "
+                        "WHERE a.entity_id IN $ids AND b.entity_id IN $ids "
+                        "RETURN a.entity_id AS src, b.entity_id AS tgt, "
+                        "type(r) AS rel_type, id(r) AS rid, properties(r) AS props "
                         "LIMIT $limit"
                     )
                     edge_result = neo_session.run(
                         edge_q,
-                        ws=workspace,
                         ids=list(node_ids),
                         limit=max_nodes * 3,
                     )
@@ -261,7 +279,6 @@ class SiloGraphService:
                         if not src or not tgt:
                             continue
                         rel_props = dict(rec["props"] or {})
-                        rel_props.pop("workspace", None)
                         edges.append({
                             "id": str(rec["rid"]),
                             "source": src,
@@ -278,5 +295,6 @@ class SiloGraphService:
             "edges": edges,
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "total_nodes": total_nodes,
             "truncated": truncated,
         }

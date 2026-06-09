@@ -17,6 +17,15 @@ depends_on = None
 
 
 def upgrade():
+    conn = op.get_bind()
+    exists = conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name='pricing_catalog'"
+        )
+    ).fetchone()
+    if exists:
+        return
     op.create_table(
         'pricing_catalog',
         sa.Column('model_name', sa.String(255), nullable=False, primary_key=True),

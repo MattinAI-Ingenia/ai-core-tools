@@ -17,10 +17,18 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        'Agent',
-        sa.Column('retrieval_config', postgresql.JSON(astext_type=sa.Text()), nullable=True)
-    )
+    conn = op.get_bind()
+    result = conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='Agent' AND column_name='retrieval_config'"
+        )
+    ).fetchone()
+    if result is None:
+        op.add_column(
+            'Agent',
+            sa.Column('retrieval_config', postgresql.JSON(astext_type=sa.Text()), nullable=True)
+        )
 
 
 def downgrade():

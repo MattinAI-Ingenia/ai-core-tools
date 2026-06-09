@@ -332,6 +332,14 @@ def build_embedding_func(embedding_service: EmbeddingService) -> "EmbeddingFunc"
         if not texts:
             return np.zeros((0, embedding_dim), dtype=np.float32)
         vectors = await _embed_batch(embeddings_model, list(texts))
+
+        # Report embedding token usage to the active accumulator (if any).
+        # We estimate tokens via character count / 4 (standard approximation).
+        acc = _active_accumulator.get()
+        if acc is not None:
+            estimated_tokens = sum(len(t) for t in texts) // 4
+            acc.add_embedding_usage(estimated_tokens)
+
         return np.asarray(vectors, dtype=np.float32)
 
     return EmbeddingFunc(

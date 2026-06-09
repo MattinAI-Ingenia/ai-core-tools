@@ -31,14 +31,37 @@ _NEW_COLUMNS = (
 )
 
 
+def _column_exists(conn, table, column):
+    return conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name=:t AND column_name=:c"
+        ),
+        {"t": table, "c": column},
+    ).fetchone() is not None
+
+
+def _fk_exists(conn, name):
+    return conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.table_constraints "
+            "WHERE constraint_name=:n AND constraint_type='FOREIGN KEY'"
+        ),
+        {"n": name},
+    ).fetchone() is not None
+
+
 def upgrade():
+    conn = op.get_bind()
     for col in _NEW_COLUMNS:
-        op.add_column('Silo', sa.Column(col, sa.Integer(), nullable=True))
-        op.create_foreign_key(
-            f'fk_silo_{col}',
-            'Silo', 'AIService',
-            [col], ['service_id'],
-        )
+        if not _column_exists(conn, 'Silo', col):
+            op.add_column('Silo', sa.Column(col, sa.Integer(), nullable=True))
+        if not _fk_exists(conn, f'fk_silo_{col}'):
+            op.create_foreign_key(
+                f'fk_silo_{col}',
+                'Silo', 'AIService',
+                [col], ['service_id'],
+            )
 
     # Backfill: legacy silos used indexing_service_id for extraction; copy it
     # into extract_service_id so existing LightRAG silos keep working without

@@ -165,7 +165,7 @@ const RepositoryFormPage: React.FC = () => {
     const normalizedLightRAGVectorDbType = (formData.lightrag_vector_db_type || 'QDRANT').toUpperCase();
 
     if (isNewRepository && !formData.vector_db_type) {
-      setError('Vector database selection is required');
+      setError('Database type selection is required');
       return;
     }
 
@@ -176,7 +176,7 @@ const RepositoryFormPage: React.FC = () => {
 
     if (isNewRepository && normalizedVectorDbType === 'LIGHTRAG') {
       if (!['PGVECTOR', 'QDRANT'].includes(normalizedLightRAGVectorDbType)) {
-        setError('LightRAG Vector DB must be either PGVECTOR or QDRANT');
+        setError('LightRAG Database Type must be either PGVECTOR or QDRANT');
         return;
       }
 
@@ -298,10 +298,10 @@ const RepositoryFormPage: React.FC = () => {
             </p>
           </div>
 
-          {/* Vector Database */}
+          {/* Database Type */}
           <div>
             <label htmlFor="vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
-              Vector Database <span className="text-red-500">*</span>
+              Database Type <span className="text-red-500">*</span>
             </label>
             <select
               id="vector_db_type"
@@ -333,7 +333,7 @@ const RepositoryFormPage: React.FC = () => {
               </p>
             ) : (
               <p className="text-sm text-amber-600 mt-1">
-                The vector database cannot be changed after a repository is created.
+                The database type cannot be changed after a repository is created.
               </p>
             )}
           </div>
@@ -341,7 +341,7 @@ const RepositoryFormPage: React.FC = () => {
           {isNewRepository && formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
             <div>
               <label htmlFor="lightrag_vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
-                LightRAG Vector DB <span className="text-red-500">*</span>
+                LightRAG Database Type <span className="text-red-500">*</span>
               </label>
               <select
                 id="lightrag_vector_db_type"
@@ -359,7 +359,7 @@ const RepositoryFormPage: React.FC = () => {
                 <option value="PGVECTOR">PGVector</option>
               </select>
               <p className="text-sm text-gray-500 mt-1">
-                Select the internal vector backend used by LightRAG for this repository.
+                Select the internal database backend used by LightRAG for this repository.
               </p>
             </div>
           )}

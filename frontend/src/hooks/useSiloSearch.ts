@@ -18,6 +18,7 @@ export interface Silo {
   created_at?: string;
   docs_count: number;
   metadata_fields?: SearchFilterMetadataField[];
+  vector_db_type?: string;
 }
 
 export interface QueryHistoryEntry {

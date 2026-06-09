@@ -178,7 +178,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       setOutputParsers(parsersResponse);
       setEmbeddingServices(servicesResponse);
 
-      // Fetch vector database options only when they have not been set
+      // Fetch database type options only when they have not been set
       if (vectorDbOptions.length === 0) {
         const siloOptions = await apiService.getSiloOptions(appIdNumber);
         const availableVectorDbOptions: VectorDbOption[] = siloOptions.vector_db_options ?? [];
@@ -256,7 +256,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     }
 
     if (!isEditing && !formData.vector_db_type) {
-      setError('Vector database selection is required');
+      setError('Database type selection is required');
       return;
     }
 
@@ -420,7 +420,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
                 disabled={isSubmitting || vectorDbOptions.length === 0 || isEditing}
               >
-                {vectorDbOptions.length === 0 && <option value="">No vector databases available</option>}
+                {vectorDbOptions.length === 0 && <option value="">No database types available</option>}
                 {vectorDbOptions.map((option) => (
                   <option key={option.code} value={option.code}>
                     {option.label}
@@ -430,11 +430,11 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
               {isEditing ? (
                 <p className="mt-1 text-sm text-gray-500 flex items-center gap-1">
                   <Info className="w-3.5 h-3.5 shrink-0" />
-                  The vector database cannot be changed after a silo is created.
+                  The database type cannot be changed after a silo is created.
                 </p>
               ) : vectorDbOptions.length === 0 ? (
                 <p className="mt-1 text-sm text-red-600">
-                  No vector databases available. Configure a silo backend before proceeding.
+                  No database types available. Configure a silo backend before proceeding.
                 </p>
               ) : (
                 <p className="mt-1 text-sm text-gray-500">

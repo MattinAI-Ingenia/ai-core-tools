@@ -32,5 +32,7 @@ class SiloGraphResponse(BaseModel):
     edges: List[GraphEdge] = []
     node_count: int = 0
     edge_count: int = 0
+    total_nodes: int = 0
+    """Total nodes in the graph for this workspace (without limit)."""
     truncated: bool = False
     """True when the result was capped at max_nodes."""

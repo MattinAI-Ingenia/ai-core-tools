@@ -22,9 +22,9 @@ class IndexingMetric(Base):
     metric_id = Column(Integer, primary_key=True, autoincrement=True)
 
     # Tenant / scope
-    app_id = Column(Integer, ForeignKey("App.app_id"), nullable=False)
-    silo_id = Column(Integer, ForeignKey("Silo.silo_id"), nullable=False)
-    resource_id = Column(Integer, ForeignKey("Resource.resource_id"), nullable=True)
+    app_id = Column(Integer, ForeignKey("App.app_id", ondelete="CASCADE"), nullable=False)
+    silo_id = Column(Integer, ForeignKey("Silo.silo_id", ondelete="CASCADE"), nullable=False)
+    resource_id = Column(Integer, ForeignKey("Resource.resource_id", ondelete="SET NULL"), nullable=True)
     # Free-form ref for non-Resource content (media, domain URL, etc.)
     content_ref = Column(String(1000), nullable=True)
 

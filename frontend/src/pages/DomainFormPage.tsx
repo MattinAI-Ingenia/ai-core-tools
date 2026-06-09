@@ -294,10 +294,10 @@ function DomainFormPage() {
           )}
         </div>
 
-        {/* Vector Database Selection */}
+        {/* Database Type Selection */}
         <div>
           <label htmlFor="domain-vector-db" className="block text-sm font-medium text-gray-700 mb-2">
-            Vector Database *
+            Database Type *
           </label>
           <select
             id="domain-vector-db"
@@ -315,12 +315,12 @@ function DomainFormPage() {
           </select>
           {vectorDbOptions.length === 0 && isNewDomain && (
             <p className="text-sm text-red-600 mt-1">
-              No vector databases available. Please configure a silo with vector support first.
+              No database types available. Please configure a silo with a database backend first.
             </p>
           )}
           {!isNewDomain && (
             <p className="text-sm text-amber-600 mt-1">
-              The vector database cannot be changed after a domain is created.
+              The database type cannot be changed after a domain is created.
             </p>
           )}
         </div>

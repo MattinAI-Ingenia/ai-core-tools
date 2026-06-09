@@ -22,6 +22,8 @@ class IndexingMetricSchema(BaseModel):
     total_tokens: int = 0
     tokens_source: Optional[str] = None  # 'provider' | 'estimated'
 
+    embedding_tokens: Optional[int] = None
+
     llm_calls: int = 0
     duration_seconds: Optional[float] = None
 

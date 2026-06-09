@@ -255,7 +255,7 @@ const RepositoryDetailPage: React.FC = () => {
   // delayed or missed.  This mirrors the media polling in ChatInterface.tsx.
   useEffect(() => {
     const hasActive = (repository?.resources ?? []).some(
-      (r: { status: string }) => r.status === 'indexing' || r.status === 'pending',
+      (r) => r.status === 'indexing' || r.status === 'pending',
     );
 
     if (!hasActive && !isIndexing) return;
@@ -268,7 +268,7 @@ const RepositoryDetailPage: React.FC = () => {
         );
         setRepository(data);
         const stillActive = (data.resources ?? []).some(
-          (r: { status: string }) => r.status === 'indexing' || r.status === 'pending',
+          (r) => r.status === 'indexing' || r.status === 'pending',
         );
         if (!stillActive) {
           setIsIndexing(false);

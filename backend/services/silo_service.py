@@ -7,11 +7,13 @@ from models.silo import Silo
 from models.resource import Resource
 from db.database import SessionLocal
 from db.database import db as db_obj
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from utils.logger import get_logger
 from langchain_core.documents import Document
 from tools.vector_store_factory import VectorStoreFactory
 from tools.vector_stores.vector_store_interface import VectorStoreInterface
+from models.indexing_metric import IndexingMetric
 from models.silo import SiloType
 from services.output_parser_service import OutputParserService
 from langchain_core.vectorstores.base import VectorStoreRetriever
@@ -749,7 +751,29 @@ class SiloService:
             if not silo:
                 logger.warning("Silo %s not found while counting documents", silo_id)
                 return 0
-            return _get_vector_store(silo).count_documents(collection_name)
+
+            count = _get_vector_store(silo).count_documents(collection_name)
+            if count > 0:
+                return count
+
+            if _resolve_vector_db_type(silo) == 'LIGHTRAG':
+                # LightRAG environments may not expose PGDocStatusStorage
+                # tables consistently. When that happens, fall back to the
+                # number of successfully indexed source resources recorded in
+                # indexing metrics so the silo UI reflects uploaded files.
+                metric_count = (
+                    db.query(func.count(func.distinct(IndexingMetric.resource_id)))
+                    .filter(
+                        IndexingMetric.silo_id == silo_id,
+                        IndexingMetric.status == 'success',
+                        IndexingMetric.resource_id.isnot(None),
+                    )
+                    .scalar()
+                )
+                if metric_count:
+                    return int(metric_count)
+
+            return 0
         except Exception as exc:
             logger.error(f"Error counting docs in silo {silo_id}: {exc}")
             return 0
@@ -1133,27 +1157,44 @@ class SiloService:
                         "tokens_source": usage.get("tokens_source", "estimated"),
                         "llm_calls": usage.get("llm_calls", 0),
                         "duration_seconds": usage.get("duration_seconds"),
+                        "embedding_tokens": usage.get("embedding_tokens") or None,
                     })
                     # Attempt to resolve cost via PricingService
                     try:
-                        # The LLM service attached to the silo for LightRAG runs
-                        # may be stored as silo.ai_service_id; fall back to None gracefully
-                        lightrag_ai_service = getattr(silo, "ai_service", None)
+                        # Resolve the primary LLM model name from the LightRAG
+                        # role services (extract > indexing fallback).
+                        lightrag_ai_service = (
+                            getattr(silo, "extract_service", None)
+                            or getattr(silo, "indexing_service", None)
+                        )
                         model_name = getattr(lightrag_ai_service, "description", None)
                         emb_model_name = getattr(embedding_service, "description", None)
                         _metric_kwargs["model_name"] = model_name
                         _metric_kwargs["embedding_model_name"] = emb_model_name
 
+                        total_cost = 0.0
+                        has_cost = False
+
                         if model_name:
                             pricing = PricingService.get_llm_pricing(session, model_name)
                             if pricing and _metric_kwargs.get("total_tokens"):
                                 input_per_1m, output_per_1m = pricing
-                                cost = (
+                                total_cost += (
                                     _metric_kwargs["prompt_tokens"] / 1_000_000 * input_per_1m
                                     + _metric_kwargs["completion_tokens"] / 1_000_000 * output_per_1m
                                 )
-                                _metric_kwargs["cost"] = round(cost, 8)
-                                _metric_kwargs["currency"] = "USD"
+                                has_cost = True
+
+                        emb_tokens = _metric_kwargs.get("embedding_tokens") or 0
+                        if emb_model_name and emb_tokens:
+                            emb_pricing = PricingService.get_embedding_pricing(session, emb_model_name)
+                            if emb_pricing:
+                                total_cost += emb_tokens / 1_000_000 * emb_pricing
+                                has_cost = True
+
+                        if has_cost:
+                            _metric_kwargs["cost"] = round(total_cost, 8)
+                            _metric_kwargs["currency"] = "USD"
                     except Exception as pricing_exc:
                         logger.debug(f"Could not resolve pricing for metric: {pricing_exc}")
 
@@ -2022,13 +2063,15 @@ class SiloService:
         # extraction_calls = entity extraction (1 + max_gleaning) + relationship extraction (1)
         extraction_calls = num_chunks * (2 + max_gleaning)
         embedding_calls = num_chunks
-        # Each extraction call receives a full chunk as input.
-        _out_per_call_avg = 250
-        _out_per_call_min = 150
+        # Fixed system-prompt overhead per LightRAG extraction call: the entity_extraction_system_prompt
+        # template + 2 few-shot examples adds ~1,400 tokens on top of the chunk content every call.
+        _prompt_overhead_tokens = 1400
+        _out_per_call_avg = 500
+        _out_per_call_min = 300
         _out_per_call_max = 800
 
         estimated_llm_calls = extraction_calls
-        estimated_input_tokens = extraction_calls * chunk_token_size
+        estimated_input_tokens = extraction_calls * (chunk_token_size + _prompt_overhead_tokens)
         estimated_output_tokens = extraction_calls * _out_per_call_avg
 
         estimated_cost_min = None
@@ -2089,21 +2132,23 @@ class SiloService:
             )
 
         # --- Time Estimates (seconds) ---
-        # Account for worker concurrency. Default: 4 LLM workers, 8 embedding workers.
-        # Per-chunk time, then distribute across workers via ceil(chunks / workers).
+        # Account for worker concurrency. When we already have successful
+        # indexing runs for this silo, prefer an empirical throughput derived
+        # from real durations over static heuristics.
         llm_workers = getattr(silo, 'llm_model_max_sync', 4) or 4
         embedding_workers = getattr(silo, 'embedding_model_max_sync', 8) or 8
-        overhead_factor = 1.2  # 20% overhead
-        fixed_overhead_s = 20  # startup/shutdown
+        overhead_factor = 1.1
+        fixed_overhead_s = 8
 
-        # Optimistic (50 tok/sec) and pessimistic (10 tok/sec) LLM throughput
-        llm_throughput_opt = 50.0
-        llm_throughput_pess = 10.0
-        embedding_throughput_opt = 500.0
-        embedding_throughput_pess = 100.0
+        # Default envelope tuned from observed local runs; historical metrics
+        # below can further refine the estimate for an already-used silo.
+        llm_throughput_opt = 180.0
+        llm_throughput_pess = 70.0
+        embedding_throughput_opt = 1200.0
+        embedding_throughput_pess = 350.0
 
         # Phase 1 — extraction (initial + gleaning, parallelised across chunks)
-        llm_tokens_per_chunk = chunk_token_size * (2 + max_gleaning)  # initial + gleaning passes
+        llm_tokens_per_chunk = (chunk_token_size + _prompt_overhead_tokens) * (2 + max_gleaning)  # initial + gleaning passes
         llm_s_per_chunk_opt = (llm_tokens_per_chunk / llm_throughput_opt) * overhead_factor
         llm_s_per_chunk_pess = (llm_tokens_per_chunk / llm_throughput_pess) * overhead_factor
         llm_wall_s_opt = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_opt
@@ -2116,8 +2161,33 @@ class SiloService:
         emb_wall_s_opt = emb_raw_s_opt / max(1, embedding_workers)
         emb_wall_s_pess = emb_raw_s_pess / max(1, embedding_workers)
 
-        estimated_indexing_time_min = round(fixed_overhead_s + max(llm_wall_s_opt, emb_wall_s_opt), 1)
-        estimated_indexing_time_max = round(fixed_overhead_s + max(llm_wall_s_pess, emb_wall_s_pess), 1)
+        estimated_indexing_time_min = fixed_overhead_s + max(llm_wall_s_opt, emb_wall_s_opt)
+        estimated_indexing_time_max = fixed_overhead_s + max(llm_wall_s_pess, emb_wall_s_pess)
+
+        successful_metrics = (
+            db.query(IndexingMetric)
+            .filter(
+                IndexingMetric.silo_id == silo.silo_id,
+                IndexingMetric.status == 'success',
+                IndexingMetric.total_tokens > 0,
+                IndexingMetric.duration_seconds > 0,
+            )
+            .order_by(IndexingMetric.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        if successful_metrics:
+            observed_total_tokens = sum(metric.total_tokens or 0 for metric in successful_metrics)
+            observed_total_duration = sum(metric.duration_seconds or 0 for metric in successful_metrics)
+            if observed_total_tokens > 0 and observed_total_duration > 0:
+                observed_tokens_per_second = observed_total_tokens / observed_total_duration
+                estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
+                observed_time = fixed_overhead_s + (estimated_total_tokens / observed_tokens_per_second)
+                estimated_indexing_time_min = min(estimated_indexing_time_min, observed_time * 0.85)
+                estimated_indexing_time_max = min(estimated_indexing_time_max, observed_time * 1.35)
+
+        estimated_indexing_time_min = round(max(fixed_overhead_s, estimated_indexing_time_min), 1)
+        estimated_indexing_time_max = round(max(estimated_indexing_time_min, estimated_indexing_time_max), 1)
         estimated_indexing_time_avg = round((estimated_indexing_time_min + estimated_indexing_time_max) / 2, 1)
 
         # Emit per-role warnings for every configured role service.

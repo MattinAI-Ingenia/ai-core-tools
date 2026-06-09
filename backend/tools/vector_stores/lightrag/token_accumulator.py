@@ -28,11 +28,13 @@ TokenSource = Literal["provider", "estimated"]
 
 @dataclass
 class IndexingTokenAccumulator:
-    """Accumulates LLM token usage across all calls in one indexing run."""
+    """Accumulates LLM and embedding token usage across all calls in one indexing run."""
 
     _prompt_tokens: int = field(default=0, init=False, repr=False)
     _completion_tokens: int = field(default=0, init=False, repr=False)
     _llm_calls: int = field(default=0, init=False, repr=False)
+    _embedding_tokens: int = field(default=0, init=False, repr=False)
+    _embedding_calls: int = field(default=0, init=False, repr=False)
     _has_estimated: bool = field(default=False, init=False, repr=False)
 
     def add_llm_usage(
@@ -48,6 +50,11 @@ class IndexingTokenAccumulator:
         if source == "estimated":
             self._has_estimated = True
 
+    def add_embedding_usage(self, tokens: int) -> None:
+        """Add usage from one embedding batch call (token count is always estimated)."""
+        self._embedding_tokens += tokens
+        self._embedding_calls += 1
+
     def totals(self) -> dict:
         """Return a dict suitable for passing directly to ``IndexingMetricRepository.create``."""
         return {
@@ -56,11 +63,14 @@ class IndexingTokenAccumulator:
             "total_tokens": self._prompt_tokens + self._completion_tokens,
             "tokens_source": "estimated" if self._has_estimated else "provider",
             "llm_calls": self._llm_calls,
+            "embedding_tokens": self._embedding_tokens,
+            "embedding_calls": self._embedding_calls,
         }
 
     def __repr__(self) -> str:  # pragma: no cover
         return (
-            f"IndexingTokenAccumulator(calls={self._llm_calls}, "
-            f"total={self._prompt_tokens + self._completion_tokens}, "
+            f"IndexingTokenAccumulator(llm_calls={self._llm_calls}, "
+            f"llm_total={self._prompt_tokens + self._completion_tokens}, "
+            f"embedding_tokens={self._embedding_tokens}, "
             f"source={'estimated' if self._has_estimated else 'provider'})"
         )

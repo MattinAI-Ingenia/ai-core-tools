@@ -47,6 +47,8 @@
     "prepare": "npm run build:lib"
   },
   "dependencies": {
+    "@neo4j-nvl/base": "^0.3.3",
+    "@neo4j-nvl/react": "^0.3.3",
     "@types/node": "^24.1.0",
     "axios": "^1.10.0",
     "lucide-react": "^0.511.0",

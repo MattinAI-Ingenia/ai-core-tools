@@ -188,7 +188,7 @@ function SilosPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Silos</h1>
-            <p className="text-gray-600">Vector storage and retrieval systems for semantic search</p>
+            <p className="text-gray-600">Database storage and retrieval systems for semantic search</p>
           </div>
         </div>
 
@@ -207,7 +207,7 @@ function SilosPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Silos</h1>
-            <p className="text-gray-600">Vector storage and retrieval systems for semantic search</p>
+            <p className="text-gray-600">Database storage and retrieval systems for semantic search</p>
           </div>
         </div>
 
@@ -234,10 +234,10 @@ function SilosPage() {
     <div className="space-y-6">
       {/* Page Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Silos</h1>
-          <p className="text-gray-600">Vector storage and retrieval systems for semantic search</p>
-        </div>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Silos</h1>
+            <p className="text-gray-600">Database storage and retrieval systems for semantic search</p>
+          </div>
         <div className="flex items-center space-x-3">
           {hasMinRole(AppRole.ADMINISTRATOR) && (
             <button
@@ -327,7 +327,7 @@ function SilosPage() {
               )
             },
             {
-              header: 'Vector DB',
+              header: 'Database Type',
               accessor: 'vector_db_type',
               render: (silo) => silo.vector_db_type || 'Unknown',
               className: 'px-6 py-4 whitespace-nowrap text-sm text-gray-900'

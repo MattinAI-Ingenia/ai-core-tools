@@ -32,6 +32,8 @@ interface SearchFiltersProps {
   appId?: string | number;
   siloId?: string | number;
   siloStorageKey?: string;
+  pendingCustomFilter?: { key: string; value: string } | null;
+  onPendingCustomFilterConsumed?: () => void;
 }
 
 const DEFAULT_DB_TYPE: SupportedDbType = 'PGVECTOR';
@@ -224,10 +226,21 @@ export function SearchFilters({
   appId,
   siloId,
   siloStorageKey,
+  pendingCustomFilter,
+  onPendingCustomFilterConsumed,
 }: Readonly<SearchFiltersProps>) {
   const [metadataFilters, setMetadataFilters] = useState<Record<string, string>>({});
   const [filterOperators, setFilterOperators] = useState<Record<string, MetadataOperator>>({});
   const [logicalOperator, setLogicalOperator] = useState<'$and' | '$or'>('$and');
+
+  useEffect(() => {
+    if (pendingCustomFilter) {
+      const { key, value } = pendingCustomFilter;
+      setMetadataFilters(prev => ({ ...prev, [key]: value }));
+      setFilterOperators(prev => ({ ...prev, [key]: '$eq' }));
+      onPendingCustomFilterConsumed?.();
+    }
+  }, [pendingCustomFilter, onPendingCustomFilterConsumed]);
 
   // Autocomplete
   const [suggestions, setSuggestions] = useState<Record<string, string[]>>({});

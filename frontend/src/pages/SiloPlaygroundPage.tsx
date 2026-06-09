@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useParams } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Search, Info, Clock, History, Bot, SplitSquareHorizontal, Settings, Share2 } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Search, Info, Clock, History, Bot, SplitSquareHorizontal, Settings, Share2, Trash2 } from 'lucide-react';
 import SearchControls from '../components/playground/SearchControls';
 import SiloAPISnippets from '../components/playground/SiloAPISnippets';
 import SearchFilters from '../components/playground/SearchFilters';
@@ -269,7 +269,7 @@ const {
             )}
 
             {activeTab === 'graph' && isLightRAG ? (
-              <div className="bg-white shadow rounded-lg p-6">
+              <div className="bg-white shadow rounded-lg overflow-hidden">
                 <SiloGraphView
                   appId={Number(appId)}
                   siloId={Number(siloId)}
@@ -612,9 +612,9 @@ const {
 
                     <div className="space-y-4">
                       {searchResults.map((result, index) => {
-                        const resultKey = result.id
+                        const resultKey = String(result.id
                           ?? result.metadata?._id
-                          ?? `${result.page_content}-${result.score ?? 'no-score'}`;
+                          ?? `${result.page_content}-${result.score ?? 'no-score'}`);
                         return (
                           <div key={resultKey} className="border border-gray-200 rounded-lg p-4">
                             <div className="flex items-start justify-between mb-2">

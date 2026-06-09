@@ -391,13 +391,11 @@ class LightRAGStore(VectorStoreInterface):
             from neo4j import GraphDatabase  # noqa: WPS433
 
             driver = GraphDatabase.driver(uri, auth=(username, password))
-            # LightRAG stores the workspace in a ``workspace`` property on
-            # every node/relationship.  Deleting by that value is the safest
-            # approach.
+            # LightRAG stores the workspace as a node *label*, not a property.
+            # Use label-based matching for reliable deletion.
             with driver.session() as session:
                 session.run(
-                    "MATCH (n) WHERE n.workspace = $ws DETACH DELETE n",
-                    ws=collection_name,
+                    f"MATCH (n:`{collection_name}`) DETACH DELETE n",
                 )
             driver.close()
             logger.info("Cleaned up Neo4j data for workspace '%s'", collection_name)

@@ -15,7 +15,15 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column('Silo', sa.Column('lightrag_vector_db_type', sa.String(length=45), nullable=True))
+    conn = op.get_bind()
+    exists = conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='Silo' AND column_name='lightrag_vector_db_type'"
+        )
+    ).fetchone()
+    if not exists:
+        op.add_column('Silo', sa.Column('lightrag_vector_db_type', sa.String(length=45), nullable=True))
 
     # Backfill legacy LightRAG silos to preserve prior behaviour.
     op.execute(

@@ -411,8 +411,8 @@ function SharePointWizardPage() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Vector Database
-                </label>
+                    Database Type
+                  </label>
                 <select
                   value={vectorDbType}
                   onChange={(e) => setVectorDbType(e.target.value)}

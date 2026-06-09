@@ -15,6 +15,15 @@ depends_on = None
 
 
 def upgrade():
+    conn = op.get_bind()
+    table_exists = conn.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name='indexing_metric'"
+        )
+    ).fetchone()
+    if table_exists:
+        return
     op.create_table(
         'indexing_metric',
         sa.Column('metric_id', sa.Integer(), nullable=False, autoincrement=True),
