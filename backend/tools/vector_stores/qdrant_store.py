@@ -184,7 +184,7 @@ class QdrantStore(VectorStoreInterface):
         PGVector format:  {"field": {"$op": value}, ...}
         Qdrant format:    {"must": [...], "must_not": [...]}
 
-        Supported operators: $eq, $ne, $gt, $gte, $lt, $lte
+        Supported operators: $eq, $ne, $gt, $gte, $lt, $lte, $in
         """
         must: List[Dict[str, Any]] = []
         must_not: List[Dict[str, Any]] = []
@@ -199,12 +199,22 @@ class QdrantStore(VectorStoreInterface):
                 continue
 
             for operator, value in condition.items():
+                key = f'{self._QDRANT_METADATA_PREFIX}{field_name}'
+
+                if operator == '$in':
+                    if not isinstance(value, list) or not value:
+                        logger.warning(
+                            "Qdrant filter: $in value for field '%s' is empty or not a list; condition discarded",
+                            field_name,
+                        )
+                        continue
+                    must.append({'key': key, 'match': {'any': value}})
+                    continue
+
                 native_op = self._PGVECTOR_TO_QDRANT_OPERATOR.get(operator)
                 if native_op is None:
                     logger.warning(f"Unknown filter operator '{operator}' for Qdrant; skipping field '{field_name}'")
                     continue
-
-                key = f'{self._QDRANT_METADATA_PREFIX}{field_name}'
 
                 if native_op == 'must_not_match':
                     must_not.append({'key': key, 'match': {'value': value}})
@@ -325,6 +335,11 @@ class QdrantStore(VectorStoreInterface):
         """
         vector_store = self._get_vector_store(collection_name, embedding_service)
 
+        # Translate PGVector-style filter dict to a qdrant_client.models.Filter object
+        # once before dispatching.  QdrantVectorStore.filter= expects models.Filter | None
+        # (not a raw dict) — passing a dict is silently mishandled or raises at runtime.
+        qdrant_filter = self._build_qdrant_filter(filter_metadata) if filter_metadata else None
+
         # Handle empty queries — always use similarity path
         if not query or (isinstance(query, str) and not query.strip()):
             query = " "
@@ -334,7 +349,7 @@ class QdrantStore(VectorStoreInterface):
             docs = vector_store.max_marginal_relevance_search(
                 query,
                 k=k,
-                filter=filter_metadata,
+                filter=qdrant_filter,
                 fetch_k=fetch_k if fetch_k else k * 4,
                 lambda_mult=lambda_mult if lambda_mult is not None else 0.5,
             )
@@ -350,7 +365,7 @@ class QdrantStore(VectorStoreInterface):
             results_with_scores = vector_store.similarity_search_with_relevance_scores(
                 query,
                 k=k,
-                filter=filter_metadata,
+                filter=qdrant_filter,
                 score_threshold=score_threshold,
             )
             return [
@@ -365,7 +380,7 @@ class QdrantStore(VectorStoreInterface):
         results_with_scores = vector_store.similarity_search_with_score(
             query,
             k=k,
-            filter=filter_metadata
+            filter=qdrant_filter
         )
         return [
             Document(
@@ -402,9 +417,16 @@ class QdrantStore(VectorStoreInterface):
         vector_store = self._get_vector_store(collection_name, embedding_service)
 
         if search_params is not None:
+            # Translate any PGVector-style filter dict stored under the "filter" key
+            # to a qdrant_client.models.Filter before handing off to as_retriever.
+            # as_retriever forwards search_kwargs verbatim to the underlying search
+            # method, which expects models.Filter | None, not a raw dict.
+            translated_params = dict(search_params)
+            if "filter" in translated_params and isinstance(translated_params["filter"], dict):
+                translated_params["filter"] = self._build_qdrant_filter(translated_params["filter"])
             return vector_store.as_retriever(
                 search_type=search_type,
-                search_kwargs=search_params,
+                search_kwargs=translated_params,
                 **kwargs
             )
         return vector_store.as_retriever(search_type=search_type, **kwargs)

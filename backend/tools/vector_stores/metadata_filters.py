@@ -7,7 +7,7 @@ cycles.  All logic operates on plain Python values and Pydantic models.
 
 Supported backends:
   - PGVector  ($eq, $ne, $gt, $gte, $lt, $lte, $in)
-  - Qdrant    ($eq, $ne, $gt, $gte, $lt, $lte)
+  - Qdrant    ($eq, $ne, $gt, $gte, $lt, $lte, $in)
 
 Neither store's existing translation layer handles ``$and`` as a top-level
 key, so ``merge_filters_and`` combines filters field-by-field.  When the same
@@ -52,8 +52,8 @@ logger = logging.getLogger(__name__)
 PGVECTOR_OPS: frozenset[str] = frozenset({"$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in"})
 
 #: Operators supported by Qdrant's ``_translate_pgvector_filter_to_qdrant``.
-#: ``$in`` is intentionally excluded: Qdrant's translator has no branch for it.
-QDRANT_OPS: frozenset[str] = frozenset({"$eq", "$ne", "$gt", "$gte", "$lt", "$lte"})
+#: ``$in`` translates to ``FieldCondition(match=MatchAny(any=[...]))`` natively.
+QDRANT_OPS: frozenset[str] = frozenset({"$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in"})
 
 #: Maximum allowed length for a sanitized string metadata value.
 #: Consumed by retriever_tool_builder (step_005).

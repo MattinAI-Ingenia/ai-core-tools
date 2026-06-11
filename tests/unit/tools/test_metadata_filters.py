@@ -4,7 +4,7 @@ All tests are pure-Python — no database, no I/O, no LLM.
 
 Coverage:
   - validate_clauses: field allowlist (declared + system), None metadata_definition,
-    operator whitelist per backend, $in PGVector vs Qdrant.
+    operator whitelist per backend, $in accepted by both PGVector and Qdrant.
   - convert_clause_types: int/float/bool/str correct conversion, unconvertible
     values discarded, $in list conversion, bool truthy string variants,
     empty $in list discard, None value discard.
@@ -209,13 +209,11 @@ class TestValidateClausesOperatorWhitelist:
         result = validate_clauses(clauses, md, QDRANT_OPS)
         assert len(result) == 1
 
-    def test_in_rejected_for_qdrant(self, caplog):
+    def test_in_accepted_for_qdrant(self):
         md = _make_metadata_def([{"name": "category", "type": "str", "description": ""}])
         clauses = [_clause("category", "$in", ["a", "b"])]
-        with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
-            result = validate_clauses(clauses, md, QDRANT_OPS)
-        assert result == []
-        assert any("$in" in r.message for r in caplog.records)
+        result = validate_clauses(clauses, md, QDRANT_OPS)
+        assert len(result) == 1
 
     def test_in_accepted_for_pgvector(self):
         md = _make_metadata_def([{"name": "category", "type": "str", "description": ""}])
@@ -236,15 +234,14 @@ class TestValidateClausesOperatorWhitelist:
         "op,backend_ops",
         [
             ("$in", PGVECTOR_OPS),   # accepted for PGVector
-            ("$in", QDRANT_OPS),     # rejected for Qdrant
+            ("$in", QDRANT_OPS),     # accepted for Qdrant ($in now supported)
         ],
     )
     def test_in_parametrized_per_backend(self, op, backend_ops):
         md = _make_metadata_def([{"name": "cat", "type": "str", "description": ""}])
         clauses = [_clause("cat", op, ["a"])]
         result = validate_clauses(clauses, md, backend_ops)
-        expected = 1 if backend_ops is PGVECTOR_OPS else 0
-        assert len(result) == expected
+        assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -677,8 +674,8 @@ class TestConstants:
     def test_pgvector_ops_contains_in(self):
         assert "$in" in PGVECTOR_OPS
 
-    def test_qdrant_ops_does_not_contain_in(self):
-        assert "$in" not in QDRANT_OPS
+    def test_qdrant_ops_contains_in(self):
+        assert "$in" in QDRANT_OPS
 
     def test_qdrant_ops_subset_of_pgvector_ops(self):
         assert QDRANT_OPS.issubset(PGVECTOR_OPS)
@@ -710,12 +707,12 @@ class TestBuildFilterDict:
         result = build_filter_dict(clauses, md, "QDRANT")
         assert result == {"tag": {"$eq": "news"}}
 
-    def test_in_op_rejected_for_qdrant(self):
+    def test_in_op_accepted_for_qdrant(self):
         md = _make_metadata_def([{"name": "tag", "type": "str", "description": ""}])
         clauses = [MetadataFilterClause(field="tag", op="$in", value=["a", "b"])]
         result = build_filter_dict(clauses, md, "QDRANT")
-        # $in is not in QDRANT_OPS — clause discarded
-        assert result == {}
+        # $in is now in QDRANT_OPS — translated to MatchAny by the translator
+        assert result == {"tag": {"$in": ["a", "b"]}}
 
     def test_invalid_field_discarded_end_to_end(self, caplog):
         md = _make_metadata_def([{"name": "year", "type": "int", "description": ""}])
