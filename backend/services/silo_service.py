@@ -10,13 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from utils.logger import get_logger
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tools.vector_store_factory import VectorStoreFactory
 from tools.vector_stores.vector_store_interface import VectorStoreInterface
 from models.silo import SiloType
 from services.output_parser_service import OutputParserService
 from langchain_core.vectorstores.base import VectorStoreRetriever
 from utils.error_handlers import (
-    handle_database_errors, NotFoundError, ValidationError, 
+    handle_database_errors, NotFoundError, ValidationError,
     validate_required_fields
 )
 from utils.vector_db_immutability import assert_vector_db_type_immutable, assert_embedding_service_immutable
@@ -28,6 +29,11 @@ REPO_BASE_FOLDER = os.path.abspath(os.getenv("REPO_BASE_FOLDER"))
 COLLECTION_PREFIX = 'silo_'
 DEFAULT_SEARCH_LIMIT = 100
 MAX_SEARCH_LIMIT = 200
+
+# Default chunking parameters used by both file and domain/web-content indexing paths.
+# Kept as module-level constants so they are easy to tune without hunting through method bodies.
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
 
 logger = get_logger(__name__)
 
@@ -501,14 +507,37 @@ class SiloService:
 
     @staticmethod
     def _create_documents_for_indexing(silo_id: int, contents: List[dict]) -> List[Document]:
-        """Helper method to create Document objects for indexing"""
-        return [
-            Document(
-                page_content=doc['content'],
-                metadata={"silo_id": silo_id, **(doc.get('metadata', {}))}
-            )
-            for doc in contents
-        ]
+        """Create Document objects for indexing, splitting each content item into chunks.
+
+        Each entry in *contents* is a dict with keys ``content`` (str) and optional
+        ``metadata`` (dict).  The content is split with
+        :class:`~langchain_text_splitters.RecursiveCharacterTextSplitter` using the
+        module-level :data:`CHUNK_SIZE` / :data:`CHUNK_OVERLAP` constants so that
+        domain/web pages (and any other free-text fed via ``index_multiple_content``)
+        are stored as appropriately sized chunks rather than one monolithic document.
+
+        ``silo_id`` and all caller-supplied metadata keys are propagated to every
+        chunk produced from the same source document.
+
+        Note on file-upload callers: the public-API file-upload path in
+        ``routers/public/v1/silos.py`` calls ``extract_documents_from_file`` first,
+        which already splits the file, then packs the resulting chunks back into
+        dicts for ``index_multiple_content``.  Because those chunks are already
+        ≤ CHUNK_SIZE characters, the splitter produces exactly one chunk per input
+        item — the behaviour is idempotent and the metadata is preserved correctly.
+
+        Media chunks (indexed via ``index_media_chunk``) bypass this method entirely
+        and are therefore unaffected.
+        """
+        splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        documents: List[Document] = []
+        for item in contents:
+            # silo_id last so a caller-supplied "silo_id" key can never override the parameter
+            base_metadata = {**(item.get('metadata', {})), "silo_id": silo_id}
+            chunks = splitter.split_text(item['content'])
+            for chunk in chunks:
+                documents.append(Document(page_content=chunk, metadata=dict(base_metadata)))
+        return documents
 
     @staticmethod
     def index_single_content(silo_id: int, content: str, metadata: dict, db: Session):
@@ -555,7 +584,6 @@ class SiloService:
             List[Document]: List of Document objects
         """
         from langchain_core.documents import Document
-        from langchain_text_splitters import CharacterTextSplitter
         from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, TextLoader
 
         if base_metadata is None:
@@ -573,7 +601,7 @@ class SiloService:
             raise ValueError(f"Unsupported file type: {file_extension}")
 
         pages = loader.load()
-        text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         docs = text_splitter.split_documents(pages)
 
         # Clean known PDF extraction artifacts (e.g. @@@@, 64/64/64/...) from
