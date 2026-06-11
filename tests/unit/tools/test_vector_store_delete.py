@@ -175,3 +175,65 @@ class TestPGVectorStoreDeleteByFilter:
 
         mock_vs.delete.assert_called_once_with(ids=["id-1", "id-2"])
         mock_vs.similarity_search.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PGVectorStore._str_for_jsonb — bool JSONB representation (finding #2)
+# ---------------------------------------------------------------------------
+
+
+class TestPGVectorStoreStrForJsonb:
+    """PGVectorStore._str_for_jsonb must produce lowercase 'true'/'false' for
+    booleans so that JSONB ->> comparisons match correctly.
+
+    PostgreSQL's ->> operator returns JSON boolean literals as lowercase
+    'true'/'false'. Python's str(True) returns 'True' (title-case), which
+    would never match — this regression guard verifies the fix.
+    """
+
+    def setup_method(self):
+        from tools.vector_stores.pgvector_store import PGVectorStore
+
+        self.fn = PGVectorStore._str_for_jsonb
+
+    def test_true_produces_lowercase(self):
+        assert self.fn(True) == "true"
+
+    def test_false_produces_lowercase(self):
+        assert self.fn(False) == "false"
+
+    def test_integer_unchanged(self):
+        assert self.fn(42) == "42"
+
+    def test_string_unchanged(self):
+        assert self.fn("hello") == "hello"
+
+    def test_none_produces_none_string(self):
+        # None should produce "None" — callers guard against None upstream
+        assert self.fn(None) == "None"
+
+    def test_operator_condition_eq_bool_false_produces_lowercase(self):
+        """End-to-end: _operator_condition for $eq False must bind 'false' not 'False'."""
+        from tools.vector_stores.pgvector_store import PGVectorStore
+
+        params: dict = {}
+        frags = PGVectorStore._operator_condition(0, "active", "$eq", False, params)
+        assert len(frags) == 1
+        assert params["v0"] == "false"
+
+    def test_operator_condition_ne_bool_true_produces_lowercase(self):
+        """$ne True must bind 'true'."""
+        from tools.vector_stores.pgvector_store import PGVectorStore
+
+        params: dict = {}
+        PGVectorStore._operator_condition(0, "active", "$ne", True, params)
+        assert params["v0"] == "true"
+
+    def test_operator_condition_in_list_with_bool_produces_lowercase(self):
+        """$in list containing booleans must bind lowercase strings."""
+        from tools.vector_stores.pgvector_store import PGVectorStore
+
+        params: dict = {}
+        PGVectorStore._operator_condition(0, "active", "$in", [True, False], params)
+        assert params["in0_0"] == "true"
+        assert params["in0_1"] == "false"

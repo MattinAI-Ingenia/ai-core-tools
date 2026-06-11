@@ -425,7 +425,7 @@ class PGVectorStore(VectorStoreInterface):
             if not isinstance(spec, dict):
                 conditions.append(f"e.cmetadata ->> :k{idx} = :v{idx}")
                 params[f"k{idx}"] = key
-                params[f"v{idx}"] = str(spec)
+                params[f"v{idx}"] = PGVectorStore._str_for_jsonb(spec)
                 idx += 1
                 continue
 
@@ -438,6 +438,19 @@ class PGVectorStore(VectorStoreInterface):
         return (" AND " + " AND ".join(conditions)) if conditions else ""
 
     @staticmethod
+    def _str_for_jsonb(val: Any) -> str:
+        """Convert *val* to the string representation stored in JSONB.
+
+        PostgreSQL's ``->>`` operator returns JSON boolean literals as lowercase
+        ``"true"`` / ``"false"``.  Python's ``str(True)`` yields ``"True"``
+        (title-case), which would never match — so booleans are lowercased here.
+        All other types use the default ``str()`` coercion.
+        """
+        if isinstance(val, bool):
+            return str(val).lower()
+        return str(val)
+
+    @staticmethod
     def _operator_condition(
         idx: int,
         key: str,
@@ -448,17 +461,17 @@ class PGVectorStore(VectorStoreInterface):
         """Build SQL fragment(s) for one (key, op, val) triple."""
         if op == "$eq":
             params[f"k{idx}"] = key
-            params[f"v{idx}"] = str(val)
+            params[f"v{idx}"] = PGVectorStore._str_for_jsonb(val)
             return [f"e.cmetadata ->> :k{idx} = :v{idx}"]
         if op == "$ne":
             params[f"k{idx}"] = key
-            params[f"v{idx}"] = str(val)
+            params[f"v{idx}"] = PGVectorStore._str_for_jsonb(val)
             return [f"e.cmetadata ->> :k{idx} != :v{idx}"]
         if op == "$in" and isinstance(val, list):
             placeholders = ", ".join(f":in{idx}_{j}" for j in range(len(val)))
             params[f"k{idx}"] = key
             for j, v in enumerate(val):
-                params[f"in{idx}_{j}"] = str(v)
+                params[f"in{idx}_{j}"] = PGVectorStore._str_for_jsonb(v)
             return [f"e.cmetadata ->> :k{idx} IN ({placeholders})"]
         if op in _PG_NUMERIC_OPS:
             params[f"k{idx}"] = key
