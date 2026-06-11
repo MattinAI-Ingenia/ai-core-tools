@@ -1,28 +1,8 @@
-"""
-Integration tests for AC-15: POST /internal/apps/{app_id}/silos/{silo_id}/resources/{resource_id}/reindex
+"""Integration tests for AC-15: POST /internal/apps/{app_id}/silos/{silo_id}/resources/{resource_id}/reindex.
 
-Verifies that reindexing a resource is idempotent — calling the endpoint multiple times
-must not accumulate duplicate chunks in the vector collection.
-
-Vector DB and file-system operations are mocked:
-  - services.silo_service._get_vector_store  → FakeVectorStore that tracks calls
-  - SiloService.extract_documents_from_file  → returns fixed docs (no real file needed)
-
-Session isolation:
-  ``reindex_resource`` opens its own ``SessionLocal()`` internally.  The test ``db``
-  fixture uses a savepoint-based session that never commits to the real DB, so a raw
-  ``SessionLocal()`` would open an independent connection and see no test data.
-
-  To bridge this gap, the ``reindex_session_patch`` fixture monkeypatches
-  ``services.silo_service.SessionLocal`` to return sessions that share the same
-  underlying connection as the test ``db``.  The internal ``session.close()`` is
-  neutralised (replaced with a no-op) so it does not close the shared connection.
-
-  This is the correct pattern for testing service methods that manage their own
-  ``SessionLocal()`` while relying on the savepoint-based test transaction for
-  isolation and rollback.
-
-Auth: uses owner_headers (Bearer token for fake_user who owns fake_app).
+Verifies idempotency — multiple calls must not accumulate duplicate chunks.
+Vector DB and file-system operations are mocked. Session isolation: reindex_resource opens its own
+SessionLocal(); the reindex_session_patch fixture redirects it to share the test DB connection.
 """
 
 import pytest
@@ -37,44 +17,26 @@ from models.resource import Resource
 from models.embedding_service import EmbeddingService
 
 
-# ---------------------------------------------------------------------------
-# Session-bridge fixture
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def reindex_session_patch(db):
-    """Redirect ``SessionLocal`` inside ``reindex_resource`` to the test connection.
+    """Redirect SessionLocal inside reindex_resource to the test connection.
 
-    ``reindex_resource`` calls ``session = SessionLocal()`` and later ``session.close()``.
-    This fixture replaces ``SessionLocal`` with a callable that:
-      1. Opens a new ``Session`` bound to the *same* connection as the test ``db``
-         (so it sees flush-only test data within the active savepoint).
-      2. Replaces ``session.close`` with a no-op to prevent premature disconnection.
-
-    The ``join_transaction_mode="create_savepoint"`` is intentionally omitted here:
-    the internal session must only *read* data set up by the test, not issue commits
-    or savepoints of its own.
+    Replaces close() with a no-op so the shared test connection is not prematurely closed.
     """
     connection = db.get_bind()
 
     def _session_factory():
         inner = Session(bind=connection, autocommit=False, autoflush=True)
-        inner.close = lambda: None  # neutralise — connection is owned by the test
+        inner.close = lambda: None
         return inner
 
     with patch("services.silo_service.SessionLocal", side_effect=_session_factory):
         yield
 
 
-# ---------------------------------------------------------------------------
-# Test-local fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def reindex_silo(db, fake_app):
-    """A REPO-type Silo with an attached EmbeddingService, scoped to fake_app."""
+    """REPO-type Silo with an attached EmbeddingService, scoped to fake_app."""
     embedding_svc = EmbeddingService(
         name="Test Embedding Service",
         provider="OpenAI",
@@ -100,7 +62,7 @@ def reindex_silo(db, fake_app):
 
 @pytest.fixture()
 def reindex_repository(db, fake_app, reindex_silo):
-    """A Repository linked to reindex_silo."""
+    """Repository linked to reindex_silo."""
     repo = Repository(
         name="Reindex Test Repo",
         type="default",
@@ -116,7 +78,7 @@ def reindex_repository(db, fake_app, reindex_silo):
 
 @pytest.fixture()
 def reindex_resource(db, reindex_repository):
-    """A Resource inside reindex_repository."""
+    """Resource inside reindex_repository."""
     resource = Resource(
         name="doc.txt",
         uri="doc.txt",
@@ -130,11 +92,6 @@ def reindex_resource(db, reindex_repository):
     return resource
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _reindex_url(app_id: int, silo_id: int, resource_id: int) -> str:
     return (
         f"/internal/apps/{app_id}/silos/{silo_id}"
@@ -143,7 +100,6 @@ def _reindex_url(app_id: int, silo_id: int, resource_id: int) -> str:
 
 
 def _make_fake_docs(resource_id: int) -> list[Document]:
-    """Three distinct chunks that simulate indexing a document."""
     return [
         Document(page_content=f"chunk-{i} of resource {resource_id}", metadata={"resource_id": resource_id})
         for i in range(3)
@@ -151,17 +107,11 @@ def _make_fake_docs(resource_id: int) -> list[Document]:
 
 
 def _make_fake_vector_store(indexed_docs: list) -> MagicMock:
-    """
-    Return a MagicMock that simulates a stateful vector store.
-
-    - delete_documents removes items whose metadata resource_id matches the filter value.
-    - index_documents appends docs to the shared indexed_docs list.
-    """
+    """Stateful vector store mock: delete removes by filter, index appends."""
     store = MagicMock()
 
     def fake_delete(collection_name, ids, embedding_service=None):
         if isinstance(ids, dict):
-            # ids is a PGVector-style filter: {"resource_id": {"$eq": value}}
             filter_field = next(iter(ids))
             op_dict = ids[filter_field]
             filter_value = op_dict.get("$eq")
@@ -180,11 +130,6 @@ def _make_fake_vector_store(indexed_docs: list) -> MagicMock:
     return store
 
 
-# ---------------------------------------------------------------------------
-# AC-15: idempotency — chunk count must not grow after multiple reindexes
-# ---------------------------------------------------------------------------
-
-
 class TestReindexIdempotency:
     """POST /internal/apps/{app_id}/silos/{silo_id}/resources/{resource_id}/reindex"""
 
@@ -198,15 +143,7 @@ class TestReindexIdempotency:
         reindex_resource,
         reindex_session_patch,
     ):
-        """
-        AC-15: calling reindex twice must yield the same chunk count as calling it once.
-
-        Flow:
-          1. First POST → triggers delete (no-op on empty store) + index → N chunks stored.
-          2. Count chunks (baseline).
-          3. Second POST → delete existing N chunks + index fresh N chunks → still N chunks.
-          4. Third POST → same → still N chunks.
-        """
+        """AC-15: reindexing multiple times must not accumulate duplicate chunks."""
         db.flush()
 
         resource_id = reindex_resource.resource_id
@@ -224,7 +161,6 @@ class TestReindexIdempotency:
                 return_value=fake_docs,
             ),
         ):
-            # First reindex
             resp1 = client.post(
                 _reindex_url(app_id, silo_id, resource_id),
                 headers=owner_headers,
@@ -235,7 +171,6 @@ class TestReindexIdempotency:
                 f"Expected {len(fake_docs)} chunks after first index, got {count_after_first}"
             )
 
-            # Second reindex — must not add new chunks
             resp2 = client.post(
                 _reindex_url(app_id, silo_id, resource_id),
                 headers=owner_headers,
@@ -246,7 +181,6 @@ class TestReindexIdempotency:
                 f"Chunk count grew on second reindex: {count_after_first} → {count_after_second}"
             )
 
-            # Third reindex — same guarantee
             resp3 = client.post(
                 _reindex_url(app_id, silo_id, resource_id),
                 headers=owner_headers,
@@ -371,11 +305,6 @@ class TestReindexIdempotency:
         )
 
 
-# ---------------------------------------------------------------------------
-# Authorization checks
-# ---------------------------------------------------------------------------
-
-
 class TestReindexAuthorization:
 
     def test_reindex_requires_authentication(
@@ -444,7 +373,6 @@ class TestReindexAuthorization:
             status="active",
             app_id=fake_app.app_id,
             vector_db_type="PGVECTOR",
-            # embedding_service_id intentionally omitted
         )
         db.add(silo_no_emb)
         db.flush()

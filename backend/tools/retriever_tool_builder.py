@@ -1,52 +1,18 @@
 """
-Pure-function builders that generate the name, description, and argument schema
-for a silo's dynamic retrieval tool.
+Pure-function builders for a silo's dynamic retrieval tool name, description,
+and argument schema.
 
-These functions are *pure*: they do not access the database, the vector store,
-or any external service.  All runtime data (distinct metadata field values) must
-be supplied by the caller, typically via :func:`collect_distinct_values`.
+These functions are pure: no database, vector store, or external service access.
+All runtime data (distinct metadata field values) must be supplied by the caller
+via :func:`collect_distinct_values`.
 
-Usage pattern (step_006)::
+All admin-supplied strings embedded in LLM tool definitions are passed through
+``sanitize_metadata_value`` — never filter values, which must match stored
+metadata exactly.
 
-    distinct = await asyncio.to_thread(collect_distinct_values, silo, db)
-    schema   = build_retriever_args_schema(silo, distinct)
-    desc     = build_retriever_description(silo, distinct)
-    name     = build_retriever_tool_name(silo)
-
-Prompt-injection hardening
---------------------------
-All admin-supplied strings (field names, descriptions, enum labels) that end up
-embedded in LLM tool definitions are passed through
-``sanitize_metadata_value`` from :mod:`tools.vector_stores.metadata_filters`.
-This applies only to text that the LLM reads — never to filter values that are
-later compared against stored metadata.
-
-Type mapping
-------------
-The ``type`` attribute in ``metadata_definition.fields`` is a free string set
-by the UI.  The canonical mapping is::
-
-    "str"  / "string"             → str
-    "int"  / "integer"            → int
-    "float"/ "number"             → float
-    "bool" / "boolean"            → bool
-    anything else                  → str  (WARNING logged)
-
-Enum / Literal policy
----------------------
-When a field has ≤ MAX_ENUM_VALUES (25) distinct values the schema uses a
-``Literal`` type so that the LLM can only supply valid values.  When there are
-more than 25 distinct values (or none at all) the schema uses the free base type
-and embeds up to MAX_EXAMPLE_VALUES (10) sanitised example values in the field
-description.
-
-Filter-usage policy embedded in descriptions
----------------------------------------------
-Every optional filter field carries the instruction:
-  "Only use this filter if the user's question explicitly mentions it; never
-  invent a value."
-This implements the best practice described in the metadata-aware-retrieval spec
-and guards against the LLM hallucinating filter values.
+Enum / Literal policy: when a string field has ≤ MAX_ENUM_VALUES (25) distinct
+values the schema uses ``Literal``; otherwise the free base type with up to
+MAX_EXAMPLE_VALUES (10) example values in the description.
 """
 
 from __future__ import annotations
@@ -67,20 +33,12 @@ from tools.vector_stores.metadata_filters import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Internal constants
-# ---------------------------------------------------------------------------
-
 _FILTER_USAGE_POLICY = (
     "Only use this filter if the user's question explicitly mentions it; "
     "never invent a value."
 )
 _MAX_DESCRIPTION_LENGTH = 2000
 _MAX_SLUG_LENGTH = 40
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 _TYPE_MAP: dict[str, type] = {
     "str": str,
@@ -95,18 +53,7 @@ _TYPE_MAP: dict[str, type] = {
 
 
 def _resolve_python_type(type_str: str, field_name: str) -> type:
-    """Map a UI type string to a Python type.
-
-    Falls back to ``str`` and emits a WARNING for unknown type strings.
-
-    Args:
-        type_str: Raw type string from ``metadata_definition.fields[*].type``.
-        field_name: Field name — included in the WARNING for diagnostics.
-
-    Returns:
-        The corresponding Python type, always one of ``str``, ``int``,
-        ``float``, or ``bool``.
-    """
+    """Map a UI type string to a Python type. Falls back to ``str`` with a WARNING."""
     resolved = _TYPE_MAP.get((type_str or "").strip().lower())
     if resolved is None:
         logger.warning(
@@ -119,9 +66,7 @@ def _resolve_python_type(type_str: str, field_name: str) -> type:
 
 
 def _is_valid_identifier(name: str) -> bool:
-    """Return True if *name* is a valid Python identifier that does not shadow
-    reserved words or the mandatory ``query`` field.
-    """
+    """Return True if *name* is a valid Python identifier that does not collide with ``query``."""
     if not name or not name.isidentifier():
         return False
     if keyword.iskeyword(name):
@@ -132,18 +77,7 @@ def _is_valid_identifier(name: str) -> bool:
 
 
 def _make_slug(name: str) -> str:
-    """Convert *name* to a lowercase ASCII slug suitable for tool names.
-
-    Rules:
-    - NFKC-normalise, lowercase.
-    - Replace any character that is not ``[a-z0-9_]`` with ``_``.
-    - Collapse consecutive underscores.
-    - Strip leading/trailing underscores.
-    - Truncate to ``_MAX_SLUG_LENGTH`` characters.
-
-    Returns an empty string when the input is blank or contains no
-    alphanumeric characters.
-    """
+    """Convert *name* to a lowercase ASCII slug (NFKC, ``[a-z0-9_]`` only, truncated)."""
     normalised = unicodedata.normalize("NFKC", name or "").lower()
     slugified = re.sub(r"[^a-z0-9_]", "_", normalised)
     collapsed = re.sub(r"_+", "_", slugified).strip("_")
@@ -151,11 +85,7 @@ def _make_slug(name: str) -> str:
 
 
 def _sanitize_field_description(raw: str) -> str:
-    """Sanitize an admin-supplied field description for safe LLM embedding.
-
-    Applies ``sanitize_metadata_value`` with the wider max_len of 200
-    characters to accommodate richer field descriptions.
-    """
+    """Sanitize an admin-supplied field description (max_len=200)."""
     return sanitize_metadata_value(raw, max_len=200)
 
 
@@ -164,20 +94,11 @@ def _build_literal_type(
     raw_values: list[str],
     field_name: str,
 ) -> tuple[type, list[str]]:
-    """Build a ``Literal[...]`` type from sanitised string values.
+    """Build ``Literal[...]`` from sanitised string values, or return the free type.
 
-    Only string fields can produce ``Literal`` types — numeric/bool fields
-    fall through to the free-type path regardless of distinct_values length.
-
-    Args:
-        base_type: Python type resolved from the field's type string.
-        raw_values: Raw distinct values from the cache service.
-        field_name: Used in WARNING messages.
-
-    Returns:
-        ``(final_type, sanitised_values_used)`` where ``sanitised_values_used``
-        is the deduplicated list of sanitised values (empty when no Literal
-        was built).
+    Only ``str`` fields produce Literal types.  Returns
+    ``(type, sanitised_literals)``; ``sanitised_literals`` is empty when no
+    Literal was built.
     """
     if base_type is not str or not raw_values or len(raw_values) > MAX_ENUM_VALUES:
         return base_type, []
@@ -208,24 +129,7 @@ def _build_field_description(
     distinct_values: list[str],
     sanitised_literals: list[str],
 ) -> str:
-    """Compose the Field description for an optional metadata filter parameter.
-
-    Structure:
-    1. Sanitised admin description (if non-empty).
-    2. Type hint in parentheses.
-    3. If free-type (no Literal): example values (up to MAX_EXAMPLE_VALUES).
-    4. Filter-usage policy.
-
-    Args:
-        raw_description: Admin-supplied description from metadata_definition.
-        field_type_label: Human-readable type label, e.g. ``"str"`` or ``"int"``.
-        distinct_values: Raw distinct values from the cache (may be empty).
-        sanitised_literals: Non-empty only when a Literal was built; used to
-            suppress the example-values block (the Literal already encodes them).
-
-    Returns:
-        Composed description string.
-    """
+    """Compose the Field description: admin description, type, examples (when no Literal), policy."""
     parts: list[str] = []
 
     cleaned_desc = _sanitize_field_description(raw_description or "")
@@ -234,7 +138,6 @@ def _build_field_description(
 
     parts.append(f"Type: {field_type_label}.")
 
-    # Only show example values when not already encoded in a Literal
     if not sanitised_literals and distinct_values:
         examples: list[str] = []
         seen_ex: set[str] = set()
@@ -252,38 +155,19 @@ def _build_field_description(
     return " ".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def build_retriever_args_schema(
     silo: Any,
     distinct_values: dict[str, list[str]],
 ) -> type[BaseModel]:
     """Build a Pydantic model for the retrieval tool's call arguments.
 
-    The model always includes a mandatory ``query`` field.  One optional field
-    is added for each entry in ``silo.metadata_definition.fields``.
+    Always includes a mandatory ``query`` field.  One optional typed field is
+    added per entry in ``silo.metadata_definition.fields``; invalid identifiers
+    and ``query`` collisions are discarded with a WARNING.
 
-    Fields whose names are not valid Python identifiers, are Python keywords,
-    or collide with ``query`` are silently discarded with a WARNING.
-
-    Only simple types (str, int, float, bool, Literal[str, ...]) are used to
-    ensure compatibility with all LLM providers' function-calling schemas
-    (OpenAI, Anthropic, Mistral, Azure, Google).
-
-    Args:
-        silo: ORM Silo instance.  ``silo.metadata_definition`` may be None.
-            Must be attached to a live Session (reads the lazy
-            ``metadata_definition`` relationship) — call at tool-construction
-            time, never from inside a tool coroutine with a detached instance.
-        distinct_values: Mapping ``{field_name: [raw_value, ...]}`` as
-            returned by :func:`collect_distinct_values`.
-
-    Returns:
-        A dynamically created Pydantic ``BaseModel`` subclass whose
-        ``model_json_schema()`` is safe for all provider bind_tools calls.
+    Must be called with the silo attached to a live Session (reads the lazy
+    ``metadata_definition`` relationship) — never from inside a tool coroutine
+    with a detached instance.
     """
     field_definitions: dict[str, Any] = {
         "query": (
@@ -318,8 +202,8 @@ def build_retriever_args_schema(
 
         raw_type_str: str = field_spec.get("type", "str")
         base_type = _resolve_python_type(raw_type_str, field_name)
-        # Canonical resolved name, never the raw editor-supplied string: the raw
-        # type string is freeform text and must not reach the LLM prompt verbatim.
+        # Use the canonical type name — the raw editor string is freeform and must
+        # not reach the LLM prompt verbatim.
         type_label = base_type.__name__
 
         field_raw_values: list[str] = distinct_values.get(field_name, [])
@@ -351,33 +235,15 @@ def build_retriever_description(
     silo: Any,
     distinct_values: dict[str, list[str]],
 ) -> str:
-    """Build the natural-language description for a silo's retrieval tool.
+    """Build the tool description: purpose blurb, filterable fields, usage policy.
 
-    The description is composed of:
-    1. A purpose statement that varies by silo type (REPO / DOMAIN / other).
-    2. A "Filterable metadata fields" section when the silo has a
-       ``metadata_definition`` with at least one field.
-    3. A usage policy (when to filter, and the zero-results retry behaviour).
-
-    Total length is capped at :data:`_MAX_DESCRIPTION_LENGTH` characters.
-    When truncation is needed the metadata-fields section is trimmed first,
-    then the purpose blurb, and a trailing ellipsis is appended.
-
-    Args:
-        silo: ORM Silo instance. Must be attached to a live Session — this
-            function reads the lazy relationships ``metadata_definition`` and
-            ``domain``. Callers must invoke it at tool-construction time, never
-            from inside a tool coroutine with a detached instance.
-        distinct_values: Mapping ``{field_name: [raw_value, ...]}`` as
-            returned by :func:`collect_distinct_values`.
-
-    Returns:
-        A description string safe to embed in an LLM tool definition.
+    Total length is capped at ``_MAX_DESCRIPTION_LENGTH``.  Must be called with
+    the silo attached to a live Session (reads ``metadata_definition`` and
+    ``domain`` lazy relationships) — never from a detached instance.
     """
     silo_type_raw: str = str(getattr(silo, "silo_type", "") or "")
     silo_type_upper = silo_type_raw.upper()
 
-    # --- Purpose blurb (varies by silo type) ---
     if silo_type_upper == "REPO":
         purpose = (
             "Search for relevant documents in the document repository. "
@@ -405,7 +271,6 @@ def build_retriever_description(
         else:
             purpose = "Search for relevant documents and information."
 
-    # --- Filterable fields section ---
     metadata_def = getattr(silo, "metadata_definition", None)
     raw_fields: list[dict[str, Any]] = []
     if metadata_def is not None:
@@ -419,14 +284,12 @@ def build_retriever_description(
         if not field_name or not _is_valid_identifier(field_name):
             continue
 
-        # Canonical resolved type name — the raw editor string never reaches the prompt.
+        # Use canonical type name — raw editor string must not reach the prompt.
         field_type = _resolve_python_type(field_spec.get("type", "str"), field_name).__name__
         field_desc_raw = field_spec.get("description", "") or ""
-        # max_len=120 here (vs 200 in the args schema): the tool description has a
-        # 2000-char global budget shared across all fields, the schema does not.
+        # max_len=120 (vs 200 in args schema): description has a 2000-char global budget.
         field_desc = sanitize_metadata_value(field_desc_raw, max_len=120)
 
-        # Build example values line (at least one real value required for AC-4)
         field_raw_values = distinct_values.get(field_name, [])
         examples: list[str] = []
         seen_ex: set[str] = set()
@@ -444,7 +307,6 @@ def build_retriever_description(
 
         fields_lines.append(line)
 
-    # --- Usage policy ---
     usage_policy = (
         "When to filter: apply a metadata filter only when the user's question "
         "explicitly mentions a value for that field. "
@@ -452,7 +314,6 @@ def build_retriever_description(
         "show the available field values to help the user refine their query."
     )
 
-    # --- Assemble and truncate ---
     sections: list[str] = [purpose]
 
     if fields_lines:
@@ -465,7 +326,7 @@ def build_retriever_description(
     if len(full_text) <= _MAX_DESCRIPTION_LENGTH:
         return full_text
 
-    # Truncate: shorten the fields block first, then the purpose blurb
+    # Shorten fields block first, then purpose blurb.
     budget = _MAX_DESCRIPTION_LENGTH - len(usage_policy) - 4  # "\n\n" separators
 
     if fields_lines:
@@ -487,22 +348,9 @@ def build_retriever_description(
 
 
 def build_retriever_tool_name(silo: Any) -> str:
-    """Build a stable, unique tool name for the silo's retrieval tool.
+    """Build a stable unique tool name: ``search_{slug}_{silo_id}``.
 
-    Pattern: ``search_{slug}_{silo_id}``
-
-    The slug is derived from ``silo.name``: lowercase, non-alphanumeric
-    characters replaced with ``_``, consecutive underscores collapsed, leading/
-    trailing underscores trimmed, truncated to ``_MAX_SLUG_LENGTH`` (40) chars.
-
-    If the slug is empty (blank name, emoji-only, etc.) the name falls back to
-    ``search_silo_{silo_id}`` to guarantee a non-empty, unique identifier.
-
-    Args:
-        silo: ORM Silo instance with ``silo_id`` and ``name`` attributes.
-
-    Returns:
-        A non-empty tool name string unique per silo_id.
+    Falls back to ``search_silo_{silo_id}`` when the name slug is empty.
     """
     silo_id = getattr(silo, "silo_id", "unknown")
     raw_name: str = getattr(silo, "name", "") or ""
@@ -516,22 +364,13 @@ def build_retriever_tool_name(silo: Any) -> str:
 def collect_distinct_values(silo: Any, db: Any) -> dict[str, list[str]]:
     """Collect distinct metadata field values for all fields in a silo.
 
-    This is a convenience helper for step_006 (the wiring layer).  It iterates
-    ``silo.metadata_definition.fields`` and calls
-    :meth:`~services.metadata_values_cache_service.MetadataValuesCacheService.get_distinct_values`
-    for each field.  Errors on individual fields are caught and logged; the
-    corresponding key is simply absent from the result dict.
-
-    Args:
-        silo: ORM Silo instance.
-        db: SQLAlchemy Session forwarded to the cache service.
+    Errors on individual fields are caught and logged; the corresponding key is
+    absent from the result.
 
     Returns:
-        ``{field_name: [value, ...]}`` mapping.  Fields for which the cache
-        service raised are absent (not present with an empty list).
+        ``{field_name: [value, ...]}`` mapping.
     """
-    # Deferred import to mirror the pattern used by MetadataValuesCacheService
-    # and avoid circular dependency risks at module load time.
+    # Deferred import to avoid circular dependency at module load time.
     from services.metadata_values_cache_service import MetadataValuesCacheService  # noqa: PLC0415
 
     metadata_def = getattr(silo, "metadata_definition", None)

@@ -1,17 +1,4 @@
-"""
-Unit tests for MetadataValuesCacheService (step_004).
-
-Verifies:
-- AC-18: second access within TTL does not re-query the vector store.
-- invalidate() forces a re-query on the next call.
-- Expired TTL triggers a re-query.
-- Vector-store error → empty list returned, result NOT cached.
-- Basic concurrency: two concurrent misses produce no state corruption.
-- Invalid METADATA_VALUES_CACHE_TTL_SECONDS env var falls back to the default (600 s).
-
-No DB, filesystem, or vector-store access is performed — all external dependencies
-are mocked.
-"""
+"""Unit tests for MetadataValuesCacheService. No DB or vector-store access — all mocked."""
 
 import threading
 import time
@@ -26,31 +13,17 @@ from services.metadata_values_cache_service import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Fixture: reset singleton state before every test
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def reset_cache(monkeypatch):
-    """Ensure the singleton cache is clean and TTL is at its default before every test."""
+    """Clean singleton cache and reset TTL before every test."""
     MetadataValuesCacheService._reset_for_testing()
-    # Make sure the env var is unset so the default TTL applies unless a test overrides it.
     monkeypatch.delenv("METADATA_VALUES_CACHE_TTL_SECONDS", raising=False)
     yield
     MetadataValuesCacheService._reset_for_testing()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _patch_silo_service(return_values: list[str] | None = None, side_effect=None):
-    """Return a context-manager that patches SiloService.get_metadata_field_values.
-
-    Uses the deferred-import path in the cache service.
-    """
+    """Patch SiloService.get_metadata_field_values via the deferred-import path."""
     mock_fn = MagicMock()
     if side_effect is not None:
         mock_fn.side_effect = side_effect
@@ -63,14 +36,9 @@ def _patch_silo_service(return_values: list[str] | None = None, side_effect=None
     ), mock_fn
 
 
-# ---------------------------------------------------------------------------
-# AC-18: cache hit — second call within TTL does not re-query
-# ---------------------------------------------------------------------------
-
-
 class TestCacheHit:
     def test_second_call_within_ttl_returns_cached_values(self):
-        """AC-18: a second get_distinct_values within the TTL must not call the vector store again."""
+        """AC-18: second call within TTL must not re-query the vector store."""
         db = MagicMock()
         values = ["invoice", "receipt"]
 
@@ -83,13 +51,12 @@ class TestCacheHit:
 
         assert first == values
         assert second == values
-        # Only one fetch should have happened despite two calls.
         assert mock_fetch.call_count == 1, (
             f"Expected 1 fetch, got {mock_fetch.call_count} — cache was not used on the second call"
         )
 
     def test_different_fields_are_cached_independently(self):
-        """Cache keys are (silo_id, field) — different fields must be fetched separately."""
+        """Different (silo_id, field) keys are fetched and cached independently."""
         db = MagicMock()
 
         call_log: list[tuple[int, str]] = []
@@ -104,7 +71,6 @@ class TestCacheHit:
         ):
             MetadataValuesCacheService.get_distinct_values(1, "doc_type", db)
             MetadataValuesCacheService.get_distinct_values(1, "language", db)
-            # Second call for each field must hit cache, not re-fetch.
             MetadataValuesCacheService.get_distinct_values(1, "doc_type", db)
             MetadataValuesCacheService.get_distinct_values(1, "language", db)
 
@@ -113,7 +79,6 @@ class TestCacheHit:
         assert (1, "language") in call_log
 
     def test_different_silos_are_cached_independently(self):
-        """Cache keys are (silo_id, field) — different silos must be fetched separately."""
         db = MagicMock()
         call_log: list[int] = []
 
@@ -127,15 +92,10 @@ class TestCacheHit:
         ):
             MetadataValuesCacheService.get_distinct_values(1, "doc_type", db)
             MetadataValuesCacheService.get_distinct_values(2, "doc_type", db)
-            MetadataValuesCacheService.get_distinct_values(1, "doc_type", db)  # cache hit
-            MetadataValuesCacheService.get_distinct_values(2, "doc_type", db)  # cache hit
+            MetadataValuesCacheService.get_distinct_values(1, "doc_type", db)
+            MetadataValuesCacheService.get_distinct_values(2, "doc_type", db)
 
         assert len(call_log) == 2
-
-
-# ---------------------------------------------------------------------------
-# Invalidation forces re-query
-# ---------------------------------------------------------------------------
 
 
 class TestInvalidation:
@@ -158,7 +118,7 @@ class TestInvalidation:
             MetadataValuesCacheService.invalidate(5)
 
             MetadataValuesCacheService.get_distinct_values(5, "doc_type", db)
-            assert fetch_count[0] == 2, "Expected re-fetch after invalidation"
+            assert fetch_count[0] == 2
 
     def test_invalidate_only_removes_target_silo(self):
         """invalidate(silo_id=A) must not evict entries for silo_id=B."""
@@ -189,11 +149,6 @@ class TestInvalidation:
         MetadataValuesCacheService.invalidate(999)  # should not raise
 
 
-# ---------------------------------------------------------------------------
-# TTL expiry forces re-query
-# ---------------------------------------------------------------------------
-
-
 class TestTTLExpiry:
     def test_expired_entry_is_re_fetched(self, monkeypatch):
         """When the TTL expires, the next call must bypass the cache and re-query."""
@@ -206,10 +161,6 @@ class TestTTLExpiry:
             lambda: fake_now[0],
         )
 
-        # Override TTL to a short value so time can be advanced without waiting.
-        # _reset_for_testing (called by the autouse fixture) always restores the
-        # class-level _ttl_seconds to _DEFAULT_TTL_SECONDS before each test, so
-        # this override is intentionally applied here after that reset.
         MetadataValuesCacheService._ttl_seconds = 10
 
         def fake_fetch(silo_id, field, _db):
@@ -220,16 +171,13 @@ class TestTTLExpiry:
             "services.metadata_values_cache_service.MetadataValuesCacheService._fetch_from_vector_store",
             side_effect=fake_fetch,
         ):
-            # First call at t=0 → miss → fetch.
             MetadataValuesCacheService.get_distinct_values(3, "lang", db)
             assert fetch_count[0] == 1
 
-            # Second call at t=5 (within TTL) → hit.
             fake_now[0] = 5.0
             MetadataValuesCacheService.get_distinct_values(3, "lang", db)
             assert fetch_count[0] == 1, "Call within TTL should have been a cache hit"
 
-            # Third call at t=15 (past TTL) → miss → re-fetch.
             fake_now[0] = 15.0
             MetadataValuesCacheService.get_distinct_values(3, "lang", db)
             assert fetch_count[0] == 2, "Call after TTL expiry should have triggered a re-fetch"
@@ -247,7 +195,7 @@ class TestErrorHandling:
 
         with patch(
             "services.metadata_values_cache_service.MetadataValuesCacheService._fetch_from_vector_store",
-            return_value=None,  # None signals an error in our convention
+            return_value=None,
         ):
             result = MetadataValuesCacheService.get_distinct_values(7, "doc_type", db)
 
@@ -261,7 +209,7 @@ class TestErrorHandling:
         def fake_fetch(silo_id, field, _db):
             call_count[0] += 1
             if call_count[0] == 1:
-                return None  # Simulate error on first call.
+                return None
             return ["ok"]
 
         with patch(
@@ -282,7 +230,7 @@ class TestErrorHandling:
 
         def fake_fetch(silo_id, field, _db):
             fetch_count[0] += 1
-            return []  # Empty list (no values) — not an error.
+            return []
 
         with patch(
             "services.metadata_values_cache_service.MetadataValuesCacheService._fetch_from_vector_store",
@@ -296,11 +244,6 @@ class TestErrorHandling:
         assert fetch_count[0] == 1, "Empty-but-successful result must be cached"
 
 
-# ---------------------------------------------------------------------------
-# Concurrency: two concurrent misses must not corrupt state
-# ---------------------------------------------------------------------------
-
-
 class TestConcurrency:
     def test_concurrent_misses_do_not_corrupt_cache(self):
         """Two threads hitting a cache miss simultaneously must both get valid results.
@@ -310,13 +253,13 @@ class TestConcurrency:
         and that the cache is in a consistent (non-corrupted) state afterward.
         """
         db = MagicMock()
-        barrier = threading.Barrier(2)  # Synchronise both threads at the miss point.
+        barrier = threading.Barrier(2)
         results: list[list[str]] = []
         errors: list[Exception] = []
 
         def slow_fetch(silo_id, field, _db):
-            barrier.wait()  # Both threads reach this point before either proceeds.
-            time.sleep(0.005)  # Small delay to increase overlap window.
+            barrier.wait()
+            time.sleep(0.005)
             return ["concurrent_value"]
 
         def thread_task():
@@ -326,10 +269,6 @@ class TestConcurrency:
             except Exception as exc:
                 errors.append(exc)
 
-        # Patch at the test level (not inside each thread) so the mock is applied
-        # before any thread starts and torn down only after all threads finish.
-        # Applying patch.object inside threads is not thread-safe and can leave
-        # the class in a partially-patched state on concurrent entry/exit.
         with patch.object(
             MetadataValuesCacheService,
             "_fetch_from_vector_store",
@@ -354,7 +293,6 @@ class TestConcurrency:
             "services.metadata_values_cache_service.MetadataValuesCacheService._fetch_from_vector_store",
             return_value=["alpha", "beta", "gamma"],
         ):
-            # Warm the cache with a single call.
             MetadataValuesCacheService.get_distinct_values(10, "category", db)
 
         results: list[list[str]] = []
@@ -373,11 +311,6 @@ class TestConcurrency:
         assert len(results) == 20
         for r in results:
             assert r == ["alpha", "beta", "gamma"]
-
-
-# ---------------------------------------------------------------------------
-# Env var: invalid TTL falls back to default
-# ---------------------------------------------------------------------------
 
 
 class TestEnvVarTTL:
@@ -427,18 +360,9 @@ class TestEnvVarTTL:
         assert result == _DEFAULT_TTL_SECONDS
 
 
-# ---------------------------------------------------------------------------
-# Sampling limit is passed through
-# ---------------------------------------------------------------------------
-
-
 class TestSamplingLimit:
     def test_fetch_passes_correct_sampling_limit(self):
-        """_fetch_from_vector_store must call SiloService with the fixed _SAMPLING_LIMIT.
-
-        SiloService is imported lazily inside _fetch_from_vector_store, so we patch
-        it via its own module path (services.silo_service.SiloService).
-        """
+        """_fetch_from_vector_store must call SiloService with the fixed _SAMPLING_LIMIT."""
         db = MagicMock()
 
         captured_limit: list[int] = []
@@ -451,7 +375,6 @@ class TestSamplingLimit:
             "services.silo_service.SiloService.get_metadata_field_values",
             side_effect=mock_get_values,
         ):
-            # Call _fetch_from_vector_store directly (not through the cache) to isolate this check.
             MetadataValuesCacheService._fetch_from_vector_store(1, "doc_type", db)
 
         assert captured_limit == [_SAMPLING_LIMIT], (
@@ -459,11 +382,7 @@ class TestSamplingLimit:
         )
 
     def test_fetch_returns_none_on_silo_service_exception(self):
-        """_fetch_from_vector_store must return None (not raise) when SiloService raises.
-
-        SiloService is imported lazily inside _fetch_from_vector_store, so we patch
-        it via its own module path (services.silo_service.SiloService).
-        """
+        """_fetch_from_vector_store must return None (not raise) when SiloService raises."""
         db = MagicMock()
 
         with patch(

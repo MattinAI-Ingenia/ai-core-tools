@@ -57,8 +57,6 @@ def _validate_silo_app_ownership(silo_id: int, app_id: int, db: Session) -> Silo
         )
     return silo
 
-# ==================== SILO MANAGEMENT ====================
-
 @silos_router.post(
     "/import",
     summary="Import Silo",

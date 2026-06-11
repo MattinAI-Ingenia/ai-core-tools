@@ -30,8 +30,6 @@ COLLECTION_PREFIX = 'silo_'
 DEFAULT_SEARCH_LIMIT = 100
 MAX_SEARCH_LIMIT = 200
 
-# Default chunking parameters used by both file and domain/web-content indexing paths.
-# Kept as module-level constants so they are easy to tune without hunting through method bodies.
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
@@ -507,32 +505,16 @@ class SiloService:
 
     @staticmethod
     def _create_documents_for_indexing(silo_id: int, contents: List[dict]) -> List[Document]:
-        """Create Document objects for indexing, splitting each content item into chunks.
+        """Split each content item into chunks and attach metadata.
 
-        Each entry in *contents* is a dict with keys ``content`` (str) and optional
-        ``metadata`` (dict).  The content is split with
-        :class:`~langchain_text_splitters.RecursiveCharacterTextSplitter` using the
-        module-level :data:`CHUNK_SIZE` / :data:`CHUNK_OVERLAP` constants so that
-        domain/web pages (and any other free-text fed via ``index_multiple_content``)
-        are stored as appropriately sized chunks rather than one monolithic document.
-
-        ``silo_id`` and all caller-supplied metadata keys are propagated to every
-        chunk produced from the same source document.
-
-        Note on file-upload callers: the public-API file-upload path in
-        ``routers/public/v1/silos.py`` calls ``extract_documents_from_file`` first,
-        which already splits the file, then packs the resulting chunks back into
-        dicts for ``index_multiple_content``.  Because those chunks are already
-        ≤ CHUNK_SIZE characters, the splitter produces exactly one chunk per input
-        item — the behaviour is idempotent and the metadata is preserved correctly.
-
-        Media chunks (indexed via ``index_media_chunk``) bypass this method entirely
-        and are therefore unaffected.
+        File-upload callers pre-split via ``extract_documents_from_file`` before
+        calling ``index_multiple_content``, so chunks already ≤ CHUNK_SIZE produce
+        exactly one chunk per input item (idempotent).
         """
         splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         documents: List[Document] = []
         for item in contents:
-            # silo_id last so a caller-supplied "silo_id" key can never override the parameter
+            # silo_id last — a caller-supplied key must not override the parameter.
             base_metadata = {**(item.get('metadata', {})), "silo_id": silo_id}
             chunks = splitter.split_text(item['content'])
             for chunk in chunks:
@@ -572,7 +554,7 @@ class SiloService:
         )
         logger.info(f"Documentos indexados correctamente en silo {silo_id}")
         try:
-            from services.metadata_values_cache_service import MetadataValuesCacheService
+            from services.metadata_values_cache_service import MetadataValuesCacheService  # noqa: PLC0415
             MetadataValuesCacheService.invalidate(silo_id)
         except Exception as _cache_exc:
             logger.warning("metadata_values_cache: invalidation failed after index_multiple_content for silo=%d: %s", silo_id, _cache_exc)
@@ -830,20 +812,10 @@ class SiloService:
 
     @staticmethod
     def _delete_resource_chunks(resource_id: int, collection_name: str, silo) -> None:
-        """Delete all vector chunks for a resource from the collection.
+        """Delete all vector chunks for a resource. Propagates vector-store exceptions.
 
-        This is the single authoritative point for the ``resource_id`` filter used
-        when removing chunks.  Both ``delete_resource`` (tolerant) and
-        ``reindex_resource`` (fail-fast) delegate here.
-
-        Args:
-            resource_id: Primary key of the resource whose chunks should be removed.
-            collection_name: Target vector collection name (e.g. ``silo_7``).
-            silo: Loaded :class:`~models.silo.Silo` instance — used for embedding
-                service resolution and vector-store type detection.  Must not be None.
-
-        Raises:
-            Exception: Propagated as-is from the underlying vector store call.
+        Single authoritative point for the ``resource_id`` filter; both
+        ``delete_resource`` (tolerant) and ``reindex_resource`` (fail-fast) delegate here.
         """
         embedding_service = silo.embedding_service
         _get_vector_store(silo).delete_documents(
@@ -854,30 +826,17 @@ class SiloService:
 
     @staticmethod
     def reindex_resource(resource: Resource) -> None:
-        """Delete existing vector chunks for a resource then re-index from the source file.
+        """Delete existing chunks then re-index from the source file.
 
-        Unlike ``index_resource``, this method first removes all chunks that already exist
-        in the collection under ``resource_id == resource.resource_id`` before re-indexing.
-        This prevents duplicate chunks from accumulating across multiple reindex calls.
-
-        If the deletion step fails the method raises immediately — indexing is intentionally
-        skipped so the collection is never left in a partially-deleted state.
-
-        When the resource is not found in the database, this method logs a warning and returns
-        silently.  The router validates resource existence before calling this method, so a
-        missing row here is a legitimate race condition (e.g. concurrent deletion), not a
-        caller error.
-
-        Args:
-            resource: The :class:`~models.resource.Resource` instance to reindex.  Only
-                ``resource_id`` is read from the supplied object; all other data is
-                re-loaded inside a fresh ``SessionLocal`` to avoid detached-instance issues.
+        If the deletion step fails, raises immediately — indexing is skipped so
+        the collection is never left in a partially-deleted state.  A missing
+        resource row is treated as a legitimate race condition (concurrent
+        deletion) and logged as WARNING without raising.
 
         Raises:
             ValueError: If the silo has no embedding service configured.
-            Exception: If deleting existing chunks from the vector store fails (propagated
-                from the vector store layer, including ``RuntimeError`` on PGVector safety-cap
-                exhaustion).
+            Exception: If the vector store delete fails (including ``RuntimeError``
+                on PGVector safety-cap exhaustion).
         """
         session = SessionLocal()
         try:
@@ -922,8 +881,7 @@ class SiloService:
         finally:
             session.close()
 
-        # Deletion succeeded — now re-index.  index_resource opens its own session
-        # and invalidates the cache internally after indexing completes.
+        # index_resource opens its own session and invalidates the cache.
         SiloService.index_resource(resource)
 
     @staticmethod

@@ -110,14 +110,11 @@ class PGVectorStore(VectorStoreInterface):
         vector_store = self._get_vector_store(collection_name, embedding_service)
         
         if isinstance(ids, list):
-            # Direct deletion by IDs
             vector_store.delete(ids=ids)
         else:
-            # Deletion by metadata filter.
-            # LangChain PGVector has no native delete-by-filter, so we loop in
-            # batches of 1000 until similarity_search returns 0 results.
-            # A safety cap of 100 iterations (~100k chunks) guards against
-            # infinite loops from a misbehaving store.
+            # LangChain PGVector has no native delete-by-filter; loop in batches
+            # of 1000 until empty.  100-iteration safety cap (~100k chunks) guards
+            # against infinite loops from a misbehaving store.
             _BATCH_SIZE = 1000
             _MAX_ITERATIONS = 100
             iteration = 0
@@ -439,12 +436,11 @@ class PGVectorStore(VectorStoreInterface):
 
     @staticmethod
     def _str_for_jsonb(val: Any) -> str:
-        """Convert *val* to the string representation stored in JSONB.
+        """Convert *val* to the JSONB string representation.
 
-        PostgreSQL's ``->>`` operator returns JSON boolean literals as lowercase
-        ``"true"`` / ``"false"``.  Python's ``str(True)`` yields ``"True"``
-        (title-case), which would never match — so booleans are lowercased here.
-        All other types use the default ``str()`` coercion.
+        PostgreSQL's ``->>`` returns boolean literals as lowercase ``"true"`` /
+        ``"false"``.  Python's ``str(True)`` yields ``"True"`` (title-case) which
+        would never match, so booleans are explicitly lowercased here.
         """
         if isinstance(val, bool):
             return str(val).lower()

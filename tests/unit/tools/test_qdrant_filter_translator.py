@@ -1,15 +1,7 @@
 """Unit tests for QdrantStore._translate_pgvector_filter_to_qdrant.
 
-Focused on the $in operator → MatchAny translation path added alongside the
-metadata_filters.QDRANT_OPS expansion.
-
-All tests are pure-Python — no Qdrant server, no I/O.
-
-Coverage:
-  - $in with a non-empty list → FieldCondition with MatchAny(any=[...])
-  - $in with an empty list → condition discarded, WARNING emitted
-  - $in combined with $eq in the same filter dict
-  - Existing operators ($eq, $ne, range) unaffected (regression guard)
+Covers the $in → MatchAny translation and regression guards for pre-existing
+operators. All tests are pure-Python — no Qdrant server, no I/O.
 """
 
 import logging
@@ -18,15 +10,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 TRANSLATOR_LOGGER = "tools.vector_stores.qdrant_store"
 
 
 def _make_store():
-    """Return a QdrantStore instance with all Qdrant I/O mocked out."""
     with patch("qdrant_client.QdrantClient"), patch("langchain_qdrant.QdrantVectorStore"):
         from tools.vector_stores.qdrant_store import QdrantStore
 
@@ -39,13 +26,7 @@ def _make_store():
         return store
 
 
-# ---------------------------------------------------------------------------
-# $in → MatchAny translation
-# ---------------------------------------------------------------------------
-
-
 class TestTranslatePGVectorFilterToQdrant:
-    """Direct tests of _translate_pgvector_filter_to_qdrant."""
 
     def setup_method(self):
         self.store = _make_store()
@@ -109,8 +90,6 @@ class TestTranslatePGVectorFilterToQdrant:
         assert result.get("must_not", []) == []
         assert any("campo" in r.message for r in caplog.records)
 
-    # --- Regression guards for pre-existing operators ---
-
     def test_eq_still_produces_match_value(self):
         result = self.store._translate_pgvector_filter_to_qdrant(
             {"status": {"$eq": "published"}}
@@ -156,13 +135,7 @@ class TestTranslatePGVectorFilterToQdrant:
         assert any("$regex" in r.message for r in caplog.records)
 
 
-# ---------------------------------------------------------------------------
-# Integration: Filter object round-trip
-# ---------------------------------------------------------------------------
-
-
 class TestBuildQdrantFilterWithIn:
-    """Verify that _build_qdrant_filter produces a proper qdrant_client.models.Filter."""
 
     def setup_method(self):
         self.store = _make_store()
@@ -184,7 +157,7 @@ class TestBuildQdrantFilterWithIn:
         assert set(condition.match.any) == {"news", "blog"}
 
     def test_empty_in_filter_returns_none(self, caplog):
-        """An empty $in list must result in _build_qdrant_filter returning None and a WARNING logged."""
+        """An empty $in list must result in None and a WARNING."""
         with caplog.at_level(logging.WARNING, logger=TRANSLATOR_LOGGER):
             qdrant_filter = self.store._build_qdrant_filter(
                 {"category": {"$in": []}}
@@ -193,19 +166,13 @@ class TestBuildQdrantFilterWithIn:
         assert any("category" in r.message for r in caplog.records)
 
 
-# ---------------------------------------------------------------------------
-# Fix #1: search_similar_documents and get_retriever pass Filter objects
-# ---------------------------------------------------------------------------
-
-
 class TestSearchSimilarDocumentsFilterTranslation:
-    """search_similar_documents must translate filter dicts before calling the vector store."""
+    """search_similar_documents translates filter dicts to models.Filter before calling the store."""
 
     def setup_method(self):
         self.store = _make_store()
 
     def _make_vector_store_mock(self):
-        """Return a mock QdrantVectorStore and wire _get_vector_store to return it."""
         vs_mock = MagicMock()
         self.store._get_vector_store = MagicMock(return_value=vs_mock)
         return vs_mock

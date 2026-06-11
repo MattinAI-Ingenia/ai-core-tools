@@ -1,9 +1,6 @@
-"""
-Unit tests for FR-10 (RecursiveCharacterTextSplitter in extract_documents_from_file)
-and FR-11 (chunking in _create_documents_for_indexing / index_single_content).
+"""Unit tests for chunking in SiloService: extract_documents_from_file (FR-10) and index_single_content (FR-11).
 
-No database, filesystem, or vector store access is required — all external
-dependencies are mocked.
+All external dependencies are mocked — no DB, filesystem, or vector store access.
 """
 from unittest.mock import MagicMock, patch
 
@@ -16,10 +13,6 @@ from services.silo_service import (
     SiloService,
 )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _make_silo(silo_id: int = 7) -> MagicMock:
     silo = MagicMock()
@@ -37,27 +30,18 @@ def _make_vector_store() -> MagicMock:
 
 def _long_text(n_chars: int = CHUNK_SIZE * 3) -> str:
     """Return a realistic multi-paragraph text longer than CHUNK_SIZE."""
-    # Build paragraphs of ~120 chars separated by double newlines so that
-    # RecursiveCharacterTextSplitter can split on paragraph boundaries.
     paragraph = (
         "The quick brown fox jumped over the lazy dog near the riverbank. "
         "Scientists discovered a new species in the Amazon rainforest yesterday. "
     )
-    # Repeat to exceed target length
     full = "\n\n".join([paragraph.strip()] * (n_chars // len(paragraph) + 2))
     return full[:n_chars]
 
-
-# ---------------------------------------------------------------------------
-# FR-11: index_single_content / index_multiple_content via
-#         _create_documents_for_indexing chunks domain-page text
-# ---------------------------------------------------------------------------
 
 class TestDomainContentChunking:
     """FR-11: Long web-page text must be chunked; metadata propagated to every chunk."""
 
     def _call_index_single(self, content: str, metadata: dict, silo_id: int = 7):
-        """Call index_single_content with a mocked DB session and vector store."""
         silo = _make_silo(silo_id)
         vs = _make_vector_store()
         db = MagicMock()
@@ -69,7 +53,6 @@ class TestDomainContentChunking:
         ):
             SiloService.index_single_content(silo_id, content, metadata, db)
 
-        # Return the documents that were passed to the vector store
         assert vs.index_documents.called, "index_documents was never called"
         call_args = vs.index_documents.call_args
         indexed_docs: list[Document] = call_args[0][1]
@@ -196,7 +179,6 @@ class TestDomainContentChunking:
             SiloService.index_multiple_content(3, documents, db)
 
         indexed_docs = vs.index_documents.call_args[0][1]
-        # Each document should have produced at least 2 chunks, so total > 2
         assert len(indexed_docs) > 2, (
             f"Expected >2 total chunks from 2 long documents, got {len(indexed_docs)}"
         )
@@ -223,17 +205,12 @@ class TestDomainContentChunking:
         indexed_docs = vs.index_documents.call_args[0][1]
         urls = {doc.metadata["url"] for doc in indexed_docs}
         assert urls == {"https://example.com/a", "https://example.com/b"}
-        # Per-chunk assignment: no chunk may carry the domain_id of the other document
         for doc in indexed_docs:
             if doc.metadata["url"] == "https://example.com/a":
                 assert doc.metadata["domain_id"] == 10
             else:
                 assert doc.metadata["domain_id"] == 20
 
-
-# ---------------------------------------------------------------------------
-# FR-10 / AC-16: extract_documents_from_file uses RecursiveCharacterTextSplitter
-# ---------------------------------------------------------------------------
 
 class TestExtractDocumentsFromFileSplitter:
     """AC-16: extract_documents_from_file must use RecursiveCharacterTextSplitter."""
@@ -242,19 +219,11 @@ class TestExtractDocumentsFromFileSplitter:
         return Document(page_content=text, metadata={"page": page, "source": "/tmp/test.pdf"})
 
     def test_uses_recursive_splitter_not_character_splitter(self):
-        """Verify that RecursiveCharacterTextSplitter (not CharacterTextSplitter) is used.
+        """RecursiveCharacterTextSplitter splits at paragraph boundaries before the hard limit.
 
-        RecursiveCharacterTextSplitter respects paragraph and sentence boundaries
-        rather than splitting on a single separator.  We verify this by providing
-        a text with a paragraph break at a natural boundary before CHUNK_SIZE and
-        confirming the split point falls at the paragraph boundary rather than at
-        the character limit.
+        A text with a clear \\n\\n boundary before CHUNK_SIZE must be split there,
+        not at the character limit — which is what CharacterTextSplitter would do.
         """
-        # Build a text that has a clear paragraph boundary at ~400 chars, then
-        # continues with another 700+ chars.  CharacterTextSplitter (default
-        # separator='\n') would potentially keep the whole thing if there is no
-        # single '\n' at the limit, whereas RecursiveCharacterTextSplitter tries
-        # '\n\n' first, then '\n', then ' '.
         para_a = "Alpha " * 67  # ~402 chars
         para_b = "Beta  " * 117  # ~702 chars
         text = para_a.strip() + "\n\n" + para_b.strip()
@@ -262,9 +231,6 @@ class TestExtractDocumentsFromFileSplitter:
 
         page_doc = self._make_page_doc(text, page=0)
 
-        # NOTE: this patch target works because extract_documents_from_file imports
-        # PyMuPDFLoader inside the function body. If that import is ever promoted to
-        # module level, these patches must target services.silo_service.PyMuPDFLoader.
         with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
             mock_loader_instance = MagicMock()
             mock_loader_instance.load.return_value = [page_doc]
@@ -276,13 +242,9 @@ class TestExtractDocumentsFromFileSplitter:
                 base_metadata={"resource_id": 1, "silo_id": 3},
             )
 
-        # The text is longer than CHUNK_SIZE so at least two chunks are expected
         assert len(docs) >= 2, (
             f"Expected >=2 chunks for a {len(text)}-char text, got {len(docs)}"
         )
-        # Distinguishing property: the recursive splitter prefers the '\n\n'
-        # boundary, so the first chunk is paragraph A alone (well under
-        # CHUNK_SIZE) and contains no content from paragraph B.
         assert len(docs[0].page_content) < CHUNK_SIZE, (
             "First chunk must split at the paragraph boundary, not at the character limit"
         )
@@ -290,8 +252,6 @@ class TestExtractDocumentsFromFileSplitter:
 
     def test_paragraph_boundary_is_preferred_split_point(self):
         """RecursiveCharacterTextSplitter splits at \\n\\n before splitting mid-sentence."""
-        # Paragraph A is 400 chars — well under CHUNK_SIZE; paragraph B is 700 chars.
-        # The double-newline boundary should be the preferred split point.
         para_a = ("Sentence one about the topic. " * 14).rstrip()  # ~420 chars
         para_b = ("Sentence two about the topic. " * 24).rstrip()  # ~720 chars
         text = para_a + "\n\n" + para_b
@@ -310,14 +270,13 @@ class TestExtractDocumentsFromFileSplitter:
             )
 
         assert len(docs) >= 2
-        # The first chunk must not exceed CHUNK_SIZE + CHUNK_OVERLAP
         assert len(docs[0].page_content) <= CHUNK_SIZE + CHUNK_OVERLAP, (
             f"First chunk too large: {len(docs[0].page_content)} chars"
         )
 
     def test_base_metadata_attached_to_every_chunk(self):
         """base_metadata keys must appear on every chunk produced by extract_documents_from_file."""
-        text = ("Word " * 300).strip()  # 1500 chars — spans at least two chunks
+        text = ("Word " * 300).strip()
         assert len(text) > CHUNK_SIZE
 
         page_doc = self._make_page_doc(text)
@@ -381,10 +340,6 @@ class TestExtractDocumentsFromFileSplitter:
         assert len(docs) == 1
         assert docs[0].metadata["page"] == 1
 
-
-# ---------------------------------------------------------------------------
-# Module-level constants sanity checks
-# ---------------------------------------------------------------------------
 
 def test_chunk_size_constant_is_positive():
     assert CHUNK_SIZE > 0

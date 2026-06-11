@@ -221,7 +221,6 @@ class QdrantStore(VectorStoreInterface):
                 elif native_op == 'match':
                     must.append({'key': key, 'match': {'value': value}})
                 else:
-                    # range operators: gt, gte, lt, lte
                     must.append({'key': key, 'range': {native_op: value}})
 
         qdrant_filter: Dict[str, Any] = {}
@@ -254,20 +253,15 @@ class QdrantStore(VectorStoreInterface):
             all matching points are removed regardless of collection size.
         """
         if isinstance(ids, list):
-            # Direct deletion by IDs — delegates to the LangChain wrapper which
-            # needs the embedding model for consistency checks.
             vector_store = self._get_vector_store(collection_name, embedding_service)
             vector_store.delete(ids=ids)
         else:
-            # Deletion by metadata filter — use Qdrant's native filter-based delete
-            # so that all matching points are removed in a single atomic operation
+            # Native filter-based delete removes all matching points atomically
             # regardless of collection size (no scroll/page-size limit).
             if ids is None:
                 logger.warning("No valid metadata filter provided for Qdrant deletion; skipping")
                 return
 
-            # Auto-detect filter format: pass Qdrant-native filters through unchanged,
-            # translate PGVector-style filters ($eq, $ne, etc.) to Qdrant format.
             qdrant_filter = self._build_qdrant_filter(ids)
             if qdrant_filter is None:
                 logger.warning(
@@ -340,11 +334,9 @@ class QdrantStore(VectorStoreInterface):
         # (not a raw dict) — passing a dict is silently mishandled or raises at runtime.
         qdrant_filter = self._build_qdrant_filter(filter_metadata) if filter_metadata else None
 
-        # Handle empty queries — always use similarity path
         if not query or (isinstance(query, str) and not query.strip()):
             query = " "
 
-        # Dispatch on search_type
         if search_type == "mmr":
             docs = vector_store.max_marginal_relevance_search(
                 query,
@@ -417,10 +409,8 @@ class QdrantStore(VectorStoreInterface):
         vector_store = self._get_vector_store(collection_name, embedding_service)
 
         if search_params is not None:
-            # Translate any PGVector-style filter dict stored under the "filter" key
-            # to a qdrant_client.models.Filter before handing off to as_retriever.
-            # as_retriever forwards search_kwargs verbatim to the underlying search
-            # method, which expects models.Filter | None, not a raw dict.
+            # as_retriever forwards search_kwargs verbatim; the underlying search
+            # expects models.Filter | None, not a raw dict.
             translated_params = dict(search_params)
             if "filter" in translated_params and isinstance(translated_params["filter"], dict):
                 translated_params["filter"] = self._build_qdrant_filter(translated_params["filter"])
