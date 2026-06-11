@@ -571,6 +571,11 @@ class SiloService:
             embedding_service=embedding_service
         )
         logger.info(f"Documentos indexados correctamente en silo {silo_id}")
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after index_multiple_content for silo=%d: %s", silo_id, _cache_exc)
 
     @staticmethod
     def extract_documents_from_file(file_path: str, file_extension: str, base_metadata: dict = None):
@@ -812,6 +817,11 @@ class SiloService:
                 embedding_service
             )
             logger.info(f"Successfully indexed resource {resource_with_relations.resource_id} in silo {resource_with_relations.repository.silo_id}")
+            try:
+                from services.metadata_values_cache_service import MetadataValuesCacheService
+                MetadataValuesCacheService.invalidate(resource_with_relations.repository.silo_id)
+            except Exception as _cache_exc:
+                logger.warning("metadata_values_cache: invalidation failed after index_resource for silo=%d: %s", resource_with_relations.repository.silo_id, _cache_exc)
         except Exception as e:
             logger.error(f"Error indexing resource {resource.resource_id}: {str(e)}")
             raise
@@ -912,7 +922,8 @@ class SiloService:
         finally:
             session.close()
 
-        # Deletion succeeded — now re-index.  index_resource opens its own session.
+        # Deletion succeeded — now re-index.  index_resource opens its own session
+        # and invalidates the cache internally after indexing completes.
         SiloService.index_resource(resource)
 
     @staticmethod
@@ -997,6 +1008,11 @@ class SiloService:
                 embedding_service
             )
             logger.info(f"Indexed media chunk (media {media.media_id}) in silo {media.repository.silo_id}")
+            try:
+                from services.metadata_values_cache_service import MetadataValuesCacheService
+                MetadataValuesCacheService.invalidate(media.repository.silo_id)
+            except Exception as _cache_exc:
+                logger.warning("metadata_values_cache: invalidation failed after index_media_chunk for silo=%d: %s", media.repository.silo_id, _cache_exc)
         except Exception as e:
             logger.error(f"Error indexing media chunk for media {media.media_id}: {str(e)}")
             raise
@@ -1055,6 +1071,12 @@ class SiloService:
                 return
 
             SiloService._delete_resource_chunks(resource.resource_id, collection_name, silo)
+            # Only reached when _delete_resource_chunks succeeded — safe to invalidate.
+            try:
+                from services.metadata_values_cache_service import MetadataValuesCacheService
+                MetadataValuesCacheService.invalidate(silo.silo_id)
+            except Exception as _cache_exc:
+                logger.warning("metadata_values_cache: invalidation failed after delete_resource for silo=%d: %s", silo.silo_id, _cache_exc)
         except Exception as e:
             logger.error(f"Error deleting resource {resource.resource_id} from vector store: {str(e)}")
             # Don't raise the exception - allow the resource to be deleted from database and disk
@@ -1085,7 +1107,12 @@ class SiloService:
             ids={"url": {"$eq": url}},
             embedding_service=embedding_service
         )
-            
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after delete_url for silo=%d: %s", silo_id, _cache_exc)
+
     @staticmethod
     def delete_content(silo_id: int, content_id: str, db: Session):
         """
@@ -1104,25 +1131,35 @@ class SiloService:
 
         collection_name = COLLECTION_PREFIX + str(silo_id)
         _get_vector_store(silo).delete_documents(
-            collection_name, 
+            collection_name,
             filter_metadata={"id": {"$eq": content_id}},
             embedding_service=silo.embedding_service
         )
         logger.info(f"Contenido {content_id} eliminado correctamente del silo {silo_id}")
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after delete_content for silo=%d: %s", silo_id, _cache_exc)
 
     @staticmethod
     def delete_collection(silo_id: int, db: Session):
         """Delete a collection using its silo's embedding service"""
         if not SiloService.check_silo_collection_exists(silo_id, db):
             return
-            
+
         # Get silo within the session to ensure relationships are loaded
         silo = SiloRepository.get_by_id(silo_id, db)
         if not silo:
             return
-            
+
         collection_name = COLLECTION_PREFIX + str(silo_id)
         _get_vector_store(silo).delete_collection(collection_name, silo.embedding_service)
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after delete_collection for silo=%d: %s", silo_id, _cache_exc)
 
     @staticmethod
     def delete_docs_in_collection(silo_id: int, ids: List[str], db: Session):
@@ -1143,11 +1180,16 @@ class SiloService:
 
         collection_name = COLLECTION_PREFIX + str(silo_id)
         _get_vector_store(silo).delete_documents(
-            collection_name, 
+            collection_name,
             ids=ids,
             embedding_service=silo.embedding_service
         )
         logger.info(f"Documentos eliminados correctamente del silo {silo_id}")
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after delete_docs_in_collection for silo=%d: %s", silo_id, _cache_exc)
 
     @staticmethod
     def delete_all_docs_in_collection(silo_id: int, db: Session):
@@ -1168,6 +1210,11 @@ class SiloService:
         collection_name = COLLECTION_PREFIX + str(silo_id)
         _get_vector_store(silo).delete_collection(collection_name, silo.embedding_service)
         logger.info(f"All documents deleted from silo {silo_id}")
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after delete_all_docs_in_collection for silo=%d: %s", silo_id, _cache_exc)
 
     @staticmethod
     def delete_docs_by_metadata(silo_id: int, filter_metadata: Dict[str, Any], db: Session) -> int:
@@ -1215,6 +1262,11 @@ class SiloService:
             embedding_service=silo.embedding_service
         )
         logger.info(f"Successfully deleted {doc_count} document(s) from silo {silo_id}")
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning("metadata_values_cache: invalidation failed after delete_docs_by_metadata for silo=%d: %s", silo_id, _cache_exc)
         return doc_count
 
     @staticmethod
