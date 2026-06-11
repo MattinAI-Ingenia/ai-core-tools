@@ -113,12 +113,26 @@ class PGVectorStore(VectorStoreInterface):
             # Direct deletion by IDs
             vector_store.delete(ids=ids)
         else:
-            # Deletion by metadata filter
-            # TODO: For deleting docs, embedding_service should not be needed. 
-            # In fact, if api key fails we cannot delete docs.
-            results = vector_store.similarity_search("", k=1000, filter=ids)
-            ids_array = [doc.id for doc in results]
-            vector_store.delete(ids=ids_array)
+            # Deletion by metadata filter.
+            # LangChain PGVector has no native delete-by-filter, so we loop in
+            # batches of 1000 until similarity_search returns 0 results.
+            # A safety cap of 100 iterations (~100k chunks) guards against
+            # infinite loops from a misbehaving store.
+            _BATCH_SIZE = 1000
+            _MAX_ITERATIONS = 100
+            iteration = 0
+            while True:
+                results = vector_store.similarity_search("", k=_BATCH_SIZE, filter=ids)
+                if not results:
+                    break
+                ids_array = [doc.id for doc in results]
+                vector_store.delete(ids=ids_array)
+                iteration += 1
+                if iteration >= _MAX_ITERATIONS:
+                    raise RuntimeError(
+                        f"delete_documents: could not empty filter {ids!r} within "
+                        f"{_MAX_ITERATIONS} iterations — aborting to avoid infinite loop"
+                    )
     
     def delete_collection(
         self, 

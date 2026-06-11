@@ -532,11 +532,13 @@ async def reindex_silo_resource(
             detail="Resource does not belong to this silo",
         )
     try:
-        SiloService.index_resource(resource)
+        SiloService.reindex_resource(resource)
         return {"message": f"Resource {resource_id} reindexed successfully", "resource_id": resource_id}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         logger.error(f"Error reindexing resource {resource_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to reindex resource")
 
 
 @silos_router.delete("/{silo_id}/documents",

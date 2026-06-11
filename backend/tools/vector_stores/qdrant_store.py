@@ -230,52 +230,52 @@ class QdrantStore(VectorStoreInterface):
     ) -> None:
         """
         Delete documents from Qdrant collection.
-        
+
         Args:
             collection_name: Name of the collection
             ids: Document IDs to delete (list) or metadata filter (dict)
-            embedding_service: Service used for embeddings
-            
-        Note: 
-            If ids is a dict (metadata filter), we first search for matching
-            documents and then delete them by their IDs.
-            The filter dict uses PGVector-style operators ($eq, $ne, etc.) and
-            is automatically translated to the Qdrant native filter format.
+            embedding_service: Service used for embeddings (only required for
+                list-based deletion via the LangChain vector-store wrapper;
+                filter-based deletion uses the raw client and does not need it).
+
+        Note:
+            When ``ids`` is a dict (metadata filter), Qdrant's native
+            filter-based delete is used — no embedding service is required and
+            all matching points are removed regardless of collection size.
         """
-        vector_store = self._get_vector_store(collection_name, embedding_service)
-        
         if isinstance(ids, list):
-            # Direct deletion by IDs
+            # Direct deletion by IDs — delegates to the LangChain wrapper which
+            # needs the embedding model for consistency checks.
+            vector_store = self._get_vector_store(collection_name, embedding_service)
             vector_store.delete(ids=ids)
         else:
-            # Deletion by metadata filter
+            # Deletion by metadata filter — use Qdrant's native filter-based delete
+            # so that all matching points are removed in a single atomic operation
+            # regardless of collection size (no scroll/page-size limit).
             if ids is None:
                 logger.warning("No valid metadata filter provided for Qdrant deletion; skipping")
                 return
 
             # Auto-detect filter format: pass Qdrant-native filters through unchanged,
             # translate PGVector-style filters ($eq, $ne, etc.) to Qdrant format.
-            if self._is_qdrant_native_filter(ids):
-                qdrant_filter = ids
-            else:
-                qdrant_filter = self._translate_pgvector_filter_to_qdrant(ids)
-
-            # Search and get IDs
-            results = self.client.scroll(
-                collection_name=collection_name,
-                scroll_filter=qdrant_filter,
-                limit=1000,
-                with_payload=False,
-                with_vectors=False
-            )[0]
-            
-            ids_to_delete = [point.id for point in results]
-            
-            if ids_to_delete:
-                self.client.delete(
-                    collection_name=collection_name,
-                    points_selector=ids_to_delete
+            qdrant_filter = self._build_qdrant_filter(ids)
+            if qdrant_filter is None:
+                logger.warning(
+                    "Qdrant delete_documents: filter translated to None for collection %s; skipping",
+                    collection_name,
                 )
+                return
+
+            from qdrant_client.models import FilterSelector
+
+            self.client.delete(
+                collection_name=collection_name,
+                points_selector=FilterSelector(filter=qdrant_filter),
+            )
+            logger.debug(
+                "Qdrant delete_documents: issued filter-based delete on collection %s",
+                collection_name,
+            )
     
     def delete_collection(
         self, 

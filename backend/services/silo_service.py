@@ -6,6 +6,7 @@ from models.silo import Silo
 from models.resource import Resource
 from db.database import SessionLocal
 from db.database import db as db_obj
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from utils.logger import get_logger
 from langchain_core.documents import Document
@@ -790,6 +791,103 @@ class SiloService:
             session.close()
 
     @staticmethod
+    def _delete_resource_chunks(resource_id: int, collection_name: str, silo) -> None:
+        """Delete all vector chunks for a resource from the collection.
+
+        This is the single authoritative point for the ``resource_id`` filter used
+        when removing chunks.  Both ``delete_resource`` (tolerant) and
+        ``reindex_resource`` (fail-fast) delegate here.
+
+        Args:
+            resource_id: Primary key of the resource whose chunks should be removed.
+            collection_name: Target vector collection name (e.g. ``silo_7``).
+            silo: Loaded :class:`~models.silo.Silo` instance — used for embedding
+                service resolution and vector-store type detection.  Must not be None.
+
+        Raises:
+            Exception: Propagated as-is from the underlying vector store call.
+        """
+        embedding_service = silo.embedding_service
+        _get_vector_store(silo).delete_documents(
+            collection_name,
+            ids={"resource_id": {"$eq": resource_id}},
+            embedding_service=embedding_service,
+        )
+
+    @staticmethod
+    def reindex_resource(resource: Resource) -> None:
+        """Delete existing vector chunks for a resource then re-index from the source file.
+
+        Unlike ``index_resource``, this method first removes all chunks that already exist
+        in the collection under ``resource_id == resource.resource_id`` before re-indexing.
+        This prevents duplicate chunks from accumulating across multiple reindex calls.
+
+        If the deletion step fails the method raises immediately — indexing is intentionally
+        skipped so the collection is never left in a partially-deleted state.
+
+        When the resource is not found in the database, this method logs a warning and returns
+        silently.  The router validates resource existence before calling this method, so a
+        missing row here is a legitimate race condition (e.g. concurrent deletion), not a
+        caller error.
+
+        Args:
+            resource: The :class:`~models.resource.Resource` instance to reindex.  Only
+                ``resource_id`` is read from the supplied object; all other data is
+                re-loaded inside a fresh ``SessionLocal`` to avoid detached-instance issues.
+
+        Raises:
+            ValueError: If the silo has no embedding service configured.
+            Exception: If deleting existing chunks from the vector store fails (propagated
+                from the vector store layer, including ``RuntimeError`` on PGVector safety-cap
+                exhaustion).
+        """
+        session = SessionLocal()
+        try:
+            resource_with_relations = session.scalars(
+                select(Resource).where(Resource.resource_id == resource.resource_id)
+            ).first()
+
+            if not resource_with_relations:
+                logger.warning(
+                    "reindex_resource: resource %s not found in database; aborting",
+                    resource.resource_id,
+                )
+                return
+
+            silo = resource_with_relations.repository.silo
+            silo_id = resource_with_relations.repository.silo_id
+
+            if not silo or not silo.embedding_service:
+                raise ValueError(
+                    f"Silo {silo_id} has no embedding service configured"
+                )
+
+            collection_name = COLLECTION_PREFIX + str(silo_id)
+
+            logger.info(
+                "reindex_resource: deleting existing chunks for resource %s from collection %s",
+                resource.resource_id,
+                collection_name,
+            )
+            SiloService._delete_resource_chunks(resource.resource_id, collection_name, silo)
+            logger.info(
+                "reindex_resource: deletion complete for resource %s; proceeding to index",
+                resource.resource_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "reindex_resource: failed to delete existing chunks for resource %s: %s",
+                resource.resource_id,
+                exc,
+            )
+            raise
+        finally:
+            session.close()
+
+        # Deletion succeeded — now re-index.  index_resource opens its own session.
+        SiloService.index_resource(resource)
+
+    @staticmethod
     def index_media_chunk(chunk: dict, media: Media, db: Session = None):
         """
         Index a single media chunk in the vector database using chunk data dict and the Media instance.
@@ -928,11 +1026,7 @@ class SiloService:
                 logger.warning(f"Silo {silo.silo_id} has no embedding service, skipping vector deletion for resource {resource.resource_id}")
                 return
 
-            _get_vector_store(silo).delete_documents(
-                collection_name,
-                ids={"resource_id": {"$eq": resource.resource_id}},
-                embedding_service=silo.embedding_service
-            )
+            SiloService._delete_resource_chunks(resource.resource_id, collection_name, silo)
         except Exception as e:
             logger.error(f"Error deleting resource {resource.resource_id} from vector store: {str(e)}")
             # Don't raise the exception - allow the resource to be deleted from database and disk
