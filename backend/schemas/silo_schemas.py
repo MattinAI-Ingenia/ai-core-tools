@@ -42,6 +42,7 @@ class SiloDetailSchema(BaseModel):
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
     lightrag_graph_context_enabled: Optional[bool] = None
+    use_agent_as_query: bool = False
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -73,6 +74,7 @@ class CreateSiloSchema(BaseModel):
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
     lightrag_graph_context_enabled: Optional[bool] = None
+    use_agent_as_query: bool = False
 
 
 class UpdateSiloSchema(BaseModel):
@@ -81,6 +83,7 @@ class UpdateSiloSchema(BaseModel):
     description: Optional[str] = None
     type: Optional[str] = None
     output_parser_id: Optional[int] = None
+    use_agent_as_query: Optional[bool] = None
 
 
 class _ContentLengthFilterSchema(BaseModel):

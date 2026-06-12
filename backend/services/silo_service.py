@@ -664,6 +664,10 @@ class SiloService:
                 logger.info(f"Setting metadata_definition_id from fallback to: {silo_data['metadata_definition_id']}")
                 silo.metadata_definition_id = silo_data['metadata_definition_id']
             
+            # use_agent_as_query is mutable (can be toggled on existing silos)
+            if 'use_agent_as_query' in silo_data and silo_data['use_agent_as_query'] is not None:
+                silo.use_agent_as_query = bool(silo_data['use_agent_as_query'])
+
             # Update silo attributes
             SiloService._update_silo(silo, silo_data)
             
@@ -1818,6 +1822,7 @@ class SiloService:
                 lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
                 lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
                 lightrag_graph_context_enabled=silo.lightrag_graph_context_enabled,
+                use_agent_as_query=getattr(silo, 'use_agent_as_query', False),
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -1862,6 +1867,7 @@ class SiloService:
             'lightrag_chunk_token_size': getattr(silo_data, 'lightrag_chunk_token_size', None),
             'lightrag_chunk_overlap_token_size': getattr(silo_data, 'lightrag_chunk_overlap_token_size', None),
             'lightrag_graph_context_enabled': getattr(silo_data, 'lightrag_graph_context_enabled', None),
+            'use_agent_as_query': getattr(silo_data, 'use_agent_as_query', None),
         }
         
         # Create or update using the existing service
