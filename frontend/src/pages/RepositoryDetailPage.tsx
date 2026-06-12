@@ -1169,6 +1169,20 @@ const RepositoryDetailPage: React.FC = () => {
                 </span>
               </p>
             )}
+            {(uploadEstimate?.estimated_cost_min != null || uploadEstimate?.estimated_cost_max != null) ? (
+              <p className="mt-1">
+                Estimated cost (LLM + embeddings):{' '}
+                <span className="font-medium">
+                  {uploadEstimate?.estimated_cost_min != null && uploadEstimate?.estimated_cost_max != null
+                    ? `${uploadEstimate.estimated_cost_min} – ${uploadEstimate.estimated_cost_max} ${uploadEstimate?.currency ?? 'USD'}`
+                    : `${uploadEstimate?.estimated_cost_min ?? uploadEstimate?.estimated_cost_max} ${uploadEstimate?.currency ?? 'USD'}`}
+                </span>
+              </p>
+            ) : (
+              <p className="mt-1">
+                Estimated cost: <span className="font-medium">Unavailable</span>
+              </p>
+            )}
           </div>
 
           <div className="sticky top-0 z-10 -mx-6 bg-white/95 px-6 py-3 backdrop-blur-sm border-y border-gray-200">
