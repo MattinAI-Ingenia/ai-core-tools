@@ -52,6 +52,7 @@ class Silo(Base):
     lightrag_chunk_token_size = Column(Integer, nullable=True)
     lightrag_chunk_overlap_token_size = Column(Integer, nullable=True)
     lightrag_graph_context_enabled = Column(Boolean, default=False, nullable=True)
+    use_agent_as_query = Column(Boolean, default=False, nullable=False, server_default='false')
 
     is_frozen = Column(Boolean, default=False, nullable=False)
     agents = relationship('Agent', lazy=True)
