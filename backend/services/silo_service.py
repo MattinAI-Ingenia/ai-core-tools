@@ -157,6 +157,119 @@ def _is_meaningful_chunk(text: str) -> bool:
     return True
 
 
+def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> tuple[dict, dict]:
+    """Materialize RAG precedence: caller > agent > system.
+
+    Returns ``(search_params, pinned_filter)`` where:
+    - ``search_params``: tuning-only dict (no 'filter' key) — k, search_type,
+      score_threshold, fetch_k, lambda_mult.
+    - ``pinned_filter``: backend-ready ``{field: {op: value}}`` dict — the AND
+      combination of caller flat filter and ``agent.rag_fixed_filters``. The
+      agent's fixed filters WIN on (field, op) conflict: they are an
+      admin-configured scoping floor a caller must not be able to loosen
+      (security). Tuning params (k/search_type/...) keep caller > agent.
+
+    Never raises: filter-building errors are caught and logged as WARNING.
+
+    Args:
+        agent: Agent ORM instance (or SimpleNamespace in tests).  Must expose
+            ``rag_k``, ``rag_search_type``, ``rag_score_threshold``,
+            ``rag_fixed_filters``, ``rag_max_retrieval_calls`` and
+            optionally ``.silo`` (for metadata_definition + vector_db_type).
+        caller_search_params: Optional search-param dict supplied by the call
+            site (e.g. the public API chat endpoint).
+    """
+    caller: dict = caller_search_params or {}
+    silo = getattr(agent, "silo", None)
+
+    # ---- Tuning params (caller > agent > server_default) ----
+    resolved: dict = {}
+
+    # k: caller explicit value wins; otherwise use agent column (server_default 30)
+    resolved["k"] = caller["k"] if "k" in caller else (getattr(agent, "rag_k", None) or 30)
+
+    # search_type: caller wins; fall back to agent column (server_default 'similarity')
+    resolved["search_type"] = (
+        caller.get("search_type") or getattr(agent, "rag_search_type", None) or "similarity"
+    )
+
+    # score_threshold: only include when a value is resolved (keeps key absent = no threshold)
+    if "score_threshold" in caller:
+        resolved["score_threshold"] = caller["score_threshold"]
+    else:
+        agent_threshold = getattr(agent, "rag_score_threshold", None)
+        if agent_threshold is not None:
+            resolved["score_threshold"] = agent_threshold
+
+    # fetch_k / lambda_mult: caller pass-through only
+    if "fetch_k" in caller:
+        resolved["fetch_k"] = caller["fetch_k"]
+    if "lambda_mult" in caller:
+        resolved["lambda_mult"] = caller["lambda_mult"]
+
+    # ---- Pinned filters ----
+    if silo is None:
+        return resolved, {}
+
+    metadata_definition = getattr(silo, "metadata_definition", None)
+
+    def _build_backend_filter(clauses_input: list) -> dict:
+        """Build backend filter from a list of MetadataFilterClause-like dicts/instances."""
+        from tools.vector_stores.metadata_filters import (  # local import avoids cycles
+            MetadataFilterClause,
+            convert_clause_types,
+            to_backend_filter,
+        )
+        clauses = []
+        for item in clauses_input:
+            try:
+                if isinstance(item, MetadataFilterClause):
+                    clauses.append(item)
+                else:
+                    clauses.append(MetadataFilterClause(**item))
+            except Exception as exc:
+                logger.warning(
+                    "resolve_search_params: could not build filter clause from %r: %s",
+                    {k: v for k, v in item.items() if k != "value"} if isinstance(item, dict) else "?",
+                    exc,
+                )
+        if not clauses:
+            return {}
+        typed = convert_clause_types(clauses, metadata_definition)
+        return to_backend_filter(typed)
+
+    # Caller flat filter: {field: value} → convert to $eq clauses
+    caller_backend: dict = {}
+    raw_caller_filter = caller.get("filter") or {}
+    if raw_caller_filter:
+        try:
+            caller_clauses = [{"field": f, "op": "$eq", "value": v} for f, v in raw_caller_filter.items()]
+            caller_backend = _build_backend_filter(caller_clauses)
+        except Exception as exc:
+            logger.warning("resolve_search_params: failed to build caller filter: %s", exc)
+
+    # Agent rag_fixed_filters: list of {field, op, value}
+    agent_backend: dict = {}
+    raw_agent_filters: Optional[list] = getattr(agent, "rag_fixed_filters", None)
+    if raw_agent_filters:
+        try:
+            agent_backend = _build_backend_filter(raw_agent_filters)
+        except Exception as exc:
+            logger.warning("resolve_search_params: failed to build agent fixed filters: %s", exc)
+
+    # AND merge. Agent fixed filters passed FIRST so they win on (field, op)
+    # conflict — an admin scoping floor the caller cannot loosen (security).
+    # merge_filters_and is first-wins per (field, op). Caller filters on other
+    # fields still apply (AND).
+    if caller_backend or agent_backend:
+        from tools.vector_stores.metadata_filters import merge_filters_and  # local import
+        pinned_filter = merge_filters_and(agent_backend, caller_backend)
+    else:
+        pinned_filter = {}
+
+    return resolved, pinned_filter
+
+
 class SiloService:
 
     '''SILO CRUD Operations'''

@@ -234,8 +234,13 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         tools.append(create_download_url_tool(working_dir))
 
     if agent.silo_id is not None:
-        # Construction does sync DB work (distinct values sampling) — keep it off the event loop
-        retriever_tool = await asyncio.to_thread(get_retriever_tool, agent.silo, search_params)
+        # Resolve precedence (caller > agent RAG config > system) AND build the tool
+        # off the event loop: both precedence resolution (lazy-loads
+        # silo.metadata_definition) and construction (distinct-value sampling) do
+        # synchronous DB work.
+        retriever_tool = await asyncio.to_thread(
+            _resolve_and_build_retriever_tool, agent, search_params
+        )
         if retriever_tool is not None:
             tools.append(retriever_tool)
 
@@ -295,13 +300,65 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     return agent_chain, mcp_client
 
 
+_DEFAULT_RECURSION_LIMIT = 50
+
+
+def _load_recursion_limit() -> int:
+    """Read AICT_AGENT_RECURSION_LIMIT from the environment once at module load.
+
+    Logs a WARNING and falls back to 50 when the value is absent, non-integer, or
+    below 1 (LangGraph requires recursion_limit >= 1; a value < 1 fails every turn).
+    """
+    raw = os.getenv("AICT_AGENT_RECURSION_LIMIT")
+    if raw is None:
+        return _DEFAULT_RECURSION_LIMIT
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "prepare_agent_config: AICT_AGENT_RECURSION_LIMIT=%r is not a valid integer; "
+            "using default %d",
+            raw, _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
+    if value < 1:
+        logger.warning(
+            "prepare_agent_config: AICT_AGENT_RECURSION_LIMIT=%r is < 1 (invalid); "
+            "using default %d",
+            raw, _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
+    return value
+
+
+AICT_AGENT_RECURSION_LIMIT: int = _load_recursion_limit()
+
+
+def _resolve_and_build_retriever_tool(agent, caller_search_params):
+    """Resolve RAG precedence then build the dynamic retriever tool for *agent*.
+
+    Runs synchronous DB work — precedence resolution lazy-loads
+    ``silo.metadata_definition`` and ``get_retriever_tool`` samples distinct values.
+    MUST be invoked via ``asyncio.to_thread`` so it never blocks the event loop.
+    """
+    from services.silo_service import resolve_search_params  # noqa: PLC0415 — avoids import cycle
+
+    resolved_sp, resolved_pinned = resolve_search_params(agent, caller_search_params)
+    return get_retriever_tool(
+        agent.silo,
+        resolved_sp,
+        getattr(agent, "rag_max_retrieval_calls", None),
+        resolved_pinned,
+    )
+
+
 def prepare_agent_config(agent):
     """Helper function to prepare agent configuration."""
     config = {
         "configurable": {
             "thread_id": f"thread_{agent.agent_id}"
         },
-        "recursion_limit": 200,
+        "recursion_limit": AICT_AGENT_RECURSION_LIMIT,
     }
     return config
 
@@ -483,9 +540,17 @@ class IACTTool(BaseTool):
         tools.append(get_current_date)
         tools.append(fetch_file_in_base64)
 
-        # Add silo retriever if configured
+        # Add silo retriever if configured. The sub-agent uses the same dynamic
+        # metadata-aware tool as the root agent, driven by its OWN RAG config
+        # (rag_k / rag_search_type / rag_score_threshold / rag_fixed_filters /
+        # rag_max_retrieval_calls). Caller search params are NOT propagated from the
+        # root agent (caller_search_params=None) — sub-agents are self-contained (FR-12).
         if agent.silo_id is not None:
-            retriever_tool = await asyncio.to_thread(get_retriever_tool, agent.silo)
+            # Caller params NOT propagated (None) — the sub-agent uses its OWN config.
+            # Off the event loop: resolution + construction do synchronous DB work.
+            retriever_tool = await asyncio.to_thread(
+                _resolve_and_build_retriever_tool, agent, None
+            )
             if retriever_tool is not None:
                 tools.append(retriever_tool)
 
@@ -789,6 +854,7 @@ def get_retriever_tool(
     silo: Silo,
     search_params: Optional[dict] = None,
     max_retrieval_calls: Optional[int] = None,
+    pinned_filter: Optional[dict] = None,
 ) -> Optional[StructuredTool]:
     """Build the dynamic retrieval tool for *silo*.
 
@@ -797,9 +863,14 @@ def get_retriever_tool(
 
     Args:
         silo: Attached Silo ORM instance.
-        search_params: Optional caller-level search parameters. ``filter`` key
-            contains pinned filters passed through without LLM whitelist.
+        search_params: Optional caller-level search parameters (tuning only — no
+            'filter' key expected when ``pinned_filter`` is provided).
         max_retrieval_calls: Optional ceiling on tool invocations per agent turn.
+        pinned_filter: Optional pre-built backend filter dict
+            ``{field: {op: value}}``.  When provided it is used directly as the
+            pinned filter and ``_build_pinned_filter`` is skipped.  When None the
+            existing behaviour is preserved: the ``filter`` key from
+            ``search_params`` is translated via ``_build_pinned_filter``.
 
     Returns:
         A StructuredTool whose coroutine performs metadata-aware retrieval,
@@ -826,15 +897,25 @@ def get_retriever_tool(
     with SessionLocal() as db_session:
         distinct_values: dict[str, List[str]] = collect_distinct_values(silo, db=db_session)
 
-    pinned_filter: dict[str, Any] = {}
     effective_search_params: Optional[dict] = search_params
 
-    if search_params and search_params.get("filter"):
-        pinned_filter = _build_pinned_filter(
-            search_params["filter"], captured_metadata_def, vector_db_type
-        )
-        if pinned_filter:
-            effective_search_params = {**search_params, "filter": pinned_filter}
+    if pinned_filter is not None:
+        # Pre-built filter supplied by resolve_search_params — use directly.
+        _pinned_filter: dict[str, Any] = pinned_filter
+        if _pinned_filter:
+            effective_search_params = {**(search_params or {}), "filter": _pinned_filter}
+    else:
+        # Legacy path: translate search_params["filter"] flat dict.
+        _pinned_filter = {}
+        if search_params and search_params.get("filter"):
+            _pinned_filter = _build_pinned_filter(
+                search_params["filter"], captured_metadata_def, vector_db_type
+            )
+            if _pinned_filter:
+                effective_search_params = {**search_params, "filter": _pinned_filter}
+
+    # Alias for closure capture
+    resolved_pinned = _pinned_filter
 
     tool_name: str = build_retriever_tool_name(silo)
     tool_description: str = build_retriever_description(silo, distinct_values)
@@ -860,7 +941,7 @@ def get_retriever_tool(
             metadata_kwargs, metadata_field_types, captured_metadata_def,
             vector_db_type, tool_name,
         )
-        merged_filter = merge_filters_and(pinned_filter, llm_filter)
+        merged_filter = merge_filters_and(resolved_pinned, llm_filter)
 
         if merged_filter:
             base = dict(effective_search_params) if effective_search_params else {}
@@ -901,7 +982,7 @@ def get_retriever_tool(
                 )
                 return (_SEARCH_ERROR_MSG, [])
 
-            filter_label = f"with filter {pinned_filter}" if pinned_filter else "(no metadata filter)"
+            filter_label = f"with filter {resolved_pinned}" if resolved_pinned else "(no metadata filter)"
             content = (
                 f"{notice}\n\n"
                 f"{len(docs)} results {filter_label}\n\n"
