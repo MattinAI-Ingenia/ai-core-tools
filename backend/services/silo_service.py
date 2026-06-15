@@ -1922,6 +1922,54 @@ class SiloService:
         return SiloRepository.delete(silo_id, db)
     
     @staticmethod
+    def _search_via_lightrag_retriever(
+        silo,
+        query: str,
+        lightrag_query_mode: str,
+        limit: Optional[int],
+        filter_metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Search using LightRAG retriever (no LLM generation).
+
+        Returns chunks from lightrag_raw_data and graph data (entities/relationships)
+        separately, without invoking any LLM synthesis.
+        """
+        collection_name = COLLECTION_PREFIX + str(silo.id)
+        results_limit = limit if limit and limit > 0 else DEFAULT_SEARCH_LIMIT
+        if results_limit > MAX_SEARCH_LIMIT:
+            results_limit = MAX_SEARCH_LIMIT
+
+        store = _get_vector_store(silo)
+        retriever = store.get_retriever(
+            collection_name,
+            silo.embedding_service,
+            {"lightrag_query_mode": lightrag_query_mode, "k": results_limit},
+        )
+        docs = retriever._get_relevant_documents(query)
+
+        lightrag_graph = None
+        chunk_results = []
+
+        if docs:
+            raw_data = docs[0].metadata.get("lightrag_raw_data") or {}
+            lightrag_graph = raw_data if raw_data else None
+            chunks = (raw_data.get("data") or {}).get("chunks") or []
+            for chunk in chunks:
+                chunk_results.append({
+                    "page_content": chunk.get("content") or "",
+                    "metadata": {k: v for k, v in chunk.items() if k != "content"},
+                    "score": None,
+                })
+
+        return {
+            "query": query,
+            "results": chunk_results,
+            "total_results": len(chunk_results),
+            "filter_metadata": filter_metadata,
+            "lightrag_graph": lightrag_graph,
+        }
+
+    @staticmethod
     def search_silo_documents_router(
         silo_id: int,
         query: str,
@@ -1939,11 +1987,14 @@ class SiloService:
         """
         Search for documents in a silo using semantic search with optional metadata filtering.
         """
-        # Get silo to validate it exists
         silo = SiloService.get_silo(silo_id, db)
         if not silo:
             return None
 
+        if lightrag_query_mode is not None:
+            return SiloService._search_via_lightrag_retriever(
+                silo, query, lightrag_query_mode, limit, filter_metadata
+            )
 
         results = SiloService.find_docs_in_collection(
             silo_id,
@@ -1959,17 +2010,15 @@ class SiloService:
             db=db,
         )
 
-
         response_results = []
         for doc in results:
-            # Extract score from metadata if available
             score = doc.metadata.pop('_score', None) if '_score' in doc.metadata else None
             response_results.append({
                 "page_content": doc.page_content,
                 "metadata": doc.metadata,
                 "score": score
             })
-        
+
         return {
             "query": query,
             "results": response_results,
