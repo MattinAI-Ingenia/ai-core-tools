@@ -2,10 +2,10 @@ import { useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useParams } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Search, Info, Clock, History, Bot, SplitSquareHorizontal, Settings, Share2, Trash2 } from 'lucide-react';
-import SearchControls from '../components/playground/SearchControls';
 import SiloAPISnippets from '../components/playground/SiloAPISnippets';
 import SearchFilters from '../components/playground/SearchFilters';
 import ResultCard from '../components/playground/ResultCard';
+import LightRAGGraphBubble from '../components/playground/LightRAGGraphBubble';
 import Modal from '../components/ui/Modal';
 import { useSiloSearch } from '../hooks/useSiloSearch';
 import type { PanelState } from '../hooks/useSiloSearch';
@@ -24,6 +24,7 @@ const {
     isSearching,
     searchError,
     hasSearched,
+    lightragGraph,
     filterMetadata,
     minContentLength,
     setMinContentLength,
@@ -328,18 +329,45 @@ const {
 
                       {showRetrievalConfig && (
                         <div className="p-4 space-y-4">
-                          <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Search Strategy</label>
-                            <select
-                              value={retrievalConfig.search_type}
-                              onChange={(e) => setRetrievalConfig(c => ({ ...c, search_type: e.target.value, score_threshold: e.target.value === 'similarity_score_threshold' ? (c.score_threshold ?? 0.7) : c.score_threshold }))}
-                              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-yellow-500"
-                            >
-                              <option value="similarity">Similarity (default)</option>
-                              <option value="mmr">MMR — Max Marginal Relevance</option>
-                              <option value="similarity_score_threshold">Score Threshold</option>
-                            </select>
-                          </div>
+                          {isLightRAG ? (
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-2">Search Mode</label>
+                              <div className="flex flex-wrap gap-3">
+                                {([
+                                  { value: 'naive', label: 'Vector' },
+                                  { value: 'local', label: 'Local' },
+                                  { value: 'global', label: 'Global' },
+                                  { value: 'hybrid', label: 'Hybrid' },
+                                  { value: 'mix', label: 'Mix' },
+                                ] as const).map((mode) => (
+                                  <label key={mode.value} className="flex items-center gap-1.5 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name="lightrag-search-mode"
+                                      value={mode.value}
+                                      checked={searchControls.lightragQueryMode === mode.value}
+                                      onChange={() => setSearchControls((c) => ({ ...c, lightragQueryMode: mode.value }))}
+                                      className="accent-yellow-600"
+                                    />
+                                    <span className="text-sm text-gray-700">{mode.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Search Strategy</label>
+                              <select
+                                value={retrievalConfig.search_type}
+                                onChange={(e) => setRetrievalConfig(c => ({ ...c, search_type: e.target.value, score_threshold: e.target.value === 'similarity_score_threshold' ? (c.score_threshold ?? 0.7) : c.score_threshold }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-yellow-500"
+                              >
+                                <option value="similarity">Similarity (default)</option>
+                                <option value="mmr">MMR — Max Marginal Relevance</option>
+                                <option value="similarity_score_threshold">Score Threshold</option>
+                              </select>
+                            </div>
+                          )}
 
                           <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Documents (k): {retrievalConfig.k}</label>
@@ -560,6 +588,13 @@ const {
                   <div className="grid grid-cols-2 gap-4">
                     {renderComparePanel('A', panelA, setPanelA)}
                     {renderComparePanel('B', panelB, setPanelB)}
+                  </div>
+                )}
+
+                {/* LightRAG graph bubble (graph modes only) */}
+                {!compareMode && isLightRAG && lightragGraph && (
+                  <div className="bg-white shadow rounded-lg p-6">
+                    <LightRAGGraphBubble graphData={lightragGraph} />
                   </div>
                 )}
 
