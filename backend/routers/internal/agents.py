@@ -398,7 +398,11 @@ async def create_or_update_agent(
         'rag_fixed_filters': agent_data.rag_fixed_filters,
     }
 
-    logger.info(f"Creating/updating agent with data: {agent_dict}")
+    # Avoid logging full prompt bodies / filter values at INFO; log identity + shape only.
+    logger.info(
+        "Creating/updating agent id=%s app=%s type=%s name=%r silo_id=%s",
+        agent_id, app_id, agent_data.type, agent_data.name, agent_data.silo_id,
+    )
 
     try:
         # Create or update agent

@@ -281,9 +281,42 @@ class QdrantStore(VectorStoreInterface):
                 collection_name,
             )
     
+    def delete_documents_excluding(
+        self,
+        collection_name: str,
+        filter_metadata: Dict[str, Any],
+        exclude: Dict[str, Any],
+        embedding_service=None,
+    ) -> None:
+        if not filter_metadata:
+            raise ValueError("filter_metadata is required for delete_documents_excluding")
+
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+
+        base = self._build_qdrant_filter(filter_metadata)
+        if base is None:
+            logger.warning(
+                "Qdrant delete_documents_excluding: filter translated to None for %s; skipping",
+                collection_name,
+            )
+            return
+
+        # must_not on the fresh-batch marker preserves the just-written chunks; points
+        # lacking the field do not match must_not and are deleted (legacy chunks included).
+        must_not = [FieldCondition(key=f, match=MatchValue(value=v)) for f, v in exclude.items()]
+        combined = Filter(
+            must=list(base.must or []),
+            should=list(base.should or []),
+            must_not=list(base.must_not or []) + must_not,
+        )
+        self.client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(filter=combined),
+        )
+
     def delete_collection(
-        self, 
-        collection_name: str, 
+        self,
+        collection_name: str,
         embedding_service=None
     ) -> None:
         """

@@ -76,7 +76,9 @@ class Agent(Base):
     enable_code_interpreter = Column(Boolean, default=False, nullable=False, server_default='false')
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
 
-    # RAG retrieval config (step_007 / FR-7); validation of rag_search_type values lives in schemas (step_008)
+    # RAG retrieval config (step_007 / FR-7); rag_search_type values validated in schemas (step_008).
+    # server_default=30 keeps existing agents on the historical retriever default; new agents get
+    # k=10 / max_calls=4 from AgentService._update_normal_agent.
     rag_k = Column(Integer, default=30, nullable=False, server_default='30')
     rag_search_type = Column(String(45), default='similarity', nullable=False, server_default='similarity')
     rag_score_threshold = Column(Float, nullable=True)  # only used when rag_search_type='similarity_score_threshold'

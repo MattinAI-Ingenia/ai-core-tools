@@ -244,7 +244,16 @@ class AgentService:
 
         update_method = self._update_normal_agent
         update_method(agent, agent_data)
-        
+
+        # Threshold search needs a threshold value, else it degrades to plain similarity at
+        # retrieval. Checked on the merged state (the schema can't see the stored value on a
+        # partial update).
+        if agent.rag_search_type == 'similarity_score_threshold' and agent.rag_score_threshold is None:
+            raise ValueError(
+                "rag_score_threshold is required when rag_search_type is "
+                "'similarity_score_threshold'"
+            )
+
         # Set type only if it's not already set (OCRAgent sets it in __init__)
         if not hasattr(agent, 'type') or agent.type is None:
             agent.type = agent_type

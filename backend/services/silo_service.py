@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any
 import os
 import re
+import uuid
 from models.media import Media
 from models.silo import Silo
 from models.resource import Resource
@@ -29,6 +30,9 @@ REPO_BASE_FOLDER = os.path.abspath(os.getenv("REPO_BASE_FOLDER"))
 COLLECTION_PREFIX = 'silo_'
 DEFAULT_SEARCH_LIMIT = 100
 MAX_SEARCH_LIMIT = 200
+
+# Per-chunk marker stamping each indexing run; lets reindex delete only stale chunks.
+INDEX_BATCH_FIELD = 'index_batch'
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -193,9 +197,11 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
         caller.get("search_type") or getattr(agent, "rag_search_type", None) or "similarity"
     )
 
-    # score_threshold: only include when a value is resolved (keeps key absent = no threshold)
+    # score_threshold: caller wins (explicit None clears). Only concrete values are stored,
+    # so absent key == no threshold; never forward None to as_retriever.
     if "score_threshold" in caller:
-        resolved["score_threshold"] = caller["score_threshold"]
+        if caller["score_threshold"] is not None:
+            resolved["score_threshold"] = caller["score_threshold"]
     else:
         agent_threshold = getattr(agent, "rag_score_threshold", None)
         if agent_threshold is not None:
@@ -206,6 +212,15 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
         resolved["fetch_k"] = caller["fetch_k"]
     if "lambda_mult" in caller:
         resolved["lambda_mult"] = caller["lambda_mult"]
+
+    # Threshold search without a threshold silently degrades to plain similarity — normalize
+    # and warn instead of a silent no-op (legacy agents, or a caller that cleared the value).
+    if resolved["search_type"] == "similarity_score_threshold" and "score_threshold" not in resolved:
+        logger.warning(
+            "resolve_search_params: 'similarity_score_threshold' requested without a "
+            "score_threshold; falling back to plain similarity search"
+        )
+        resolved["search_type"] = "similarity"
 
     # ---- Pinned filters ----
     if silo is None:
@@ -849,7 +864,13 @@ class SiloService:
                 session.close()
 
     @staticmethod
-    def index_resource(resource: Resource):
+    def index_resource(resource: Resource, index_batch: Optional[str] = None) -> str:
+        """Index a resource's file into its silo collection.
+
+        Every chunk is stamped with ``index_batch`` (generated if not supplied) so a
+        later reindex can delete only the stale chunks. Returns the batch used.
+        """
+        index_batch = index_batch or uuid.uuid4().hex
         # For resource operations, we need a fresh session since this might be called from other contexts
         session = SessionLocal()
         try:
@@ -857,8 +878,8 @@ class SiloService:
             resource_with_relations = session.query(Resource).filter(Resource.resource_id == resource.resource_id).first()
             if not resource_with_relations:
                 logger.error(f"Resource {resource.resource_id} not found for indexing")
-                return
-                
+                return index_batch
+
             collection_name = COLLECTION_PREFIX + str(resource_with_relations.repository.silo_id)
             
             # Build the correct file path including folder structure
@@ -877,7 +898,8 @@ class SiloService:
                 "resource_id": resource_with_relations.resource_id,
                 "silo_id": resource_with_relations.repository.silo_id,
                 "name": resource_with_relations.uri,
-                "file_type": file_extension
+                "file_type": file_extension,
+                INDEX_BATCH_FIELD: index_batch,
             }
             
             # Add folder information if resource is in a folder
@@ -898,14 +920,14 @@ class SiloService:
 
             if not docs:
                 logger.warning(f"No content extracted from resource {resource_with_relations.resource_id} ({resource_with_relations.uri}). The file may be empty or contain only images/scans without text.")
-                return
+                return index_batch
 
             embedding_service = resource_with_relations.repository.silo.embedding_service
-            
+
             if not embedding_service:
                 logger.warning(f"Silo {resource_with_relations.repository.silo_id} has no embedding service, skipping indexing for resource {resource_with_relations.resource_id}")
-                return
-                
+                return index_batch
+
             _get_vector_store(resource_with_relations.repository.silo).index_documents(
                 collection_name,
                 docs,
@@ -923,6 +945,8 @@ class SiloService:
         finally:
             session.close()
 
+        return index_batch
+
     @staticmethod
     def _delete_resource_chunks(resource_id: int, collection_name: str, silo) -> None:
         """Delete all vector chunks for a resource. Propagates vector-store exceptions.
@@ -939,17 +963,16 @@ class SiloService:
 
     @staticmethod
     def reindex_resource(resource: Resource) -> None:
-        """Delete existing chunks then re-index from the source file.
+        """Re-index a resource using index-then-swap (no empty-collection window).
 
-        If the deletion step fails, raises immediately — indexing is skipped so
-        the collection is never left in a partially-deleted state.  A missing
-        resource row is treated as a legitimate race condition (concurrent
-        deletion) and logged as WARNING without raising.
+        The fresh batch is written first; only after it succeeds are the resource's
+        other chunks deleted. If indexing fails, the previous chunks are untouched
+        (worst case: transient duplicates that the next successful reindex resolves —
+        never zero chunks).
 
         Raises:
             ValueError: If the silo has no embedding service configured.
-            Exception: If the vector store delete fails (including ``RuntimeError``
-                on PGVector safety-cap exhaustion).
+            Exception: If the vector-store delete/index fails.
         """
         session = SessionLocal()
         try:
@@ -968,34 +991,29 @@ class SiloService:
             silo_id = resource_with_relations.repository.silo_id
 
             if not silo or not silo.embedding_service:
-                raise ValueError(
-                    f"Silo {silo_id} has no embedding service configured"
-                )
+                raise ValueError(f"Silo {silo_id} has no embedding service configured")
 
+            # Capture everything needed for the swap before the session closes.
             collection_name = COLLECTION_PREFIX + str(silo_id)
-
-            logger.info(
-                "reindex_resource: deleting existing chunks for resource %s from collection %s",
-                resource.resource_id,
-                collection_name,
-            )
-            SiloService._delete_resource_chunks(resource.resource_id, collection_name, silo)
-            logger.info(
-                "reindex_resource: deletion complete for resource %s; proceeding to index",
-                resource.resource_id,
-            )
-        except Exception as exc:
-            logger.error(
-                "reindex_resource: failed to delete existing chunks for resource %s: %s",
-                resource.resource_id,
-                exc,
-            )
-            raise
+            embedding_service = silo.embedding_service
+            vector_store = _get_vector_store(silo)
         finally:
             session.close()
 
-        # index_resource opens its own session and invalidates the cache.
-        SiloService.index_resource(resource)
+        # 1) Write the fresh batch first — previous chunks remain searchable meanwhile.
+        new_batch = SiloService.index_resource(resource)
+
+        # 2) Swap: drop this resource's chunks that are not the fresh batch.
+        logger.info(
+            "reindex_resource: swapping stale chunks for resource %s in collection %s (batch %s)",
+            resource.resource_id, collection_name, new_batch,
+        )
+        vector_store.delete_documents_excluding(
+            collection_name,
+            filter_metadata={"resource_id": {"$eq": resource.resource_id}},
+            exclude={INDEX_BATCH_FIELD: new_batch},
+            embedding_service=embedding_service,
+        )
 
     @staticmethod
     def index_media_chunk(chunk: dict, media: Media, db: Session = None):

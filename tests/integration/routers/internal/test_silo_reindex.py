@@ -1,6 +1,10 @@
 """Integration tests for AC-15: POST /internal/apps/{app_id}/silos/{silo_id}/resources/{resource_id}/reindex.
 
-Verifies idempotency — multiple calls must not accumulate duplicate chunks.
+Verifies idempotency — multiple calls must not accumulate duplicate chunks — using the
+index-then-swap flow: the fresh batch is written first, then the resource's stale chunks
+(those not stamped with the new index_batch) are removed via delete_documents_excluding, so
+the collection never passes through an empty state.
+
 Vector DB and file-system operations are mocked. Session isolation: reindex_resource opens its own
 SessionLocal(); the reindex_session_patch fixture redirects it to share the test DB connection.
 """
@@ -99,34 +103,37 @@ def _reindex_url(app_id: int, silo_id: int, resource_id: int) -> str:
     )
 
 
-def _make_fake_docs(resource_id: int) -> list[Document]:
+def _fake_extract(path, file_extension, base_metadata):
+    """Stand-in for extract_documents_from_file: stamps each chunk with base_metadata
+    (which includes the index_batch set by index_resource), as the real splitter does."""
     return [
-        Document(page_content=f"chunk-{i} of resource {resource_id}", metadata={"resource_id": resource_id})
+        Document(page_content=f"chunk-{i}", metadata={**base_metadata})
         for i in range(3)
     ]
 
 
 def _make_fake_vector_store(indexed_docs: list) -> MagicMock:
-    """Stateful vector store mock: delete removes by filter, index appends."""
+    """Stateful vector store mock matching the index-then-swap flow: index appends;
+    delete_documents_excluding removes the resource's chunks not in the kept batch."""
     store = MagicMock()
-
-    def fake_delete(collection_name, ids, embedding_service=None):
-        if isinstance(ids, dict):
-            filter_field = next(iter(ids))
-            op_dict = ids[filter_field]
-            filter_value = op_dict.get("$eq")
-            to_remove = [
-                d for d in indexed_docs
-                if str(d.metadata.get(filter_field)) == str(filter_value)
-            ]
-            for doc in to_remove:
-                indexed_docs.remove(doc)
 
     def fake_index(collection_name, documents, embedding_service=None):
         indexed_docs.extend(documents)
 
-    store.delete_documents.side_effect = fake_delete
+    def fake_delete_excluding(collection_name, filter_metadata, exclude, embedding_service=None):
+        field = next(iter(filter_metadata))
+        value = filter_metadata[field].get("$eq")
+        survivors = []
+        for d in indexed_docs:
+            matches_resource = str(d.metadata.get(field)) == str(value)
+            keep_batch = all(d.metadata.get(k) == v for k, v in exclude.items())
+            if matches_resource and not keep_batch:
+                continue  # stale chunk → drop
+            survivors.append(d)
+        indexed_docs[:] = survivors
+
     store.index_documents.side_effect = fake_index
+    store.delete_documents_excluding.side_effect = fake_delete_excluding
     return store
 
 
@@ -152,13 +159,12 @@ class TestReindexIdempotency:
 
         indexed_docs: list[Document] = []
         fake_store = _make_fake_vector_store(indexed_docs)
-        fake_docs = _make_fake_docs(resource_id)
 
         with (
             patch("services.silo_service._get_vector_store", return_value=fake_store),
             patch(
                 "services.silo_service.SiloService.extract_documents_from_file",
-                return_value=fake_docs,
+                side_effect=_fake_extract,
             ),
         ):
             resp1 = client.post(
@@ -167,8 +173,8 @@ class TestReindexIdempotency:
             )
             assert resp1.status_code == 200, f"First reindex failed: {resp1.text}"
             count_after_first = len(indexed_docs)
-            assert count_after_first == len(fake_docs), (
-                f"Expected {len(fake_docs)} chunks after first index, got {count_after_first}"
+            assert count_after_first == 3, (
+                f"Expected 3 chunks after first index, got {count_after_first}"
             )
 
             resp2 = client.post(
@@ -191,7 +197,7 @@ class TestReindexIdempotency:
                 f"Chunk count grew on third reindex: {count_after_first} → {count_after_third}"
             )
 
-    def test_reindex_calls_delete_before_index(
+    def test_reindex_indexes_before_swap_delete(
         self,
         client,
         db,
@@ -201,20 +207,20 @@ class TestReindexIdempotency:
         reindex_resource,
         reindex_session_patch,
     ):
-        """delete_documents must be called before index_documents on each reindex."""
+        """Index-then-swap: the fresh batch is written before stale chunks are deleted."""
         db.flush()
 
         resource_id = reindex_resource.resource_id
         call_order: list[str] = []
         fake_store = MagicMock()
-        fake_store.delete_documents.side_effect = lambda *a, **kw: call_order.append("delete")
         fake_store.index_documents.side_effect = lambda *a, **kw: call_order.append("index")
+        fake_store.delete_documents_excluding.side_effect = lambda *a, **kw: call_order.append("delete")
 
         with (
             patch("services.silo_service._get_vector_store", return_value=fake_store),
             patch(
                 "services.silo_service.SiloService.extract_documents_from_file",
-                return_value=_make_fake_docs(resource_id),
+                side_effect=_fake_extract,
             ),
         ):
             resp = client.post(
@@ -222,11 +228,11 @@ class TestReindexIdempotency:
                 headers=owner_headers,
             )
         assert resp.status_code == 200
-        assert call_order == ["delete", "index"], (
-            f"Expected ['delete', 'index'], got {call_order}"
+        assert call_order == ["index", "delete"], (
+            f"Expected ['index', 'delete'], got {call_order}"
         )
 
-    def test_reindex_aborts_if_delete_fails(
+    def test_reindex_does_not_delete_if_index_fails(
         self,
         client,
         db,
@@ -236,20 +242,20 @@ class TestReindexIdempotency:
         reindex_resource,
         reindex_session_patch,
     ):
-        """If delete_documents raises, the endpoint returns 500 and index is never called."""
+        """If indexing raises, the swap delete never runs — previous chunks survive (no data loss)."""
         db.flush()
 
         resource_id = reindex_resource.resource_id
         fake_store = MagicMock()
-        fake_store.delete_documents.side_effect = RuntimeError("vector store unavailable")
-        index_called = []
-        fake_store.index_documents.side_effect = lambda *a, **kw: index_called.append(True)
+        fake_store.index_documents.side_effect = RuntimeError("vector store unavailable")
+        delete_called = []
+        fake_store.delete_documents_excluding.side_effect = lambda *a, **kw: delete_called.append(True)
 
         with (
             patch("services.silo_service._get_vector_store", return_value=fake_store),
             patch(
                 "services.silo_service.SiloService.extract_documents_from_file",
-                return_value=_make_fake_docs(resource_id),
+                side_effect=_fake_extract,
             ),
         ):
             resp = client.post(
@@ -258,9 +264,9 @@ class TestReindexIdempotency:
             )
 
         assert resp.status_code == 500, (
-            f"Expected 500 when delete fails, got {resp.status_code}"
+            f"Expected 500 when indexing fails, got {resp.status_code}"
         )
-        assert not index_called, "index_documents must not be called when delete fails"
+        assert not delete_called, "swap delete must not run when indexing fails"
 
     def test_reindex_uses_correct_filter(
         self,
@@ -272,21 +278,23 @@ class TestReindexIdempotency:
         reindex_resource,
         reindex_session_patch,
     ):
-        """delete_documents is called with the resource_id filter for the correct resource."""
+        """The swap delete targets the resource_id and preserves the fresh index_batch."""
         db.flush()
 
         resource_id = reindex_resource.resource_id
         delete_calls: list = []
         fake_store = MagicMock()
-        fake_store.delete_documents.side_effect = (
-            lambda coll, ids, embedding_service=None: delete_calls.append(ids)
+        fake_store.delete_documents_excluding.side_effect = (
+            lambda coll, filter_metadata, exclude, embedding_service=None: delete_calls.append(
+                (filter_metadata, exclude)
+            )
         )
 
         with (
             patch("services.silo_service._get_vector_store", return_value=fake_store),
             patch(
                 "services.silo_service.SiloService.extract_documents_from_file",
-                return_value=_make_fake_docs(resource_id),
+                side_effect=_fake_extract,
             ),
         ):
             resp = client.post(
@@ -296,13 +304,13 @@ class TestReindexIdempotency:
 
         assert resp.status_code == 200
         assert len(delete_calls) == 1, (
-            f"Expected delete_documents called once, got {len(delete_calls)} calls"
+            f"Expected delete_documents_excluding called once, got {len(delete_calls)} calls"
         )
-        filter_arg = delete_calls[0]
-        assert "resource_id" in filter_arg, f"Expected resource_id filter, got {filter_arg}"
-        assert filter_arg["resource_id"].get("$eq") == resource_id, (
-            f"Filter resource_id mismatch: {filter_arg}"
+        filter_metadata, exclude = delete_calls[0]
+        assert filter_metadata.get("resource_id", {}).get("$eq") == resource_id, (
+            f"Filter resource_id mismatch: {filter_metadata}"
         )
+        assert "index_batch" in exclude, f"Expected index_batch in exclude, got {exclude}"
 
 
 class TestReindexAuthorization:

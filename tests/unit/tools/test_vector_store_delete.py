@@ -66,83 +66,102 @@ class TestQdrantStoreDeleteByFilter:
         mock_client.delete.assert_not_called()
         mock_client.scroll.assert_not_called()
 
+    def test_delete_excluding_adds_must_not_on_fresh_batch(self):
+        """delete_documents_excluding deletes the resource's chunks except the fresh batch."""
+        store, mock_client = self._make_store()
+
+        store.delete_documents_excluding(
+            "silo_1",
+            filter_metadata={"resource_id": {"$eq": 7}},
+            exclude={"index_batch": "abc123"},
+        )
+
+        mock_client.delete.assert_called_once()
+        from qdrant_client.models import FilterSelector
+
+        selector = mock_client.delete.call_args.kwargs["points_selector"]
+        assert isinstance(selector, FilterSelector)
+        must_not = selector.filter.must_not
+        assert any(
+            getattr(c, "key", None) == "index_batch"
+            and getattr(getattr(c, "match", None), "value", None) == "abc123"
+            for c in must_not
+        )
+
 
 class TestPGVectorStoreDeleteByFilter:
-    """PGVectorStore.delete_documents with a metadata-filter dict."""
+    """PGVectorStore.delete_documents with a metadata-filter dict (native SQL DELETE)."""
 
     def _make_store(self):
         from tools.vector_stores.pgvector_store import PGVectorStore
 
         store = PGVectorStore.__new__(PGVectorStore)
-        mock_db = MagicMock()
-        mock_db._async_engine = None
-        store.db = mock_db
-        store.engine = mock_db.engine
+        store.db = MagicMock()
         store.async_engine = None
+
+        # engine.begin() context manager yielding a connection that records execute().
+        self.mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__enter__.return_value = self.mock_conn
+        mock_engine.begin.return_value.__exit__.return_value = False
+        store.engine = mock_engine
         return store
 
-    def test_delete_single_batch(self):
-        """Resources with <=1000 chunks are cleared in one iteration."""
+    def test_delete_by_filter_issues_single_native_delete(self):
+        """A metadata-filter dict runs one DELETE, never an embedding/similarity_search loop."""
         store = self._make_store()
 
-        doc_ids = [f"doc-{i}" for i in range(50)]
-        fake_docs = [MagicMock(id=id_) for id_ in doc_ids]
-
-        mock_vs = MagicMock()
-        # First call returns docs; second call (after delete) returns empty
-        mock_vs.similarity_search.side_effect = [fake_docs, []]
-
-        with patch.object(store, "_get_vector_store", return_value=mock_vs):
+        with patch.object(store, "_get_vector_store") as mock_get_vs:
             store.delete_documents("silo_1", ids={"resource_id": {"$eq": 7}})
 
-        assert mock_vs.similarity_search.call_count == 2
-        mock_vs.delete.assert_called_once_with(ids=doc_ids)
+        mock_get_vs.assert_not_called()  # no embedding model is built for deletes
+        self.mock_conn.execute.assert_called_once()
+        sql_arg, params = self.mock_conn.execute.call_args.args
+        assert "DELETE FROM langchain_pg_embedding" in str(sql_arg)
+        assert params["name"] == "silo_1"
+        assert 7 in params.values() or "7" in params.values()
 
-    def test_delete_iterates_until_empty(self):
-        """Resources with >1000 chunks trigger multiple batched iterations."""
+    def test_delete_skips_on_empty_filter(self):
+        """An empty/None filter must not issue any SQL."""
         store = self._make_store()
+        store.delete_documents("silo_1", ids={})
+        store.delete_documents("silo_1", ids=None)
+        self.mock_conn.execute.assert_not_called()
 
-        batch_1 = [MagicMock(id=f"a{i}") for i in range(1000)]
-        batch_2 = [MagicMock(id=f"b{i}") for i in range(1000)]
-        batch_3 = [MagicMock(id=f"c{i}") for i in range(500)]
-
-        mock_vs = MagicMock()
-        mock_vs.similarity_search.side_effect = [batch_1, batch_2, batch_3, []]
-
-        with patch.object(store, "_get_vector_store", return_value=mock_vs):
-            store.delete_documents("silo_1", ids={"resource_id": {"$eq": 99}})
-
-        assert mock_vs.similarity_search.call_count == 4
-        assert mock_vs.delete.call_count == 3
-        mock_vs.delete.assert_any_call(ids=[d.id for d in batch_1])
-        mock_vs.delete.assert_any_call(ids=[d.id for d in batch_2])
-        mock_vs.delete.assert_any_call(ids=[d.id for d in batch_3])
-
-    def test_delete_raises_at_safety_cap(self):
-        """After 100 iterations without emptying, a RuntimeError is raised."""
+    def test_delete_by_id_list_uses_langchain_store(self):
+        """Direct list deletion still goes through the LangChain wrapper, not SQL."""
         store = self._make_store()
-
-        infinite_batch = [MagicMock(id=f"x{i}") for i in range(1000)]
         mock_vs = MagicMock()
-        mock_vs.similarity_search.return_value = infinite_batch
 
-        with patch.object(store, "_get_vector_store", return_value=mock_vs):
-            with pytest.raises(RuntimeError, match="could not empty filter"):
-                store.delete_documents("silo_1", ids={"resource_id": {"$eq": 1}})
-
-        assert mock_vs.similarity_search.call_count == 100
-        assert mock_vs.delete.call_count == 100
-
-    def test_delete_by_id_list_skips_iteration(self):
-        """Direct list deletion must not enter the iteration loop."""
-        store = self._make_store()
-
-        mock_vs = MagicMock()
         with patch.object(store, "_get_vector_store", return_value=mock_vs):
             store.delete_documents("silo_1", ids=["id-1", "id-2"])
 
         mock_vs.delete.assert_called_once_with(ids=["id-1", "id-2"])
-        mock_vs.similarity_search.assert_not_called()
+        self.mock_conn.execute.assert_not_called()
+
+    def test_delete_excluding_keeps_fresh_batch(self):
+        """delete_documents_excluding builds an IS DISTINCT FROM guard for the kept batch."""
+        store = self._make_store()
+
+        store.delete_documents_excluding(
+            "silo_1",
+            filter_metadata={"resource_id": {"$eq": 7}},
+            exclude={"index_batch": "abc123"},
+        )
+
+        self.mock_conn.execute.assert_called_once()
+        sql_arg, params = self.mock_conn.execute.call_args.args
+        sql = str(sql_arg)
+        assert "DELETE FROM langchain_pg_embedding" in sql
+        assert "IS DISTINCT FROM" in sql
+        assert params["exf0"] == "index_batch"
+        assert params["exv0"] == "abc123"
+
+    def test_delete_excluding_requires_filter(self):
+        """An empty candidate filter is rejected (would delete the whole collection)."""
+        store = self._make_store()
+        with pytest.raises(ValueError, match="filter_metadata is required"):
+            store.delete_documents_excluding("silo_1", filter_metadata={}, exclude={"index_batch": "x"})
 
 
 class TestPGVectorStoreStrForJsonb:

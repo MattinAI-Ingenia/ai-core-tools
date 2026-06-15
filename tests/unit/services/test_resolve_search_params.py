@@ -128,13 +128,14 @@ class TestCallerPrecedence:
         assert sp["score_threshold"] == pytest.approx(0.4)
 
     def test_caller_score_threshold_none_clears_agent_value(self):
-        """Explicit None in caller for score_threshold clears the agent's value."""
+        """Explicit None in caller for score_threshold clears the agent's value and
+        leaves no residual key (never forwarded as score_threshold=None to as_retriever)."""
         silo = _make_silo()
         agent = _make_agent(rag_score_threshold=0.7, silo=silo)
 
         sp, _ = resolve_search_params(agent, {"score_threshold": None})
 
-        assert sp.get("score_threshold") is None
+        assert "score_threshold" not in sp
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,36 @@ class TestAgentFallback:
         sp, _ = resolve_search_params(agent, {})
 
         assert "score_threshold" not in sp
+
+
+class TestThresholdFallback:
+    def test_threshold_search_without_value_downgrades_to_similarity(self):
+        """A threshold search with no threshold would silently no-op; the resolver
+        normalizes it to plain similarity instead."""
+        silo = _make_silo()
+        agent = _make_agent(
+            rag_search_type="similarity_score_threshold",
+            rag_score_threshold=None,
+            silo=silo,
+        )
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["search_type"] == "similarity"
+        assert "score_threshold" not in sp
+
+    def test_threshold_search_kept_when_value_present(self):
+        silo = _make_silo()
+        agent = _make_agent(
+            rag_search_type="similarity_score_threshold",
+            rag_score_threshold=0.6,
+            silo=silo,
+        )
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["search_type"] == "similarity_score_threshold"
+        assert sp["score_threshold"] == pytest.approx(0.6)
 
 
 # ---------------------------------------------------------------------------
