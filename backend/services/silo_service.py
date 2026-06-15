@@ -1934,7 +1934,7 @@ class SiloService:
         Returns chunks from lightrag_raw_data and graph data (entities/relationships)
         separately, without invoking any LLM synthesis.
         """
-        collection_name = COLLECTION_PREFIX + str(silo.id)
+        collection_name = COLLECTION_PREFIX + str(silo.silo_id)
         results_limit = limit if limit and limit > 0 else DEFAULT_SEARCH_LIMIT
         if results_limit > MAX_SEARCH_LIMIT:
             results_limit = MAX_SEARCH_LIMIT

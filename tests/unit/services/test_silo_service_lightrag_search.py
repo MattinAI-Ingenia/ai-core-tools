@@ -23,7 +23,7 @@ def _make_mock_doc(entities=None, relationships=None, chunks=None):
 
 def _make_mock_silo(silo_id=1):
     mock_silo = MagicMock()
-    mock_silo.id = silo_id
+    mock_silo.silo_id = silo_id
     mock_silo.embedding_service_id = 1
     mock_silo.embedding_service = MagicMock()
     mock_silo.vector_db_type = "LIGHTRAG"
