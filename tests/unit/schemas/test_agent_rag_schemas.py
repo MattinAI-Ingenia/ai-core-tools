@@ -210,3 +210,42 @@ class TestRagFixedFilters:
         ]
         obj = schema_fn(rag_fixed_filters=filters)
         assert len(obj.rag_fixed_filters) == 2
+
+
+# ---------------------------------------------------------------------------
+# RuntimeSearchParamsSchema — DoS guard for caller-supplied search params
+# ---------------------------------------------------------------------------
+
+class TestRuntimeSearchParams:
+    def _schema(self):
+        from schemas.agent_schemas import RuntimeSearchParamsSchema
+        return RuntimeSearchParamsSchema
+
+    def test_valid_params_pass(self):
+        self._schema()(k=20, search_type="mmr", score_threshold=0.5, fetch_k=50, lambda_mult=0.3)
+
+    def test_empty_passes(self):
+        self._schema()()
+
+    def test_filter_passthrough_accepted(self):
+        obj = self._schema()(filter={"region": "north"})
+        assert obj.filter == {"region": "north"}
+
+    @pytest.mark.parametrize("k", [0, 101, 100000])
+    def test_out_of_range_k_raises(self, k):
+        with pytest.raises(ValidationError):
+            self._schema()(k=k)
+
+    @pytest.mark.parametrize("fetch_k", [0, 101])
+    def test_out_of_range_fetch_k_raises(self, fetch_k):
+        with pytest.raises(ValidationError):
+            self._schema()(fetch_k=fetch_k)
+
+    def test_invalid_search_type_raises(self):
+        with pytest.raises(ValidationError):
+            self._schema()(search_type="bogus")
+
+    @pytest.mark.parametrize("value", [-0.1, 1.1])
+    def test_out_of_range_score_threshold_raises(self, value):
+        with pytest.raises(ValidationError):
+            self._schema()(score_threshold=value)

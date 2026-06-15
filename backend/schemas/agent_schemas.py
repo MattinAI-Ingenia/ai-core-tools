@@ -61,6 +61,43 @@ class RagConfigFieldsMixin(BaseModel):
         return validated
 
 
+class RuntimeSearchParamsSchema(BaseModel):
+    """Bounds for caller-supplied runtime search params on the public chat API.
+
+    Acts as a validation gate only: a DoS guard so an API-key holder cannot force a
+    huge retrieval (k/fetch_k) per turn. Tuning fields share the agent-config bounds;
+    `filter` values are whitelisted later in the retrieval pipeline. Unknown keys are
+    ignored here (they are dropped by ``resolve_search_params`` anyway).
+    """
+    k: Optional[int] = None
+    search_type: Optional[str] = None
+    score_threshold: Optional[float] = None
+    fetch_k: Optional[int] = None
+    lambda_mult: Optional[float] = None
+    filter: Optional[Dict[str, Any]] = None
+
+    @field_validator("k", "fetch_k")
+    @classmethod
+    def validate_positive_k(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1 <= v <= 100):
+            raise ValueError("must be between 1 and 100")
+        return v
+
+    @field_validator("search_type")
+    @classmethod
+    def validate_search_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _VALID_RAG_SEARCH_TYPES:
+            raise ValueError(f"must be one of {sorted(_VALID_RAG_SEARCH_TYPES)}")
+        return v
+
+    @field_validator("score_threshold", "lambda_mult")
+    @classmethod
+    def validate_unit_interval(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError("must be between 0 and 1")
+        return v
+
+
 # ==================== AGENT SCHEMAS ====================
 
 class AgentListItemSchema(BaseModel):
