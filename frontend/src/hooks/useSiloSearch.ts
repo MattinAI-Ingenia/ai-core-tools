@@ -6,6 +6,7 @@ import { DEFAULT_SEARCH_CONTROLS } from '../components/playground/SearchControls
 import type { SearchControlsValue } from '../components/playground/SearchControls';
 import type { SearchResult } from '../components/playground/ResultCard';
 import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
+import type { LightRAGGraphData } from '../types/streaming';
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -88,6 +89,9 @@ export interface SiloSearchState {
   reindexLoading: string | null;
   reindexMessage: { type: 'success' | 'error'; text: string } | null;
 
+  // LightRAG graph data from last search
+  lightragGraph: LightRAGGraphData | null;
+
   // Observability / history
   queryHistory: QueryHistoryEntry[];
   showHistory: boolean;
@@ -152,6 +156,7 @@ export function useSiloSearch(
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  const [lightragGraph, setLightragGraph] = useState<LightRAGGraphData | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [filterMetadata, setFilterMetadata] = useState<Record<string, any> | undefined>(undefined);
   const [minContentLength, setMinContentLength] = useState<number | null>(null);
@@ -279,7 +284,9 @@ export function useSiloSearch(
       setIsSearching(true);
       setSearchError(null);
       setSearchResults([]);
+      setLightragGraph(null);
       setHasSearched(true);
+      const isLightRAG = silo?.vector_db_type?.toUpperCase() === 'LIGHTRAG';
       const t0 = performance.now();
       const { data: response, serverMs } = await apiService.searchSiloDocumentsWithTiming(
         Number.parseInt(appId),
@@ -288,12 +295,13 @@ export function useSiloSearch(
         searchControls.limit,
         filterMetadata,
         {
-          searchType: searchControls.searchType,
-          scoreThreshold: searchControls.searchType === 'similarity_score_threshold' ? searchControls.scoreThreshold : undefined,
-          fetchK: searchControls.searchType === 'mmr' ? searchControls.fetchK : undefined,
-          lambdaMult: searchControls.searchType === 'mmr' ? searchControls.lambdaMult : undefined,
+          searchType: isLightRAG ? undefined : searchControls.searchType,
+          scoreThreshold: (!isLightRAG && searchControls.searchType === 'similarity_score_threshold') ? searchControls.scoreThreshold : undefined,
+          fetchK: (!isLightRAG && searchControls.searchType === 'mmr') ? searchControls.fetchK : undefined,
+          lambdaMult: (!isLightRAG && searchControls.searchType === 'mmr') ? searchControls.lambdaMult : undefined,
           minContentLength: minContentLength ?? undefined,
           maxContentLength: maxContentLength ?? undefined,
+          lightragQueryMode: isLightRAG ? searchControls.lightragQueryMode : undefined,
         },
       );
       const clientMs = Math.round(performance.now() - t0);
@@ -313,6 +321,7 @@ export function useSiloSearch(
         id: result.metadata?._id as string | undefined,
       }));
       setSearchResults(resultsWithIds);
+      setLightragGraph((response.lightrag_graph as LightRAGGraphData | null) ?? null);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Search failed');
       console.error('Error searching silo:', err);
@@ -516,6 +525,7 @@ export function useSiloSearch(
     isSearching,
     searchError,
     hasSearched,
+    lightragGraph,
     filterMetadata,
     minContentLength,
     setMinContentLength,
