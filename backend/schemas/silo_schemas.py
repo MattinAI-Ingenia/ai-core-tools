@@ -213,6 +213,7 @@ class SiloSearchSchema(BaseModel):
     lambda_mult: Optional[float] = None
     min_content_length: Optional[int] = None   # inclusive lower bound on chunk character count
     max_content_length: Optional[int] = None   # inclusive upper bound on chunk character count
+    lightrag_query_mode: Optional[Literal["local", "global", "hybrid", "mix", "naive", "bypass"]] = None
 
     @field_validator("search_type")
     @classmethod
