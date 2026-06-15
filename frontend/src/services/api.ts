@@ -1225,6 +1225,7 @@ class ApiService {
       lambdaMult?: number;
       minContentLength?: number;
       maxContentLength?: number;
+      lightragQueryMode?: string;
     },
   ) {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/search`, {
@@ -1233,7 +1234,8 @@ class ApiService {
         query,
         ...(limit !== undefined ? { limit } : {}),
         filter_metadata: filterMetadata,
-        ...(searchOptions?.searchType && searchOptions.searchType !== 'similarity' ? { search_type: searchOptions.searchType } : {}),
+        ...(searchOptions?.lightragQueryMode ? { lightrag_query_mode: searchOptions.lightragQueryMode } : {}),
+        ...(!searchOptions?.lightragQueryMode && searchOptions?.searchType && searchOptions.searchType !== 'similarity' ? { search_type: searchOptions.searchType } : {}),
         ...(searchOptions?.scoreThreshold !== undefined ? { score_threshold: searchOptions.scoreThreshold } : {}),
         ...(searchOptions?.fetchK !== undefined ? { fetch_k: searchOptions.fetchK } : {}),
         ...(searchOptions?.lambdaMult !== undefined ? { lambda_mult: searchOptions.lambdaMult } : {}),
@@ -1256,6 +1258,7 @@ class ApiService {
       lambdaMult?: number;
       minContentLength?: number;
       maxContentLength?: number;
+      lightragQueryMode?: string;
     },
   ): Promise<{ data: any; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
@@ -1263,7 +1266,8 @@ class ApiService {
       query,
       ...(limit !== undefined ? { limit } : {}),
       filter_metadata: filterMetadata,
-      ...(searchOptions?.searchType && searchOptions.searchType !== 'similarity'
+      ...(searchOptions?.lightragQueryMode ? { lightrag_query_mode: searchOptions.lightragQueryMode } : {}),
+      ...(!searchOptions?.lightragQueryMode && searchOptions?.searchType && searchOptions.searchType !== 'similarity'
         ? { search_type: searchOptions.searchType }
         : {}),
       ...(searchOptions?.scoreThreshold !== undefined
