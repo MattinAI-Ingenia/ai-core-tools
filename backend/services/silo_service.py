@@ -1933,6 +1933,7 @@ class SiloService:
         lambda_mult: Optional[float] = None,
         min_content_length: Optional[int] = None,
         max_content_length: Optional[int] = None,
+        lightrag_query_mode: Optional[str] = None,
         db: Session = None,
     ) -> Optional[Dict[str, Any]]:
         """
