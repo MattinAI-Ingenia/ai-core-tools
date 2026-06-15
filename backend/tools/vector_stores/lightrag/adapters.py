@@ -106,21 +106,22 @@ def is_lightrag_available() -> bool:
 def build_role_llm_configs(
     *,
     extract_service: AIService,
-    query_service: Optional[AIService] = None,
     keywords_service: Optional[AIService] = None,
     vlm_service: Optional[AIService] = None,
     temperature: float = 0.0,
 ) -> dict[str, "RoleLLMConfig"]:
     """Build a ``role_llm_configs`` dict for the ``LightRAG`` constructor.
 
-    Returns a mapping from LightRAG role name (``"extract" | "keyword" |
-    "query" | "vlm"``) to a :class:`RoleLLMConfig` containing the
-    ``llm_model_func`` callable for that role.
+    Returns a mapping from LightRAG role name (``"extract" | "keyword" | "vlm"``)
+    to a :class:`RoleLLMConfig` containing the ``llm_model_func`` callable for
+    that role.
 
     ``extract_service`` is mandatory — it is also used as the base
     ``llm_model_func`` fallback. The other roles default to ``None``
     (omitted from the dict) which tells LightRAG to reuse the base
-    ``llm_model_func`` automatically.
+    ``llm_model_func`` automatically. The query role is intentionally omitted
+    because ``only_need_context=True`` is always used and LightRAG falls back
+    to the base LLM for context assembly.
 
     LightRAG 1.5.0rc3 expects role keys in **lowercase** and the keyword
     role as singular ``"keyword"`` (not ``"keywords"``).
@@ -130,30 +131,28 @@ def build_role_llm_configs(
     if extract_service is None:
         raise ValueError("extract_service is required to build LightRAG role LLMs")
 
-    configs: dict[str, RoleLLMConfig] = {
-        'extract': RoleLLMConfig(
-            func=build_llm_model_func(extract_service, temperature=temperature),
-        ),
-    }
-
-    if query_service is not None:
-        configs['query'] = RoleLLMConfig(
-            func=build_llm_model_func(query_service, temperature=temperature),
+    def _role_config(service: "AIService") -> "RoleLLMConfig":
+        return RoleLLMConfig(
+            func=build_llm_model_func(service, temperature=temperature),
+            metadata={
+                "binding": getattr(service, "provider", None),
+                "model": getattr(service, "description", None),
+            },
         )
+
+    configs: dict[str, RoleLLMConfig] = {
+        'extract': _role_config(extract_service),
+    }
 
     # LightRAG uses "keyword" (singular), not "keywords".
     if keywords_service is not None:
-        configs['keyword'] = RoleLLMConfig(
-            func=build_llm_model_func(keywords_service, temperature=temperature),
-        )
+        configs['keyword'] = _role_config(keywords_service)
 
     # VLM is optional — omitting the key is cleaner than an entry with
     # func=None, because LightRAG's resolver treats a missing key as
     # "fall back to base" and a None func as an error.
     if vlm_service is not None:
-        configs['vlm'] = RoleLLMConfig(
-            func=build_llm_model_func(vlm_service, temperature=temperature),
-        )
+        configs['vlm'] = _role_config(vlm_service)
 
     return configs
 

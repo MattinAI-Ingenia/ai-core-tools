@@ -69,7 +69,6 @@ class RepositoryService:
         indexing_service_id: Optional[int] = None,
         db: Session = None,
         *,
-        query_service_id: Optional[int] = None,
         extract_service_id: Optional[int] = None,
         keywords_service_id: Optional[int] = None,
         vlm_service_id: Optional[int] = None,
@@ -83,7 +82,6 @@ class RepositoryService:
             vector_db_type: Optional vector database type
             indexing_service_id: Optional indexing AI service ID (legacy, prefer extract_service_id)
             db: Database session
-            query_service_id: LightRAG QUERY role AI service
             extract_service_id: LightRAG EXTRACT role AI service
             keywords_service_id: LightRAG KEYWORDS role AI service
             vlm_service_id: LightRAG VLM role AI service
@@ -113,7 +111,6 @@ class RepositoryService:
             'vector_db_type': resolved_vector_db_type,
             'lightrag_vector_db_type': lightrag_vector_db_type,
             'indexing_service_id': indexing_service_id,
-            'query_service_id': query_service_id,
             'extract_service_id': extract_service_id,
             'keywords_service_id': keywords_service_id,
             'vlm_service_id': vlm_service_id,
@@ -403,7 +400,6 @@ class RepositoryService:
         # Get the current embedding service ID and role service IDs from the repository's silo
         embedding_service_id = None
         indexing_service_id = None
-        query_service_id = None
         extract_service_id = None
         keywords_service_id = None
         vlm_service_id = None
@@ -416,7 +412,6 @@ class RepositoryService:
                 embedding_service_id = repo.silo.embedding_service.service_id
             if repo.silo.indexing_service_id:
                 indexing_service_id = repo.silo.indexing_service_id
-            query_service_id = getattr(repo.silo, 'query_service_id', None)
             extract_service_id = getattr(repo.silo, 'extract_service_id', None) or indexing_service_id
             keywords_service_id = getattr(repo.silo, 'keywords_service_id', None)
             vlm_service_id = getattr(repo.silo, 'vlm_service_id', None)
@@ -466,7 +461,6 @@ class RepositoryService:
             transcription_service_id=repo.transcription_service_id,
             video_ai_service_id=repo.video_ai_service_id,
             indexing_service_id=indexing_service_id,
-            query_service_id=query_service_id,
             extract_service_id=extract_service_id,
             keywords_service_id=keywords_service_id,
             vlm_service_id=vlm_service_id,
@@ -536,7 +530,6 @@ class RepositoryService:
             normalized_lightrag_vector_db_type,
             repo_data.indexing_service_id,
             db,
-            query_service_id=getattr(repo_data, 'query_service_id', None),
             extract_service_id=getattr(repo_data, 'extract_service_id', None),
             keywords_service_id=getattr(repo_data, 'keywords_service_id', None),
             vlm_service_id=getattr(repo_data, 'vlm_service_id', None),

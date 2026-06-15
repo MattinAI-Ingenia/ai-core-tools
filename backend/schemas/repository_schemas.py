@@ -46,7 +46,6 @@ class RepositoryDetailSchema(BaseModel):
     video_ai_service_id: Optional[int] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
     # LightRAG 2026.05 role-specific LLM configuration
-    query_service_id: Optional[int] = None
     extract_service_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None
@@ -66,7 +65,6 @@ class CreateRepositorySchema(BaseModel):
     video_ai_service_id: Optional[int] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
     # LightRAG 2026.05 role-specific LLM configuration
-    query_service_id: Optional[int] = None
     extract_service_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None

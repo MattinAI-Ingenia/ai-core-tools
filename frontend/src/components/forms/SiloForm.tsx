@@ -28,7 +28,6 @@ interface Silo {
   embedding_services?: { service_id: number; name: string; provider?: string; is_system?: boolean }[];
   vector_db_options?: VectorDbOption[];
   indexing_service_id?: number; // legacy alias for extract_service_id
-  query_service_id?: number;
   extract_service_id?: number;
   keywords_service_id?: number;
   vlm_service_id?: number;
@@ -57,7 +56,6 @@ interface SiloFormData {
   embedding_service_id?: number;
   vector_db_type?: string;
   indexing_service_id?: number; // legacy alias for extract_service_id
-  query_service_id?: number;
   extract_service_id?: number;
   keywords_service_id?: number;
   vlm_service_id?: number;
@@ -67,13 +65,7 @@ interface SiloFormData {
   lightrag_graph_context_enabled?: boolean;
 }
 
-const ROLE_SERVICE_FIELDS = [
-  'query_service_id',
-  'extract_service_id',
-  'keywords_service_id',
-  'vlm_service_id',
-] as const;
-type RoleServiceField = typeof ROLE_SERVICE_FIELDS[number];
+type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
 
 // Define the props for the component
 interface SiloFormProps {
@@ -92,14 +84,13 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     embedding_service_id: undefined,
     vector_db_type: 'PGVECTOR',
     indexing_service_id: undefined,
-    query_service_id: undefined,
     extract_service_id: undefined,
     keywords_service_id: undefined,
     vlm_service_id: undefined,
     lightrag_chunk_strategy: 'token_window',
     lightrag_chunk_token_size: 1200,
     lightrag_chunk_overlap_token_size: 100,
-    lightrag_graph_context_enabled: false
+    lightrag_graph_context_enabled: false,
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,14 +140,13 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       indexing_service_id: silo?.indexing_service_id || undefined,
       // LightRAG 2026.05 roles. Fall back to the legacy ``indexing_service_id``
       // for old silos that still only have the single-LLM column populated.
-      query_service_id: silo?.query_service_id || silo?.indexing_service_id || undefined,
       extract_service_id: silo?.extract_service_id || silo?.indexing_service_id || undefined,
       keywords_service_id: silo?.keywords_service_id || silo?.indexing_service_id || undefined,
       vlm_service_id: silo?.vlm_service_id || undefined,
       lightrag_chunk_strategy: silo?.lightrag_chunk_strategy || 'token_window',
       lightrag_chunk_token_size: silo?.lightrag_chunk_token_size || 1200,
       lightrag_chunk_overlap_token_size: silo?.lightrag_chunk_overlap_token_size || 100,
-      lightrag_graph_context_enabled: silo?.lightrag_graph_context_enabled || false
+      lightrag_graph_context_enabled: silo?.lightrag_graph_context_enabled || false,
     }));
   }, [silo]);
 
@@ -208,7 +198,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
 
     const intFields = [
       'embedding_service_id', 'output_parser_id', 'indexing_service_id',
-      'query_service_id', 'extract_service_id', 'keywords_service_id', 'vlm_service_id',
+      'extract_service_id', 'keywords_service_id', 'vlm_service_id',
       'lightrag_chunk_token_size', 'lightrag_chunk_overlap_token_size',
     ];
     if (intFields.includes(name)) {
@@ -217,23 +207,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       parsedValue = value.toUpperCase();
     }
 
-    setFormData(prev => {
-      const next = { ...prev, [name]: parsedValue };
-      // Query is the primary role — when it changes, propagate the value to
-      // Extract and Keywords if those slots are empty OR were matching the
-      // previous Query value (treat them as auto-filled). VLM is left alone
-      // because it requires a multimodal model.
-      if (name === 'query_service_id') {
-        const prevQuery = prev.query_service_id;
-        const autofillRoles: RoleServiceField[] = ['extract_service_id', 'keywords_service_id'];
-        for (const role of autofillRoles) {
-          if (!prev[role] || prev[role] === prevQuery) {
-            next[role] = parsedValue as number | undefined;
-          }
-        }
-      }
-      return next;
-    });
+    setFormData(prev => ({ ...prev, [name]: parsedValue }));
   };
 
   // Helper: get the model identifier for an AIService row used in the dropdown.
@@ -277,7 +251,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       };
       const payload = isEditing
         ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi,
-              query_service_id: _qsi, extract_service_id: _esi2, keywords_service_id: _ksi,
+              extract_service_id: _esi2, keywords_service_id: _ksi,
               vlm_service_id: _vsi, ...rest }) => rest)(normalized)
         : { ...normalized, vector_db_type: normalized.vector_db_type!.toUpperCase() };
       await onSubmit(payload);
@@ -453,14 +427,6 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                   QUERY is the primary role — selecting it auto-fills EXTRACT
                   and KEYWORDS. VLM is optional and must be multimodal. */}
               {([
-                {
-                  field: 'query_service_id' as RoleServiceField,
-                  role: 'query' as LightRAGRole,
-                  label: 'Query AI Service',
-                  required: true,
-                  helper: 'LLM that generates the final answer at query time. Recommended: large model (32B+, e.g. GPT-4o, Claude 3.5 Sonnet). Selecting this auto-fills Extract & Keywords.',
-                  placeholder: 'Select an AI service for query generation',
-                },
                 {
                   field: 'extract_service_id' as RoleServiceField,
                   role: 'extract' as LightRAGRole,

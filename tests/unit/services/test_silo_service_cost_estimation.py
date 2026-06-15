@@ -31,7 +31,6 @@ def _make_lightrag_silo(chunk_size=1200, model_name="gpt-4o"):
     silo.embedding_service.name = "text-embedding-3-small"
     # Role-specific services — None means "not configured, use fallback".
     silo.extract_service = None
-    silo.query_service = None
     silo.keywords_service = None
     silo.vlm_service = None
     return silo
@@ -54,10 +53,13 @@ def test_estimate_cost_basic_calculation():
 
     assert result["total_chunks"] == 2
     assert result["chunk_token_size"] == 1200
-    assert result["estimated_llm_calls"] == 4           # chunks * 2
+    assert result["estimated_llm_calls"] == 2           # chunks * (1 + 0 gleaning)
     assert result["estimated_embedding_calls"] == 2     # chunks * 1
-    assert result["estimated_input_tokens"] == 4800     # 4 calls * chunk_size
-    assert result["estimated_output_tokens"] == 1000    # 4 calls * 250 avg
+    # 2 calls * (avg_chunk_tokens 750 + 1400 overhead) = 4300
+    assert result["estimated_input_tokens"] == 4300
+    assert result["estimated_output_tokens"] == 1000    # 2 calls * 500 avg
+    # content tokens (1500) * (1 + 0.6 graph factor) = 2400
+    assert result["estimated_embedding_tokens"] == 2400
     assert result["warnings"] == []
 
 
@@ -183,7 +185,7 @@ def test_estimate_cost_multiple_documents():
         result = SiloService.estimate_indexing_cost(1, documents, db)
 
     assert result["total_chunks"] == 3  # 1 + 2
-    assert result["estimated_llm_calls"] == 6  # 3 chunks * 2
+    assert result["estimated_llm_calls"] == 3  # 3 chunks * (1 + 0 gleaning)
 
 
 def test_estimate_cost_per_doc_with_overlap():
@@ -237,10 +239,10 @@ def test_estimate_cost_with_gleaning():
 
     assert result["total_chunks"] == 2
     assert result["chunk_token_size"] == 1200
-    # 2 chunks * (2 + 2 gleaning) = 8 calls
-    assert result["estimated_llm_calls"] == 8
+    # 2 chunks * (1 + 2 gleaning) = 6 calls
+    assert result["estimated_llm_calls"] == 6
     assert result["estimated_embedding_calls"] == 2
-    # 8 calls * 1200 = 9600 input tokens
-    assert result["estimated_input_tokens"] == 9600
+    # 6 calls * (avg_chunk_tokens 750 + 1400 overhead) = 12900 input tokens
+    assert result["estimated_input_tokens"] == 12900
     assert result["warnings"] == []
 

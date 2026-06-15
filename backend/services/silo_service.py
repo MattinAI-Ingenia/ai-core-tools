@@ -224,10 +224,11 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
             db_obj, resolved_type,
             ai_service=extract_service,
             embedding_service=silo.embedding_service,
-            query_service=getattr(silo, 'query_service', None),
             keywords_service=getattr(silo, 'keywords_service', None),
             vlm_service=getattr(silo, 'vlm_service', None),
             lightrag_vector_db_type=getattr(silo, 'lightrag_vector_db_type', None) or 'QDRANT',
+            lightrag_chunk_token_size=getattr(silo, 'lightrag_chunk_token_size', None),
+            lightrag_chunk_overlap_token_size=getattr(silo, 'lightrag_chunk_overlap_token_size', None),
         )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
@@ -250,6 +251,25 @@ _WORD_RE = re.compile(r'[^\W\d_]{3,}', re.UNICODE)
 # e.g. "V I T O R I A" or "p a s a d o". Used to detect and collapse
 # spaced-out OCR output back into normal words.
 _SPACED_WORD_RE = re.compile(r'[^\W\d_](?: [^\W\d_])+', re.UNICODE)
+
+
+def _num_token_chunks(text: str, chunk_token_size: int, overlap_token_size: int) -> int:
+    """Approximate how many token-chunks LightRAG will produce for *text*.
+
+    Mirrors LightRAG's token-window chunking. Token count is approximated from
+    characters (chars/4) with a 1.25x correction for whitespace/punctuation/
+    special tokens. Used both for progress chunk-counting and cost estimation
+    so the two stay consistent.
+    """
+    if not text:
+        return 0
+    doc_tokens = int((len(text) / 4) * 1.25)
+    if overlap_token_size >= chunk_token_size or overlap_token_size == 0:
+        return max(1, math.ceil(doc_tokens / chunk_token_size))
+    stride = chunk_token_size - overlap_token_size
+    if doc_tokens <= chunk_token_size:
+        return 1
+    return 1 + math.ceil((doc_tokens - chunk_token_size) / stride)
 
 
 def _collapse_spaced_letters(line: str) -> str:
@@ -373,7 +393,7 @@ class SiloService:
             )
     
     @staticmethod
-    def get_silo_retriever(silo_id: int, search_params=None, **kwargs) -> Optional[VectorStoreRetriever]:
+    def get_silo_retriever(silo_id: int, search_params=None, retrieval_config=None, **kwargs) -> Optional[VectorStoreRetriever]:
         """
         Get retriever for a silo with its corresponding embedding service
         
@@ -537,7 +557,7 @@ class SiloService:
         # Convert string values to int where needed
         for field in [
             'silo_id', 'app_id', 'embedding_service_id', 'indexing_service_id',
-            'query_service_id', 'extract_service_id', 'keywords_service_id', 'vlm_service_id',
+            'extract_service_id', 'keywords_service_id', 'vlm_service_id',
         ]:
             if field in silo_data and silo_data[field] and isinstance(silo_data[field], str):
                 try:
@@ -594,12 +614,11 @@ class SiloService:
             if silo.vector_db_type == 'LIGHTRAG' and not silo_id:
                 has_extract_llm = (
                     silo_data.get('extract_service_id')
-                    or silo_data.get('query_service_id')
                     or silo_data.get('indexing_service_id')  # legacy
                 )
                 if not has_extract_llm:
                     raise ValidationError(
-                        "LightRAG silos require at least a Query or Extract AI service"
+                        "LightRAG silos require at least an Extract AI service"
                     )
                 if not silo_data.get('embedding_service_id'):
                     raise ValidationError("LightRAG silos require an embedding_service_id")
@@ -616,7 +635,6 @@ class SiloService:
             if not silo_id:
                 role_fields = (
                     'indexing_service_id',
-                    'query_service_id',
                     'extract_service_id',
                     'keywords_service_id',
                     'vlm_service_id',
@@ -664,10 +682,6 @@ class SiloService:
                 logger.info(f"Setting metadata_definition_id from fallback to: {silo_data['metadata_definition_id']}")
                 silo.metadata_definition_id = silo_data['metadata_definition_id']
             
-            # use_agent_as_query is mutable (can be toggled on existing silos)
-            if 'use_agent_as_query' in silo_data and silo_data['use_agent_as_query'] is not None:
-                silo.use_agent_as_query = bool(silo_data['use_agent_as_query'])
-
             # Update silo attributes
             SiloService._update_silo(silo, silo_data)
             
@@ -865,13 +879,16 @@ class SiloService:
         logger.info(f"Documentos indexados correctamente en silo {silo_id}")
 
     @staticmethod
-    def extract_documents_from_file(file_path: str, file_extension: str, base_metadata: dict = None):
+    def extract_documents_from_file(file_path: str, file_extension: str, base_metadata: dict = None, split: bool = True):
         """
-        Extracts and splits documents from a file, attaching base metadata to each chunk.
+        Extracts (and optionally splits) documents from a file, attaching base metadata.
         Args:
             file_path: Path to the file to extract from
             file_extension: File extension (e.g., '.pdf', '.docx', '.txt')
             base_metadata: Metadata dict to attach to each document
+            split: When True (default, for PGVector/Qdrant), split into ~1000-char
+                chunks. When False (LightRAG), return one Document per page/file so
+                LightRAG applies its own token-based chunking (``lightrag_chunk_token_size``).
         Returns:
             List[Document]: List of Document objects
         """
@@ -894,8 +911,14 @@ class SiloService:
             raise ValueError(f"Unsupported file type: {file_extension}")
 
         pages = loader.load()
-        text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        docs = text_splitter.split_documents(pages)
+        if split:
+            text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            docs = text_splitter.split_documents(pages)
+        else:
+            # LightRAG path: keep one Document per page/file so LightRAG can
+            # chunk by its own configured token size instead of being fed
+            # pre-split text (which would bypass lightrag_chunk_token_size).
+            docs = pages
 
         # Clean known PDF extraction artifacts (e.g. @@@@, 64/64/64/...) from
         # each chunk's content, then discard chunks that are empty or still
@@ -1062,8 +1085,24 @@ class SiloService:
                 path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), resource_with_relations.uri)
 
             file_extension = os.path.splitext(resource_with_relations.uri)[1].lower()
-            docs = SiloService.extract_documents_from_file(path, file_extension, {})
-            return len(docs) if docs else 0
+            silo = resource_with_relations.repository.silo
+            is_lightrag = getattr(silo, 'vector_db_type', None) == 'LIGHTRAG'
+
+            docs = SiloService.extract_documents_from_file(
+                path, file_extension, {}, split=not is_lightrag,
+            )
+            if not docs:
+                return 0
+            if not is_lightrag:
+                return len(docs)
+            # LightRAG chunks each page/file internally by token size — count
+            # those token-chunks so progress math matches the real run.
+            chunk_size = silo.lightrag_chunk_token_size or 1200
+            overlap = silo.lightrag_chunk_overlap_token_size or 0
+            return sum(
+                _num_token_chunks(getattr(d, 'page_content', ''), chunk_size, overlap)
+                for d in docs
+            )
         except Exception:
             return 0
         finally:
@@ -1109,7 +1148,12 @@ class SiloService:
                 base_metadata["folder_path"] = ""
                 base_metadata["ref"] = os.path.join(str(resource_with_relations.repository_id), resource_with_relations.uri)
 
-            docs = SiloService.extract_documents_from_file(path, file_extension, base_metadata)
+            # LightRAG chunks internally by token size, so feed it whole
+            # pages/files; other backends still need pre-split chunks.
+            _is_lightrag = getattr(resource_with_relations.repository.silo, 'vector_db_type', None) == 'LIGHTRAG'
+            docs = SiloService.extract_documents_from_file(
+                path, file_extension, base_metadata, split=not _is_lightrag,
+            )
 
             if not docs:
                 logger.warning(f"No content extracted from resource {resource_with_relations.resource_id} ({resource_with_relations.uri}). The file may be empty or contain only images/scans without text.")
@@ -1813,7 +1857,6 @@ class SiloService:
                 metadata_definition_id=silo.metadata_definition_id,
                 embedding_service_id=silo.embedding_service_id,
                 indexing_service_id=silo.indexing_service_id,
-                query_service_id=getattr(silo, 'query_service_id', None),
                 extract_service_id=getattr(silo, 'extract_service_id', None) or silo.indexing_service_id,
                 keywords_service_id=getattr(silo, 'keywords_service_id', None),
                 vlm_service_id=getattr(silo, 'vlm_service_id', None),
@@ -1822,7 +1865,6 @@ class SiloService:
                 lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
                 lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
                 lightrag_graph_context_enabled=silo.lightrag_graph_context_enabled,
-                use_agent_as_query=getattr(silo, 'use_agent_as_query', False),
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -1859,7 +1901,6 @@ class SiloService:
             'vector_db_type': getattr(silo_data, 'vector_db_type', None),
             'lightrag_vector_db_type': getattr(silo_data, 'lightrag_vector_db_type', None),
             'indexing_service_id': getattr(silo_data, 'indexing_service_id', None),
-            'query_service_id': getattr(silo_data, 'query_service_id', None),
             'extract_service_id': getattr(silo_data, 'extract_service_id', None),
             'keywords_service_id': getattr(silo_data, 'keywords_service_id', None),
             'vlm_service_id': getattr(silo_data, 'vlm_service_id', None),
@@ -1867,7 +1908,6 @@ class SiloService:
             'lightrag_chunk_token_size': getattr(silo_data, 'lightrag_chunk_token_size', None),
             'lightrag_chunk_overlap_token_size': getattr(silo_data, 'lightrag_chunk_overlap_token_size', None),
             'lightrag_graph_context_enabled': getattr(silo_data, 'lightrag_graph_context_enabled', None),
-            'use_agent_as_query': getattr(silo_data, 'use_agent_as_query', None),
         }
         
         # Create or update using the existing service
@@ -2034,28 +2074,19 @@ class SiloService:
         chunk_overlap_token_size = silo.lightrag_chunk_overlap_token_size or 0
         chunk_strategy = getattr(silo, 'lightrag_chunk_strategy', None)
 
-        # Calculate chunks per document, then sum.
+        # Calculate chunks and total content tokens per document, then sum.
         # Tokenization adjustment: actual token count is typically 10-25% higher than
         # the rough 4-char-per-token estimate, due to whitespace, punctuation, and
-        # special tokens. Apply 1.25x multiplier for more accurate estimation.
+        # special tokens. The 1.25x multiplier lives inside ``_num_token_chunks``.
+        # Note: documents here are whole pages/files (split=False), so this mirrors
+        # LightRAG's own token-window chunking by chunk_token_size.
         num_chunks = 0
+        total_content_tokens = 0
         for doc in documents:
             doc_chars = len(doc.get('content', ''))
-            doc_tokens = int((doc_chars / 4) * 1.25)
+            total_content_tokens += int((doc_chars / 4) * 1.25)
 
-            if chunk_overlap_token_size >= chunk_token_size:
-                # Edge case: overlap >= chunk size (invalid config but handle gracefully)
-                doc_chunks = max(1, math.ceil(doc_tokens / chunk_token_size))
-            elif chunk_overlap_token_size == 0:
-                # No overlap: ceil(tokens / chunk_size)
-                doc_chunks = max(1, math.ceil(doc_tokens / chunk_token_size))
-            else:
-                # With overlap: stride = chunk_size - overlap
-                stride = chunk_token_size - chunk_overlap_token_size
-                if doc_tokens <= chunk_token_size:
-                    doc_chunks = 1
-                else:
-                    doc_chunks = 1 + math.ceil((doc_tokens - chunk_token_size) / stride)
+            doc_chunks = _num_token_chunks(doc.get('content', ''), chunk_token_size, chunk_overlap_token_size)
 
             # Adjust for chunk strategy per document
             if chunk_strategy == "split_only":
@@ -2066,8 +2097,10 @@ class SiloService:
         import config
         max_gleaning = config.ENTITY_EXTRACT_MAX_GLEANING
 
-        # extraction_calls = entity extraction (1 + max_gleaning) + relationship extraction (1)
-        extraction_calls = num_chunks * (2 + max_gleaning)
+        # LightRAG extracts entities AND relationships in a SINGLE LLM call per
+        # chunk (one JSON response with both), plus one extra call per gleaning
+        # pass. So calls/chunk = 1 + max_gleaning (not 2 + max_gleaning).
+        extraction_calls = num_chunks * (1 + max_gleaning)
         embedding_calls = num_chunks
         # Fixed system-prompt overhead per LightRAG extraction call: the entity_extraction_system_prompt
         # template + 2 few-shot examples adds ~1,400 tokens on top of the chunk content every call.
@@ -2076,9 +2109,20 @@ class SiloService:
         _out_per_call_min = 300
         _out_per_call_max = 800
 
+        # Average real chunk size in tokens (last chunk of a doc is smaller than
+        # chunk_token_size), used for the per-call content portion.
+        avg_chunk_tokens = (total_content_tokens / num_chunks) if num_chunks else chunk_token_size
+
         estimated_llm_calls = extraction_calls
-        estimated_input_tokens = extraction_calls * (chunk_token_size + _prompt_overhead_tokens)
-        estimated_output_tokens = extraction_calls * _out_per_call_avg
+        estimated_input_tokens = int(extraction_calls * (avg_chunk_tokens + _prompt_overhead_tokens))
+        estimated_output_tokens = int(extraction_calls * _out_per_call_avg)
+
+        # Embedding tokens = chunk embeddings (≈ all content) + the entity and
+        # relationship description embeddings LightRAG writes to the vector store.
+        # The graph contribution is approximated as a fraction of content tokens
+        # (entity/relationship descriptions are derived from the chunk text).
+        _GRAPH_EMB_FACTOR = 0.6
+        estimated_embedding_tokens = int(total_content_tokens * (1 + _GRAPH_EMB_FACTOR))
 
         estimated_cost_min = None
         estimated_cost_max = None
@@ -2122,7 +2166,7 @@ class SiloService:
 
         if llm_price is not None:
             in_price, out_price = llm_price
-            emb_tokens = num_chunks * chunk_token_size
+            emb_tokens = estimated_embedding_tokens
             emb_cost = (emb_tokens * emb_price / 1_000_000) if emb_price is not None else 0.0
 
             llm_input_cost = estimated_input_tokens * in_price / 1_000_000
@@ -2144,31 +2188,6 @@ class SiloService:
         llm_workers = getattr(silo, 'llm_model_max_sync', 4) or 4
         embedding_workers = getattr(silo, 'embedding_model_max_sync', 8) or 8
         overhead_factor = 1.1
-        fixed_overhead_s = 8
-
-        # Default envelope tuned from observed local runs; historical metrics
-        # below can further refine the estimate for an already-used silo.
-        llm_throughput_opt = 180.0
-        llm_throughput_pess = 70.0
-        embedding_throughput_opt = 1200.0
-        embedding_throughput_pess = 350.0
-
-        # Phase 1 — extraction (initial + gleaning, parallelised across chunks)
-        llm_tokens_per_chunk = (chunk_token_size + _prompt_overhead_tokens) * (2 + max_gleaning)  # initial + gleaning passes
-        llm_s_per_chunk_opt = (llm_tokens_per_chunk / llm_throughput_opt) * overhead_factor
-        llm_s_per_chunk_pess = (llm_tokens_per_chunk / llm_throughput_pess) * overhead_factor
-        llm_wall_s_opt = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_opt
-        llm_wall_s_pess = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_pess
-
-        # Embedding (parallel to LLM, but we take the max wall time)
-        emb_tokens_total = num_chunks * chunk_token_size
-        emb_raw_s_opt = (emb_tokens_total / embedding_throughput_opt) * overhead_factor
-        emb_raw_s_pess = (emb_tokens_total / embedding_throughput_pess) * overhead_factor
-        emb_wall_s_opt = emb_raw_s_opt / max(1, embedding_workers)
-        emb_wall_s_pess = emb_raw_s_pess / max(1, embedding_workers)
-
-        estimated_indexing_time_min = fixed_overhead_s + max(llm_wall_s_opt, emb_wall_s_opt)
-        estimated_indexing_time_max = fixed_overhead_s + max(llm_wall_s_pess, emb_wall_s_pess)
 
         successful_metrics = (
             db.query(IndexingMetric)
@@ -2182,6 +2201,36 @@ class SiloService:
             .limit(10)
             .all()
         )
+
+        # Cold start: the first indexing into a silo also creates the Neo4j
+        # database + full-text/B-tree indexes, the Qdrant collections and
+        # initialises LightRAG storages — tens of seconds that a warm silo
+        # (existing successful runs) no longer pays.
+        fixed_overhead_s = 8 if successful_metrics else 30
+
+        # Default envelope tuned from observed local runs; historical metrics
+        # below can further refine the estimate for an already-used silo.
+        llm_throughput_opt = 180.0
+        llm_throughput_pess = 70.0
+        embedding_throughput_opt = 1200.0
+        embedding_throughput_pess = 350.0
+
+        # Phase 1 — extraction (1 call/chunk + gleaning passes, parallelised across chunks)
+        llm_tokens_per_chunk = (avg_chunk_tokens + _prompt_overhead_tokens) * (1 + max_gleaning)
+        llm_s_per_chunk_opt = (llm_tokens_per_chunk / llm_throughput_opt) * overhead_factor
+        llm_s_per_chunk_pess = (llm_tokens_per_chunk / llm_throughput_pess) * overhead_factor
+        llm_wall_s_opt = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_opt
+        llm_wall_s_pess = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_pess
+
+        # Embedding (parallel to LLM, but we take the max wall time)
+        emb_tokens_total = estimated_embedding_tokens
+        emb_raw_s_opt = (emb_tokens_total / embedding_throughput_opt) * overhead_factor
+        emb_raw_s_pess = (emb_tokens_total / embedding_throughput_pess) * overhead_factor
+        emb_wall_s_opt = emb_raw_s_opt / max(1, embedding_workers)
+        emb_wall_s_pess = emb_raw_s_pess / max(1, embedding_workers)
+
+        estimated_indexing_time_min = fixed_overhead_s + max(llm_wall_s_opt, emb_wall_s_opt)
+        estimated_indexing_time_max = fixed_overhead_s + max(llm_wall_s_pess, emb_wall_s_pess)
         if successful_metrics:
             observed_total_tokens = sum(metric.total_tokens or 0 for metric in successful_metrics)
             observed_total_duration = sum(metric.duration_seconds or 0 for metric in successful_metrics)
@@ -2199,7 +2248,6 @@ class SiloService:
         # Emit per-role warnings for every configured role service.
         role_services = {
             'extract':  extract_service,
-            'query':    getattr(silo, 'query_service', None),
             'keywords': getattr(silo, 'keywords_service', None),
             'vlm':      getattr(silo, 'vlm_service', None),
         }
@@ -2218,6 +2266,7 @@ class SiloService:
             "estimated_embedding_calls": embedding_calls,
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,
+            "estimated_embedding_tokens": estimated_embedding_tokens,
             "estimated_cost_min": estimated_cost_min,
             "estimated_cost_max": estimated_cost_max,
             "currency": currency,

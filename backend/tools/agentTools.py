@@ -241,6 +241,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     if agent.has_memory:
         max_tokens = agent.memory_max_tokens or 4000
         max_messages = agent.memory_max_messages or 20
+        summarization_llm = llm
         from models.agent import DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
         trim_tokens = agent.memory_summarize_threshold or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
         if summarization_assoc_config is not None:
@@ -249,6 +250,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             # Use 4000 as fallback, not agent.memory_summarize_threshold, to avoid inheriting unrelated agent settings
             trim_tokens = summarization_assoc_config.get('trim_tokens', 4000)
 
+            summarization_llm = llm
             summarization_model_value = summarization_assoc_config.get('summarization_model', 'agent_llm')
             if summarization_model_value and summarization_model_value != 'agent_llm':
                 try:
@@ -488,12 +490,12 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             middleware=middleware or [],
         )
 
+    langsmith_config = None  # TODO: build from agent.app via resolve_langsmith_settings
+
     # Add logging for the created agent
     logger.info(f"Created agent with {len(tools)} tools")
     logger.info(f"Memory enabled: {agent.has_memory}")
     logger.info(f"Output parser: {agent.output_parser_id is not None}")
-
-    return agent_chain, mcp_client
     logger.info(f"LangSmith configured: {langsmith_config is not None}")
     logger.info(f"Monitoring enabled: {monitoring_handler is not None}")
 

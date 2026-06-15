@@ -18,13 +18,12 @@ interface RepositoryFormData {
   transcription_service_id?: number;
   video_ai_service_id?: number;
   indexing_service_id?: number; // legacy alias for extract_service_id
-  query_service_id?: number;
   extract_service_id?: number;
   keywords_service_id?: number;
   vlm_service_id?: number;
 }
 
-type RoleServiceField = 'query_service_id' | 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
+type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
 
 interface EmbeddingService {
   service_id: number;
@@ -67,7 +66,6 @@ const RepositoryFormPage: React.FC = () => {
     transcription_service_id: undefined,
     video_ai_service_id: undefined,
     indexing_service_id: undefined,
-    query_service_id: undefined,
     extract_service_id: undefined,
     keywords_service_id: undefined,
     vlm_service_id: undefined,
@@ -125,7 +123,6 @@ const RepositoryFormPage: React.FC = () => {
           transcription_service_id: repository.transcription_service_id ?? undefined,
           video_ai_service_id: repository.video_ai_service_id ?? undefined,
           indexing_service_id: repository.indexing_service_id ?? undefined,
-          query_service_id: repository.query_service_id ?? repository.indexing_service_id ?? undefined,
           extract_service_id: repository.extract_service_id ?? repository.indexing_service_id ?? undefined,
           keywords_service_id: repository.keywords_service_id ?? repository.indexing_service_id ?? undefined,
           vlm_service_id: repository.vlm_service_id ?? undefined,
@@ -180,9 +177,9 @@ const RepositoryFormPage: React.FC = () => {
         return;
       }
 
-      const hasExtractLlm = formData.extract_service_id || formData.query_service_id || formData.indexing_service_id;
+      const hasExtractLlm = formData.extract_service_id || formData.indexing_service_id;
       if (!hasExtractLlm) {
-        setError('LightRAG repositories require at least a Query or Extract AI service');
+        setError('LightRAG repositories require at least an Extract AI service');
         return;
       }
       // Block VLM if not multimodal
@@ -212,7 +209,6 @@ const RepositoryFormPage: React.FC = () => {
       video_ai_service_id: formData.video_ai_service_id,
       // Mirror extract → legacy indexing_service_id for backward compat.
       indexing_service_id: formData.extract_service_id || formData.indexing_service_id,
-      query_service_id: formData.query_service_id,
       extract_service_id: formData.extract_service_id,
       keywords_service_id: formData.keywords_service_id,
       vlm_service_id: formData.vlm_service_id,
@@ -400,14 +396,6 @@ const RepositoryFormPage: React.FC = () => {
             <>
               {([
                 {
-                  field: 'query_service_id' as RoleServiceField,
-                  role: 'query' as LightRAGRole,
-                  label: 'Query AI Service',
-                  required: true,
-                  helper: 'LLM that generates the final answer at query time. Recommended: large model (32B+). Selecting this auto-fills Extract & Keywords.',
-                  placeholder: 'Select an AI service for query generation',
-                },
-                {
                   field: 'extract_service_id' as RoleServiceField,
                   role: 'extract' as LightRAGRole,
                   label: 'Extract AI Service',
@@ -444,23 +432,10 @@ const RepositoryFormPage: React.FC = () => {
                     </label>
                     <select
                       id={field}
-                      value={value || ''}
+                      value={value?.toString() || ''}
                       onChange={(e) => {
                         const parsed = e.target.value ? Number.parseInt(e.target.value, 10) : undefined;
-                        setFormData(prev => {
-                          const next = { ...prev, [field]: parsed };
-                          // Auto-fill Extract and Keywords when Query changes
-                          if (field === 'query_service_id') {
-                            const prevQuery = prev.query_service_id;
-                            if (!prev.extract_service_id || prev.extract_service_id === prevQuery) {
-                              next.extract_service_id = parsed;
-                            }
-                            if (!prev.keywords_service_id || prev.keywords_service_id === prevQuery) {
-                              next.keywords_service_id = parsed;
-                            }
-                          }
-                          return next;
-                        });
+                        setFormData(prev => ({ ...prev, [field]: parsed }));
                       }}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                       required={required}

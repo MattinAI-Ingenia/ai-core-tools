@@ -10,6 +10,8 @@ import type { PanelFile } from './AttachedFilesPanel';
 import MediaUploadModal from './MediaUploadModal';
 import VideoPlayer from './VideoPlayer';
 import type { VideoTimestamp } from './VideoPlayer';
+import LightRAGGraphBubble from './LightRAGGraphBubble';
+import type { LightRAGGraphData } from '../../types/streaming';
 
 interface Message {
   id: string;
@@ -17,6 +19,7 @@ interface Message {
   content: string;
   timestamp: Date;
   files?: string[];
+  lightragGraph?: LightRAGGraphData | null;
 }
 
 /** Shape returned by the API for each history message. */
@@ -390,6 +393,7 @@ function ChatInterface({
         type: 'agent',
         content: responseContent,
         timestamp: new Date(),
+        lightragGraph: result.lightragGraph,
       };
       // Commit the message and release the streaming hold in the same batch
       setMessages((prev) => [...prev, agentMsg]);
@@ -1012,6 +1016,9 @@ function ChatInterface({
                             title={readyVideoMedia?.name}
                             isAudio={readyVideoMedia?.media_type === 'audio'}
                           />
+                        )}
+                        {message.lightragGraph && (
+                          <LightRAGGraphBubble graphData={message.lightragGraph} />
                         )}
                         <div className="mt-1">
                           <span className="text-xs text-gray-400 dark:text-gray-500">

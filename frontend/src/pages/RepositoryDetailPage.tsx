@@ -967,13 +967,13 @@ const RepositoryDetailPage: React.FC = () => {
                     {filteredResources.map((resource) => (
                       <div
                         key={resource.resource_id}
-                        className="px-6 py-4 flex items-center justify-between"
+                        className="px-6 py-4 flex items-center justify-between min-w-0"
                       >
-                        <div className="flex items-center gap-4">
-                          <div className="bg-gray-100 p-2 rounded-lg"><FileText className="w-4 h-4" /></div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <h3 className="font-medium text-gray-900">
+                        <div className="flex items-center gap-4 min-w-0 flex-1">
+                          <div className="bg-gray-100 p-2 rounded-lg shrink-0"><FileText className="w-4 h-4" /></div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <h3 className="font-medium text-gray-900 truncate min-w-0" title={resource.name}>
                                 {resource.name}
                               </h3>
                               {resource.status === 'pending' && (
@@ -1014,7 +1014,7 @@ const RepositoryDetailPage: React.FC = () => {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 shrink-0 ml-4">
                           {canEdit && (
                             <button
                               onClick={() => handleMoveResource(resource)}
@@ -1135,22 +1135,26 @@ const RepositoryDetailPage: React.FC = () => {
               <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.chunk_token_size)} tokens</p>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">LLM Calls</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_llm_calls)}</p>
+              <p className="text-xs uppercase tracking-wide text-gray-500">LLM Tokens</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">
+                {formatEstimateValue(
+                  (uploadEstimate?.estimated_input_tokens ?? 0) + (uploadEstimate?.estimated_output_tokens ?? 0)
+                )}
+              </p>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Calls</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_embedding_calls)}</p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Input Tokens</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_input_tokens)}</p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Output Tokens</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.estimated_output_tokens)}</p>
+              <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Tokens</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">
+                {formatEstimateValue(
+                  (uploadEstimate?.estimated_embedding_calls ?? 0) * (uploadEstimate?.chunk_token_size ?? 0)
+                )}
+              </p>
             </div>
           </div>
+
+          <p className="text-xs text-gray-500">
+            These are upper-bound estimates. Actual cost depends on the number of entities extracted per chunk and may vary.
+          </p>
 
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             <p>

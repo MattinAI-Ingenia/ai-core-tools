@@ -169,7 +169,9 @@ class AgentExecutionService:
                     "file_path": file_ref.file_path,
                 })
 
-        # 6. Get / create conversation for memory-enabled agents
+        # 6. Get / create conversation
+        # Memory-enabled agents use the conversation for checkpointing + message count.
+        # Stateless agents still need the conversation object to update the message count.
         session = None
         conversation = None
         if agent.has_memory:
@@ -210,6 +212,17 @@ class AgentExecutionService:
                     user_context=user_context,
                     conversation_id=session_suffix,
                 )
+
+        # For stateless agents, still load the conversation (if provided) so that
+        # _finalize_turn can increment the message count.
+        if not agent.has_memory and conversation_id and conversation is None:
+            from services.conversation_service import ConversationService
+            conversation = ConversationService.get_conversation(
+                db=db,
+                conversation_id=conversation_id,
+                user_context=user_context,
+                agent_id=agent_id,
+            )
 
         # 7. Re-query agent with all relationships eagerly loaded
         fresh_agent = self.agent_execution_repo.get_agent_with_relationships(db, agent_id)

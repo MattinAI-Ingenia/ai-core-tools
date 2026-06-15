@@ -156,8 +156,9 @@ class VectorStoreFactory:
             db=db,
             ai_service=ai_service,
             embedding_service=embedding_service,
-            query_service=kwargs.get('query_service'),
             keywords_service=kwargs.get('keywords_service'),
             vlm_service=kwargs.get('vlm_service'),
             lightrag_vector_db_type=kwargs.get('lightrag_vector_db_type'),
+            lightrag_chunk_token_size=kwargs.get('lightrag_chunk_token_size'),
+            lightrag_chunk_overlap_token_size=kwargs.get('lightrag_chunk_overlap_token_size'),
         )

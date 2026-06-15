@@ -34,7 +34,6 @@ class SiloDetailSchema(BaseModel):
     embedding_service_id: Optional[int] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
     # LightRAG 2026.05 role-specific LLM configuration
-    query_service_id: Optional[int] = None
     extract_service_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None
@@ -42,7 +41,6 @@ class SiloDetailSchema(BaseModel):
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
     lightrag_graph_context_enabled: Optional[bool] = None
-    use_agent_as_query: bool = False
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -66,7 +64,6 @@ class CreateSiloSchema(BaseModel):
     lightrag_vector_db_type: Optional[str] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
     # LightRAG 2026.05 role-specific LLM configuration
-    query_service_id: Optional[int] = None
     extract_service_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None
@@ -74,7 +71,6 @@ class CreateSiloSchema(BaseModel):
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
     lightrag_graph_context_enabled: Optional[bool] = None
-    use_agent_as_query: bool = False
 
 
 class UpdateSiloSchema(BaseModel):
@@ -83,7 +79,6 @@ class UpdateSiloSchema(BaseModel):
     description: Optional[str] = None
     type: Optional[str] = None
     output_parser_id: Optional[int] = None
-    use_agent_as_query: Optional[bool] = None
 
 
 class _ContentLengthFilterSchema(BaseModel):
@@ -187,6 +182,7 @@ class CostEstimationResponseSchema(BaseModel):
     estimated_embedding_calls: int
     estimated_input_tokens: int
     estimated_output_tokens: int
+    estimated_embedding_tokens: Optional[int] = None
     estimated_cost_min: Optional[float] = None
     estimated_cost_max: Optional[float] = None
     currency: str = "USD"  # ISO 4217 code (USD, EUR, etc.)

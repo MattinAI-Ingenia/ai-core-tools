@@ -337,6 +337,21 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                         "Could not extract ToolMessage info for tool_end event",
                         exc_info=True,
                     )
+                # Detect LightRAG graph context carried in the artifact
+                try:
+                    artifact = getattr(msg, "artifact", None)
+                    if artifact:
+                        docs = artifact if isinstance(artifact, list) else [artifact]
+                        for doc in docs:
+                            raw_data = getattr(doc, "metadata", {}).get("lightrag_raw_data")
+                            if raw_data:
+                                events.append({
+                                    "type": "_lightrag_graph",
+                                    "data": raw_data,
+                                })
+                                break
+                except Exception:
+                    logger.debug("Could not extract LightRAG graph data from artifact", exc_info=True)
 
     # --- __interrupt__: HumanInTheLoop middleware paused execution ---
     # This check MUST be outside the for-loop above because when LangGraph

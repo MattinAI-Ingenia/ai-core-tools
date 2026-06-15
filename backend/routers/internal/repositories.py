@@ -389,8 +389,10 @@ async def estimate_upload_resources(
                 "folder_id": folder_id,
             }
 
-            # Use existing extraction utility (raises for unsupported types)
-            docs = SiloService.extract_documents_from_file(temp_path, file_ext, base_metadata)
+            # Estimation is LightRAG-only; feed whole pages/files so the chunk
+            # count reflects LightRAG's own token-based chunking (not the
+            # generic pre-split path used by PGVector/Qdrant).
+            docs = SiloService.extract_documents_from_file(temp_path, file_ext, base_metadata, split=False)
             for doc in docs:
                 extracted_documents.append({
                     "content": getattr(doc, "page_content", ""),

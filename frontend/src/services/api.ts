@@ -1366,7 +1366,6 @@ class ApiService {
     transcription_service_id?: number;
     video_ai_service_id?: number;
     indexing_service_id?: number;
-    query_service_id?: number;
     extract_service_id?: number;
     keywords_service_id?: number;
     vlm_service_id?: number;
@@ -1385,7 +1384,6 @@ class ApiService {
     transcription_service_id?: number;
     video_ai_service_id?: number;
     indexing_service_id?: number;
-    query_service_id?: number;
     extract_service_id?: number;
     keywords_service_id?: number;
     vlm_service_id?: number;

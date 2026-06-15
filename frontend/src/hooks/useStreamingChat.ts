@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { StreamEvent, ActiveTool } from '../types/streaming';
+import type { StreamEvent, ActiveTool, LightRAGGraphData } from '../types/streaming';
 import { getStreamingMessage } from '../i18n/streaming';
 
 interface StreamResult {
@@ -7,6 +7,7 @@ interface StreamResult {
   conversationId: number | null;
   sessionId: string | null;
   files: Array<{ file_id: string; filename: string; file_type: string }>;
+  lightragGraph?: LightRAGGraphData | null;
 }
 
 export interface StreamFnOptions {
@@ -130,6 +131,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       let sessionId: string | null = null;
       let finalResponse: string | Record<string, unknown> = '';
       let finalFiles: Array<{ file_id: string; filename: string; file_type: string }> = [];
+      let finalLightragGraph: LightRAGGraphData | null = null;
 
       try {
         await streamFnRef.current(message, {
@@ -186,9 +188,11 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
                   response?: string | Record<string, unknown>;
                   files?: Array<{ file_id: string; filename: string; file_type: string }>;
                   conversation_id?: number;
+                  lightrag_graph?: LightRAGGraphData | null;
                 };
                 finalResponse = doneData.response ?? contentRef.current;
                 finalFiles = doneData.files ?? [];
+                finalLightragGraph = doneData.lightrag_graph ?? null;
                 if (doneData.conversation_id) {
                   conversationId = doneData.conversation_id;
                 }
@@ -249,6 +253,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
         conversationId,
         sessionId,
         files: finalFiles,
+        lightragGraph: finalLightragGraph,
       };
     },
     [],

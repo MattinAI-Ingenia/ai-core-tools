@@ -24,6 +24,7 @@ from tools.streaming_utils import (
     SSE_TOKEN,
     SSE_HITL_INTERRUPT,
 )
+from tools.streaming_utils import _extract_text_content as _extract_text, _get_lc_source, _INTERNAL_LC_SOURCES
 from services.agent_execution_service import AgentExecutionService
 from utils.logger import get_logger
 
@@ -180,11 +181,6 @@ class AgentStreamingService:
                 except Exception:
                     pass
 
-                # Vectorize attached files (PDFs, text) into a temp silo for RAG
-                temp_silo_ids = self.execution_service._vectorize_and_resolve_file_silos(
-                    ctx, agent_id, session_id_for_media, effective_db, temp_silo_ids
-                )
-
             agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
                 ctx.fresh_agent,
                 ctx.search_params,
@@ -244,18 +240,8 @@ class AgentStreamingService:
             # 6. Streaming loop — the only part that stays in this service
             # ----------------------------------------------------------------
             accumulated_content = ""
+            lightrag_graph_data = None
 
-            async for mode, chunk in agent_chain.astream(
-                {"messages": [message_payload]},
-                config=config,
-                stream_mode=["messages", "updates"],
-            ):
-                events = map_stream_event(mode, chunk)
-                if events:
-                    for event in events:
-                        if event["type"] == SSE_TOKEN:
-                            accumulated_content += event["data"].get("content", "")
-                        yield format_sse_event(event["type"], event["data"])
             if langsmith_config:
                 stream_ctx = ls.tracing_context(
                     client=langsmith_config["client"],
@@ -267,18 +253,96 @@ class AgentStreamingService:
 
                 stream_ctx = nullcontext()
 
+            # Token buffer: keyed by message id, holds text chunks until we
+            # know whether the message has tool_calls (discard) or not (flush).
+            _token_buf: dict[str, list[str]] = {}
+            _discarded_ids: set[str] = set()
+
             with stream_ctx:
                 async for mode, chunk in agent_chain.astream(
                     {"messages": [message_payload]},
                     config=config,
                     stream_mode=["messages", "updates", "custom"],
                 ):
+                    if mode == "messages":
+                        # Buffer tokens instead of emitting immediately so we can
+                        # discard them if this message turns out to have tool_calls.
+                        if not (isinstance(chunk, tuple) and len(chunk) == 2):
+                            continue
+                        msg_chunk, metadata = chunk
+                        if type(msg_chunk).__name__ not in ("AIMessageChunk", "AIMessage"):
+                            continue
+                        if _get_lc_source(metadata) in _INTERNAL_LC_SOURCES:
+                            continue
+                        msg_id = getattr(msg_chunk, "id", None)
+                        if not msg_id:
+                            continue
+                        # If this chunk carries tool_call_chunks, the whole
+                        # message is a tool invocation — discard buffered text.
+                        tool_call_chunks = getattr(msg_chunk, "tool_call_chunks", None) or []
+                        if tool_call_chunks:
+                            _discarded_ids.add(msg_id)
+                            _token_buf.pop(msg_id, None)
+                            continue
+                        if msg_id in _discarded_ids:
+                            continue
+                        text = _extract_text(getattr(msg_chunk, "content", None))
+                        if text:
+                            _token_buf.setdefault(msg_id, []).append(text)
+                        continue
+
+                    if mode == "updates":
+                        # Inspect complete messages to flush or discard token buffers.
+                        if isinstance(chunk, dict):
+                            for _node, delta in chunk.items():
+                                if not isinstance(delta, dict):
+                                    continue
+                                msgs = delta.get("messages", [])
+                                if not isinstance(msgs, list):
+                                    msgs = [msgs]
+                                for msg in msgs:
+                                    if msg is None:
+                                        continue
+                                    msg_id = getattr(msg, "id", None)
+                                    if not msg_id:
+                                        continue
+                                    has_tools = bool(getattr(msg, "tool_calls", None))
+                                    if has_tools:
+                                        _discarded_ids.add(msg_id)
+                                        _token_buf.pop(msg_id, None)
+                                    else:
+                                        for text in _token_buf.pop(msg_id, []):
+                                            accumulated_content += text
+                                            yield format_sse_event(SSE_TOKEN, {"content": text})
+                        # Emit non-token events from updates (tool_start, tool_end, etc.)
+                        events = map_stream_event(mode, chunk)
+                        if events:
+                            for event in events:
+                                if event["type"] == "_lightrag_graph":
+                                    lightrag_graph_data = event["data"]
+                                elif event["type"] != SSE_TOKEN:
+                                    yield format_sse_event(event["type"], event["data"])
+                        continue
+
+                    # custom mode and anything else
                     events = map_stream_event(mode, chunk)
                     if events:
                         for event in events:
                             if event["type"] == SSE_TOKEN:
                                 accumulated_content += event["data"].get("content", "")
-                            yield format_sse_event(event["type"], event["data"])
+                            elif event["type"] == "_lightrag_graph":
+                                lightrag_graph_data = event["data"]
+                                continue
+                            else:
+                                yield format_sse_event(event["type"], event["data"])
+
+            # Flush any remaining buffered tokens (e.g. final message with no tool_calls
+            # that never triggered an updates confirmation).
+            for _mid, texts in _token_buf.items():
+                if _mid not in _discarded_ids:
+                    for text in texts:
+                        accumulated_content += text
+                        yield format_sse_event(SSE_TOKEN, {"content": text})
 
             logger.info("Stream completed — accumulated_content length=%d", len(accumulated_content))
 
@@ -345,6 +409,7 @@ class AgentStreamingService:
                         "response": result["parsed_response"],
                         "conversation_id": result["effective_conv_id"],
                         "files": result["files_data"],
+                        "lightrag_graph": lightrag_graph_data,
                     },
                 )
 
@@ -499,18 +564,79 @@ class AgentStreamingService:
 
             # 4. Stream resumed execution
             accumulated_content = ""
+            _token_buf: dict[str, list[str]] = {}
+            _discarded_ids: set[str] = set()
 
             async for mode, chunk in agent_chain.astream(
                 resume_input,
                 config=config,
                 stream_mode=["messages", "updates", "custom"],
             ):
+                if mode == "messages":
+                    if not (isinstance(chunk, tuple) and len(chunk) == 2):
+                        continue
+                    msg_chunk, metadata = chunk
+                    if type(msg_chunk).__name__ not in ("AIMessageChunk", "AIMessage"):
+                        continue
+                    if _get_lc_source(metadata) in _INTERNAL_LC_SOURCES:
+                        continue
+                    msg_id = getattr(msg_chunk, "id", None)
+                    if not msg_id:
+                        continue
+                    tool_call_chunks = getattr(msg_chunk, "tool_call_chunks", None) or []
+                    if tool_call_chunks:
+                        _discarded_ids.add(msg_id)
+                        _token_buf.pop(msg_id, None)
+                        continue
+                    if msg_id in _discarded_ids:
+                        continue
+                    text = _extract_text(getattr(msg_chunk, "content", None))
+                    if text:
+                        _token_buf.setdefault(msg_id, []).append(text)
+                    continue
+
+                if mode == "updates":
+                    if isinstance(chunk, dict):
+                        for _node, delta in chunk.items():
+                            if not isinstance(delta, dict):
+                                continue
+                            msgs = delta.get("messages", [])
+                            if not isinstance(msgs, list):
+                                msgs = [msgs]
+                            for msg in msgs:
+                                if msg is None:
+                                    continue
+                                msg_id = getattr(msg, "id", None)
+                                if not msg_id:
+                                    continue
+                                has_tools = bool(getattr(msg, "tool_calls", None))
+                                if has_tools:
+                                    _discarded_ids.add(msg_id)
+                                    _token_buf.pop(msg_id, None)
+                                else:
+                                    for text in _token_buf.pop(msg_id, []):
+                                        accumulated_content += text
+                                        yield format_sse_event(SSE_TOKEN, {"content": text})
+                    events = map_stream_event(mode, chunk)
+                    if events:
+                        for event in events:
+                            if event["type"] != SSE_TOKEN:
+                                yield format_sse_event(event["type"], event["data"])
+                    continue
+
                 events = map_stream_event(mode, chunk)
                 if events:
                     for event in events:
                         if event["type"] == SSE_TOKEN:
                             accumulated_content += event["data"].get("content", "")
-                        yield format_sse_event(event["type"], event["data"])
+                        else:
+                            yield format_sse_event(event["type"], event["data"])
+
+            for _mid, texts in _token_buf.items():
+                if _mid not in _discarded_ids:
+                    for text in texts:
+                        accumulated_content += text
+                        yield format_sse_event(SSE_TOKEN, {"content": text})
 
             # 5. Check for further interrupts (chained HITL)
             has_pending_interrupt = False

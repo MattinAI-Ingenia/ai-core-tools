@@ -387,7 +387,7 @@ async def create_or_update_agent(
         'silo_id': agent_data.silo_id,
         'output_parser_id': agent_data.output_parser_id,
         'temperature': agent_data.temperature,
-        'retrieval_config': agent_data.retrieval_config.model_dump() if agent_data.retrieval_config else None,
+        'retrieval_config': (agent_data.retrieval_config.model_dump() if hasattr(agent_data.retrieval_config, 'model_dump') else agent_data.retrieval_config) if agent_data.retrieval_config else None,
         # OCR-specific fields
         'vision_service_id': agent_data.vision_service_id,
         'vision_system_prompt': agent_data.vision_system_prompt,

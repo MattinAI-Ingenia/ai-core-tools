@@ -40,6 +40,41 @@ export interface ErrorEventData {
   message: string;
 }
 
+export interface LightRAGEntity {
+  id: string;
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface LightRAGRelationship {
+  id: string;
+  source?: string;
+  target?: string;
+  [key: string]: unknown;
+}
+
+export interface LightRAGChunk {
+  id: string;
+  content?: string;
+  file_path?: string;
+  [key: string]: unknown;
+}
+
+export interface LightRAGReference {
+  reference_id?: string;
+  file_path?: string;
+  [key: string]: unknown;
+}
+
+export interface LightRAGGraphData {
+  data?: {
+    entities?: LightRAGEntity[];
+    relationships?: LightRAGRelationship[];
+    chunks?: LightRAGChunk[];
+    references?: LightRAGReference[];
+  };
+}
+
 export interface DoneEventData {
   response: string | Record<string, unknown>;
   files?: Array<{
@@ -47,6 +82,7 @@ export interface DoneEventData {
     filename: string;
     file_type: string;
   }>;
+  lightrag_graph?: LightRAGGraphData | null;
 }
 
 export interface ActiveTool {

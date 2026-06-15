@@ -157,16 +157,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
         );
     }
 
-    if (!graphData || graphData.nodes.length === 0) {
-        return (
-            <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
-                No graph data indexed yet.
-            </div>
-        );
-    }
-
-    const nvlNodes = toNvlNodes(graphData.nodes);
-    const nvlRels = toNvlRels(graphData.edges, graphData.nodes);
+    const nodes = graphData?.nodes ?? [];
+    const edges = graphData?.edges ?? [];
+    const nvlNodes = toNvlNodes(nodes);
+    const nvlRels = toNvlRels(edges, nodes);
+    const isEmpty = nvlNodes.length === 0;
 
     return (
         <div className="flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: 500 }}>
@@ -212,12 +207,12 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     <RefreshCw className="w-4 h-4" />
                 </button>
                 <span className="text-xs text-gray-400">
-                    {graphData.node_count} nodes · {graphData.edge_count} edges
-                    {graphData.truncated && ' · (truncated)'}
+                    {graphData?.node_count ?? 0} nodes · {graphData?.edge_count ?? 0} edges
+                    {graphData?.truncated && ' · (truncated)'}
                 </span>
             </div>
 
-            {graphData.truncated && (
+            {graphData?.truncated && (
                 <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
                     Graph truncated to {graphData.node_count} nodes. Use search to filter.
                 </div>
@@ -225,13 +220,21 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
 
             {/* Graph + side panel */}
             <div className="relative flex-1 border-t border-gray-200 overflow-hidden">
-                <InteractiveNvlWrapper
-                    nodes={nvlNodes}
-                    rels={nvlRels}
-                    nvlOptions={nvlOptions}
-                    mouseEventCallbacks={mouseEventCallbacks}
-                    style={{ width: '100%', height: '100%' }}
-                />
+                {isEmpty ? (
+                    <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+                        {search
+                            ? `No results for “${search}”. Try another search.`
+                            : 'No graph data indexed yet.'}
+                    </div>
+                ) : (
+                    <InteractiveNvlWrapper
+                        nodes={nvlNodes}
+                        rels={nvlRels}
+                        nvlOptions={nvlOptions}
+                        mouseEventCallbacks={mouseEventCallbacks}
+                        style={{ width: '100%', height: '100%' }}
+                    />
+                )}
 
                 {/* Node detail panel */}
                 {selectedNode && (
