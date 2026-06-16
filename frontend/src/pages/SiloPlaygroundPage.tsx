@@ -591,13 +591,6 @@ const {
                   </div>
                 )}
 
-                {/* LightRAG graph bubble (graph modes only) */}
-                {!compareMode && isLightRAG && lightragGraph && (
-                  <div className="bg-white shadow rounded-lg p-6">
-                    <LightRAGGraphBubble graphData={lightragGraph} />
-                  </div>
-                )}
-
                 {/* Search Results (single panel) */}
                 {!compareMode && searchResults.length > 0 && (
                   <div className="bg-white shadow rounded-lg p-6">
@@ -605,7 +598,8 @@ const {
                       Search Results ({searchResults.length})
                     </h2>
 
-                    {/* Curator toolbar */}
+                    {/* Curator toolbar — hidden for LightRAG (no document IDs to delete) */}
+                    {!isLightRAG && (
                     <div className="flex flex-wrap items-center gap-3 mb-4 py-2 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
                       <label className="flex items-center gap-1.5 cursor-pointer text-gray-600 select-none">
                         <input
@@ -644,6 +638,7 @@ const {
                         </span>
                       )}
                     </div>
+                    )}
 
                     <div className="space-y-4">
                       {searchResults.map((result, index) => {
@@ -724,6 +719,13 @@ const {
                         );
                       })}
                     </div>
+
+                    {/* LightRAG graph bubble — only for graph modes (not Vector/naive) */}
+                    {isLightRAG && lightragGraph && searchControls.lightragQueryMode !== 'naive' && (
+                      <div className="mt-6">
+                        <LightRAGGraphBubble graphData={lightragGraph} />
+                      </div>
+                    )}
                   </div>
                 )}
 

@@ -214,6 +214,7 @@ export function useSiloSearch(
     } catch { /* ignore */ }
   }, [siloId]);
 
+
   useEffect(() => {
     if (!appId || !siloId) return;
     apiService.getAgents(Number.parseInt(appId))
@@ -315,7 +316,6 @@ export function useSiloSearch(
         maxContentLength,
         timestamp: Date.now(),
       });
-      // Extract _id from metadata and set as top-level id field
       const resultsWithIds = (response.results || []).map((result: SearchResult) => ({
         ...result,
         id: result.metadata?._id as string | undefined,
@@ -462,6 +462,7 @@ export function useSiloSearch(
     setter((p) => ({ ...p, isSearching: true, error: null }));
     try {
       const t0 = performance.now();
+      const isLightRAGPanel = silo?.vector_db_type?.toUpperCase() === 'LIGHTRAG';
       const { data, serverMs: _serverMs } = await apiService.searchSiloDocumentsWithTiming(
         Number.parseInt(appId),
         Number.parseInt(siloId),
@@ -469,10 +470,14 @@ export function useSiloSearch(
         searchControls.limit,
         filterMetadata,
         {
-          searchType: searchControls.searchType,
-          scoreThreshold: searchControls.searchType === 'similarity_score_threshold' ? searchControls.scoreThreshold : undefined,
-          fetchK: searchControls.searchType === 'mmr' ? searchControls.fetchK : undefined,
-          lambdaMult: searchControls.searchType === 'mmr' ? searchControls.lambdaMult : undefined,
+          ...(isLightRAGPanel
+            ? { lightragQueryMode: searchControls.lightragQueryMode }
+            : {
+                searchType: searchControls.searchType,
+                scoreThreshold: searchControls.searchType === 'similarity_score_threshold' ? searchControls.scoreThreshold : undefined,
+                fetchK: searchControls.searchType === 'mmr' ? searchControls.fetchK : undefined,
+                lambdaMult: searchControls.searchType === 'mmr' ? searchControls.lambdaMult : undefined,
+              }),
           minContentLength: minContentLength ?? undefined,
           maxContentLength: maxContentLength ?? undefined,
         },
