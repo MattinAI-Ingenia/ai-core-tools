@@ -167,7 +167,7 @@ const {
             Panel {label}
           </span>
           {panel.clientMs !== null && (
-            <span className="text-xs text-gray-400">{panel.clientMs} ms</span>
+            <span className="text-xs text-gray-400">{panel.clientMs >= 1000 ? `${(panel.clientMs / 1000).toFixed(1)}s` : `${panel.clientMs} ms`}</span>
           )}
         </div>
 
@@ -455,9 +455,9 @@ const {
                       {lastClientMs !== null && (
                         <div className="flex items-center gap-1.5 text-xs text-gray-500">
                           <Clock className="w-3.5 h-3.5" />
-                          <span>Client: <strong>{lastClientMs} ms</strong></span>
+                          <span>Client: <strong>{lastClientMs >= 1000 ? `${(lastClientMs / 1000).toFixed(1)}s` : `${lastClientMs} ms`}</strong></span>
                           {lastServerMs !== null && (
-                            <span className="text-gray-400">· Server: <strong>{lastServerMs} ms</strong></span>
+                            <span className="text-gray-400">· Server: <strong>{lastServerMs >= 1000 ? `${(lastServerMs / 1000).toFixed(1)}s` : `${lastServerMs} ms`}</strong></span>
                           )}
                         </div>
                       )}

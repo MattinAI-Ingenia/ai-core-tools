@@ -1940,26 +1940,19 @@ class SiloService:
             results_limit = MAX_SEARCH_LIMIT
 
         store = _get_vector_store(silo)
-        retriever = store.get_retriever(
-            collection_name,
-            silo.embedding_service,
-            {"lightrag_query_mode": lightrag_query_mode, "k": results_limit},
+        raw_data = store.retrieve_graph_context(
+            collection_name, query, lightrag_query_mode, results_limit
         )
-        docs = retriever._get_relevant_documents(query)
 
-        lightrag_graph = None
+        lightrag_graph = raw_data if raw_data else None
         chunk_results = []
-
-        if docs:
-            raw_data = docs[0].metadata.get("lightrag_raw_data") or {}
-            lightrag_graph = raw_data if raw_data else None
-            chunks = (raw_data.get("data") or {}).get("chunks") or []
-            for chunk in chunks:
-                chunk_results.append({
-                    "page_content": chunk.get("content") or "",
-                    "metadata": {k: v for k, v in chunk.items() if k != "content"},
-                    "score": None,
-                })
+        chunks = (raw_data.get("data") or {}).get("chunks") or []
+        for chunk in chunks:
+            chunk_results.append({
+                "page_content": chunk.get("content") or "",
+                "metadata": {k: v for k, v in chunk.items() if k != "content"},
+                "score": None,
+            })
 
         return {
             "query": query,
