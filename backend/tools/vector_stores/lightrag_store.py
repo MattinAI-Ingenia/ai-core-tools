@@ -769,25 +769,26 @@ class LightRAGStore(VectorStoreInterface):
             top_k=top_k,
         )
 
-    def retrieve_graph_context(
+    async def aretrieve_graph_context(
         self,
         collection_name: str,
         query: str,
         mode: str,
         top_k: int,
     ) -> dict:
-        """Call aquery_llm with only_need_context=True and return normalized graph data.
+        """Async: call aquery_llm with only_need_context=True and return normalized graph data.
 
-        Unlike _get_relevant_documents, this does NOT discard the result when the
-        LLM context string is empty — it always returns the raw graph data
-        (entities, relationships, chunks) so the playground can display them
-        even when LightRAG finds no strong keyword match.
+        Uses _aget_rag_instance so Neo4j is initialised in the *same* event loop
+        that runs aquery_llm — avoids "Future attached to a different loop" errors.
+        Unlike _get_relevant_documents, does NOT discard the result when the LLM
+        context string is empty, so entities/chunks are returned even when LightRAG
+        finds no strong keyword match.
         """
         from lightrag.base import QueryParam  # noqa: WPS433
 
-        rag = self._get_rag_instance(collection_name)
+        rag = await self._aget_rag_instance(collection_name)
         param = QueryParam(mode=mode, top_k=top_k, only_need_context=True)
-        response = _run_async(rag.aquery_llm(query, param=param))
+        response = await rag.aquery_llm(query, param=param)
 
         if isinstance(response, dict):
             raw_data = response

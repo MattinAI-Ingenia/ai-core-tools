@@ -375,20 +375,32 @@ async def search_silo_documents(
         logger.info(f"Getting silo {silo_id} for validation")
         
         t0 = time.perf_counter()
-        result = SiloService.search_silo_documents_router(
-            silo_id,
-            search_query.query,
-            search_query.filter_metadata,
-            search_query.limit,
-            search_query.search_type,
-            search_query.score_threshold,
-            search_query.fetch_k,
-            search_query.lambda_mult,
-            search_query.min_content_length,
-            search_query.max_content_length,
-            search_query.lightrag_query_mode,
-            db,
-        )
+        if search_query.lightrag_query_mode is not None:
+            silo = SiloService.get_silo(silo_id, db)
+            if not silo:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SILO_NOT_FOUND_MSG)
+            result = await SiloService._search_via_lightrag_retriever(
+                silo,
+                search_query.query,
+                search_query.lightrag_query_mode,
+                search_query.limit,
+                search_query.filter_metadata,
+            )
+        else:
+            result = SiloService.search_silo_documents_router(
+                silo_id,
+                search_query.query,
+                search_query.filter_metadata,
+                search_query.limit,
+                search_query.search_type,
+                search_query.score_threshold,
+                search_query.fetch_k,
+                search_query.lambda_mult,
+                search_query.min_content_length,
+                search_query.max_content_length,
+                None,
+                db,
+            )
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
         
         if result is None:

@@ -1922,17 +1922,17 @@ class SiloService:
         return SiloRepository.delete(silo_id, db)
     
     @staticmethod
-    def _search_via_lightrag_retriever(
+    async def _search_via_lightrag_retriever(
         silo,
         query: str,
         lightrag_query_mode: str,
         limit: Optional[int],
         filter_metadata: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Search using LightRAG retriever (no LLM generation).
+        """Async search using LightRAG retriever (no LLM generation).
 
-        Returns chunks from lightrag_raw_data and graph data (entities/relationships)
-        separately, without invoking any LLM synthesis.
+        Uses aretrieve_graph_context so Neo4j runs in the correct event loop.
+        Returns chunks from lightrag_raw_data and graph data separately.
         """
         collection_name = COLLECTION_PREFIX + str(silo.silo_id)
         results_limit = limit if limit and limit > 0 else DEFAULT_SEARCH_LIMIT
@@ -1940,7 +1940,7 @@ class SiloService:
             results_limit = MAX_SEARCH_LIMIT
 
         store = _get_vector_store(silo)
-        raw_data = store.retrieve_graph_context(
+        raw_data = await store.aretrieve_graph_context(
             collection_name, query, lightrag_query_mode, results_limit
         )
 

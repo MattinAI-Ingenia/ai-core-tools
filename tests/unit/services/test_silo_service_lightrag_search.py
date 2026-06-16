@@ -1,24 +1,10 @@
 """Unit tests for LightRAG retriever-based search path in SiloService."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 from langchain_core.documents import Document
 
 from backend.services.silo_service import SiloService
-
-
-def _make_mock_doc(entities=None, relationships=None, chunks=None):
-    graph_data = {
-        "data": {
-            "entities": entities or [{"id": "e1", "name": "Entity1"}],
-            "relationships": relationships or [],
-            "chunks": chunks or [{"id": "c1", "content": "chunk text"}],
-        }
-    }
-    return Document(
-        page_content="context string",
-        metadata={"source": "lightrag", "query_mode": "hybrid", "lightrag_raw_data": graph_data},
-    )
 
 
 def _make_mock_silo(silo_id=1):
@@ -30,57 +16,56 @@ def _make_mock_silo(silo_id=1):
     return mock_silo
 
 
-@patch("backend.services.silo_service.SiloService.check_silo_collection_exists", return_value=True)
-@patch("backend.services.silo_service._get_vector_store")
-@patch("backend.services.silo_service.SiloService.get_silo")
-def test_lightrag_query_mode_returns_chunks_and_graph(mock_get_silo, mock_get_store, _mock_exists):
-    """When lightrag_query_mode is set, service uses retriever and returns chunks + lightrag_graph."""
-    mock_silo = _make_mock_silo()
-    mock_get_silo.return_value = mock_silo
+def _make_raw_data(entities=None, chunks=None):
+    return {
+        "data": {
+            "entities": entities or [{"id": "e1", "name": "Entity1"}],
+            "relationships": [],
+            "chunks": chunks or [{"id": "c1", "content": "chunk text"}],
+        }
+    }
 
-    mock_doc = _make_mock_doc()
-    mock_retriever = MagicMock()
-    mock_retriever._get_relevant_documents.return_value = [mock_doc]
+
+@pytest.mark.asyncio
+@patch("backend.services.silo_service._get_vector_store")
+async def test_lightrag_query_mode_returns_chunks_and_graph(mock_get_store):
+    """_search_via_lightrag_retriever returns chunks + lightrag_graph from raw data."""
+    raw_data = _make_raw_data()
     mock_store = MagicMock()
-    mock_store.get_retriever.return_value = mock_retriever
+    mock_store.aretrieve_graph_context = AsyncMock(return_value=raw_data)
     mock_get_store.return_value = mock_store
 
-    result = SiloService.search_silo_documents_router(
-        silo_id=1,
+    result = await SiloService._search_via_lightrag_retriever(
+        silo=_make_mock_silo(),
         query="test query",
         lightrag_query_mode="hybrid",
-        db=MagicMock(),
+        limit=20,
+        filter_metadata=None,
     )
 
-    assert result is not None
     assert result["total_results"] == 1
     assert result["results"][0]["page_content"] == "chunk text"
     assert result["lightrag_graph"] is not None
     assert result["lightrag_graph"]["data"]["entities"][0]["name"] == "Entity1"
-    mock_store.get_retriever.assert_called_once()
-    mock_retriever._get_relevant_documents.assert_called_once_with("test query")
+    mock_store.aretrieve_graph_context.assert_awaited_once()
 
 
-@patch("backend.services.silo_service.SiloService.check_silo_collection_exists", return_value=True)
+@pytest.mark.asyncio
 @patch("backend.services.silo_service._get_vector_store")
-@patch("backend.services.silo_service.SiloService.get_silo")
-def test_lightrag_query_mode_empty_docs_returns_empty(mock_get_silo, mock_get_store, _mock_exists):
-    """When retriever returns no docs, results and lightrag_graph are empty/None."""
-    mock_get_silo.return_value = _make_mock_silo()
-    mock_retriever = MagicMock()
-    mock_retriever._get_relevant_documents.return_value = []
+async def test_lightrag_query_mode_empty_raw_data_returns_empty(mock_get_store):
+    """When aretrieve_graph_context returns empty dict, results and lightrag_graph are empty/None."""
     mock_store = MagicMock()
-    mock_store.get_retriever.return_value = mock_retriever
+    mock_store.aretrieve_graph_context = AsyncMock(return_value={})
     mock_get_store.return_value = mock_store
 
-    result = SiloService.search_silo_documents_router(
-        silo_id=1,
+    result = await SiloService._search_via_lightrag_retriever(
+        silo=_make_mock_silo(),
         query="nothing",
         lightrag_query_mode="local",
-        db=MagicMock(),
+        limit=20,
+        filter_metadata=None,
     )
 
-    assert result is not None
     assert result["total_results"] == 0
     assert result["results"] == []
     assert result["lightrag_graph"] is None
