@@ -7,6 +7,7 @@ import {
   vlmBlockingError,
   type LightRAGRole,
 } from '../../utils/lightragModelSpecs';
+import { LightRAGModelHints } from './LightRAGModelHints';
 
 interface VectorDbOption {
   code: string;
@@ -230,6 +231,11 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       return;
     }
 
+    if (isLightRAG && !formData.keywords_service_id) {
+      setError('Keywords AI Service is required for LightRAG silos');
+      return;
+    }
+
     // Block: VLM role must be multimodal when set (LightRAG only).
     if (isLightRAG && vlmError) {
       setError(vlmError);
@@ -428,14 +434,14 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                   role: 'extract' as LightRAGRole,
                   label: 'Extract AI Service',
                   required: true,
-                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier (12B+, non-reasoning).',
+                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier non-reasoning.',
                   placeholder: 'Select an AI service for entity extraction',
                 },
                 {
                   field: 'keywords_service_id' as RoleServiceField,
                   role: 'keywords' as LightRAGRole,
                   label: 'Keywords AI Service',
-                  required: false,
+                  required: true,
                   helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
                   placeholder: 'Select an AI service for keyword extraction',
                 },
@@ -474,6 +480,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                       ))}
                     </select>
                     <p className="mt-1 text-sm text-gray-500">{helper}</p>
+                    <LightRAGModelHints role={role} />
                     {warning && (
                       <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
                         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />

@@ -56,6 +56,7 @@ interface CostEstimationResult {
   estimated_embedding_calls: number;
   estimated_input_tokens: number;
   estimated_output_tokens: number;
+  estimated_embedding_tokens?: number | null;
   estimated_cost_min?: number | null;
   estimated_cost_max?: number | null;
   currency?: string | null;
@@ -1145,9 +1146,7 @@ const RepositoryDetailPage: React.FC = () => {
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Tokens</p>
               <p className="mt-1 text-lg font-semibold text-gray-900">
-                {formatEstimateValue(
-                  (uploadEstimate?.estimated_embedding_calls ?? 0) * (uploadEstimate?.chunk_token_size ?? 0)
-                )}
+                {formatEstimateValue(uploadEstimate?.estimated_embedding_tokens)}
               </p>
             </div>
           </div>

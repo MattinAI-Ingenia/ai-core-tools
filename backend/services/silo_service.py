@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _ROLE_MIN_SPECS = {
-    'extract':  {'params_b': 12, 'context_kb': 32},
+    'extract':  {'params_b': 30, 'context_kb': 32},
     'query':    {'params_b': 32, 'context_kb': 32},
     'keywords': {'params_b': None, 'context_kb': 8},
     'vlm':      {'params_b': None, 'context_kb': None},  # validated via vision flag
@@ -125,14 +125,7 @@ def _validate_model_for_role(role: str, model_name: str) -> Optional[str]:
     specs = _lookup_model_specs(model_name)
 
     if specs is None:
-        # Unknown model — fall back to a name heuristic so we still warn
-        # operators about obviously-small models.
-        lower = model_name.lower()
-        if role in ('extract', 'query') and any(p in lower for p in ('mini', 'small', 'tiny')):
-            return (
-                f"Model '{model_name}' may be too small for the {role.upper()} role "
-                f"(recommend {min_spec['params_b']}B+ params, {min_spec['context_kb']}K+ context)"
-            )
+        # Unknown model — no warning (closed models lack public specs, can't assume size).
         return None
 
     context_kb, params_b, _ = specs
@@ -141,10 +134,13 @@ def _validate_model_for_role(role: str, model_name: str) -> Optional[str]:
         issues.append(f"context {context_kb}K < {min_spec['context_kb']}K")
     if min_spec['params_b'] is not None and params_b < min_spec['params_b']:
         issues.append(f"params ~{params_b}B < {min_spec['params_b']}B")
+    # Keywords: warn if model is unnecessarily large (>30B)
+    if role == 'keywords' and params_b > 30:
+        issues.append(f"params ~{params_b}B is overkill for keyword extraction")
 
     if not issues:
         return None
-    return f"{role.upper()}: '{model_name}' below LightRAG recommendation ({', '.join(issues)})"
+    return f"{role.upper()}: '{model_name}' {', '.join(issues)}"
 
 
 def _validate_model_for_lightrag(model_name: str) -> Optional[str]:
@@ -2123,10 +2119,10 @@ class SiloService:
 
         # Embedding tokens = chunk embeddings (≈ all content) + the entity and
         # relationship description embeddings LightRAG writes to the vector store.
-        # The graph contribution is approximated as a fraction of content tokens
-        # (entity/relationship descriptions are derived from the chunk text).
-        _GRAPH_EMB_FACTOR = 0.6
-        estimated_embedding_tokens = int(total_content_tokens * (1 + _GRAPH_EMB_FACTOR))
+        # Those descriptions ARE the extraction output, so the graph contribution
+        # tracks output (entity density), not raw content. A flat content-based
+        # factor underestimated dense documents by 2-3x.
+        estimated_embedding_tokens = int(total_content_tokens + estimated_output_tokens)
 
         estimated_cost_min = None
         estimated_cost_max = None

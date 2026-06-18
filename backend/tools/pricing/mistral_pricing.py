@@ -14,13 +14,16 @@ class MistralPricingProvider(PricingProvider):
     def provider_name(self) -> str:
         return "mistral"
 
-    # Public list prices (USD per 1M tokens) as of May 2026
-    # Source: https://mistral.ai/technology/
+    # Public list prices (USD per 1M tokens) as of June 2026
+    # Source: https://mistral.ai/pricing/
     _LLM_PRICES = {
-        "mistral-large":   (2.00,   6.00),
-        "mistral-medium":  (0.40,   1.20),
-        "mistral-small":   (0.10,   0.30),
-        "pixtral":         (0.10,   0.30),
+        "mistral-large":    (2.00,   6.00),
+        "mistral-medium":   (0.40,   1.20),
+        "mistral-small":    (0.10,   0.30),
+        "mistral-small-4":  (0.10,   0.30),
+        "ministral-3-3b":   (0.10,   0.10),
+        "ministral-8b":     (0.10,   0.10),
+        "pixtral":          (0.10,   0.30),
     }
 
     _EMBEDDING_PRICES = {

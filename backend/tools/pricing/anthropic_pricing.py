@@ -17,14 +17,17 @@ class AnthropicPricingProvider(PricingProvider):
     def provider_name(self) -> str:
         return "anthropic"
 
-    # Public list prices (USD per 1M tokens) as of May 2026
+    # Public list prices (USD per 1M tokens) as of June 2026
     # Source: https://www.anthropic.com/pricing
     _LLM_PRICES = {
         # Claude 4 series
         "claude-opus-4":     (15.00, 75.00),
         "claude-opus-4-7":   (15.00, 75.00),
+        "claude-opus-4-8":   (15.00, 75.00),
         "claude-sonnet-4":   (3.00,  15.00),
         "claude-sonnet-4-6": (3.00,  15.00),
+        # Claude Haiku
+        "claude-haiku-4-5":  (1.00,  5.00),
         # Claude 3.5 series
         "claude-3.5-sonnet": (3.00,  15.00),
         "claude-3.5-haiku":  (0.80,  4.00),

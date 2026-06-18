@@ -9,6 +9,7 @@ import {
   vlmBlockingError,
   type LightRAGRole,
 } from '../utils/lightragModelSpecs';
+import { LightRAGModelHints } from '../components/forms/LightRAGModelHints';
 
 interface RepositoryFormData {
   name: string;
@@ -186,6 +187,10 @@ const RepositoryFormPage: React.FC = () => {
       const hasExtractLlm = formData.extract_service_id || formData.indexing_service_id;
       if (!hasExtractLlm) {
         setError('LightRAG repositories require at least an Extract AI service');
+        return;
+      }
+      if (!formData.keywords_service_id) {
+        setError('Keywords AI Service is required for LightRAG repositories');
         return;
       }
       // Block VLM if not multimodal
@@ -467,14 +472,14 @@ const RepositoryFormPage: React.FC = () => {
                   role: 'extract' as LightRAGRole,
                   label: 'Extract AI Service',
                   required: true,
-                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier (12B+, non-reasoning).',
+                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier non-reasoning.',
                   placeholder: 'Select an AI service for entity extraction',
                 },
                 {
                   field: 'keywords_service_id' as RoleServiceField,
                   role: 'keywords' as LightRAGRole,
                   label: 'Keywords AI Service',
-                  required: false,
+                  required: true,
                   helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
                   placeholder: 'Select an AI service for keyword extraction',
                 },
@@ -515,6 +520,7 @@ const RepositoryFormPage: React.FC = () => {
                       ))}
                     </select>
                     <p className="text-sm text-gray-500 mt-1">{helper}</p>
+                    <LightRAGModelHints role={role} />
                     {warning && (
                       <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
                         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />

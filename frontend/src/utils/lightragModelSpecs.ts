@@ -25,7 +25,7 @@ export interface RoleMinSpec {
 }
 
 export const ROLE_MIN_SPECS: Record<LightRAGRole, RoleMinSpec> = {
-  extract:  { params_b: 12, context_kb: 32 },
+  extract:  { params_b: 30, context_kb: 32 },
   query:    { params_b: 32, context_kb: 32 },
   keywords: { params_b: null, context_kb: 8 },
   vlm:      { params_b: null, context_kb: null }, // vision flag handled separately
@@ -82,13 +82,7 @@ export function getRoleWarning(role: LightRAGRole, modelName: string | null | un
   const specs = lookupModelSpecs(modelName);
 
   if (!specs) {
-    // Unknown model — fall back to a name heuristic for the strict roles.
-    const lower = modelName.toLowerCase();
-    if ((role === 'extract' || role === 'query') && ['mini', 'small', 'tiny'].some(p => lower.includes(p))) {
-      const ctx = min.context_kb ?? '?';
-      const par = min.params_b ?? '?';
-      return `'${modelName}' may be too small for ${role.toUpperCase()} (recommend ${par}B+ params, ${ctx}K+ context)`;
-    }
+    // Unknown model — no warning (closed models lack public specs, can't assume size).
     return null;
   }
 
@@ -99,8 +93,12 @@ export function getRoleWarning(role: LightRAGRole, modelName: string | null | un
   if (min.params_b !== null && specs.params_b < min.params_b) {
     issues.push(`params ~${specs.params_b}B < ${min.params_b}B`);
   }
+  // Keywords: warn if model is unnecessarily large (>30B)
+  if (role === 'keywords' && specs.params_b > 30) {
+    issues.push(`params ~${specs.params_b}B is overkill for keyword extraction`);
+  }
   if (issues.length === 0) return null;
-  return `${role.toUpperCase()}: '${modelName}' below recommendation (${issues.join(', ')})`;
+  return `${role.toUpperCase()}: '${modelName}' ${issues.join(', ')}`;
 }
 
 /**
