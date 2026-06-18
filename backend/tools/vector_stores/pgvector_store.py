@@ -390,6 +390,44 @@ class PGVectorStore(VectorStoreInterface):
             logger.error("PGVector get_distinct_metadata_values error: %s", exc)
             return []
 
+    def get_all_documents(
+        self,
+        collection_name: str,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        params: Dict[str, Any] = {"name": collection_name}
+        where_extra = self._build_filter_sql(filter_metadata, params) if filter_metadata else ""
+
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT :limit"
+            params["limit"] = int(limit)
+
+        sql = text(
+            "SELECT e.id, e.document, e.cmetadata FROM langchain_pg_embedding e "
+            "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+            f"WHERE c.name = :name{where_extra}{limit_sql}"
+        )
+
+        try:
+            with self.engine.connect() as connection:
+                rows = connection.execute(sql, params).fetchall()
+        except Exception as exc:
+            logger.error("PGVector get_all_documents error: %s", exc)
+            raise
+
+        documents: List[Document] = []
+        for row in rows:
+            doc_id, content, metadata = row[0], row[1], row[2]
+            if content is None:
+                continue
+            base_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            base_metadata["_id"] = doc_id
+            documents.append(Document(page_content=content, metadata=base_metadata))
+        return documents
+
+
     @staticmethod
     def _build_filter_sql(filter_metadata: Dict[str, Any], params: Dict[str, Any]) -> str:
         """

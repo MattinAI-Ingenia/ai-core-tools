@@ -19,6 +19,11 @@ DEFAULT_AGENT_TEMPERATURE = 0.7
 # Default memory summarize threshold (number of messages)
 DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20
 
+# Default retrieval configuration (per-agent RAG behaviour)
+DEFAULT_RETRIEVAL_SEARCH_TYPE = "similarity"  # similarity | mmr | similarity_score_threshold
+DEFAULT_RETRIEVAL_K = 30                      # candidate documents fetched from the vector store
+DEFAULT_RETRIEVAL_STRATEGY = "passthrough"    # passthrough | rerank
+
 
 class AgentSkill(Base):
     """Association table for Agent-Skill many-to-many relationship"""
@@ -86,6 +91,28 @@ class Agent(Base):
                         nullable=True)
     temperature = Column(Float, default=DEFAULT_AGENT_TEMPERATURE, nullable=False)
     is_frozen = Column(Boolean, default=False, nullable=False)
+
+    # Retrieval configuration (per-agent RAG behaviour). Defaults reproduce the
+    # previous hard-coded behaviour so existing agents are unaffected.
+    retrieval_search_type = Column(
+        String(45),
+        default=DEFAULT_RETRIEVAL_SEARCH_TYPE,
+        nullable=False,
+        server_default=DEFAULT_RETRIEVAL_SEARCH_TYPE,
+    )  # how the vector store is queried (Phase 1)
+    retrieval_k = Column(
+        Integer,
+        default=DEFAULT_RETRIEVAL_K,
+        nullable=False,
+        server_default=str(DEFAULT_RETRIEVAL_K),
+    )  # number of candidates retrieved before any strategy (Phase 1)
+    retrieval_strategy = Column(
+        String(45),
+        default=DEFAULT_RETRIEVAL_STRATEGY,
+        nullable=False,
+        server_default=DEFAULT_RETRIEVAL_STRATEGY,
+    )  # post-retrieval strategy applied to candidates (Phase 2)
+    retrieval_top_n = Column(Integer, nullable=True)  # documents kept after reranking (Phase 2)
 
     marketplace_visibility = Column(
         Enum(MarketplaceVisibility),

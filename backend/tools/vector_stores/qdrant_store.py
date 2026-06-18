@@ -442,6 +442,48 @@ class QdrantStore(VectorStoreInterface):
             logger.debug("Qdrant count_documents error for %s: %s", collection_name, exc)
             return 0
 
+    def get_all_documents(
+        self,
+        collection_name: str,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        qdrant_filter = self._build_qdrant_filter(filter_metadata)
+
+        documents: List[Document] = []
+        try:
+            offset = None
+            batch_size = 200
+            while True:
+                results, next_offset = self.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=qdrant_filter,
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in results:
+                    payload = point.payload or {}
+                    if not isinstance(payload, dict):
+                        continue
+                    content = payload.get("page_content")
+                    if content is None:
+                        continue
+                    metadata = dict(payload.get("metadata", {}) or {})
+                    metadata["_id"] = point.id
+                    documents.append(Document(page_content=content, metadata=metadata))
+                    if limit is not None and len(documents) >= limit:
+                        return documents
+                if next_offset is None or len(results) < batch_size:
+                    break
+                offset = next_offset
+        except Exception as exc:
+            logger.error("Qdrant get_all_documents error for %s: %s", collection_name, exc)
+            raise
+
+        return documents
+
     def update_documents_metadata(
         self,
         collection_name: str,

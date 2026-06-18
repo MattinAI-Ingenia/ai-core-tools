@@ -231,3 +231,34 @@ class VectorStoreInterface(ABC):
             Alphabetically sorted list of distinct values.
         """
         pass
+
+    @abstractmethod
+    def get_all_documents(
+        self,
+        collection_name: str,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """
+        Fetch the full set of documents stored in a collection.
+
+        Unlike :meth:`search_similar_documents`, this performs no similarity
+        ranking and requires no embeddings — it is meant for building in-memory
+        lexical indexes (e.g. BM25) over the whole corpus.
+
+        Args:
+            collection_name: Name of the collection/index.
+            filter_metadata: Optional PGVector-style metadata filter
+                (e.g. ``{"field": {"$eq": "value"}}``) to restrict the corpus.
+            limit: Optional maximum number of documents to return. ``None``
+                returns all documents.
+
+        Returns:
+            List of ``Document`` objects (``page_content`` + ``metadata``). The
+            document id, when available, is exposed in ``metadata['_id']``.
+
+        Raises:
+            Exception: If fetching fails.
+        """
+        pass
+

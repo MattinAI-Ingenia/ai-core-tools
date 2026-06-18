@@ -11,6 +11,10 @@ from utils.logger import get_logger
 from langchain_core.documents import Document
 from tools.vector_store_factory import VectorStoreFactory
 from tools.vector_stores.vector_store_interface import VectorStoreInterface
+from tools.retrieval.retrieval_context import RetrievalContext
+from tools.retrieval.retrieval_pipeline import RetrievalPipeline
+from tools.retrieval.search_methods.search_method_factory import DEFAULT_SEARCH_METHOD
+from tools.retrieval.strategies.strategy_factory import DEFAULT_STRATEGY
 from models.silo import SiloType
 from services.output_parser_service import OutputParserService
 from langchain_core.vectorstores.base import VectorStoreRetriever
@@ -201,7 +205,7 @@ class SiloService:
             
             if search_params:
                 # Known retriever parameters that should not be wrapped in 'filter'
-                known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type'}
+                known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type', 'search_method', 'strategy', 'top_n', 'similarity_threshold', 'bm25_max_docs'}
                 
                 # Separate known params from filter fields
                 filter_fields = {}
@@ -232,15 +236,35 @@ class SiloService:
             # kwarg to `as_retriever`, not nested inside search_kwargs.
             retriever_search_type = merged_search_kwargs.pop("search_type", "similarity")
 
-            # Use async engine with psycopg (not asyncpg) for async operations
-            # psycopg supports async natively and handles multiple SQL statements properly
-            return _get_vector_store(silo).get_retriever(
-                collection_name,
-                silo.embedding_service,
-                merged_search_kwargs,
-                search_type=retriever_search_type,
-                use_async=True  # Use async psycopg engine for LangGraph compatibility
+            # Extract the retrieval search method (defaults to dense vector search).
+            search_method_name = merged_search_kwargs.pop("search_method", None)
+
+            # Extract the retrieval strategy (defaults to passthrough = no-op).
+            strategy_name = merged_search_kwargs.pop("strategy", None)
+
+            # Component-specific parameters must not leak into the vector store
+            # search_kwargs; pull them into a separate dict for the pipeline.
+            component_params = {}
+            for component_key in ("top_n", "similarity_threshold", "bm25_max_docs"):
+                if component_key in merged_search_kwargs:
+                    component_params[component_key] = merged_search_kwargs.pop(component_key)
+
+            # Build the shared context and compose the retrieval pipeline:
+            #   search methods -> transformers (strategies).
+            # Phase 1 (search method) uses the async psycopg engine for LangGraph
+            # compatibility; Phase 2 wraps it with the selected strategy.
+            ctx = RetrievalContext(
+                vector_store=_get_vector_store(silo),
+                collection_name=collection_name,
+                embedding_service=silo.embedding_service,
+                search_kwargs=merged_search_kwargs,
+                params={"search_type": retriever_search_type, **component_params},
             )
+
+            search_method_names = [search_method_name or DEFAULT_SEARCH_METHOD]
+            transformer_names = [strategy_name or DEFAULT_STRATEGY]
+
+            return RetrievalPipeline.build(ctx, search_method_names, transformer_names)
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
             raise
@@ -1108,6 +1132,7 @@ class SiloService:
         min_content_length: Optional[int] = None,
         max_content_length: Optional[int] = None,
         db: Session = None,
+        search_method: str = "dense",
     ) -> List[Document]:
         # Get silo within the session to ensure relationships are loaded
         silo = SiloRepository.get_by_id(silo_id, db)
@@ -1125,17 +1150,35 @@ class SiloService:
         if results_limit > MAX_SEARCH_LIMIT:
             results_limit = MAX_SEARCH_LIMIT
 
-        docs = _get_vector_store(silo).search_similar_documents(
-            collection_name,
-            query,
-            embedding_service=embedding_service,
-            filter_metadata=filter_metadata or {},
-            k=results_limit,
-            search_type=search_type,
-            score_threshold=score_threshold,
-            fetch_k=fetch_k,
-            lambda_mult=lambda_mult,
-        )
+        if search_method and search_method.lower() == "bm25":
+            # Lexical BM25 path: build an in-memory keyword index via the retrieval
+            # pipeline. search_type / score_threshold / fetch_k / lambda_mult are
+            # dense-only knobs and are intentionally ignored here.
+            ctx = RetrievalContext(
+                vector_store=_get_vector_store(silo),
+                collection_name=collection_name,
+                embedding_service=embedding_service,
+                search_kwargs={"k": results_limit, "filter": filter_metadata or None},
+                params={},
+            )
+            try:
+                retriever = RetrievalPipeline.build(ctx, ["bm25"], [DEFAULT_STRATEGY])
+                docs = retriever.invoke(query)
+            except ValueError:
+                # Empty corpus / nothing to index — return no results.
+                docs = []
+        else:
+            docs = _get_vector_store(silo).search_similar_documents(
+                collection_name,
+                query,
+                embedding_service=embedding_service,
+                filter_metadata=filter_metadata or {},
+                k=results_limit,
+                search_type=search_type,
+                score_threshold=score_threshold,
+                fetch_k=fetch_k,
+                lambda_mult=lambda_mult,
+            )
         if min_content_length is not None or max_content_length is not None:
             docs = [
                 d for d in docs
@@ -1407,6 +1450,7 @@ class SiloService:
         min_content_length: Optional[int] = None,
         max_content_length: Optional[int] = None,
         db: Session = None,
+        search_method: str = "dense",
     ) -> Optional[Dict[str, Any]]:
         """
         Search for documents in a silo using semantic search with optional metadata filtering
@@ -1429,6 +1473,7 @@ class SiloService:
             min_content_length=min_content_length,
             max_content_length=max_content_length,
             db=db,
+            search_method=search_method,
         )
         
         # Convert results to response format

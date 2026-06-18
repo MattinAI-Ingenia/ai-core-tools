@@ -234,7 +234,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
 
     if agent.silo_id is not None:
 
-        retriever_tool = get_retriever_tool(agent.silo, search_params)
+        retriever_tool = get_retriever_tool(agent.silo, search_params, agent=agent)
         if retriever_tool is not None:
             tools.append(retriever_tool)
 
@@ -484,7 +484,7 @@ class IACTTool(BaseTool):
 
         # Add silo retriever if configured
         if agent.silo_id is not None:
-            retriever_tool = get_retriever_tool(agent.silo)
+            retriever_tool = get_retriever_tool(agent.silo, agent=agent)
             if retriever_tool is not None:
                 tools.append(retriever_tool)
 
@@ -656,12 +656,48 @@ def convert_search_params_to_types(search_params: dict, metadata_definition) -> 
             
     return converted_params
 
-def get_retriever_tool(silo: Silo, search_params=None):
+def _build_agent_retrieval_config(agent) -> dict:
+    """Build silo search params from an agent's persisted retrieval config.
+
+    Returns a dict with the keys understood by ``SiloService.get_silo_retriever``
+    (``search_type``, ``k``, ``strategy``, ``top_n``). Keys whose value is unset
+    are omitted so the downstream defaults still apply.
+    """
+    if agent is None:
+        return {}
+
+    config = {}
+    search_type = getattr(agent, 'retrieval_search_type', None)
+    if search_type:
+        config['search_type'] = search_type
+    k = getattr(agent, 'retrieval_k', None)
+    if k is not None:
+        config['k'] = k
+    strategy = getattr(agent, 'retrieval_strategy', None)
+    if strategy:
+        config['strategy'] = strategy
+    top_n = getattr(agent, 'retrieval_top_n', None)
+    if top_n is not None:
+        config['top_n'] = top_n
+    return config
+
+
+def get_retriever_tool(silo: Silo, search_params=None, agent=None):
     
     if silo.silo_id is not None:
         # Convert search parameters to proper types based on metadata definition
         if search_params:
             search_params = convert_search_params_to_types(search_params, silo.metadata_definition)
+
+        # Merge the agent's persisted retrieval configuration (search_type, k,
+        # strategy, top_n) with any per-request search params. Per-request params
+        # win for overlapping keys so a caller can still override on demand.
+        retrieval_config = _build_agent_retrieval_config(agent)
+        if retrieval_config:
+            merged_params = dict(retrieval_config)
+            if search_params:
+                merged_params.update(search_params)
+            search_params = merged_params
 
         retriever = SiloService.get_silo_retriever(silo.silo_id, search_params)
         name = "silo_retriever"

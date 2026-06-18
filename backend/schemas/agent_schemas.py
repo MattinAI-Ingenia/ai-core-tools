@@ -1,7 +1,13 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
-from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+from models.agent import (
+    DEFAULT_AGENT_TEMPERATURE,
+    DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
+    DEFAULT_RETRIEVAL_SEARCH_TYPE,
+    DEFAULT_RETRIEVAL_K,
+    DEFAULT_RETRIEVAL_STRATEGY,
+)
 
 # ==================== AGENT SCHEMAS ====================
 
@@ -41,6 +47,11 @@ class AgentDetailSchema(BaseModel):
     silo_id: Optional[int] = None
     output_parser_id: Optional[int] = None
     temperature: float = DEFAULT_AGENT_TEMPERATURE
+    # Retrieval configuration (per-agent RAG behaviour)
+    retrieval_search_type: str = DEFAULT_RETRIEVAL_SEARCH_TYPE
+    retrieval_k: int = DEFAULT_RETRIEVAL_K
+    retrieval_strategy: str = DEFAULT_RETRIEVAL_STRATEGY
+    retrieval_top_n: Optional[int] = None
     tool_ids: List[int] = []
     mcp_config_ids: List[int] = []
     skill_ids: List[int] = []
@@ -61,6 +72,9 @@ class AgentDetailSchema(BaseModel):
     tools: List[Dict[str, Any]]
     mcp_configs: List[Dict[str, Any]]
     skills: List[Dict[str, Any]]
+    # Retrieval option catalogs for the agent config UI
+    retrieval_search_type_options: List[Dict[str, str]] = []
+    retrieval_strategy_options: List[Dict[str, str]] = []
     marketplace_visibility: Optional[str] = None
     marketplace_profile: Optional[Dict[str, Any]] = None
     is_frozen: bool = False
@@ -86,6 +100,11 @@ class CreateUpdateAgentSchema(BaseModel):
     silo_id: Optional[int] = None
     output_parser_id: Optional[int] = None
     temperature: Optional[float] = DEFAULT_AGENT_TEMPERATURE
+    # Retrieval configuration (per-agent RAG behaviour)
+    retrieval_search_type: Optional[str] = DEFAULT_RETRIEVAL_SEARCH_TYPE
+    retrieval_k: Optional[int] = DEFAULT_RETRIEVAL_K
+    retrieval_strategy: Optional[str] = DEFAULT_RETRIEVAL_STRATEGY
+    retrieval_top_n: Optional[int] = None
     tool_ids: Optional[List[int]] = []
     mcp_config_ids: Optional[List[int]] = []
     skill_ids: Optional[List[int]] = []

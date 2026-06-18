@@ -1,10 +1,19 @@
 from typing import Union, List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_RETRIEVAL_SEARCH_TYPE, DEFAULT_RETRIEVAL_K, DEFAULT_RETRIEVAL_STRATEGY
 from models.ocr_agent import OCRAgent
 from schemas.agent_schemas import AgentListItemSchema, AgentDetailSchema
 from repositories.agent_repository import AgentRepository
 from repositories.skill_repository import SkillRepository
+from tools.retrieval.strategies.strategy_factory import StrategyFactory
+
+# Vector store search types (Phase 1 — how the underlying vector DB is queried).
+# These are the search types supported by LangChain's VectorStoreRetriever.
+RETRIEVAL_SEARCH_TYPE_OPTIONS: List[Dict[str, str]] = [
+    {'code': 'similarity', 'label': 'Similarity'},
+    {'code': 'mmr', 'label': 'Maximal Marginal Relevance (MMR)'},
+    {'code': 'similarity_score_threshold', 'label': 'Similarity with score threshold'},
+]
 
 
 def _serialize_marketplace_profile(profile) -> Optional[Dict[str, Any]]:
@@ -106,6 +115,10 @@ class AgentService:
             silo_id=getattr(agent, 'silo_id', None),
             output_parser_id=getattr(agent, 'output_parser_id', None),
             temperature=agent.temperature if agent.temperature is not None else DEFAULT_AGENT_TEMPERATURE,
+            retrieval_search_type=getattr(agent, 'retrieval_search_type', None) or DEFAULT_RETRIEVAL_SEARCH_TYPE,
+            retrieval_k=getattr(agent, 'retrieval_k', None) or DEFAULT_RETRIEVAL_K,
+            retrieval_strategy=getattr(agent, 'retrieval_strategy', None) or DEFAULT_RETRIEVAL_STRATEGY,
+            retrieval_top_n=getattr(agent, 'retrieval_top_n', None),
             tool_ids=associations['tool_ids'],
             mcp_config_ids=associations['mcp_ids'],
             skill_ids=associations['skill_ids'],
@@ -125,6 +138,9 @@ class AgentService:
             tools=form_data['tools'],
             mcp_configs=form_data['mcp_configs'],
             skills=form_data['skills'],
+            # Retrieval option catalogs
+            retrieval_search_type_options=RETRIEVAL_SEARCH_TYPE_OPTIONS,
+            retrieval_strategy_options=StrategyFactory.get_available_strategy_options(),
             # Marketplace
             marketplace_visibility=(
                 agent.marketplace_visibility.value
@@ -257,6 +273,18 @@ class AgentService:
         
         # Handle temperature field - default to DEFAULT_AGENT_TEMPERATURE if not provided
         agent.temperature = data.get('temperature', DEFAULT_AGENT_TEMPERATURE)
+
+        # Retrieval configuration — only overwrite when a value is provided so
+        # partial updates keep the existing config.
+        if data.get('retrieval_search_type') is not None:
+            agent.retrieval_search_type = data['retrieval_search_type']
+        if data.get('retrieval_k') is not None:
+            agent.retrieval_k = data['retrieval_k']
+        if data.get('retrieval_strategy') is not None:
+            agent.retrieval_strategy = data['retrieval_strategy']
+        # top_n is nullable: an explicit key (even None) updates it
+        if 'retrieval_top_n' in data:
+            agent.retrieval_top_n = data['retrieval_top_n']
         
         # OCR-specific fields (only set if the agent is an OCRAgent instance)
         if isinstance(agent, OCRAgent):

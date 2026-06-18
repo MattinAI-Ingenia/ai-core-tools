@@ -287,6 +287,7 @@ export function useSiloSearch(
         searchControls.limit,
         filterMetadata,
         {
+          searchMethod: searchControls.searchMethod,
           searchType: searchControls.searchType,
           scoreThreshold: searchControls.searchType === 'similarity_score_threshold' ? searchControls.scoreThreshold : undefined,
           fetchK: searchControls.searchType === 'mmr' ? searchControls.fetchK : undefined,
@@ -459,6 +460,7 @@ export function useSiloSearch(
         searchControls.limit,
         filterMetadata,
         {
+          searchMethod: searchControls.searchMethod,
           searchType: searchControls.searchType,
           scoreThreshold: searchControls.searchType === 'similarity_score_threshold' ? searchControls.scoreThreshold : undefined,
           fetchK: searchControls.searchType === 'mmr' ? searchControls.fetchK : undefined,

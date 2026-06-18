@@ -82,12 +82,21 @@ class SiloSearchSchema(BaseModel):
     query: str
     limit: Optional[int] = None
     filter_metadata: Optional[Dict[str, Any]] = None
+    search_method: str = "dense"
     search_type: str = "similarity"
     score_threshold: Optional[float] = None
     fetch_k: Optional[int] = None
     lambda_mult: Optional[float] = None
     min_content_length: Optional[int] = None   # inclusive lower bound on chunk character count
     max_content_length: Optional[int] = None   # inclusive upper bound on chunk character count
+
+    @field_validator("search_method")
+    @classmethod
+    def validate_search_method(cls, v: str) -> str:
+        allowed = {"dense", "bm25"}
+        if v not in allowed:
+            raise ValueError(f"search_method must be one of {sorted(allowed)}, got '{v}'")
+        return v
 
     @field_validator("search_type")
     @classmethod

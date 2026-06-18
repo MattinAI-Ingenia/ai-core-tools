@@ -386,6 +386,11 @@ async def create_or_update_agent(
         'silo_id': agent_data.silo_id,
         'output_parser_id': agent_data.output_parser_id,
         'temperature': agent_data.temperature,
+        # Retrieval configuration (per-agent RAG behaviour)
+        'retrieval_search_type': agent_data.retrieval_search_type,
+        'retrieval_k': agent_data.retrieval_k,
+        'retrieval_strategy': agent_data.retrieval_strategy,
+        'retrieval_top_n': agent_data.retrieval_top_n,
         # OCR-specific fields
         'vision_service_id': agent_data.vision_service_id,
         'vision_system_prompt': agent_data.vision_system_prompt,

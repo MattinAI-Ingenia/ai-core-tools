@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 
 export interface SearchControlsValue {
   limit: number;
+  searchMethod: 'dense' | 'bm25';
   searchType: 'similarity' | 'similarity_score_threshold' | 'mmr';
   scoreThreshold: number;
   fetchK: number;
@@ -11,6 +12,7 @@ export interface SearchControlsValue {
 
 export const DEFAULT_SEARCH_CONTROLS: SearchControlsValue = {
   limit: 20,
+  searchMethod: 'dense',
   searchType: 'similarity',
   scoreThreshold: 0.7,
   fetchK: 100,
@@ -37,6 +39,10 @@ function searchTypeLabel(searchType: SearchControlsValue['searchType']): string 
     default:
       return 'Cosine Similarity';
   }
+}
+
+function searchMethodLabel(searchMethod: SearchControlsValue['searchMethod']): string {
+  return searchMethod === 'bm25' ? 'BM25 (lexical)' : 'Dense (semantic)';
 }
 
 export default function SearchControls({ siloId, value, onChange, disabled }: Readonly<SearchControlsProps>) {
@@ -74,7 +80,10 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
     });
   }
 
-  const summary = `Top K: ${value.limit} · ${searchTypeLabel(value.searchType)}`;
+  const summary =
+    value.searchMethod === 'bm25'
+      ? `Top K: ${value.limit} · ${searchMethodLabel(value.searchMethod)}`
+      : `Top K: ${value.limit} · ${searchMethodLabel(value.searchMethod)} · ${searchTypeLabel(value.searchType)}`;
 
   return (
     <div className="border border-yellow-200 rounded-lg bg-yellow-50 overflow-hidden">
@@ -122,24 +131,46 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
             </div>
           </div>
 
-          {/* Search strategy */}
+          {/* Search method */}
           <div>
-            <label htmlFor="search-type-select" className="block text-sm text-gray-700 mb-1">Search strategy</label>
+            <label htmlFor="search-method-select" className="block text-sm text-gray-700 mb-1">Search method</label>
             <select
-              id="search-type-select"
-              value={value.searchType}
+              id="search-method-select"
+              value={value.searchMethod}
               disabled={disabled}
-              onChange={(e) => handleSearchTypeChange(e.target.value as SearchControlsValue['searchType'])}
+              onChange={(e) => handleChange({ searchMethod: e.target.value as SearchControlsValue['searchMethod'] })}
               className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
             >
-              <option value="similarity">Cosine Similarity</option>
-              <option value="similarity_score_threshold">Score Threshold</option>
-              <option value="mmr">Max Marginal Relevance (MMR)</option>
+              <option value="dense">Dense (semantic / embeddings)</option>
+              <option value="bm25">BM25 (lexical / keyword)</option>
             </select>
+            <p className="text-xs text-gray-500 mt-1">
+              {value.searchMethod === 'bm25'
+                ? 'Keyword matching (TF·IDF). Search strategy options below do not apply.'
+                : 'Embedding similarity. Understands meaning and synonyms.'}
+            </p>
           </div>
 
+          {/* Search strategy — dense only */}
+          {value.searchMethod !== 'bm25' && (
+            <div>
+              <label htmlFor="search-type-select" className="block text-sm text-gray-700 mb-1">Search strategy</label>
+              <select
+                id="search-type-select"
+                value={value.searchType}
+                disabled={disabled}
+                onChange={(e) => handleSearchTypeChange(e.target.value as SearchControlsValue['searchType'])}
+                className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+              >
+                <option value="similarity">Cosine Similarity</option>
+                <option value="similarity_score_threshold">Score Threshold</option>
+                <option value="mmr">Max Marginal Relevance (MMR)</option>
+              </select>
+            </div>
+          )}
+
           {/* Score threshold — only when similarity_score_threshold */}
-          {value.searchType === 'similarity_score_threshold' && (
+          {value.searchMethod !== 'bm25' && value.searchType === 'similarity_score_threshold' && (
             <div>
               <label className="block text-sm text-gray-700 mb-1">
                 Score threshold: <span className="font-semibold">{value.scoreThreshold.toFixed(2)}</span>
@@ -165,7 +196,7 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
           )}
 
           {/* Fetch K + Lambda — only when mmr */}
-          {value.searchType === 'mmr' && (
+          {value.searchMethod !== 'bm25' && value.searchType === 'mmr' && (
             <>
               <div>
                 <label htmlFor="fetch-k-input" className="block text-sm text-gray-700 mb-1">

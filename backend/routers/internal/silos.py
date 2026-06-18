@@ -385,6 +385,7 @@ async def search_silo_documents(
             search_query.min_content_length,
             search_query.max_content_length,
             db,
+            search_method=search_query.search_method,
         )
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
         

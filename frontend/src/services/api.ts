@@ -1090,6 +1090,7 @@ class ApiService {
     filterMetadata?: Record<string, any>,
     searchOptions?: {
       searchType?: string;
+      searchMethod?: string;
       scoreThreshold?: number;
       fetchK?: number;
       lambdaMult?: number;
@@ -1103,6 +1104,7 @@ class ApiService {
         query,
         ...(limit !== undefined ? { limit } : {}),
         filter_metadata: filterMetadata,
+        ...(searchOptions?.searchMethod && searchOptions.searchMethod !== 'dense' ? { search_method: searchOptions.searchMethod } : {}),
         ...(searchOptions?.searchType && searchOptions.searchType !== 'similarity' ? { search_type: searchOptions.searchType } : {}),
         ...(searchOptions?.scoreThreshold !== undefined ? { score_threshold: searchOptions.scoreThreshold } : {}),
         ...(searchOptions?.fetchK !== undefined ? { fetch_k: searchOptions.fetchK } : {}),
@@ -1121,6 +1123,7 @@ class ApiService {
     filterMetadata?: Record<string, any>,
     searchOptions?: {
       searchType?: string;
+      searchMethod?: string;
       scoreThreshold?: number;
       fetchK?: number;
       lambdaMult?: number;
@@ -1133,6 +1136,9 @@ class ApiService {
       query,
       ...(limit !== undefined ? { limit } : {}),
       filter_metadata: filterMetadata,
+      ...(searchOptions?.searchMethod && searchOptions.searchMethod !== 'dense'
+        ? { search_method: searchOptions.searchMethod }
+        : {}),
       ...(searchOptions?.searchType && searchOptions.searchType !== 'similarity'
         ? { search_type: searchOptions.searchType }
         : {}),

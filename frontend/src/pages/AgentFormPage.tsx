@@ -4,7 +4,7 @@ import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb,
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
-import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD } from '../constants/agentConstants';
+import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_RETRIEVAL_SEARCH_TYPE, DEFAULT_RETRIEVAL_K, DEFAULT_RETRIEVAL_STRATEGY } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
@@ -31,6 +31,10 @@ interface Agent {
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
+  retrieval_search_type?: string;
+  retrieval_k?: number;
+  retrieval_strategy?: string;
+  retrieval_top_n?: number;
   tool_ids?: number[];
   mcp_config_ids?: number[];
   skill_ids?: number[];
@@ -47,6 +51,8 @@ interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
+  retrieval_search_type_options?: Array<{ code: string; label: string }>;
+  retrieval_strategy_options?: Array<{ code: string; label: string }>;
 }
 
 interface AgentFormData {
@@ -66,6 +72,10 @@ interface AgentFormData {
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
+  retrieval_search_type: string;
+  retrieval_k: number;
+  retrieval_strategy: string;
+  retrieval_top_n?: number;
   tool_ids: number[];
   mcp_config_ids: number[];
   skill_ids: number[];
@@ -195,6 +205,9 @@ function AgentFormPage() {
     memory_max_tokens: 4000,
     memory_summarize_threshold: DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
     temperature: DEFAULT_AGENT_TEMPERATURE,
+    retrieval_search_type: DEFAULT_RETRIEVAL_SEARCH_TYPE,
+    retrieval_k: DEFAULT_RETRIEVAL_K,
+    retrieval_strategy: DEFAULT_RETRIEVAL_STRATEGY,
     tool_ids: [],
     mcp_config_ids: [],
     skill_ids: []
@@ -252,6 +265,10 @@ function AgentFormPage() {
         silo_id: response.silo_id || undefined,
         output_parser_id: response.output_parser_id || undefined,
         temperature: response.temperature ?? DEFAULT_AGENT_TEMPERATURE,
+        retrieval_search_type: response.retrieval_search_type || DEFAULT_RETRIEVAL_SEARCH_TYPE,
+        retrieval_k: response.retrieval_k ?? DEFAULT_RETRIEVAL_K,
+        retrieval_strategy: response.retrieval_strategy || DEFAULT_RETRIEVAL_STRATEGY,
+        retrieval_top_n: response.retrieval_top_n ?? undefined,
         tool_ids: response.tool_ids || [],
         mcp_config_ids: response.mcp_config_ids || [],
         skill_ids: response.skill_ids || [],
@@ -421,6 +438,10 @@ function AgentFormPage() {
       silo_id: formData.silo_id,
       output_parser_id: formData.output_parser_id,
       temperature: formData.temperature,
+      retrieval_search_type: formData.retrieval_search_type,
+      retrieval_k: formData.retrieval_k,
+      retrieval_strategy: formData.retrieval_strategy,
+      retrieval_top_n: formData.retrieval_top_n,
       tool_ids: formData.tool_ids,
       mcp_config_ids: formData.mcp_config_ids,
       skill_ids: formData.skill_ids,
@@ -780,6 +801,82 @@ function AgentFormPage() {
                           ))}
                         </select>
                       </div>
+
+                      {formData.silo_id && (
+                        <div className="space-y-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                          <div className="flex items-center text-sm font-semibold text-gray-700">
+                            <FolderSearch className="w-4 h-4 mr-2" />
+                            Retrieval Configuration
+                          </div>
+
+                          <div>
+                            <label htmlFor="retrieval_search_type" className="block text-sm font-medium text-gray-700 mb-2">
+                              Search Type
+                            </label>
+                            <select
+                              id="retrieval_search_type"
+                              value={formData.retrieval_search_type}
+                              onChange={(e) => handleInputChange('retrieval_search_type', e.target.value)}
+                              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                            >
+                              {(agent?.retrieval_search_type_options ?? []).map((option) => (
+                                <option key={option.code} value={option.code}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div>
+                            <label htmlFor="retrieval_k" className="block text-sm font-medium text-gray-700 mb-2">
+                              Candidates to retrieve (k)
+                            </label>
+                            <input
+                              type="number"
+                              id="retrieval_k"
+                              min="1"
+                              value={formData.retrieval_k}
+                              onChange={(e) => handleInputChange('retrieval_k', e.target.value ? Number.parseInt(e.target.value) : DEFAULT_RETRIEVAL_K)}
+                              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                            />
+                          </div>
+
+                          <div>
+                            <label htmlFor="retrieval_strategy" className="block text-sm font-medium text-gray-700 mb-2">
+                              Retrieval Strategy
+                            </label>
+                            <select
+                              id="retrieval_strategy"
+                              value={formData.retrieval_strategy}
+                              onChange={(e) => handleInputChange('retrieval_strategy', e.target.value)}
+                              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                            >
+                              {(agent?.retrieval_strategy_options ?? []).map((option) => (
+                                <option key={option.code} value={option.code}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {formData.retrieval_strategy === 'rerank' && (
+                            <div>
+                              <label htmlFor="retrieval_top_n" className="block text-sm font-medium text-gray-700 mb-2">
+                                Documents to keep after reranking (top_n)
+                              </label>
+                              <input
+                                type="number"
+                                id="retrieval_top_n"
+                                min="1"
+                                value={formData.retrieval_top_n ?? ''}
+                                onChange={(e) => handleInputChange('retrieval_top_n', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                                placeholder="5"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div>
                         <label htmlFor="temperature" className="block text-sm font-medium text-gray-700 mb-2">
