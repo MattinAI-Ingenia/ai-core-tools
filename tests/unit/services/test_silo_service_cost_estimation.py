@@ -12,6 +12,18 @@ from services.silo_service import SiloService
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_token_count():
+    """Pin token counting to chars/4 so chunk/cost math is deterministic.
+
+    The real estimator uses tiktoken (matching LightRAG's chunker); these tests
+    cover the windowing + cost formulas, not the tokenizer, so we mock the
+    token-count boundary to a simple chars/4 rule.
+    """
+    with patch("services.silo_service._count_tokens", side_effect=lambda t: len(t) // 4):
+        yield
+
+
 def _make_lightrag_silo(chunk_size=1200, model_name="gpt-4o"):
     silo = MagicMock()
     silo.vector_db_type = "LIGHTRAG"
@@ -45,21 +57,21 @@ def test_estimate_cost_basic_calculation():
     silo = _make_lightrag_silo(chunk_size=1200)
     db = MagicMock()
 
-    # 4800 chars → (4800/4)*1.25 = 1500 tokens → ceil(1500/1200) = 2 chunks
+    # 4800 chars → 4800/4 = 1200 tokens → ceil(1200/1200) = 1 chunk
     documents = [{"content": "x" * 4800}]
 
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
         result = SiloService.estimate_indexing_cost(1, documents, db)
 
-    assert result["total_chunks"] == 2
+    assert result["total_chunks"] == 1
     assert result["chunk_token_size"] == 1200
-    assert result["estimated_llm_calls"] == 2           # chunks * (1 + 0 gleaning)
-    assert result["estimated_embedding_calls"] == 2     # chunks * 1
-    # 2 calls * (avg_chunk_tokens 750 + 1400 overhead) = 4300
-    assert result["estimated_input_tokens"] == 4300
-    assert result["estimated_output_tokens"] == 1000    # 2 calls * 500 avg
-    # content tokens (1500) * (1 + 0.6 graph factor) = 2400
-    assert result["estimated_embedding_tokens"] == 2400
+    assert result["estimated_llm_calls"] == 1           # chunks * (1 + 0 gleaning)
+    assert result["estimated_embedding_calls"] == 1     # chunks * 1
+    # 1 call * (avg_chunk_tokens 1200 + 3800 overhead) = 5000
+    assert result["estimated_input_tokens"] == 5000
+    assert result["estimated_output_tokens"] == 2000    # 1 call * 2000 avg
+    # chunk embeddings (content 1200) + graph embeddings (≈ output 2000) = 3200
+    assert result["estimated_embedding_tokens"] == 3200
     assert result["warnings"] == []
 
 
@@ -173,18 +185,19 @@ def test_estimate_cost_multiple_documents():
     silo = _make_lightrag_silo(chunk_size=1200)
     db = MagicMock()
 
-    # Doc1: 2400 chars → (2400/4)*1.25 = 750 tokens → ceil(750/1200) = 1 chunk
-    # Doc2: 4800 chars → (4800/4)*1.25 = 1500 tokens → ceil(1500/1200) = 2 chunks
-    # Total: 3 chunks (per-doc sum)
+    # Doc1: 5200 chars → 1300 tokens → ceil(1300/1200) = 2 chunks
+    # Doc2: 2800 chars → 700 tokens → 1 chunk
+    # Per-doc sum: 3 chunks. (A global 2000-token chunking would give only 2,
+    # so total_chunks == 3 proves the per-document calculation.)
     documents = [
-        {"content": "x" * 2400},
-        {"content": "x" * 4800},
+        {"content": "x" * 5200},
+        {"content": "x" * 2800},
     ]
 
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
         result = SiloService.estimate_indexing_cost(1, documents, db)
 
-    assert result["total_chunks"] == 3  # 1 + 2
+    assert result["total_chunks"] == 3  # 2 + 1
     assert result["estimated_llm_calls"] == 3  # 3 chunks * (1 + 0 gleaning)
 
 
@@ -230,7 +243,7 @@ def test_estimate_cost_with_gleaning():
     """Verify that ENTITY_EXTRACT_MAX_GLEANING scales the mathematical estimates correctly."""
     silo = _make_lightrag_silo(chunk_size=1200)
     db = MagicMock()
-    documents = [{"content": "x" * 4800}]  # 2 chunks
+    documents = [{"content": "x" * 5200}]  # 1300 tokens → 2 chunks
 
     # Patch ENTITY_EXTRACT_MAX_GLEANING to 2
     with patch("config.ENTITY_EXTRACT_MAX_GLEANING", 2):
@@ -242,7 +255,6 @@ def test_estimate_cost_with_gleaning():
     # 2 chunks * (1 + 2 gleaning) = 6 calls
     assert result["estimated_llm_calls"] == 6
     assert result["estimated_embedding_calls"] == 2
-    # 6 calls * (avg_chunk_tokens 750 + 1400 overhead) = 12900 input tokens
-    assert result["estimated_input_tokens"] == 12900
+    # 6 calls * (avg_chunk_tokens 650 + 3800 overhead) = 26700 input tokens
+    assert result["estimated_input_tokens"] == 26700
     assert result["warnings"] == []
-

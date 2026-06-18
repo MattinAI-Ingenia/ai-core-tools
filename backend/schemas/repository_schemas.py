@@ -68,6 +68,10 @@ class CreateRepositorySchema(BaseModel):
     extract_service_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None
+    # LightRAG chunking config (forwarded to the auto-created silo)
+    lightrag_chunk_strategy: Optional[str] = None
+    lightrag_chunk_token_size: Optional[int] = None
+    lightrag_chunk_overlap_token_size: Optional[int] = None
 
 
 class UpdateRepositorySchema(BaseModel):

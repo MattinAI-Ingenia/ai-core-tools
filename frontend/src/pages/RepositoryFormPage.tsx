@@ -21,6 +21,9 @@ interface RepositoryFormData {
   extract_service_id?: number;
   keywords_service_id?: number;
   vlm_service_id?: number;
+  lightrag_chunk_strategy?: string;
+  lightrag_chunk_token_size?: number;
+  lightrag_chunk_overlap_token_size?: number;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -69,6 +72,9 @@ const RepositoryFormPage: React.FC = () => {
     extract_service_id: undefined,
     keywords_service_id: undefined,
     vlm_service_id: undefined,
+    lightrag_chunk_strategy: 'fixed_token',
+    lightrag_chunk_token_size: 1200,
+    lightrag_chunk_overlap_token_size: 100,
   });
 
   const isNewRepository = repositoryId === '0';
@@ -212,6 +218,9 @@ const RepositoryFormPage: React.FC = () => {
       extract_service_id: formData.extract_service_id,
       keywords_service_id: formData.keywords_service_id,
       vlm_service_id: formData.vlm_service_id,
+      lightrag_chunk_strategy: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_chunk_strategy : undefined,
+      lightrag_chunk_token_size: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_chunk_token_size : undefined,
+      lightrag_chunk_overlap_token_size: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_chunk_overlap_token_size : undefined,
     };
 
     setError(null);
@@ -334,33 +343,7 @@ const RepositoryFormPage: React.FC = () => {
             )}
           </div>
 
-          {isNewRepository && formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
-            <div>
-              <label htmlFor="lightrag_vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
-                LightRAG Database Type <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="lightrag_vector_db_type"
-                value={formData.lightrag_vector_db_type}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    lightrag_vector_db_type: e.target.value.toUpperCase(),
-                  })
-                }
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              >
-                <option value="QDRANT">Qdrant</option>
-                <option value="PGVECTOR">PGVector</option>
-              </select>
-              <p className="text-sm text-gray-500 mt-1">
-                Select the internal database backend used by LightRAG for this repository.
-              </p>
-            </div>
-          )}
-
-          {/* Embedding Service (only for new repositories) */}
+          {/* Embedding Service (common — used by the auto-created silo, only for new repositories) */}
           {isNewRepository && (
             <div>
               <label htmlFor="embedding_service_id" className="block text-sm font-medium text-gray-700 mb-2">
@@ -391,9 +374,93 @@ const RepositoryFormPage: React.FC = () => {
             </div>
           )}
 
-          {/* LightRAG role-specific LLM configuration (only for new repositories) */}
+          {/* Transcription Service */}
+          {aiServices.length > 0 && (
+            <div>
+              <label htmlFor="transcription_service_id" className="block text-sm font-medium text-gray-700 mb-2">
+                Transcription Service (Whisper)
+              </label>
+              <select
+                id="transcription_service_id"
+                value={formData.transcription_service_id || ''}
+                onChange={(e) => setFormData({
+                  ...formData,
+                  transcription_service_id: e.target.value ? parseInt(e.target.value, 10) : undefined,
+                })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="">None (no transcription analysis) </option>
+                {aiServices.map((service) => (
+                  <option key={service.service_id} value={service.service_id}>
+                    {service.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-sm text-gray-500 mt-1">
+                Transcription service used for all media uploads in this repository.
+              </p>
+            </div>
+          )}
+
+          {/* Video AI Service */}
+          {aiServices.filter(s => s.supports_video).length > 0 && (
+            <div>
+              <label htmlFor="video_ai_service_id" className="block text-sm font-medium text-gray-700 mb-2">
+                Video Analysis Service (Gemini)
+              </label>
+              <select
+                id="video_ai_service_id"
+                value={formData.video_ai_service_id || ''}
+                onChange={(e) => setFormData({
+                  ...formData,
+                  video_ai_service_id: e.target.value ? parseInt(e.target.value, 10) : undefined,
+                })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="">None (no visual analysis)</option>
+                {aiServices.filter(s => s.supports_video).map((service) => (
+                  <option key={service.service_id} value={service.service_id}>
+                    {service.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-sm text-gray-500 mt-1">
+                When set, media uploaded in multimodal mode will use this service for visual frame analysis.
+              </p>
+            </div>
+          )}
+
+          {/* LightRAG Configuration — shown only when LIGHTRAG is selected (new repositories) */}
           {isNewRepository && formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
-            <>
+            <div className="border-t border-gray-200 pt-6 mt-6 space-y-6">
+              <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">LightRAG Configuration</h3>
+
+              {/* LightRAG Database Type */}
+              <div>
+                <label htmlFor="lightrag_vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
+                  LightRAG Database Type <span className="text-red-500">*</span>
+                </label>
+                <select
+                  id="lightrag_vector_db_type"
+                  value={formData.lightrag_vector_db_type}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      lightrag_vector_db_type: e.target.value.toUpperCase(),
+                    })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  required
+                >
+                  <option value="QDRANT">Qdrant</option>
+                  <option value="PGVECTOR">PGVector</option>
+                </select>
+                <p className="text-sm text-gray-500 mt-1">
+                  Select the internal database backend used by LightRAG for this repository.
+                </p>
+              </div>
+
+              {/* Role-specific LLM configuration */}
               {([
                 {
                   field: 'extract_service_id' as RoleServiceField,
@@ -463,62 +530,56 @@ const RepositoryFormPage: React.FC = () => {
                   </div>
                 );
               })}
-            </>
-          )}
 
-          {/* Transcription Service */}
-          {aiServices.length > 0 && (
-            <div>
-              <label htmlFor="transcription_service_id" className="block text-sm font-medium text-gray-700 mb-2">
-                Transcription Service (Whisper)
-              </label>
-              <select
-                id="transcription_service_id"
-                value={formData.transcription_service_id || ''}
-                onChange={(e) => setFormData({
-                  ...formData,
-                  transcription_service_id: e.target.value ? parseInt(e.target.value, 10) : undefined,
-                })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="">None (no transcription analysis) </option>
-                {aiServices.map((service) => (
-                  <option key={service.service_id} value={service.service_id}>
-                    {service.name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-sm text-gray-500 mt-1">
-                Transcription service used for all media uploads in this repository.
-              </p>
-            </div>
-          )}
+              {/* Chunking Strategy */}
+              <div>
+                <label htmlFor="lightrag_chunk_strategy" className="block text-sm font-medium text-gray-700 mb-2">
+                  Chunking strategy
+                </label>
+                <select
+                  id="lightrag_chunk_strategy"
+                  value={formData.lightrag_chunk_strategy || 'fixed_token'}
+                  onChange={(e) => setFormData({ ...formData, lightrag_chunk_strategy: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="fixed_token">Fixed token (default)</option>
+                  <option value="recursive_character">Recursive character</option>
+                  <option value="semantic_vector">Semantic vector</option>
+                  <option value="paragraph_semantic">Paragraph semantic</option>
+                </select>
+              </div>
 
-          {/* Video AI Service */}
-          {aiServices.filter(s => s.supports_video).length > 0 && (
-            <div>
-              <label htmlFor="video_ai_service_id" className="block text-sm font-medium text-gray-700 mb-2">
-                Video Analysis Service (Gemini)
-              </label>
-              <select
-                id="video_ai_service_id"
-                value={formData.video_ai_service_id || ''}
-                onChange={(e) => setFormData({
-                  ...formData,
-                  video_ai_service_id: e.target.value ? parseInt(e.target.value, 10) : undefined,
-                })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="">None (no visual analysis)</option>
-                {aiServices.filter(s => s.supports_video).map((service) => (
-                  <option key={service.service_id} value={service.service_id}>
-                    {service.name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-sm text-gray-500 mt-1">
-                When set, media uploaded in multimodal mode will use this service for visual frame analysis.
-              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="lightrag_chunk_token_size" className="block text-sm font-medium text-gray-700 mb-2">
+                    Chunk token size
+                  </label>
+                  <input
+                    type="number"
+                    id="lightrag_chunk_token_size"
+                    value={formData.lightrag_chunk_token_size ?? 1200}
+                    onChange={(e) => setFormData({ ...formData, lightrag_chunk_token_size: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })}
+                    min={100}
+                    max={8000}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="lightrag_chunk_overlap_token_size" className="block text-sm font-medium text-gray-700 mb-2">
+                    Overlap token size
+                  </label>
+                  <input
+                    type="number"
+                    id="lightrag_chunk_overlap_token_size"
+                    value={formData.lightrag_chunk_overlap_token_size ?? 100}
+                    onChange={(e) => setFormData({ ...formData, lightrag_chunk_overlap_token_size: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })}
+                    min={0}
+                    max={2000}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              </div>
+
             </div>
           )}
 

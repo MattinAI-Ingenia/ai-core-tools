@@ -63,6 +63,16 @@ logging.getLogger("lightrag").addFilter(_DropUnconfiguredRoleLog())
 # Valid LightRAG query modes — used for pass-through validation.
 _LIGHTRAG_MODES = frozenset({"local", "global", "hybrid", "naive", "mix", "bypass"})
 
+# Maps a silo's chunking strategy to LightRAG's native ``process_options``
+# selector char (see lightrag.constants.PROCESS_OPTION_CHUNK_*). Unknown or
+# legacy values (e.g. the old "token_window") fall back to fixed-token "F".
+_CHUNK_STRATEGY_OPTION = {
+    "fixed_token": "F",
+    "recursive_character": "R",
+    "semantic_vector": "V",
+    "paragraph_semantic": "P",
+}
+
 
 def _source_label_from_metadata(metadata: dict) -> str:
     """Build a human-readable source label for a chunk from its document metadata.
@@ -90,7 +100,7 @@ def _source_label_from_metadata(metadata: dict) -> str:
     return label
 
 
-async def _ainsert(rag, texts, file_paths=None):
+async def _ainsert(rag, texts, file_paths=None, process_options="F"):
     """Insert documents through LightRAG's modern (non-legacy) chunking router.
 
     The plain ``rag.ainsert`` enqueues without a chunking selector, which makes
@@ -102,17 +112,19 @@ async def _ainsert(rag, texts, file_paths=None):
     """
     from lightrag.parser.routing import resolve_chunk_options
 
-    chunk_opts = resolve_chunk_options(rag.addon_params)
+    chunk_opts = resolve_chunk_options(
+        rag.addon_params, process_options=process_options
+    )
     await rag.apipeline_enqueue_documents(
         texts,
         file_paths=file_paths,
-        process_options="F",
+        process_options=process_options,
         chunk_options=chunk_opts,
     )
     await rag.apipeline_process_enqueue_documents()
 
 
-async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None):
+async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, process_options="F"):
     """Run the insert with optional sub-document progress reporting.
 
     Polls pipeline_status every 0.5s while the insert runs.  Falls back
@@ -122,7 +134,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     retrieved chunks carry a human-readable source instead of "unknown_source".
     """
     if progress_callback is None:
-        await _ainsert(rag, texts, file_paths=file_paths)
+        await _ainsert(rag, texts, file_paths=file_paths, process_options=process_options)
         return
 
     total = len(texts)
@@ -142,7 +154,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
 
     poll_task = asyncio.create_task(_poll())
     try:
-        await _ainsert(rag, texts, file_paths=file_paths)
+        await _ainsert(rag, texts, file_paths=file_paths, process_options=process_options)
     finally:
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
@@ -403,6 +415,7 @@ class LightRAGStore(VectorStoreInterface):
         lightrag_vector_db_type: Optional[str] = None,
         lightrag_chunk_token_size: Optional[int] = None,
         lightrag_chunk_overlap_token_size: Optional[int] = None,
+        lightrag_chunk_strategy: Optional[str] = None,
     ):
         self.db = db
         # ``ai_service`` is the legacy single-LLM parameter — it acts as the
@@ -416,6 +429,9 @@ class LightRAGStore(VectorStoreInterface):
         self.lightrag_vector_db_type = (lightrag_vector_db_type or "QDRANT").upper()
         self._chunk_token_size = lightrag_chunk_token_size
         self._chunk_overlap_token_size = lightrag_chunk_overlap_token_size
+        self._chunk_process_option = _CHUNK_STRATEGY_OPTION.get(
+            lightrag_chunk_strategy, "F"
+        )
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
         self._rag_instances: Dict[str, Any] = {}
@@ -560,7 +576,7 @@ class LightRAGStore(VectorStoreInterface):
         ctx_token = set_active_accumulator(accumulator)
         t_start = time.perf_counter()
         try:
-            _run_async(_ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths))
+            _run_async(_ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, process_options=self._chunk_process_option))
         finally:
             reset_active_accumulator(ctx_token)
 

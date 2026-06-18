@@ -161,4 +161,5 @@ class VectorStoreFactory:
             lightrag_vector_db_type=kwargs.get('lightrag_vector_db_type'),
             lightrag_chunk_token_size=kwargs.get('lightrag_chunk_token_size'),
             lightrag_chunk_overlap_token_size=kwargs.get('lightrag_chunk_overlap_token_size'),
+            lightrag_chunk_strategy=kwargs.get('lightrag_chunk_strategy'),
         )

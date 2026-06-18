@@ -72,6 +72,9 @@ class RepositoryService:
         extract_service_id: Optional[int] = None,
         keywords_service_id: Optional[int] = None,
         vlm_service_id: Optional[int] = None,
+        lightrag_chunk_strategy: Optional[str] = None,
+        lightrag_chunk_token_size: Optional[int] = None,
+        lightrag_chunk_overlap_token_size: Optional[int] = None,
     ) -> Repository:
         """
         Create a new repository with its associated silo
@@ -114,6 +117,9 @@ class RepositoryService:
             'extract_service_id': extract_service_id,
             'keywords_service_id': keywords_service_id,
             'vlm_service_id': vlm_service_id,
+            'lightrag_chunk_strategy': lightrag_chunk_strategy,
+            'lightrag_chunk_token_size': lightrag_chunk_token_size,
+            'lightrag_chunk_overlap_token_size': lightrag_chunk_overlap_token_size,
         }
         silo = silo_service.create_or_update_silo(silo_data, SiloType.REPO, db)
 
@@ -530,9 +536,12 @@ class RepositoryService:
             normalized_lightrag_vector_db_type,
             repo_data.indexing_service_id,
             db,
-            extract_service_id=getattr(repo_data, 'extract_service_id', None),
-            keywords_service_id=getattr(repo_data, 'keywords_service_id', None),
-            vlm_service_id=getattr(repo_data, 'vlm_service_id', None),
+            extract_service_id=repo_data.extract_service_id,
+            keywords_service_id=repo_data.keywords_service_id,
+            vlm_service_id=repo_data.vlm_service_id,
+            lightrag_chunk_strategy=repo_data.lightrag_chunk_strategy,
+            lightrag_chunk_token_size=repo_data.lightrag_chunk_token_size,
+            lightrag_chunk_overlap_token_size=repo_data.lightrag_chunk_overlap_token_size,
         )
 
     @staticmethod

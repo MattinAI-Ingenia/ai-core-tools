@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+import functools
 import math
 import os
 import re
@@ -84,63 +85,13 @@ _MODEL_SPECS = {
 # Use the same fuzzy prefix/substring matching as _MODEL_SPECS.
 # ---------------------------------------------------------------------------
 
-_LLM_PRICING: dict[str, tuple[float, float]] = {
-    # OpenAI
-    'gpt-4o-mini':       (0.15,   0.60),
-    'gpt-4o':            (2.50,  10.00),
-    'gpt-4-turbo':       (10.00, 30.00),
-    'gpt-4':             (30.00, 60.00),
-    'gpt-3.5-turbo':     (0.50,   1.50),
-    # Anthropic
-    'claude-3-haiku':    (0.25,   1.25),
-    'claude-3.5-haiku':  (0.80,   4.00),
-    'claude-3.5-sonnet': (3.00,  15.00),
-    'claude-sonnet-4':   (3.00,  15.00),
-    'claude-opus-4':     (15.00, 75.00),
-    # Mistral
-    'mistral-small':     (0.10,   0.30),
-    'mistral-medium':    (0.40,   1.20),
-    'mistral-large':     (2.00,   6.00),
-    'pixtral':           (0.10,   0.30),
-    # Google
-    'gemini-2.0-flash':  (0.075,  0.30),
-    'gemini-1.5-flash':  (0.075,  0.30),
-    'gemini-1.5-pro':    (1.25,   5.00),
-}
-
-_EMBEDDING_PRICING: dict[str, float] = {
-    # OpenAI
-    'text-embedding-3-small': 0.02,
-    'text-embedding-3-large': 0.13,
-    'text-embedding-ada-002': 0.10,
-}
-
-
-def _lookup_llm_price(model_name: str) -> tuple[float, float] | None:
-    """Return (input_usd_per_1m, output_usd_per_1m) or None if unknown.
-
-    Longer/more-specific keys win over shorter ones to avoid 'gpt-4' matching
-    before 'gpt-4o' or 'gpt-4-turbo'.
-    """
-    if not model_name:
-        return None
-    lower = model_name.lower()
-    # Sort by key length descending so more-specific entries match first.
-    for known_id, price in sorted(_LLM_PRICING.items(), key=lambda kv: len(kv[0]), reverse=True):
-        if known_id in lower or lower in known_id:
-            return price
-    return None
-
-
-def _lookup_embedding_price(model_name: str) -> float | None:
-    """Return input_usd_per_1m for an embedding model or None if unknown."""
-    if not model_name:
-        return None
-    lower = model_name.lower()
-    for known_id, price in _EMBEDDING_PRICING.items():
-        if known_id in lower or lower in known_id:
-            return price
-    return None
+def _ensure_pricing_catalog(db) -> None:
+    """Populate the pricing_catalog table from providers if empty."""
+    from models.pricing_catalog import PricingCatalog
+    if db.query(PricingCatalog).first() is not None:
+        return
+    from services.pricing_service import PricingService
+    PricingService.update_pricing_catalog(db)
 
 
 def _lookup_model_specs(model_name: str):
@@ -229,6 +180,7 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
             lightrag_vector_db_type=getattr(silo, 'lightrag_vector_db_type', None) or 'QDRANT',
             lightrag_chunk_token_size=getattr(silo, 'lightrag_chunk_token_size', None),
             lightrag_chunk_overlap_token_size=getattr(silo, 'lightrag_chunk_overlap_token_size', None),
+            lightrag_chunk_strategy=getattr(silo, 'lightrag_chunk_strategy', None),
         )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
@@ -253,23 +205,46 @@ _WORD_RE = re.compile(r'[^\W\d_]{3,}', re.UNICODE)
 _SPACED_WORD_RE = re.compile(r'[^\W\d_](?: [^\W\d_])+', re.UNICODE)
 
 
-def _num_token_chunks(text: str, chunk_token_size: int, overlap_token_size: int) -> int:
-    """Approximate how many token-chunks LightRAG will produce for *text*.
+@functools.lru_cache(maxsize=1)
+def _token_encoder():
+    """tiktoken encoder matching LightRAG's chunker (TiktokenTokenizer('gpt-4o-mini') → o200k_base)."""
+    import tiktoken
+    try:
+        return tiktoken.encoding_for_model("gpt-4o-mini")
+    except Exception:
+        return tiktoken.get_encoding("o200k_base")
 
-    Mirrors LightRAG's token-window chunking. Token count is approximated from
-    characters (chars/4) with a 1.25x correction for whitespace/punctuation/
-    special tokens. Used both for progress chunk-counting and cost estimation
-    so the two stay consistent.
-    """
+
+def _count_tokens(text: str) -> int:
+    """Real token count via the same tiktoken encoding LightRAG uses."""
     if not text:
         return 0
-    doc_tokens = int((len(text) / 4) * 1.25)
+    try:
+        return len(_token_encoder().encode(text))
+    except Exception:
+        return len(text) // 4  # ponytail: fallback if tiktoken unavailable
+
+
+def _chunks_from_tokens(doc_tokens: int, chunk_token_size: int, overlap_token_size: int) -> int:
+    """Token-window chunk count for a document of *doc_tokens* tokens."""
+    if doc_tokens <= 0:
+        return 0
     if overlap_token_size >= chunk_token_size or overlap_token_size == 0:
         return max(1, math.ceil(doc_tokens / chunk_token_size))
     stride = chunk_token_size - overlap_token_size
     if doc_tokens <= chunk_token_size:
         return 1
     return 1 + math.ceil((doc_tokens - chunk_token_size) / stride)
+
+
+def _num_token_chunks(text: str, chunk_token_size: int, overlap_token_size: int) -> int:
+    """Approximate how many token-chunks LightRAG will produce for *text*.
+
+    Counts tokens with the same tiktoken encoding LightRAG's chunker uses, then
+    mirrors its token-window splitting. Used for both progress chunk-counting
+    and cost estimation so the two stay consistent with the real run.
+    """
+    return _chunks_from_tokens(_count_tokens(text), chunk_token_size, overlap_token_size)
 
 
 def _collapse_spaced_letters(line: str) -> str:
@@ -655,7 +630,7 @@ class SiloService:
             # Set LightRAG config columns on creation
             if not silo_id:
                 for field in ('lightrag_chunk_strategy', 'lightrag_chunk_token_size',
-                              'lightrag_chunk_overlap_token_size', 'lightrag_graph_context_enabled'):
+                              'lightrag_chunk_overlap_token_size'):
                     if field in silo_data and silo_data[field] is not None:
                         setattr(silo, field, silo_data[field])
 
@@ -1864,7 +1839,6 @@ class SiloService:
                 lightrag_chunk_strategy=silo.lightrag_chunk_strategy,
                 lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
                 lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
-                lightrag_graph_context_enabled=silo.lightrag_graph_context_enabled,
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -1907,7 +1881,6 @@ class SiloService:
             'lightrag_chunk_strategy': getattr(silo_data, 'lightrag_chunk_strategy', None),
             'lightrag_chunk_token_size': getattr(silo_data, 'lightrag_chunk_token_size', None),
             'lightrag_chunk_overlap_token_size': getattr(silo_data, 'lightrag_chunk_overlap_token_size', None),
-            'lightrag_graph_context_enabled': getattr(silo_data, 'lightrag_graph_context_enabled', None),
         }
         
         # Create or update using the existing service
@@ -2115,27 +2088,13 @@ class SiloService:
 
         chunk_token_size = silo.lightrag_chunk_token_size or 1200
         chunk_overlap_token_size = silo.lightrag_chunk_overlap_token_size or 0
-        chunk_strategy = getattr(silo, 'lightrag_chunk_strategy', None)
 
-        # Calculate chunks and total content tokens per document, then sum.
-        # Tokenization adjustment: actual token count is typically 10-25% higher than
-        # the rough 4-char-per-token estimate, due to whitespace, punctuation, and
-        # special tokens. The 1.25x multiplier lives inside ``_num_token_chunks``.
-        # Note: documents here are whole pages/files (split=False), so this mirrors
-        # LightRAG's own token-window chunking by chunk_token_size.
         num_chunks = 0
         total_content_tokens = 0
         for doc in documents:
-            doc_chars = len(doc.get('content', ''))
-            total_content_tokens += int((doc_chars / 4) * 1.25)
-
-            doc_chunks = _num_token_chunks(doc.get('content', ''), chunk_token_size, chunk_overlap_token_size)
-
-            # Adjust for chunk strategy per document
-            if chunk_strategy == "split_only":
-                doc_chunks = max(1, int(doc_chunks * 1.25))
-
-            num_chunks += doc_chunks
+            doc_tokens = _count_tokens(doc.get('content', ''))
+            total_content_tokens += doc_tokens
+            num_chunks += _chunks_from_tokens(doc_tokens, chunk_token_size, chunk_overlap_token_size)
 
         import config
         max_gleaning = config.ENTITY_EXTRACT_MAX_GLEANING
@@ -2145,12 +2104,14 @@ class SiloService:
         # pass. So calls/chunk = 1 + max_gleaning (not 2 + max_gleaning).
         extraction_calls = num_chunks * (1 + max_gleaning)
         embedding_calls = num_chunks
-        # Fixed system-prompt overhead per LightRAG extraction call: the entity_extraction_system_prompt
-        # template + 2 few-shot examples adds ~1,400 tokens on top of the chunk content every call.
-        _prompt_overhead_tokens = 1400
-        _out_per_call_avg = 500
-        _out_per_call_min = 300
-        _out_per_call_max = 800
+        # Fixed prompt overhead per LightRAG extraction call (measured against
+        # lightrag.prompt.PROMPTS): system 1,305 + few-shot examples 2,244 +
+        # user wrapper 250 ≈ 3,800 tokens on top of the chunk content every call.
+        _prompt_overhead_tokens = 3800
+        # Entity+relationship JSON output is large and varies with entity density.
+        _out_per_call_avg = 2000
+        _out_per_call_min = 1000
+        _out_per_call_max = 3000
 
         # Average real chunk size in tokens (last chunk of a doc is smaller than
         # chunk_token_size), used for the per-call content portion.
@@ -2194,18 +2155,12 @@ class SiloService:
         )
 
         # --- Pricing ---
-        # Try to get prices from DB first (fetched from provider APIs),
-        # fall back to hardcoded catalog if not found.
         from services.pricing_service import PricingService
+        _ensure_pricing_catalog(db)
 
         llm_price = PricingService.get_llm_pricing(db, model_name)
         currency = "USD"
-        if llm_price is None:
-            llm_price = _lookup_llm_price(model_name)  # fallback hardcoded
-
         emb_price = PricingService.get_embedding_pricing(db, embedding_model_name)
-        if emb_price is None:
-            emb_price = _lookup_embedding_price(embedding_model_name)  # fallback hardcoded
 
         if llm_price is not None:
             in_price, out_price = llm_price
