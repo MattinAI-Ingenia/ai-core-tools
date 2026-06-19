@@ -255,6 +255,10 @@ async def call_agent_stream(
                 async for chunk in base_generator:
                     yield chunk
             finally:
+                # Release the request DB session here: for a StreamingResponse the
+                # get_db dependency teardown does not run until late, leaving the
+                # connection checked out (idle-in-transaction) for every stream.
+                db.close()
                 await fms.cleanup_ephemeral_refs(all_file_references)
 
         logger.info(f"Public API streaming chat for agent {agent_id}")

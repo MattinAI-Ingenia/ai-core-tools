@@ -786,6 +786,9 @@ async def chat_with_agent_stream(
                 async for chunk in base_generator:
                     yield chunk
             finally:
+                # Release the request DB session: get_db teardown runs too late
+                # for a StreamingResponse, leaving the connection checked out.
+                db.close()
                 await fms.cleanup_ephemeral_refs(all_file_references)
 
         logger.info(f"Streaming chat request for agent {agent_id} by user {auth_context.identity.id}")
