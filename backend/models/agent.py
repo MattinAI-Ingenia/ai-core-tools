@@ -92,27 +92,36 @@ class Agent(Base):
     temperature = Column(Float, default=DEFAULT_AGENT_TEMPERATURE, nullable=False)
     is_frozen = Column(Boolean, default=False, nullable=False)
 
-    # Retrieval configuration (per-agent RAG behaviour). Defaults reproduce the
-    # previous hard-coded behaviour so existing agents are unaffected.
+    # Retrieval configuration (per-agent RAG behaviour).
+    #
+    # Two stable *selectors* are stored as typed columns:
+    #   - retrieval_search_type: how the vector store is queried (Phase 1)
+    #   - retrieval_strategy:    post-retrieval strategy applied (Phase 2)
+    #
+    # Every component-specific knob (k, top_n, similarity_threshold, and any
+    # future search-method / strategy parameter such as a hybrid `alpha`) lives
+    # in the single ``retrieval_params`` JSON column. Storing them there means
+    # adding a new retrieval parameter never requires a schema migration. The
+    # ``retrieval_k`` / ``retrieval_top_n`` properties below keep the historical
+    # flat attribute access working transparently on top of the JSON payload.
     retrieval_search_type = Column(
         String(45),
         default=DEFAULT_RETRIEVAL_SEARCH_TYPE,
         nullable=False,
         server_default=DEFAULT_RETRIEVAL_SEARCH_TYPE,
     )  # how the vector store is queried (Phase 1)
-    retrieval_k = Column(
-        Integer,
-        default=DEFAULT_RETRIEVAL_K,
-        nullable=False,
-        server_default=str(DEFAULT_RETRIEVAL_K),
-    )  # number of candidates retrieved before any strategy (Phase 1)
     retrieval_strategy = Column(
         String(45),
         default=DEFAULT_RETRIEVAL_STRATEGY,
         nullable=False,
         server_default=DEFAULT_RETRIEVAL_STRATEGY,
     )  # post-retrieval strategy applied to candidates (Phase 2)
-    retrieval_top_n = Column(Integer, nullable=True)  # documents kept after reranking (Phase 2)
+    retrieval_params = Column(
+        JSON,
+        default=dict,
+        nullable=False,
+        server_default='{}',
+    )  # component-specific knobs: k, top_n, similarity_threshold, …
 
     marketplace_visibility = Column(
         Enum(MarketplaceVisibility),
@@ -156,6 +165,35 @@ class Agent(Base):
         uselist=False,
         cascade='all, delete-orphan'
     )
+
+    # ---- Retrieval knob accessors (backed by the retrieval_params JSON) -------
+    # These expose the most common knobs as flat attributes so callers (schemas,
+    # services, retrieval tools) keep using ``agent.retrieval_k`` /
+    # ``agent.retrieval_top_n`` unchanged while the values live inside the JSON
+    # payload. Setters always reassign the dict so SQLAlchemy tracks the change.
+    def _set_retrieval_param(self, key, value):
+        params = dict(self.retrieval_params or {})
+        if value is None:
+            params.pop(key, None)
+        else:
+            params[key] = value
+        self.retrieval_params = params
+
+    @property
+    def retrieval_k(self):
+        return (self.retrieval_params or {}).get('k', DEFAULT_RETRIEVAL_K)
+
+    @retrieval_k.setter
+    def retrieval_k(self, value):
+        self._set_retrieval_param('k', value)
+
+    @property
+    def retrieval_top_n(self):
+        return (self.retrieval_params or {}).get('top_n')
+
+    @retrieval_top_n.setter
+    def retrieval_top_n(self, value):
+        self._set_retrieval_param('top_n', value)
 
     __mapper_args__ = {
         'polymorphic_identity': 'agent',
