@@ -23,6 +23,7 @@ if sys.platform == 'win32':
 
 import errno
 from contextlib import asynccontextmanager
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -280,6 +281,17 @@ async def _oserror_handler(_request: Request, exc: OSError) -> JSONResponse:
     # Not a disk-full error — re-raise so FastAPI's default handler maps it
     # to a 500 with the original traceback in the logs.
     raise exc
+
+
+@app.exception_handler(SQLAlchemyPoolTimeout)
+async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout) -> JSONResponse:
+    """Map DB connection-pool exhaustion to 503 with Retry-After instead of an opaque 500."""
+    logger.error("Database connection pool exhausted: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Service temporarily unavailable, please retry shortly."},
+        headers={"Retry-After": "5"},
+    )
 
 
 # Mount routers - clean structure with no nesting
