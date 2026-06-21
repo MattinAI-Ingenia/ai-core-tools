@@ -20,6 +20,7 @@ class UserDetailResponse(BaseModel):
     api_keys_count: int
     is_active: bool
     platform_role: str = 'editor'
+    is_omniadmin: bool = False
 
 
 class SetPlatformRoleRequest(BaseModel):

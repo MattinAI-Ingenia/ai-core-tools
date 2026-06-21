@@ -15,7 +15,7 @@ from services.user_deletion_errors import (
 )
 from services.app_ownership_errors import TransferRecipientInvalidError, TierLimitExceededError
 from typing import Literal, Optional, Tuple, List, Dict, Any
-from utils.config import is_omniadmin
+from utils.config import is_omniadmin, get_omniadmins
 from utils.logger import get_logger
 
 class UserService:
@@ -88,7 +88,7 @@ class UserService:
     def get_all_users(db: Session, page: int = 1, per_page: int = 10) -> Tuple[List[Dict], int]:
         """Get all users with pagination. Returns (users_list, total_count)."""
         user_repo = UserRepository(db)
-        users, total = user_repo.get_all_paginated(page, per_page)
+        users, total = user_repo.get_all_paginated(page, per_page, exclude_emails=get_omniadmins())
 
         users_list = [UserService._user_to_dict(user) for user in users]
 
@@ -104,7 +104,7 @@ class UserService:
     def search_users(db: Session, query: str, page: int = 1, per_page: int = 10) -> Tuple[List[Dict], int]:
         """Search users by name or email. Returns (users_list, total_count)."""
         user_repo = UserRepository(db)
-        users, total = user_repo.search_users(query, page, per_page)
+        users, total = user_repo.search_users(query, page, per_page, exclude_emails=get_omniadmins())
 
         users_list = [UserService._user_to_dict(user) for user in users]
 
@@ -424,6 +424,9 @@ class UserService:
             raise ValueError(f"Invalid platform role '{role}'. Must be one of: {', '.join(valid_roles)}")
 
         user = UserService._get_user_or_raise(db, user_id)
+
+        if is_omniadmin(user.email):
+            raise PermissionError("Cannot change the platform role of an omniadmin user")
 
         if user.email == admin_email:
             raise ValueError("Cannot change your own platform role")
