@@ -640,6 +640,13 @@ const {
                     </div>
                     )}
 
+                    {/* LightRAG graph bubble — only for graph modes (not Vector/naive) */}
+                    {isLightRAG && lightragGraph && searchControls.lightragQueryMode !== 'naive' && (
+                      <div className="mb-6">
+                        <LightRAGGraphBubble graphData={lightragGraph} />
+                      </div>
+                    )}
+
                     <div className="space-y-4">
                       {searchResults.map((result, index) => {
                         const resultKey = String(result.id
@@ -720,12 +727,6 @@ const {
                       })}
                     </div>
 
-                    {/* LightRAG graph bubble — only for graph modes (not Vector/naive) */}
-                    {isLightRAG && lightragGraph && searchControls.lightragQueryMode !== 'naive' && (
-                      <div className="mt-6">
-                        <LightRAGGraphBubble graphData={lightragGraph} />
-                      </div>
-                    )}
                   </div>
                 )}
 
