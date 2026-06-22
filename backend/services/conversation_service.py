@@ -101,7 +101,7 @@ class ConversationService:
         
         # Generate auto-title if not provided
         if not title:
-            title = f"Conversación {datetime.utcnow().strftime('%d/%m/%Y %H:%M')}"
+            title = f"Conversation {datetime.utcnow().strftime('%d/%m/%Y %H:%M')}"
         
         # Create conversation
         conversation = Conversation(

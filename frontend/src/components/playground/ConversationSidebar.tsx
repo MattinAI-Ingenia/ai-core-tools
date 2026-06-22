@@ -31,12 +31,12 @@ function formatDate(dateString: string): string {
   const diffHours = Math.floor(diffMs / 3600000);
   const diffDays = Math.floor(diffMs / 86400000);
 
-  if (diffMins < 1) return 'Ahora';
-  if (diffMins < 60) return `Hace ${diffMins}m`;
-  if (diffHours < 24) return `Hace ${diffHours}h`;
-  if (diffDays < 7) return `Hace ${diffDays}d`;
+  if (diffMins < 1) return 'Now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
 
-  return date.toLocaleDateString('es-ES', { 
+  return date.toLocaleDateString('en-US', {
     day: 'numeric', 
     month: 'short' 
   });
@@ -233,7 +233,7 @@ export default function ConversationSidebar({
                   <div className="flex items-center space-x-2 mt-2 text-xs text-gray-400">
                     <span>{formatDate(conversation.updated_at)}</span>
                     <span>•</span>
-                    <span>{conversation.message_count} mensajes</span>
+                    <span>{conversation.message_count} messages</span>
                   </div>
                 </div>
 
@@ -280,7 +280,7 @@ export default function ConversationSidebar({
       {/* Header */}
       <div className="p-4 border-b border-white/10 dark:border-gray-700/30">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Conversaciones</h3>
+          <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Conversations</h3>
           <button
             onClick={() => setIsCollapsed(true)}
             className="p-1 hover:bg-white/30 dark:hover:bg-gray-700/40 rounded transition-colors"
@@ -299,7 +299,7 @@ export default function ConversationSidebar({
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
-          <span>Nueva Conversación</span>
+          <span>New Conversation</span>
         </button>
       </div>
 

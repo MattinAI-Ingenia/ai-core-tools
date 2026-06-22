@@ -468,7 +468,7 @@ class MarketplaceService:
         session_id = f"conv_{agent_id}_{conversation_uuid}"
 
         if not title:
-            title = f"Conversación {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}"
+            title = f"Conversation {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}"
 
         conversation = Conversation(
             agent_id=agent_id,
