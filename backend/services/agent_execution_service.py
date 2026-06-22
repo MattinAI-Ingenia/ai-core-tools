@@ -190,30 +190,29 @@ class AgentExecutionService:
                     "file_path": file_ref.file_path,
                 })
 
-        # 6. Get / create conversation for memory-enabled agents
+        # 6. Resolve conversation + (for memory-enabled agents) the session.
+        #    The conversation is fetched whenever a conversation_id is provided,
+        #    regardless of memory, so its session_id can be used to resolve temp
+        #    playground media/file silos (uploaded content retrieval). The
+        #    LangGraph memory session is only created for memory-enabled agents.
         session = None
         conversation = None
-        if agent.has_memory:
-            from services.conversation_service import ConversationService
+        from services.conversation_service import ConversationService
 
-            if conversation_id:
-                conversation = ConversationService.get_conversation(
-                    db=db,
-                    conversation_id=conversation_id,
-                    user_context=user_context,
-                    agent_id=agent_id,
+        if conversation_id:
+            conversation = ConversationService.get_conversation(
+                db=db,
+                conversation_id=conversation_id,
+                user_context=user_context,
+                agent_id=agent_id,
+            )
+            if not conversation:
+                raise HTTPException(
+                    status_code=404, detail="Conversation not found or access denied"
                 )
-                if not conversation:
-                    raise HTTPException(
-                        status_code=404, detail="Conversation not found or access denied"
-                    )
-                session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
-                session = await self.session_service.get_user_session(
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    conversation_id=session_suffix,
-                )
-            else:
+
+        if agent.has_memory:
+            if conversation is None:
                 conversation = ConversationService.create_conversation(
                     db=db,
                     agent_id=agent_id,
@@ -225,12 +224,12 @@ class AgentExecutionService:
                     conversation.conversation_id,
                     agent_id,
                 )
-                session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
-                session = await self.session_service.get_user_session(
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    conversation_id=session_suffix,
-                )
+            session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
+            session = await self.session_service.get_user_session(
+                agent_id=agent_id,
+                user_context=user_context,
+                conversation_id=session_suffix,
+            )
 
         # 7. Re-query agent with all relationships eagerly loaded
         fresh_agent = self.agent_execution_repo.get_agent_with_relationships(db, agent_id)

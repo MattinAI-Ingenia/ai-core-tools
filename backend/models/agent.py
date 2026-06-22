@@ -96,6 +96,23 @@ class Agent(Base):
     temperature = Column(Float, default=DEFAULT_AGENT_TEMPERATURE, nullable=False)
     is_frozen = Column(Boolean, default=False, nullable=False)
 
+    # Media processing configuration (used by the playground media upload).
+    # Configured once at agent level so uploads only require the file/URL.
+    transcription_service_id = Column(
+        Integer,
+        ForeignKey('AIService.service_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    video_ai_service_id = Column(
+        Integer,
+        ForeignKey('AIService.service_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    media_forced_language = Column(String(10), nullable=True)
+    media_chunk_min_duration = Column(Integer, default=30, nullable=False, server_default='30')
+    media_chunk_max_duration = Column(Integer, default=120, nullable=False, server_default='120')
+    media_chunk_overlap = Column(Integer, default=5, nullable=False, server_default='5')
+
     marketplace_visibility = Column(
         Enum(MarketplaceVisibility),
         nullable=False,

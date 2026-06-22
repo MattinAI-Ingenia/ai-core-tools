@@ -145,6 +145,13 @@ class AgentDetailSchema(BaseModel):
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = None
     text_system_prompt: Optional[str] = None
+    # Media processing configuration (playground media upload)
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
+    media_forced_language: Optional[str] = None
+    media_chunk_min_duration: int = 30
+    media_chunk_max_duration: int = 120
+    media_chunk_overlap: int = 5
     # Silo information for playground
     silo: Optional[Dict[str, Any]] = None
     # Output parser information for playground
@@ -194,6 +201,13 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = None
     text_system_prompt: Optional[str] = None
+    # Media processing configuration (playground media upload)
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
+    media_forced_language: Optional[str] = None
+    media_chunk_min_duration: Optional[int] = 30
+    media_chunk_max_duration: Optional[int] = 120
+    media_chunk_overlap: Optional[int] = 5
 
 
 class UpdatePromptSchema(BaseModel):

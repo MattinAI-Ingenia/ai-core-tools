@@ -397,6 +397,13 @@ async def create_or_update_agent(
         'rag_score_threshold': agent_data.rag_score_threshold,
         'rag_max_retrieval_calls': agent_data.rag_max_retrieval_calls,
         'rag_fixed_filters': agent_data.rag_fixed_filters,
+        # Media processing configuration (playground media upload)
+        'transcription_service_id': agent_data.transcription_service_id,
+        'video_ai_service_id': agent_data.video_ai_service_id,
+        'media_forced_language': agent_data.media_forced_language,
+        'media_chunk_min_duration': agent_data.media_chunk_min_duration,
+        'media_chunk_max_duration': agent_data.media_chunk_max_duration,
+        'media_chunk_overlap': agent_data.media_chunk_overlap,
     }
 
     # Avoid logging full prompt bodies / filter values at INFO; log identity + shape only.

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from models.repository import Repository
 from models.media import Media
+from models.agent import Agent
 from repositories.repository_repository import RepositoryRepository
 from services.repository_service import RepositoryService
 from services.media_service import MediaService
@@ -39,6 +40,58 @@ def _temp_repo_name(agent_id: int, session_id: str) -> str:
 
 class PlaygroundMediaService:
     """Manages temporary media repositories for the agent playground."""
+
+    @staticmethod
+    def _resolve_media_config(
+        agent_id: int,
+        db: Session,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        forced_language: Optional[str],
+        chunk_min_duration: Optional[int],
+        chunk_max_duration: Optional[int],
+        chunk_overlap: Optional[int],
+    ) -> Dict[str, Any]:
+        """Fill missing media-upload parameters with the agent-level config.
+
+        Media processing is configured once on the agent, so the playground
+        upload only needs the file/URL. Any value explicitly passed in the
+        request still takes precedence over the agent defaults.
+        """
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+
+        return {
+            "transcription_service_id": (
+                transcription_service_id
+                if transcription_service_id is not None
+                else getattr(agent, "transcription_service_id", None)
+            ),
+            "video_ai_service_id": (
+                video_ai_service_id
+                if video_ai_service_id is not None
+                else getattr(agent, "video_ai_service_id", None)
+            ),
+            "forced_language": (
+                forced_language
+                if forced_language is not None
+                else getattr(agent, "media_forced_language", None)
+            ),
+            "chunk_min_duration": (
+                chunk_min_duration
+                if chunk_min_duration is not None
+                else getattr(agent, "media_chunk_min_duration", None)
+            ),
+            "chunk_max_duration": (
+                chunk_max_duration
+                if chunk_max_duration is not None
+                else getattr(agent, "media_chunk_max_duration", None)
+            ),
+            "chunk_overlap": (
+                chunk_overlap
+                if chunk_overlap is not None
+                else getattr(agent, "media_chunk_overlap", None)
+            ),
+        }
 
     @staticmethod
     def get_temp_repository(
@@ -71,6 +124,25 @@ class PlaygroundMediaService:
             app_id, agent_id, session_id, db
         )
         if existing:
+            # Keep the temp repo in sync with the latest resolved media config
+            # (e.g. the agent's transcription/video services were configured
+            # after the repo was first created in this session).
+            updated = False
+            if existing.transcription_service_id != transcription_service_id:
+                existing.transcription_service_id = transcription_service_id
+                updated = True
+            if existing.video_ai_service_id != video_ai_service_id:
+                existing.video_ai_service_id = video_ai_service_id
+                updated = True
+            if updated:
+                db.commit()
+                logger.info(
+                    "Updated temp playground repo %s media config "
+                    "(transcription=%s, video=%s)",
+                    existing.repository_id,
+                    transcription_service_id,
+                    video_ai_service_id,
+                )
             return existing
 
         # Resolve embedding service: explicit > first available in app
@@ -119,13 +191,24 @@ class PlaygroundMediaService:
         chunk_overlap: Optional[int] = None,
     ) -> Dict[str, Any]:
         
+        cfg = PlaygroundMediaService._resolve_media_config(
+            agent_id,
+            db,
+            transcription_service_id,
+            video_ai_service_id,
+            forced_language,
+            chunk_min_duration,
+            chunk_max_duration,
+            chunk_overlap,
+        )
+
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id,
             agent_id,
             session_id,
             db,
-            transcription_service_id=transcription_service_id,
-            video_ai_service_id=video_ai_service_id,
+            transcription_service_id=cfg["transcription_service_id"],
+            video_ai_service_id=cfg["video_ai_service_id"],
             embedding_service_id=embedding_service_id,
         )
 
@@ -136,10 +219,10 @@ class PlaygroundMediaService:
             db=db,
             background_tasks=background_tasks,
             user_context=None,
-            forced_language=forced_language,
-            chunk_min_duration=chunk_min_duration,
-            chunk_max_duration=chunk_max_duration,
-            chunk_overlap=chunk_overlap,
+            forced_language=cfg["forced_language"],
+            chunk_min_duration=cfg["chunk_min_duration"],
+            chunk_max_duration=cfg["chunk_max_duration"],
+            chunk_overlap=cfg["chunk_overlap"],
         )
 
         return {
@@ -166,13 +249,24 @@ class PlaygroundMediaService:
         chunk_overlap: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Add a YouTube URL to a temp playground repository."""
+        cfg = PlaygroundMediaService._resolve_media_config(
+            agent_id,
+            db,
+            transcription_service_id,
+            video_ai_service_id,
+            forced_language,
+            chunk_min_duration,
+            chunk_max_duration,
+            chunk_overlap,
+        )
+
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id,
             agent_id,
             session_id,
             db,
-            transcription_service_id=transcription_service_id,
-            video_ai_service_id=video_ai_service_id,
+            transcription_service_id=cfg["transcription_service_id"],
+            video_ai_service_id=cfg["video_ai_service_id"],
             embedding_service_id=embedding_service_id,
         )
 
@@ -182,10 +276,10 @@ class PlaygroundMediaService:
             folder_id=None,
             db=db,
             background_tasks=background_tasks,
-            forced_language=forced_language,
-            chunk_min_duration=chunk_min_duration,
-            chunk_max_duration=chunk_max_duration,
-            chunk_overlap=chunk_overlap,
+            forced_language=cfg["forced_language"],
+            chunk_min_duration=cfg["chunk_min_duration"],
+            chunk_max_duration=cfg["chunk_max_duration"],
+            chunk_overlap=cfg["chunk_overlap"],
         )
 
         return {
