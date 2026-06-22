@@ -247,9 +247,14 @@ class ApiService {
     });
   }
 
-  async resetAgentConversation(appId: number, agentId: number) {
+  async resetAgentConversation(appId: number, agentId: number, conversationId?: number | null) {
+    const formData = new FormData();
+    if (conversationId != null) {
+      formData.append('conversation_id', String(conversationId));
+    }
     return this.request(`/internal/apps/${appId}/agents/${agentId}/reset`, {
       method: 'POST',
+      body: formData,
     });
   }
 

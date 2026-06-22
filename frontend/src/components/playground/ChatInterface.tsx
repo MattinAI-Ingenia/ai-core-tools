@@ -307,7 +307,7 @@ function ChatInterface({
 
   const handleResetConversation = async () => {
     try {
-      await apiService.resetAgentConversation(appId, agentId);
+      await apiService.resetAgentConversation(appId, agentId, currentConversationId);
       setMessages([]);
       setPersistentFiles([]);
       setFilterMetadata(undefined);

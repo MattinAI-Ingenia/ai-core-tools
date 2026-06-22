@@ -36,5 +36,6 @@ class AgentExecutionContext:
 
     # Original inputs (needed by finalize for metadata)
     processed_files: List[Dict[str, Any]] = field(default_factory=list)
+    temp_silo_ids: List[int] = field(default_factory=list)  # Playground file/temp silos for retrieval
     search_params: Optional[Dict[str, Any]] = None
     user_context: Optional[Dict[str, Any]] = None

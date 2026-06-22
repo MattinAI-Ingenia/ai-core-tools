@@ -811,6 +811,7 @@ async def reset_conversation(
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
     db: Annotated[Session, Depends(get_db)],
+    conversation_id: Annotated[Optional[int], Form()] = None,
 ):
     """
     Internal API: Reset conversation for playground (OAuth authentication)
@@ -823,7 +824,8 @@ async def reset_conversation(
         user_context = {
             "user_id": int(auth_context.identity.id),
             "oauth": True,
-            "app_id": app_id
+            "app_id": app_id,
+            "conversation_id": conversation_id,
         }
 
         # Use unified service layer
@@ -941,7 +943,39 @@ async def upload_file_for_chat(
             conversation_id=conversation_id,
             has_memory=bool(getattr(agent, "has_memory", False)),
         )
-        
+
+        # Vectorize PDF/text attachments into a temporary playground silo so the
+        # agent retrieves them via RAG instead of having their full text injected
+        # into the prompt. Requires a conversation to key the temp silo.
+        try:
+            from services.playground_file_service import (
+                PlaygroundFileService,
+                VECTORIZABLE_FILE_TYPES,
+            )
+            if conversation_id and file_ref.file_type in VECTORIZABLE_FILE_TYPES:
+                from services.conversation_service import ConversationService
+                conv = ConversationService.get_conversation(
+                    db=db,
+                    conversation_id=conversation_id,
+                    user_context=user_context,
+                    agent_id=agent_id,
+                )
+                if conv and conv.session_id:
+                    PlaygroundFileService.vectorize_uploaded_file(
+                        app_id=app_id,
+                        agent_id=agent_id,
+                        session_id=conv.session_id,
+                        file_id=file_ref.file_id,
+                        filename=file_ref.filename,
+                        file_path=file_ref.file_path,
+                        content=file_ref.content,
+                        db=db,
+                    )
+        except Exception as vec_err:
+            logger.error(
+                f"Error vectorizing playground file for agent {agent_id}: {vec_err}"
+            )
+
         logger.info(f"File uploaded for agent {agent_id} by user {auth_context.identity.id}")
         return {
             "success": True,

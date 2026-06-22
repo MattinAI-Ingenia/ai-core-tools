@@ -107,6 +107,7 @@ class AgentExecutionService:
                 ctx.user_context,
                 ctx.image_files,
                 working_dir=ctx.working_dir,
+                temp_silo_ids=ctx.temp_silo_ids,
             )
 
             return await self._finalize_turn(ctx, response, db)
@@ -169,30 +170,29 @@ class AgentExecutionService:
                     "file_path": file_ref.file_path,
                 })
 
-        # 6. Get / create conversation for memory-enabled agents
+        # 6. Resolve conversation + (for memory-enabled agents) the session.
+        #    The conversation is fetched whenever a conversation_id is provided,
+        #    regardless of memory, so its session_id can be used to resolve the
+        #    temp playground file silo (uploaded PDF/text retrieval). The
+        #    LangGraph memory session is only created for memory-enabled agents.
         session = None
         conversation = None
-        if agent.has_memory:
-            from services.conversation_service import ConversationService
+        from services.conversation_service import ConversationService
 
-            if conversation_id:
-                conversation = ConversationService.get_conversation(
-                    db=db,
-                    conversation_id=conversation_id,
-                    user_context=user_context,
-                    agent_id=agent_id,
+        if conversation_id:
+            conversation = ConversationService.get_conversation(
+                db=db,
+                conversation_id=conversation_id,
+                user_context=user_context,
+                agent_id=agent_id,
+            )
+            if not conversation:
+                raise HTTPException(
+                    status_code=404, detail="Conversation not found or access denied"
                 )
-                if not conversation:
-                    raise HTTPException(
-                        status_code=404, detail="Conversation not found or access denied"
-                    )
-                session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
-                session = await self.session_service.get_user_session(
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    conversation_id=session_suffix,
-                )
-            else:
+
+        if agent.has_memory:
+            if conversation is None:
                 conversation = ConversationService.create_conversation(
                     db=db,
                     agent_id=agent_id,
@@ -204,20 +204,43 @@ class AgentExecutionService:
                     conversation.conversation_id,
                     agent_id,
                 )
-                session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
-                session = await self.session_service.get_user_session(
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    conversation_id=session_suffix,
-                )
+            session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
+            session = await self.session_service.get_user_session(
+                agent_id=agent_id,
+                user_context=user_context,
+                conversation_id=session_suffix,
+            )
 
         # 7. Re-query agent with all relationships eagerly loaded
         fresh_agent = self.agent_execution_repo.get_agent_with_relationships(db, agent_id)
         if not fresh_agent:
             raise HTTPException(status_code=404, detail="Agent not found in database")
 
-        # 8. Build enhanced message + separate image files
-        enhanced_message, image_files = self._prepare_message_with_files(message, processed_files)
+        # 8. Resolve the temporary playground silo. PDF/text files attached in
+        #    this conversation are vectorized at upload time into that silo, so
+        #    here we only wire its retriever and drop those files from prompt
+        #    injection — their content is retrieved via RAG instead.
+        temp_silo_ids = self._resolve_playground_silos(
+            agent_id=agent_id,
+            conversation=conversation,
+            user_context=user_context,
+            db=db,
+        )
+
+        # 9. Build enhanced message + separate image files. When a temp silo
+        #    exists, vectorizable files (PDF/text) are excluded from the prompt;
+        #    otherwise we keep the original text-injection fallback.
+        if temp_silo_ids:
+            from services.playground_file_service import VECTORIZABLE_FILE_TYPES
+            non_injected_files = [
+                f for f in processed_files
+                if f.get("type") not in VECTORIZABLE_FILE_TYPES
+            ]
+        else:
+            non_injected_files = processed_files
+        enhanced_message, image_files = self._prepare_message_with_files(
+            message, non_injected_files
+        )
 
         session_id_for_cache = session.id if (fresh_agent.has_memory and session) else None
         effective_conv_id = conversation_id or (
@@ -253,8 +276,33 @@ class AgentExecutionService:
             working_dir=working_dir,
             pre_existing_files=pre_existing_files,
             processed_files=processed_files,
+            temp_silo_ids=temp_silo_ids,
             search_params=search_params,
             user_context=user_context,
+        )
+
+    def _resolve_playground_silos(
+        self,
+        agent_id: int,
+        conversation: Any,
+        user_context: Optional[Dict],
+        db: Session,
+    ) -> List[int]:
+        """Return temp playground silo IDs for this agent + conversation.
+
+        PDF/text files are vectorized into the temp silo at upload time. A
+        stable conversation ``session_id`` is required, so for memory-less turns
+        with no conversation this returns an empty list and the original
+        text-injection behavior is kept.
+        """
+        session_id = conversation.session_id if conversation else None
+        app_id = user_context.get("app_id") if user_context else None
+        if not session_id or not app_id or not db:
+            return []
+
+        from services.playground_file_service import PlaygroundFileService
+        return PlaygroundFileService.get_temp_silo_ids_for_agent(
+            app_id, agent_id, session_id, db
         )
 
     async def _finalize_turn(
@@ -533,6 +581,29 @@ class AgentExecutionService:
                     logger.error(f"Error removing file {file_data['file_id']} during reset: {str(e)}")
             
             logger.info(f"Conversation reset for agent {agent_id} - cleared {len(attached_files)} files")
+
+            # Clean up the temp playground file repository (silo + vector data)
+            try:
+                app_id = user_context.get("app_id") if user_context else None
+                conversation_id = user_context.get("conversation_id") if user_context else None
+                if app_id and conversation_id and db:
+                    from services.conversation_service import ConversationService
+                    from services.playground_file_service import PlaygroundFileService
+                    conv = ConversationService.get_conversation(
+                        db=db,
+                        conversation_id=conversation_id,
+                        user_context=user_context,
+                        agent_id=agent_id,
+                    )
+                    if conv and conv.session_id:
+                        PlaygroundFileService.cleanup(app_id, agent_id, conv.session_id, db)
+                        logger.info(
+                            f"Cleaned up playground files for agent {agent_id} "
+                            f"session {conv.session_id}"
+                        )
+            except Exception as e:
+                logger.error(f"Error cleaning up playground files during reset: {e}")
+
             return True
             
         except Exception as e:
@@ -969,7 +1040,8 @@ class AgentExecutionService:
         session_id_for_cache: str = None,
         user_context: Dict = None,
         image_files: List[Dict] = None,
-        working_dir: Optional[str] = None
+        working_dir: Optional[str] = None,
+        temp_silo_ids: Optional[List[int]] = None,
     ) -> Any:
         """Execute agent in FastAPI's event loop using shared checkpointer pool.
 
@@ -987,7 +1059,8 @@ class AgentExecutionService:
         try:
             # Create the agent chain with all tools and capabilities
             agent_chain, mcp_client = await create_agent(
-                fresh_agent, search_params, session_id_for_cache, user_context, working_dir
+                fresh_agent, search_params, session_id_for_cache, user_context, working_dir,
+                temp_silo_ids=temp_silo_ids,
             )
 
             # Prepare configuration

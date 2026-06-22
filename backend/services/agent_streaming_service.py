@@ -125,6 +125,7 @@ class AgentStreamingService:
                 ctx.session_id_for_cache,
                 ctx.user_context,
                 ctx.working_dir,
+                temp_silo_ids=ctx.temp_silo_ids,
             )
 
             config = prepare_agent_config(ctx.fresh_agent)

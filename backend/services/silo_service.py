@@ -264,6 +264,17 @@ class SiloService:
             search_method_names = [search_method_name or DEFAULT_SEARCH_METHOD]
             transformer_names = [strategy_name or DEFAULT_STRATEGY]
 
+            logger.info(
+                "Silo %s retrieval pipeline -> search_method=%s, search_type='%s', "
+                "strategy=%s, k=%s, component_params=%s",
+                silo_id,
+                search_method_names,
+                retriever_search_type,
+                transformer_names,
+                merged_search_kwargs.get("k"),
+                component_params or {},
+            )
+
             return RetrievalPipeline.build(ctx, search_method_names, transformer_names)
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
@@ -578,7 +589,7 @@ class SiloService:
             List[Document]: List of Document objects
         """
         from langchain_core.documents import Document
-        from langchain_text_splitters import CharacterTextSplitter
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
         from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, TextLoader
 
         if base_metadata is None:
@@ -596,8 +607,12 @@ class SiloService:
             raise ValueError(f"Unsupported file type: {file_extension}")
 
         pages = loader.load()
-        text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         docs = text_splitter.split_documents(pages)
+        logger.info(
+            f"Split '{file_path}' into {len(docs)} chunk(s) from {len(pages)} page(s) "
+            f"(chunk_size=1000, overlap=200)"
+        )
 
         # Clean known PDF extraction artifacts (e.g. @@@@, 64/64/64/...) from
         # each chunk's content, then discard chunks that are empty or still

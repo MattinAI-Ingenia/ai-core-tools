@@ -303,7 +303,18 @@ class ConversationService:
             logger.info(f"Deleted chat history for conversation {conversation_id} (thread_id: thread_{conversation.agent_id}_{conversation.session_id})")
         except Exception as e:
             logger.error(f"Error deleting chat history: {e}")
-        
+
+        # Delete the temporary playground file silo (vectorized PDF/text uploads)
+        try:
+            app_id = user_context.get("app_id") if user_context else None
+            if app_id and conversation.session_id:
+                from services.playground_file_service import PlaygroundFileService
+                PlaygroundFileService.cleanup(
+                    app_id, conversation.agent_id, conversation.session_id, db
+                )
+        except Exception as e:
+            logger.error(f"Error cleaning up playground files for conversation {conversation_id}: {e}")
+
         # Delete the conversation record
         db.delete(conversation)
         db.commit()

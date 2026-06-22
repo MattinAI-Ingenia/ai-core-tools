@@ -109,7 +109,7 @@ class MCPClientManager:
         if self._client is not None:
             self._client = None
 
-async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None):
+async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None, temp_silo_ids: Optional[List[int]] = None):
     """Create a new agent instance with cached checkpointer if memory is enabled.
     
     Args:
@@ -117,6 +117,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         search_params: Optional search parameters for silo-based retrieval
         session_id: Optional session ID for memory-enabled agents (used to cache checkpointer)
         user_context: Optional user context containing authentication tokens for MCP
+        temp_silo_ids: Optional temporary silo IDs (e.g. playground PDF/text uploads) to add as extra retrievers
     """
     llm = get_llm(agent)
     if llm is None:
@@ -237,6 +238,54 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         retriever_tool = get_retriever_tool(agent.silo, search_params, agent=agent)
         if retriever_tool is not None:
             tools.append(retriever_tool)
+
+    # Add temp silo retrievers (playground PDF/text uploads vectorized for this
+    # conversation). Each temp silo gets its own retriever tool so the agent can
+    # search content the user attached in the current conversation.
+    has_temp_retrievers = False
+    if temp_silo_ids:
+        from repositories.silo_repository import SiloRepository
+        from db.database import SessionLocal
+        temp_db = SessionLocal()
+        try:
+            for idx, temp_silo_id in enumerate(temp_silo_ids):
+                temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
+                if not temp_silo:
+                    continue
+                # Inherit the agent's retrieval config (search_type, k, strategy,
+                # top_n) so uploaded files are searched the same way as the main
+                # silo (e.g. mmr). Per-request metadata filters are intentionally
+                # NOT forwarded — they target the main silo's metadata schema.
+                temp_tool = get_retriever_tool(temp_silo, agent=agent)
+                if temp_tool is None:
+                    continue
+                temp_tool.name = f"playground_content_retriever_{idx}"
+                temp_tool.description = (
+                    "Use this tool to search the documents (PDFs, text files) "
+                    "the user attached in this conversation. Always use it when "
+                    "the user asks about uploaded or attached content."
+                )
+                tools.append(temp_tool)
+                has_temp_retrievers = True
+                logger.info(
+                    "Added temp silo retriever %s for agent %s",
+                    temp_silo_id, agent.agent_id,
+                )
+        finally:
+            temp_db.close()
+
+    if has_temp_retrievers:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<uploaded_files_instructions>\n"
+            + "The user has attached documents (PDFs, text files) in this "
+            + "conversation. Their content has been indexed for semantic search.\n"
+            + "When the user asks about or references attached files, you MUST "
+            + "use the playground content retriever tool to find the relevant "
+            + "information, and cite the source filename from the retrieved "
+            + "chunk metadata.\n"
+            + "</uploaded_files_instructions>"
+        )
 
     if agent.enable_code_interpreter and working_dir:
         os.makedirs(working_dir, exist_ok=True)
