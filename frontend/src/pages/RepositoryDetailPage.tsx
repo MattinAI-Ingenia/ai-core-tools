@@ -125,6 +125,15 @@ function formatEstimateValue(value: number | null | undefined) {
   return new Intl.NumberFormat().format(value);
 }
 
+// Round a predicted estimate up to 2 significant figures so it reads as a clean
+// upper bound (e.g. 22,448 → 23,000) instead of false precision. Rounds up so
+// the displayed value never undershoots the computed estimate.
+function roundEstimateUp(value: number | null | undefined): number | null | undefined {
+  if (value == null || !Number.isFinite(value) || value <= 0) return value;
+  const magnitude = 10 ** (Math.floor(Math.log10(value)) - 1);
+  return Math.ceil(value / magnitude) * magnitude;
+}
+
 function formatSeconds(seconds: number | null | undefined): string {
   if (seconds == null) return '?';
   const mins = Math.floor(seconds / 60);
@@ -1129,7 +1138,7 @@ const RepositoryDetailPage: React.FC = () => {
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <p className="text-xs uppercase tracking-wide text-gray-500">Chunks</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.total_chunks)}</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(roundEstimateUp(uploadEstimate?.total_chunks))}</p>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <p className="text-xs uppercase tracking-wide text-gray-500">Chunk Size</p>
@@ -1139,20 +1148,22 @@ const RepositoryDetailPage: React.FC = () => {
               <p className="text-xs uppercase tracking-wide text-gray-500">LLM Tokens</p>
               <p className="mt-1 text-lg font-semibold text-gray-900">
                 {formatEstimateValue(
-                  (uploadEstimate?.estimated_input_tokens ?? 0) + (uploadEstimate?.estimated_output_tokens ?? 0)
+                  roundEstimateUp(
+                    (uploadEstimate?.estimated_input_tokens ?? 0) + (uploadEstimate?.estimated_output_tokens ?? 0)
+                  )
                 )}
               </p>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Tokens</p>
               <p className="mt-1 text-lg font-semibold text-gray-900">
-                {formatEstimateValue(uploadEstimate?.estimated_embedding_tokens)}
+                {formatEstimateValue(roundEstimateUp(uploadEstimate?.estimated_embedding_tokens))}
               </p>
             </div>
           </div>
 
           <p className="text-xs text-gray-500">
-            These are upper-bound estimates. Actual cost depends on the number of entities extracted per chunk and may vary.
+            These are estimates. Actual cost depends on the number of entities extracted per chunk and may vary.
           </p>
 
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
