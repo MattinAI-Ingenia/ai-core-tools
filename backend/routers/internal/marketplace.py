@@ -205,6 +205,7 @@ async def get_my_rating(
 )
 async def start_marketplace_conversation(
     agent_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[AuthContext, Depends(get_current_user_oauth)],
     title: Optional[str] = None,
@@ -217,6 +218,7 @@ async def start_marketplace_conversation(
             agent_id=agent_id,
             user_id=user_id,
             title=title,
+            timezone_str=request.headers.get("x-timezone"),
         )
         return conversation
     except ValueError as exc:

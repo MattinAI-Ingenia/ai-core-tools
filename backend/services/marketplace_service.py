@@ -435,6 +435,7 @@ class MarketplaceService:
         agent_id: int,
         user_id: int,
         title: Optional[str] = None,
+        timezone_str: Optional[str] = None,
     ) -> Conversation:
         """
         Create a new marketplace conversation.
@@ -468,7 +469,15 @@ class MarketplaceService:
         session_id = f"conv_{agent_id}_{conversation_uuid}"
 
         if not title:
-            title = f"Conversation {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}"
+            user_tz = None
+            if timezone_str:
+                from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+                try:
+                    user_tz = ZoneInfo(timezone_str)
+                except ZoneInfoNotFoundError:
+                    pass
+            local_now = datetime.now(user_tz) if user_tz else datetime.now(timezone.utc)
+            title = f"Conversation {local_now.strftime('%d/%m/%Y %H:%M')}"
 
         conversation = Conversation(
             agent_id=agent_id,

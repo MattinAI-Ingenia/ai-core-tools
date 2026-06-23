@@ -227,6 +227,28 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             + "</output_format_instructions>"
         )
 
+    # Localize current time and timezone for the agent context
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    import datetime
+
+    user_tz = None
+    if user_context and (tz_name := user_context.get("timezone")):
+        try:
+            user_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(f"Invalid timezone in user_context: {tz_name}")
+
+    local_now = datetime.datetime.now(user_tz) if user_tz else datetime.datetime.now(datetime.timezone.utc)
+    local_time_str = local_now.strftime("%Y-%m-%d %H:%M:%S %Z" if user_tz else "%Y-%m-%d %H:%M:%S UTC")
+
+    system_prompt_content = (
+        system_prompt_content
+        + f"\n\n<current_time>\n"
+        + f"Current date and time in user's location: {local_time_str}\n"
+        + f"User's timezone: {user_context.get('timezone', 'UTC') if user_context else 'UTC'}\n"
+        + f"</current_time>"
+    )
+
     middleware = []
 
     # If a summarization middleware entity is attached, let it override

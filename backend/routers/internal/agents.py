@@ -666,6 +666,7 @@ async def chat_with_agent(
             "oauth": True,
             "app_id": app_id,
             "token": jwt_token,
+            "timezone": request.headers.get("x-timezone"),
         }
 
         all_file_references = await fms.resolve_chat_files(
@@ -746,6 +747,7 @@ async def chat_with_agent_stream(
             "oauth": True,
             "app_id": app_id,
             "token": jwt_token,
+            "timezone": request.headers.get("x-timezone"),
         }
 
         fms = FileManagementService()

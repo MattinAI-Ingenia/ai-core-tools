@@ -101,7 +101,15 @@ class ConversationService:
         
         # Generate auto-title if not provided
         if not title:
-            title = f"Conversation {datetime.utcnow().strftime('%d/%m/%Y %H:%M')}"
+            user_tz = None
+            if user_context and (timezone_str := user_context.get("timezone")):
+                from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+                try:
+                    user_tz = ZoneInfo(timezone_str)
+                except ZoneInfoNotFoundError:
+                    pass
+            local_now = datetime.now(user_tz) if user_tz else datetime.utcnow()
+            title = f"Conversation {local_now.strftime('%d/%m/%Y %H:%M')}"
         
         # Create conversation
         conversation = Conversation(

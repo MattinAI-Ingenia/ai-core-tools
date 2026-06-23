@@ -37,6 +37,14 @@ class ApiService {
     return token;
   }
 
+  private getClientTimezone(): string | null {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    } catch {
+      return null;
+    }
+  }
+
   private prepareHeaders(options: RequestInit): Record<string, string> {
     const headers: Record<string, string> = {};
 
@@ -49,6 +57,12 @@ class ApiService {
     const token = this.getAuthToken();
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    // Automatically include user's timezone if available
+    const timezone = this.getClientTimezone();
+    if (timezone) {
+      headers['X-Timezone'] = timezone;
     }
 
     return headers;
@@ -1632,15 +1646,9 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/chat/stream`;
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: this.prepareHeaders({ body: formData }),
       body: formData,
       signal: options.signal,
     });
@@ -2161,15 +2169,9 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/marketplace/conversations/${conversationId}/chat/stream`;
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: this.prepareHeaders({ body: formData }),
       body: formData,
       signal: options.signal,
     });
@@ -2692,17 +2694,9 @@ class ApiService {
     options: { onEvent: (event: StreamEvent) => void; signal?: AbortSignal }
   ): Promise<void> {
     const url = `${this.baseURL}/internal/platform-chatbot/chat/stream`;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: this.prepareHeaders({}),
       body: JSON.stringify({ message, session_id: sessionId }),
       signal: options.signal,
     });

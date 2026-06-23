@@ -1,6 +1,6 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class ConversationBase(BaseModel):
@@ -30,6 +30,14 @@ class ConversationResponse(ConversationBase):
     updated_at: datetime
     last_message: Optional[str] = None
     message_count: int
+    
+    @field_serializer('created_at', 'updated_at')
+    def serialize_dt(self, dt: datetime, _info):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        return dt.isoformat().replace("+00:00", "Z")
     
     model_config = ConfigDict(from_attributes=True)
 

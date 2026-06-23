@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lks_idprovider import AuthContext
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Annotated
@@ -34,6 +34,7 @@ def _auth_context_to_dict(auth_context: AuthContext) -> Dict:
 @router.post("", response_model=ConversationResponse, responses={500: {"description": "Internal server error"}})
 async def create_conversation(
     agent_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[AuthContext, Depends(get_current_user_oauth)],
     title: Optional[str] = None,
@@ -47,6 +48,7 @@ async def create_conversation(
     """
     try:
         user_context = _auth_context_to_dict(current_user)
+        user_context["timezone"] = request.headers.get("x-timezone")
         
         conversation = ConversationService.create_conversation(
             db=db,

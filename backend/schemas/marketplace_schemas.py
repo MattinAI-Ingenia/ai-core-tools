@@ -1,6 +1,6 @@
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, field_serializer
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 # ==================== CONSTANTS ====================
@@ -154,6 +154,14 @@ class MarketplaceConversationSchema(BaseModel):
     agent_display_name: str  # Resolved display name
     agent_icon_url: Optional[str] = None
     app_name: Optional[str] = None  # App that owns the agent
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_dt(self, dt: datetime, _info):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        return dt.isoformat().replace("+00:00", "Z")
 
 
 class MarketplaceConversationListSchema(BaseModel):

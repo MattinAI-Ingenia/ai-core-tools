@@ -65,8 +65,8 @@ class Conversation(Base):
             "user_id": self.user_id,
             "title": self.title,
             "session_id": self.session_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() + "Z" if self.updated_at else None,
             "last_message": self.last_message,
             "message_count": self.message_count
         }
