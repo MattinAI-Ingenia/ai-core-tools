@@ -339,8 +339,11 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
         return {}
 
     entities = []
+    known = set()
     for e in data.get("entities", []):
         name = e.get("entity_name") or e.get("name") or ""
+        if name:
+            known.add(name)
         entities.append({
             "id": name,
             "name": name,
@@ -360,6 +363,21 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
             "description": r.get("description", ""),
             "keywords": r.get("keywords", ""),
         })
+        # LightRAG truncates entities and relationships by independent token
+        # budgets, so a relationship endpoint may not appear in the entity list.
+        # Add it as a minimal "partial" node so the edge can still be drawn;
+        # the frontend renders these in a muted color.
+        for endpoint in (src, tgt):
+            if endpoint and endpoint not in known:
+                known.add(endpoint)
+                entities.append({
+                    "id": endpoint,
+                    "name": endpoint,
+                    "entity_type": "",
+                    "description": "",
+                    "file_path": "",
+                    "partial": True,
+                })
 
     chunks = []
     for c in data.get("chunks", []):

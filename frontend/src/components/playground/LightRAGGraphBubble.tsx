@@ -13,7 +13,9 @@ function toNvlNodes(entities: LightRAGEntity[]): NvlNode[] {
   return entities.map((e) => ({
     id: String(e.id),
     captions: [{ value: String(e.name ?? e.id) }],
-    color: '#6366f1',
+    // "partial" nodes are relationship endpoints LightRAG truncated from the
+    // entity list — drawn in a muted blue-gray to flag we only know their name.
+    color: e.partial ? '#94a3b8' : '#6366f1',
   }));
 }
 
@@ -90,8 +92,9 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
   const chunks = data.chunks ?? [];
   const references = data.references ?? [];
 
-  const entityCount = entities.length;
-  const relCount = relationships.length;
+  // Partial nodes are synthesized endpoints, not real returned entities — exclude
+  // them from the count so the header reflects the entities LightRAG actually returned.
+  const entityCount = entities.filter((e) => !e.partial).length;
   const chunkCount = chunks.length;
 
   const { nvlNodes, nvlRels } = useMemo(() => {
@@ -99,6 +102,10 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
     const ids = new Set(nodes.map((n) => n.id));
     return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids) };
   }, [entities, relationships]);
+
+  // Count only the relationships actually drawn (both endpoints present) so the
+  // header matches the canvas instead of LightRAG's raw relationship total.
+  const relCount = nvlRels.length;
 
   if (entityCount === 0 && relCount === 0 && chunkCount === 0) return null;
 
