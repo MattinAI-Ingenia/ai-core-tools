@@ -94,13 +94,22 @@ docker compose exec backend python -m utils.seed_dev_users --yes \
   --users "you@company.com:Your Name"
 ```
 
-3. Give that user write permissions by setting `platform_role='editor'`.
-   Without this, a `viewer` user can log in but cannot create or modify apps or other resources.
+3. Give that user write permissions. New users default to the `viewer` platform
+   role, and **viewers can log in but cannot create or modify** apps, agents,
+   silos or any other resource (every write returns `403 Viewer role cannot
+   create or modify resources`). Pick one option:
 
-```bash
-docker compose exec postgres psql -U mattin -d mattin_ai -c \
-  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
-```
+   - **Make them an omniadmin** (simplest for your own admin account): add the
+     email to `AICT_OMNIADMINS` in `.env` and re-run `docker compose up -d`.
+     Omniadmins have full access and skip the step below.
+   - **Promote from the UI**: log in as an omniadmin and go to
+     **Admin → Users**, then set the role to **Editor**.
+   - **Promote via SQL**:
+
+     ```bash
+     docker compose exec postgres psql -U mattin -d mattin_ai -c \
+       "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
+     ```
 
 4. Log in with that email from the UI.
 5. Create your first App, or import `scripts/demo-app.json`.
@@ -344,12 +353,14 @@ VITE_OIDC_CLIENT_ID=your-client-id
 
 ## Services and Ports
 
-| Service | Docker | Local |
-|---------|--------|-------|
-| Frontend | http://localhost:3000 | http://localhost:5173 |
-| Backend | http://localhost:8000 | http://localhost:8000 |
-| PostgreSQL | localhost:5432 | localhost:5432 |
-| API Docs | http://localhost:8000/docs/internal | http://localhost:8000/docs/internal |
+| Service | Docker (Caddy, single port) | Local |
+|---------|------------------------------|-------|
+| Frontend | http://localhost/ | http://localhost:5173 |
+| Backend (API) | http://localhost/ (same origin via Caddy) | http://localhost:8000 |
+| PostgreSQL | internal network only — not published to the host | localhost:5432 |
+| API Docs | http://localhost/docs/internal | http://localhost:8000/docs/internal |
+
+> In Docker, only Caddy's port (80 by default, configurable via `HTTP_PORT`) is exposed to the host. Backend, frontend, PostgreSQL, Qdrant and Neo4j stay on the internal Docker network.
 
 ---
 
@@ -380,9 +391,9 @@ The project consists of several main components:
 
 ### API keys don't work
 
-1. Verify the `.env` file is in the project root
-2. Restart services after changing `.env`
-3. Check that the key has no extra spaces
+1. Verify you edited the right file: `docker/.env` for Docker, `backend/.env` for local development (see the table in [Configuration](#configuration))
+2. Reload after changing it: `docker compose up -d` for Docker (a plain `restart` does not pick up new env values), or restart `uvicorn` locally
+3. Check that the key has no extra spaces or quotes
 
 ### Clean and start fresh (Docker)
 
