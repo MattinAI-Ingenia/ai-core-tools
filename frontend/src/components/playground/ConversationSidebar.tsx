@@ -37,8 +37,8 @@ function formatDate(dateString: string): string {
   if (diffDays < 7) return `${diffDays}d ago`;
 
   return date.toLocaleDateString('en-US', {
-    day: 'numeric', 
-    month: 'short' 
+    day: 'numeric',
+    month: 'short'
   });
 }
 
@@ -100,10 +100,30 @@ export default function ConversationSidebar({
     }
   }
 
+  async function handleDeleteAllConversations() {
+    const ok = await confirm({
+      title: 'Erase all conversations',
+      message: 'Are you sure you want to delete all conversations and memories for this agent? This action cannot be undone and will clear both backend checkpoints and local states.',
+      confirmLabel: 'Erase All',
+      variant: 'danger',
+    });
+
+    if (!ok) return;
+
+    try {
+      await apiService.deleteAllConversationsForAgent(agentId);
+      setConversations([]);
+      onNewConversation();
+    } catch (err) {
+      console.error('Error erasing all conversations:', err);
+      alert('Error al borrar todas las conversaciones');
+    }
+  }
+
   async function handleEditTitle(conversationId: number, newTitle: string) {
     try {
       await apiService.updateConversation(conversationId, { title: newTitle });
-      setConversations(conversations.map(c => 
+      setConversations(conversations.map(c =>
         c.conversation_id === conversationId ? { ...c, title: newTitle } : c
       ));
     } catch (err) {
@@ -149,7 +169,7 @@ export default function ConversationSidebar({
       return (
         <div className="p-4 text-center text-red-600">
           <p>{error}</p>
-          <button 
+          <button
             onClick={loadConversations}
             className="mt-2 text-sm text-blue-600 hover:underline"
           >
@@ -184,11 +204,10 @@ export default function ConversationSidebar({
                 if ((e.target as HTMLElement).closest('button[data-action]')) return;
                 onConversationSelect(conversation.conversation_id);
               }}
-              className={`group w-full text-left p-4 cursor-pointer transition-colors ${
-                isActive
+              className={`group w-full text-left p-4 cursor-pointer transition-colors ${isActive
                   ? 'pg-sidebar-active'
                   : 'hover:bg-white/40 dark:hover:bg-gray-800/40 border-l-2 border-transparent'
-              }`}
+                }`}
             >
               <div className="flex items-start justify-between">
                 <div className="flex-1 min-w-0">
@@ -201,15 +220,13 @@ export default function ConversationSidebar({
                       onBlur={() => handleRenameSave(conversation.conversation_id)}
                       onKeyDown={(e) => handleRenameKeyDown(e, conversation.conversation_id)}
                       onClick={(e) => e.stopPropagation()}
-                      className={`text-sm font-medium border-b outline-none bg-transparent w-full ${
-                        isActive ? 'border-indigo-300 text-indigo-900 dark:text-indigo-200' : 'border-gray-400 text-gray-700 dark:text-gray-200'
-                      }`}
+                      className={`text-sm font-medium border-b outline-none bg-transparent w-full ${isActive ? 'border-indigo-300 text-indigo-900 dark:text-indigo-200' : 'border-gray-400 text-gray-700 dark:text-gray-200'
+                        }`}
                     />
                   ) : (
                     <div className="flex items-center gap-1">
-                      <h4 className={`text-sm font-medium truncate ${
-                        isActive ? 'text-indigo-900 dark:text-indigo-200' : 'text-gray-700 dark:text-gray-200'
-                      }`}>
+                      <h4 className={`text-sm font-medium truncate ${isActive ? 'text-indigo-900 dark:text-indigo-200' : 'text-gray-700 dark:text-gray-200'
+                        }`}>
                         {conversation.title}
                       </h4>
                       <button
@@ -267,7 +284,7 @@ export default function ConversationSidebar({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
         </button>
-        
+
         <div className="mt-4 text-xs text-gray-500 transform -rotate-90 whitespace-nowrap">
           {conversations.length} conversaciones
         </div>
@@ -278,8 +295,8 @@ export default function ConversationSidebar({
   return (
     <div className="w-80 pg-glass border-r border-white/10 flex flex-col animate-fade-in">
       {/* Header */}
-      <div className="p-4 border-b border-white/10 dark:border-gray-700/30">
-        <div className="flex items-center justify-between mb-3">
+      <div className="p-4 border-b border-white/10 dark:border-gray-700/30 flex flex-col gap-2">
+        <div className="flex items-center justify-between mb-1">
           <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Conversations</h3>
           <button
             onClick={() => setIsCollapsed(true)}
@@ -291,7 +308,7 @@ export default function ConversationSidebar({
             </svg>
           </button>
         </div>
-        
+
         <button
           onClick={onNewConversation}
           className="w-full px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white rounded-lg transition-all shadow-sm hover:shadow-md flex items-center justify-center space-x-2"
@@ -301,15 +318,28 @@ export default function ConversationSidebar({
           </svg>
           <span>New Conversation</span>
         </button>
+
+        {conversations.length > 0 && (
+          <button
+            onClick={handleDeleteAllConversations}
+            className="w-full px-4 py-2 border border-red-250 dark:border-red-900/40 text-red-600 dark:text-red-400 bg-red-50/50 dark:bg-red-950/20 hover:bg-red-55 dark:hover:bg-red-950/40 rounded-lg transition-all text-sm font-medium flex items-center justify-center space-x-2 shadow-sm"
+            title="Erase all conversations and memories"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            <span>Erase All Conversations</span>
+          </button>
+        )}
       </div>
 
       {/* Conversations List */}
       <div className="flex-1 overflow-y-auto">
         {renderContent()}
       </div>
-      
+
       {/* Footer */}
-      <div className="p-3 border-t border-white/10 dark:border-gray-700/30">
+      <div className="p-3 border-t border-white/10 dark:border-gray-700/30 flex flex-col gap-2">
         <button
           onClick={loadConversations}
           className="w-full text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors flex items-center justify-center space-x-1 py-1 rounded hover:bg-white/20 dark:hover:bg-gray-700/30"

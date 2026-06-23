@@ -212,3 +212,31 @@ async def delete_conversation(
         raise HTTPException(status_code=404, detail=CONVERSATION_NOT_FOUND)
     return {"message": "Conversation deleted successfully"}
 
+
+@router.delete("/by-agent/{agent_id}", responses={404: {"description": "Agent not found"}})
+async def delete_all_conversations(
+    agent_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AuthContext, Depends(get_current_user_oauth)]
+):
+    """
+    Delete all conversations for the current user and specified agent
+    
+    Args:
+        agent_id: ID of the agent
+    """
+    try:
+        user_context = _auth_context_to_dict(current_user)
+        deleted_count = await ConversationService.delete_all_conversations(
+            db=db,
+            agent_id=agent_id,
+            user_context=user_context
+        )
+        return {"deleted_count": deleted_count, "message": "All conversations deleted successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error deleting all conversations for agent {agent_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+

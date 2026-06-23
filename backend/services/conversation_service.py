@@ -324,6 +324,68 @@ class ConversationService:
         
         logger.info(f"Deleted conversation {conversation_id}")
         return True
+
+    @staticmethod
+    async def delete_all_conversations(
+        db: Session,
+        agent_id: int,
+        user_context: Dict
+    ) -> int:
+        """
+        Delete all conversations for a specific agent and user
+        
+        Args:
+            db: Database session
+            agent_id: ID of the agent
+            user_context: User context for validation
+            
+        Returns:
+            Number of deleted conversations
+        """
+        # Validate that the agent exists
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+        if not agent:
+            raise ValueError("Agent not found")
+            
+        # Get all conversations for this agent and user (no pagination)
+        conversations, total = ConversationService.list_conversations(
+            db=db,
+            agent_id=agent_id,
+            user_context=user_context,
+            limit=1000, # Large limit to fetch all
+            offset=0
+        )
+        
+        deleted_count = 0
+        for conversation in conversations:
+            # Clean up playground temp media
+            try:
+                from services.playground_media_service import PlaygroundMediaService
+                app_id = conversation.agent.app_id
+                PlaygroundMediaService.cleanup(
+                    app_id, conversation.agent_id, conversation.session_id, db
+                )
+            except Exception as e:
+                logger.error(f"Error cleaning up playground media during delete_all: {e}")
+                
+            # Delete chat history from checkpointer
+            try:
+                await CheckpointerCacheService.invalidate_checkpointer_async(
+                    agent_id=conversation.agent_id,
+                    session_id=conversation.session_id
+                )
+            except Exception as e:
+                logger.error(f"Error deleting chat history during delete_all: {e}")
+                
+            # Delete the conversation record
+            db.delete(conversation)
+            deleted_count += 1
+            
+        if deleted_count > 0:
+            db.commit()
+            
+        logger.info(f"Deleted {deleted_count} conversations for agent {agent_id}")
+        return deleted_count
     
     @staticmethod
     async def get_conversation_history(

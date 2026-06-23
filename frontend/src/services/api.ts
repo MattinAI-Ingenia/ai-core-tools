@@ -2038,6 +2038,12 @@ class ApiService {
     });
   }
 
+  async deleteAllConversationsForAgent(agentId: number) {
+    return this.request(`/internal/conversations/by-agent/${agentId}`, {
+      method: 'DELETE',
+    });
+  }
+
   // ==================== MARKETPLACE ====================
 
   async getMarketplaceCatalog(
