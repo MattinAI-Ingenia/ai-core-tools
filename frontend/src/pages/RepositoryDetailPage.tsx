@@ -166,6 +166,8 @@ const RepositoryDetailPage: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [repository, setRepository] = useState<RepositoryDetail | null>(null);
+
+  const isLightRAG = repository?.vector_db_type?.toUpperCase() === 'LIGHTRAG';
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [estimatingUpload, setEstimatingUpload] = useState(false);
@@ -1039,7 +1041,7 @@ const RepositoryDetailPage: React.FC = () => {
                           >
                             <ArrowDownToLine className="w-4 h-4" />
                           </button>
-                          {canEdit && (
+                          {canEdit && !isLightRAG && (
                             <button
                               onClick={() => handleDeleteResource(resource)}
                               className="p-2 text-gray-400 hover:text-red-600"
@@ -1084,20 +1086,20 @@ const RepositoryDetailPage: React.FC = () => {
                             <StatusBadge status={media.status} processingMode={media.processing_mode} />
 
                             {canEdit && (
-                              <>
-                                <button
-                                  onClick={() => handleMoveMedia(media)}
-                                  className="p-2 text-gray-400 hover:text-purple-600"
-                                >
-                                  <ArrowLeftRight className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteMedia(media)}
-                                  className="p-2 text-gray-400 hover:text-red-600"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </>
+                              <button
+                                onClick={() => handleMoveMedia(media)}
+                                className="p-2 text-gray-400 hover:text-purple-600"
+                              >
+                                <ArrowLeftRight className="w-4 h-4" />
+                              </button>
+                            )}
+                            {canEdit && !isLightRAG && (
+                              <button
+                                onClick={() => handleDeleteMedia(media)}
+                                className="p-2 text-gray-400 hover:text-red-600"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
                             )}
                           </div>
                         </div>
