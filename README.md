@@ -54,8 +54,7 @@ cd docker
 # 1. Copy environment template
 cp .env.example .env
 
-# 2. Edit .env — DATABASE_PASSWORD and SECRET_KEY are REQUIRED
-#    Also set IMAGE_TAG=<sha-xxxxxxx|develop> if you want to pin a version
+# 2. Edit .env — fill in the required values (see "Configure your .env" below)
 
 # 3a. Pull prebuilt images (recommended)
 docker compose pull backend frontend
@@ -70,6 +69,54 @@ docker compose up -d --build
 #    - App:      http://localhost/
 #    - API Docs: http://localhost/docs/internal
 ```
+
+### Configure your `.env`
+
+After `cp .env.example .env`, you only need to change the fields that do not have a working default or that block startup:
+
+| Variable | Required | What to put | Notes |
+|----------|----------|-------------|-------|
+| `DATABASE_PASSWORD` | Yes | A strong random password | Compose will fail if it is empty |
+| `SECRET_KEY` | Yes | Generate one with `python -c "import secrets; print(secrets.token_hex(32))"` | Used to sign sessions/JWTs |
+| `FRONTEND_URL` | Only outside local Docker | `http://<server-ip-or-domain>` | In local Docker, `http://localhost` from `.env.example` already works |
+
+If you set `AICT_LOGIN=OIDC`, you must also fill `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `VITE_OIDC_ENABLED=true`, `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, and `VITE_OIDC_REDIRECT_URI`.
+
+### First login in `AICT_LOGIN=FAKE`
+
+The default Docker setup uses `AICT_LOGIN=FAKE`. In that mode, the login email must already exist in the `User` table before you can sign in.
+
+1. Start the stack with `docker compose up -d` or `docker compose up -d --build`.
+2. Create the first user inside the running backend container:
+
+```bash
+docker compose exec backend python -m utils.seed_dev_users --yes \
+  --users "you@company.com:Your Name"
+```
+
+3. Give that user write permissions by setting `platform_role='editor'`.
+   Without this, a `viewer` user can log in but cannot create or modify apps or other resources.
+
+```bash
+docker compose exec postgres psql -U mattin -d mattin_ai -c \
+  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
+```
+
+4. Log in with that email from the UI.
+5. Create your first App, or import `scripts/demo-app.json`.
+
+If you prefer to define the initial user in the `.env`, uncomment and fill
+`AICT_DEV_SEED_USERS`, then run:
+
+```bash
+docker compose exec backend python -m utils.seed_dev_users --yes
+```
+
+### What `LIGHTRAG_ENABLED` does
+
+`LIGHTRAG_ENABLED=true` enables the LightRAG integration in the backend. This means silos can use graph-augmented retrieval backed by Neo4j in addition to the configured vector store.
+
+Set `LIGHTRAG_ENABLED=false` if you do not want to use LightRAG. Neo4j is still started by the Docker stack, but the backend will not expose or use the LightRAG functionality.
 
 Published images: `ghcr.io/lksnext-ai-lab/mattinai-{backend,frontend}`. See
 [docker/README.md](docker/README.md) for deployment details, primary login, and
@@ -123,8 +170,12 @@ docker run -d --name mattin-postgres \
   -p 5432:5432 \
   pgvector/pgvector:pg17
 
+# Enable the pgvector extension in that database
+docker exec -it mattin-postgres psql -U mattin -d mattin_ai -c \
+  "CREATE EXTENSION IF NOT EXISTS vector;"
+
 # Option B: PostgreSQL installed locally
-# Make sure to install the pgvector extension
+# Make sure to install and enable the pgvector extension in your target database
 ```
 
 ### 2. Backend (FastAPI)
@@ -147,14 +198,36 @@ poetry install
 
 # Configure environment variables
 cp backend/.env.example backend/.env
-# Edit backend/.env: change DATABASE_HOST=localhost
+# Edit backend/.env:
+#   - set SQLALCHEMY_DATABASE_URI to your local database
+#   - keep AICT_LOGIN=FAKE for local dev unless you are testing OIDC
+# Example:
+# SQLALCHEMY_DATABASE_URI=postgresql://mattin:mattin_secure_2024@localhost:5432/mattin_ai
 
 # Run migrations
 alembic upgrade head
 
+# Seed a local dev user (run from the backend/ directory)
+cd backend
+python -m utils.seed_dev_users --yes --users "you@company.com:Your Name"
+cd ..
+
+# Give that user write permissions
+# If you are using the Docker Postgres from Option A:
+docker exec -it mattin-postgres psql -U mattin -d mattin_ai -c \
+  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
+
+# If you are using a locally installed Postgres from Option B:
+psql postgresql://mattin:mattin_secure_2024@localhost:5432/mattin_ai -c \
+  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
+
 # Start server
 uvicorn backend.main:app --reload --port 8000
 ```
+
+Without the `SQLALCHEMY_DATABASE_URI`, the backend will not boot. Without the seeded `User` row, the FAKE login flow cannot authenticate. Without
+`platform_role='editor'`, the user can log in but cannot create or modify
+resources.
 
 ### 3. Frontend (React)
 
@@ -196,26 +269,38 @@ The frontend will be available at http://localhost:5173
 
 ## Configuration
 
-Edit the `.env` file according to your environment:
+This repository contains multiple `.env.example` files. They are not for the same execution mode:
+
+| Scenario | Template to copy | Resulting file | Used by |
+|----------|------------------|----------------|---------|
+| Docker Compose | `docker/.env.example` | `docker/.env` | `cd docker && docker compose ...` |
+| Local backend | `backend/.env.example` | `backend/.env` | `uvicorn backend.main:app --reload` |
+| Local frontend | `frontend/.env.example` | `frontend/.env` | `cd frontend && npm run dev` |
+| Root `.env.example` | `.env.example` | `.env` | General/legacy repo-level reference used by some docs and scripts |
+
+The notes below refer to the Docker Compose setup, so the relevant file here is `docker/.env.example`.
 
 ### Required Variables
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key | `sk-proj-xxx...` |
-| `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-xxx...` |
-| `MISTRAL_API_KEY` | Mistral API key | `xxx...` |
-| `AICT_OMNIADMINS` | Administrator email(s) | `admin@company.com` |
+| `DATABASE_PASSWORD` | PostgreSQL password used by the Docker stack | `change-me-please` |
+| `SECRET_KEY` | Session/JWT signing secret | `hex-string-generated-with-secrets.token_hex(32)` |
 
-> You need at least ONE AI API key configured.
+For local Docker, `FRONTEND_URL`, `AICT_LOGIN`, and `LIGHTRAG_ENABLED` already come with working defaults in `docker/.env.example`. Change them only if your deployment needs something different.
+
+For local development without Docker, do not edit `docker/.env`. Use
+`backend/.env` for the FastAPI app and `frontend/.env` for the React app.
 
 ### Environment-Specific Variables
 
 | Variable | Docker | Local |
 |----------|--------|-------|
 | `DATABASE_HOST` | (not needed) | `localhost` |
-| `FRONTEND_URL` | `http://localhost:3000` | `http://localhost:5173` |
-| `VITE_API_BASE_URL` | `http://localhost:8000` | `http://localhost:8000` |
+| `FRONTEND_URL` | `http://localhost` by default | (not used) |
+| `VITE_API_BASE_URL` | relative same-origin via Caddy | `http://localhost:8000` |
+
+For Docker, `AICT_OMNIADMINS` does not create users by itself. In `FAKE` mode you must seed or insert the login user into `User` first, and ensure the user has `platform_role='editor'` if they need to create or modify resources.
 
 ### AI Service Configuration
 
