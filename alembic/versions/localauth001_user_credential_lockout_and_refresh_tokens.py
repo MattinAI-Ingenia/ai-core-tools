@@ -1,7 +1,7 @@
 """Add lockout fields to user_credentials and create refresh_tokens table.
 
 Revision ID: localauth001
-Revises: spoint001
+Revises: ragcfg001
 Create Date: 2026-06-04
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'localauth001'
-down_revision = 'spoint001'
+down_revision = 'ragcfg001'
 branch_labels = None
 depends_on = None
 
