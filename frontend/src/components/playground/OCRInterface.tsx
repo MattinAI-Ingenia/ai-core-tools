@@ -141,7 +141,12 @@ export const OCRInterface: React.FC<OCRInterfaceProps> = ({
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                     {outputParser.fields.map((field) => (
                       <div key={field.name} className="bg-white p-2 rounded border text-xs">
-                        <div className="font-medium text-blue-900">{field.name}</div>
+                        <div className="font-medium text-blue-900 flex items-center gap-1">
+                          {field.name}
+                          {field.optional && (
+                            <span className="text-gray-400 font-normal italic">(optional)</span>
+                          )}
+                        </div>
                         <div className="text-blue-600">
                           <code className="text-xs">{field.type}</code>
                         </div>
