@@ -1,12 +1,111 @@
 from typing import Union, List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+from models.agent import Agent, AgentSkill, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
 from models.ocr_agent import OCRAgent
+from models.skill import Skill
 from schemas.agent_schemas import AgentListItemSchema, AgentDetailSchema
 from repositories.agent_repository import AgentRepository
 from repositories.skill_repository import SkillRepository
 from repositories.middleware_repository import MiddlewareRepository
 from models.middleware import AgentMiddleware
+
+LIGHTRAG_ROUTER_SKILL_NAME = "LightRAG Query Router"
+
+ROUTER_SKILL_CONTENT = """# LightRAG Query Router
+
+You have access to `retrieve_from_knowledge_base(query, mode)`.
+Before every retrieval call, select the `mode` that best matches the question.
+
+---
+
+## Mode Guide
+
+### local
+**Strategy:** Traverses entity neighborhoods in the knowledge graph — direct
+relationships, attributes, and co-occurring concepts around a specific node.
+
+**Use when:**
+- The question names or implies a specific entity, person, organization, or concept
+- "What does [X] do?", "Who is [Y]?", "What are the properties of [Z]?"
+- "List all [X]s related to [Y]", "What is the role of [Z] in this project?"
+
+**Avoid when:** The question is broad, comparative, or doesn't anchor to a named entity.
+
+---
+
+### global
+**Strategy:** Queries community-level summaries built from clusters of related
+entities — captures high-level themes and patterns across the whole graph.
+
+**Use when:**
+- The question asks for summaries, overviews, or thematic patterns
+- "What are the main topics covered?", "Summarize the overall approach to X"
+- "What are the key trends?", "What does this document focus on?"
+- Questions starting with "In general...", "Overall...", "What is the big picture of..."
+
+**Avoid when:** The question targets a specific named entity or fact.
+
+---
+
+### hybrid *(default)*
+**Strategy:** Runs local + global in parallel and merges results — balances
+entity precision with thematic breadth.
+
+**Use when:**
+- The question has both specific and thematic aspects
+- "How does [X] relate to the broader strategy?", "What is [Y] and why does it matter?"
+- You are unsure which of local or global is more appropriate
+- Default to this mode when the question type is ambiguous
+
+---
+
+### mix
+**Strategy:** Runs local + global + naive vector search — maximum coverage at
+the cost of speed and token usage.
+
+**Use when:**
+- Complex analytical or comparative questions: "Compare how X and Y are treated across all documents"
+- Questions where missing context would be a significant failure: "What are ALL the ways Z is discussed?"
+- The user explicitly asks for exhaustive or comprehensive answers
+
+**Avoid when:** Response time matters or the question is straightforward.
+
+---
+
+### naive
+**Strategy:** Pure vector similarity — no graph traversal, no community summaries.
+Fast and precise for direct lexical or semantic matches.
+
+**Use when:**
+- Simple, direct fact lookups: "What is the definition of X?", "Find the section about Y"
+- Keyword or phrase searches where graph structure adds no value
+- The question is a verbatim search ("Does the document mention Z?")
+
+**Avoid when:** The answer depends on relationships between entities or thematic context.
+
+---
+
+## Decision flowchart
+
+Is this a general-knowledge question with no need for the knowledge base?
+  → Do NOT call retrieve_from_knowledge_base
+
+Does the question name or anchor to a specific entity?
+  → Yes, and it's only about that entity → local
+  → Yes, but also asks about broader context → hybrid
+
+Does the question ask for themes, summaries, or patterns?
+  → Yes, no specific entity involved → global
+
+Is it a complex comparison or exhaustive analysis?
+  → mix
+
+Is it a simple keyword/fact lookup?
+  → naive
+
+Unsure?
+  → hybrid
+"""
 
 
 def _serialize_marketplace_profile(profile) -> Optional[Dict[str, Any]]:
@@ -390,6 +489,55 @@ class AgentService:
                 AgentRepository.create_agent_skill_association(db, agent_id, skill_id, description)
 
         db.commit()
+
+    def ensure_lightrag_router_skill(self, db: Session, app_id: int) -> Skill:
+        """Find or create the LightRAG Query Router skill for this app."""
+        existing = db.query(Skill).filter(
+            Skill.app_id == app_id,
+            Skill.name == LIGHTRAG_ROUTER_SKILL_NAME,
+        ).first()
+        if existing:
+            return existing
+        skill = Skill(
+            name=LIGHTRAG_ROUTER_SKILL_NAME,
+            description="Automatically selects the optimal LightRAG query mode (local/global/hybrid/mix/naive) per question.",
+            content=ROUTER_SKILL_CONTENT,
+            app_id=app_id,
+        )
+        db.add(skill)
+        db.commit()
+        db.refresh(skill)
+        return skill
+
+    def attach_skill_to_agent(self, db: Session, agent_id: int, skill_id: int) -> None:
+        """Attach a skill to an agent if not already attached."""
+        existing = db.query(AgentSkill).filter(
+            AgentSkill.agent_id == agent_id,
+            AgentSkill.skill_id == skill_id,
+        ).first()
+        if not existing:
+            db.add(AgentSkill(agent_id=agent_id, skill_id=skill_id))
+            db.commit()
+
+    def cleanup_lightrag_router_skill(self, db: Session, app_id: int, agent_id: int) -> None:
+        """Detach the routing skill from this agent; delete from app if orphaned."""
+        skill = db.query(Skill).filter(
+            Skill.app_id == app_id,
+            Skill.name == LIGHTRAG_ROUTER_SKILL_NAME,
+        ).first()
+        if not skill:
+            return
+        db.query(AgentSkill).filter(
+            AgentSkill.agent_id == agent_id,
+            AgentSkill.skill_id == skill.skill_id,
+        ).delete(synchronize_session=False)
+        db.commit()
+        remaining = db.query(AgentSkill).filter(
+            AgentSkill.skill_id == skill.skill_id,
+        ).count()
+        if remaining == 0:
+            db.delete(skill)
+            db.commit()
 
     def update_agent_middlewares(self, db: Session, agent_id: int, middleware_ids: list):
         """Update agent middleware associations"""
