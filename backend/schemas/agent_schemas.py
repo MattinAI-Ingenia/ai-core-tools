@@ -19,7 +19,7 @@ class RetrievalConfig(BaseModel):
     # Similarity-score-threshold-specific
     score_threshold: Optional[float] = None
     # LightRAG-specific
-    lightrag_query_mode: Optional[Literal["local", "global", "hybrid", "mix", "naive", "bypass"]] = None
+    lightrag_query_mode: Optional[Literal["local", "global", "hybrid", "mix", "naive", "bypass", "skill-routed"]] = None
 
     @field_validator("k")
     @classmethod
@@ -120,7 +120,7 @@ class AgentDetailSchema(BaseModel):
     marketplace_profile: Optional[Dict[str, Any]] = None
     is_frozen: bool = False
     # Static constant for frontend selectors
-    lightrag_query_modes: List[str] = ["local", "global", "hybrid", "mix", "naive", "bypass"]
+    lightrag_query_modes: List[str] = ["skill-routed", "local", "global", "hybrid", "mix", "naive", "bypass"]
 
     model_config = ConfigDict(from_attributes=True)
 
