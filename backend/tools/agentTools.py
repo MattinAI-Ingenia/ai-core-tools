@@ -32,10 +32,54 @@ from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_contex
 from utils.mcp_ssl_utils import inject_ssl_config
 from tools.skill_tools import create_skill_loader_tool, generate_skills_system_prompt_section
 from tools.python_sandbox_tools import create_python_repl_tool
+from services.agent_service import LIGHTRAG_ROUTER_SKILL_NAME
 
 logger = get_logger(__name__)
 
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
+
+
+def _is_router_skill_active(skill_associations) -> bool:
+    """Return True if the LightRAG Query Router skill is in the agent's active skills."""
+    if not skill_associations:
+        return False
+    return any(
+        getattr(assoc.skill, 'name', None) == LIGHTRAG_ROUTER_SKILL_NAME
+        for assoc in skill_associations
+        if assoc.skill
+    )
+
+
+def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
+    """Return a retrieve_from_knowledge_base(query, mode) LangChain tool for skill-routed agents."""
+    silo_id = silo.silo_id
+    VALID_MODES = {"local", "global", "hybrid", "mix", "naive"}
+
+    @tool
+    async def retrieve_from_knowledge_base(query: str, mode: str) -> str:
+        """Retrieve information from the LightRAG knowledge base.
+
+        Args:
+            query: The search query to run against the knowledge base.
+            mode: Retrieval strategy — one of: local, global, hybrid, mix, naive.
+                  See the LightRAG Query Router skill for selection guidance.
+        """
+        resolved_mode = mode if mode in VALID_MODES else "hybrid"
+        retriever = SiloService.get_silo_retriever(
+            silo_id,
+            search_params,
+            retrieval_config={"lightrag_query_mode": resolved_mode},
+        )
+        docs = await retriever.ainvoke(query)
+        if not docs:
+            return "No relevant documents found."
+        parts = []
+        for doc in docs:
+            metadata_str = json.dumps(doc.metadata, ensure_ascii=False) if doc.metadata else "{}"
+            parts.append(f"Content: {doc.page_content}\nMetadata: {metadata_str}")
+        return "\n\n---\n\n".join(parts)
+
+    return retrieve_from_knowledge_base
 
 
 def _extract_mcp_root_causes(exc: BaseException) -> str:
@@ -449,7 +493,11 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
 
     if agent.silo_id is not None:
 
-        retriever_tool = get_retriever_tool(agent.silo, search_params, retrieval_config=retrieval_config)
+        retriever_tool = get_retriever_tool(
+            agent.silo, search_params,
+            retrieval_config=retrieval_config,
+            skill_associations=getattr(agent, 'skill_associations', None),
+        )
         if retriever_tool is not None:
             tools.append(retriever_tool)
 
@@ -715,7 +763,11 @@ class IACTTool(BaseTool):
         # Add silo retriever if configured
         if agent.silo_id is not None:
             sub_retrieval_config = getattr(agent, 'retrieval_config', None)
-            retriever_tool = get_retriever_tool(agent.silo, retrieval_config=sub_retrieval_config)
+            retriever_tool = get_retriever_tool(
+                agent.silo,
+                retrieval_config=sub_retrieval_config,
+                skill_associations=getattr(agent, 'skill_associations', None),
+            )
             if retriever_tool is not None:
                 tools.append(retriever_tool)
 
@@ -897,9 +949,18 @@ def convert_search_params_to_types(search_params: dict, metadata_definition) -> 
             
     return converted_params
 
-def get_retriever_tool(silo: Silo, search_params=None, retrieval_config: Optional[dict] = None):
-    
+def get_retriever_tool(silo: Silo, search_params=None, retrieval_config: Optional[dict] = None, skill_associations=None):
+
     if silo.silo_id is not None:
+        # skill-routed: dynamic tool if routing skill is active, else fall back to hybrid
+        lightrag_mode = (retrieval_config or {}).get("lightrag_query_mode")
+        if lightrag_mode == "skill-routed":
+            if _is_router_skill_active(skill_associations):
+                return _create_dynamic_lightrag_tool(silo, search_params)
+            else:
+                # ponytail: routing skill toggled off — fall back transparently to hybrid
+                retrieval_config = {**(retrieval_config or {}), "lightrag_query_mode": "hybrid"}
+
         # Convert search parameters to proper types based on metadata definition
         if search_params:
             search_params = convert_search_params_to_types(search_params, silo.metadata_definition)
