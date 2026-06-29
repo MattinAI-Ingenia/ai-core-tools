@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers } from 'lucide-react';
 import { apiService } from '../services/api';
@@ -397,13 +397,32 @@ function AgentFormPage() {
     });
   };
 
+  const ROUTER_SKILL_NAME = "LightRAG Query Router";
+
   const handleSkillToggle = (skillId: number) => {
-    setFormData(prev => ({
-      ...prev,
-      skill_ids: prev.skill_ids.includes(skillId)
+    const skill = agent?.skills?.find(s => s.skill_id === skillId);
+    const isRouterSkill = skill?.name === ROUTER_SKILL_NAME;
+    const isCurrentlyOn = formData.skill_ids.includes(skillId);
+
+    setFormData(prev => {
+      const newSkillIds = isCurrentlyOn
         ? prev.skill_ids.filter(id => id !== skillId)
-        : [...prev.skill_ids, skillId]
-    }));
+        : [...prev.skill_ids, skillId];
+
+      // Snap query mode to hybrid when routing skill is toggled off while skill-routed
+      const snapToHybrid =
+        isRouterSkill &&
+        isCurrentlyOn &&
+        prev.retrieval_config?.lightrag_query_mode === 'skill-routed';
+
+      return {
+        ...prev,
+        skill_ids: newSkillIds,
+        ...(snapToHybrid
+          ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'hybrid' } }
+          : {}),
+      };
+    });
   };
 
   const getMiddlewareStatus = (mw: { mcp_config_ids?: number[]; tool_agent_ids?: number[] }): 'available' | 'disabled' | 'partial' => {
@@ -897,22 +916,36 @@ function AgentFormPage() {
                                 </label>
                                 <select
                                   id="lightrag_query_mode"
-                                  value={formData.retrieval_config?.lightrag_query_mode ?? 'hybrid'}
+                                  value={formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed'}
                                   onChange={(e) => handleInputChange('retrieval_config', {
                                     ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
                                     lightrag_query_mode: e.target.value
                                   })}
                                   className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
                                 >
-                                  {(agent?.lightrag_query_modes ?? ['local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map(mode => (
+                                  {(agent?.lightrag_query_modes ?? ['skill-routed', 'local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map(mode => (
                                     <option key={mode} value={mode}>
-                                      {mode === 'hybrid' ? `${mode} (default)` : mode}
+                                      {mode === 'skill-routed'
+                                        ? 'Skill-Routed (auto)'
+                                        : mode === 'hybrid'
+                                        ? `${mode} (default fallback)`
+                                        : mode}
                                     </option>
                                   ))}
                                 </select>
                                 <p className="text-xs text-gray-500 mt-1">
-                                  local = entity neighbors · global = community summaries · hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
+                                  skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries · hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
                                 </p>
+                                {formData.retrieval_config?.lightrag_query_mode === 'skill-routed' && (
+                                  <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2">
+                                    <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
+                                    <p className="text-xs text-purple-800">
+                                      <span className="font-semibold">LightRAG Query Router</span> — the agent will automatically
+                                      select the best retrieval strategy (local / global / hybrid / mix / naive) per question.
+                                      A routing skill will be added to this agent on save.
+                                    </p>
+                                  </div>
+                                )}
                               </div>
                             )}
 
@@ -1526,32 +1559,44 @@ function AgentFormPage() {
                     <>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {agent.skills.map((skill) => (
-                          <button
-                            key={skill.skill_id}
-                            type="button"
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.skill_ids.includes(skill.skill_id)
-                              ? 'border-purple-500 bg-purple-50'
-                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                              }`}
-                            onClick={() => handleSkillToggle(skill.skill_id)}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center">
-                                <input
-                                  type="checkbox"
-                                  checked={formData.skill_ids.includes(skill.skill_id)}
-                                  onChange={() => handleSkillToggle(skill.skill_id)}
-                                  className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                />
-                                <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
+                          <Fragment key={skill.skill_id}>
+                            <button
+                              type="button"
+                              className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.skill_ids.includes(skill.skill_id)
+                                ? 'border-purple-500 bg-purple-50'
+                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                                }`}
+                              onClick={() => handleSkillToggle(skill.skill_id)}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={formData.skill_ids.includes(skill.skill_id)}
+                                    onChange={() => handleSkillToggle(skill.skill_id)}
+                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                  />
+                                  <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
+                                </div>
+                                <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
+                                  }`} />
                               </div>
-                              <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
-                                }`} />
-                            </div>
-                            {skill.description && (
-                              <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
+                              {skill.description && (
+                                <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
+                              )}
+                            </button>
+                            {skill.name === ROUTER_SKILL_NAME &&
+                              formData.skill_ids.includes(skill.skill_id) &&
+                              !selectedSiloIsLightRAG && (
+                              <div className="col-span-full mt-1 p-3 bg-orange-50 border border-orange-200 rounded-lg flex items-start gap-2">
+                                <span className="text-orange-500 mt-0.5 text-sm">⚠️</span>
+                                <p className="text-xs text-orange-800">
+                                  <span className="font-semibold">LightRAG Query Router</span> has no effect unless this agent
+                                  uses a LightRAG knowledge base. Assign a LightRAG silo above to enable routing.
+                                </p>
+                              </div>
                             )}
-                          </button>
+                          </Fragment>
                         ))}
                       </div>
 
