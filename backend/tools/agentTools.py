@@ -44,9 +44,11 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
     silo_id = silo.silo_id
     VALID_MODES = {"local", "global", "hybrid", "mix", "naive"}
 
-    @tool
-    async def retrieve_from_knowledge_base(query: str, mode: str) -> str:
-        """Retrieve information from the LightRAG knowledge base.
+    @tool(response_format="content_and_artifact")
+    async def retrieve_from_knowledge_base(query: str, mode: str) -> tuple:
+        """Search the domain knowledge base. Call this tool for any question about
+        specific people, organizations, concepts, or events that may be in the
+        knowledge base — do not answer from memory alone.
 
         Args:
             query: The search query to run against the knowledge base.
@@ -54,6 +56,7 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
                   See the LightRAG Query Router skill for selection guidance.
         """
         resolved_mode = mode if mode in VALID_MODES else "hybrid"
+        logger.info("[skill-routed] query=%r mode_requested=%r mode_used=%r", query, mode, resolved_mode)
         retriever = SiloService.get_silo_retriever(
             silo_id,
             search_params,
@@ -61,12 +64,16 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
         )
         docs = await retriever.ainvoke(query)
         if not docs:
-            return "No relevant documents found."
+            return "No relevant documents found.", []
+        _INTERNAL_META = {"lightrag_raw_data", "lightrag_keywords"}
         parts = []
         for doc in docs:
-            metadata_str = json.dumps(doc.metadata, ensure_ascii=False) if doc.metadata else "{}"
+            meta = {k: v for k, v in (doc.metadata or {}).items() if k not in _INTERNAL_META}
+            metadata_str = json.dumps(meta, ensure_ascii=False) if meta else "{}"
             parts.append(f"Content: {doc.page_content}\nMetadata: {metadata_str}")
-        return "\n\n---\n\n".join(parts)
+        # naive = vector-only, no graph traversal → no subgraph to show
+        artifact = [] if resolved_mode == "naive" else docs
+        return "\n\n---\n\n".join(parts), artifact
 
     return retrieve_from_knowledge_base
 

@@ -94,12 +94,14 @@ class AgentRepository:
             agent = AgentRepository.get_by_id(db, agent_id)
             if not agent:
                 agent = AgentRepository.get_ocr_agent_by_id(db, agent_id)
-            
+
             if agent:
                 return AgentRepository._delete_agent_with_associations(db, agent)
             return False
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            import logging
+            logging.getLogger(__name__).error("Failed to delete agent %s: %s", agent_id, exc, exc_info=True)
             return False
 
     @staticmethod
@@ -109,7 +111,7 @@ class AgentRepository:
         db.query(AgentMCP).filter(AgentMCP.agent_id == agent_id).delete(synchronize_session=False)
         db.query(AgentSkill).filter(AgentSkill.agent_id == agent_id).delete(synchronize_session=False)
         db.query(AgentTool).filter(AgentTool.agent_id == agent_id).delete(synchronize_session=False)
-        # Remove all references to this agent as a tool (tool_id side).
+        db.query(AgentMiddleware).filter(AgentMiddleware.agent_id == agent_id).delete(synchronize_session=False)
         AgentRepository.remove_tool_references(db, agent_id)
         db.delete(agent)
         db.commit()

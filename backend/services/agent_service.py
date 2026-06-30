@@ -85,12 +85,21 @@ Fast and precise for direct lexical or semantic matches.
 
 ---
 
+## When to call the tool
+
+**Default: always call `retrieve_from_knowledge_base` first.**
+The knowledge base contains domain-specific information you do not have in your
+training data. A question about a person, organization, concept, or event that
+could plausibly be in the knowledge base MUST go through the tool — do not
+answer from memory alone.
+
+Only skip the tool when the question is unambiguously about general world
+knowledge with zero domain specificity (e.g. "What is the capital of France?").
+When in doubt, call the tool. An empty result is more honest than a hallucinated answer.
+
 ## Decision flowchart
 
-Is this a general-knowledge question with no need for the knowledge base?
-  → Do NOT call retrieve_from_knowledge_base
-
-Does the question name or anchor to a specific entity?
+Does the question name or anchor to a specific entity (person, org, concept)?
   → Yes, and it's only about that entity → local
   → Yes, but also asks about broader context → hybrid
 
@@ -499,6 +508,9 @@ class AgentService:
             Skill.name == LIGHTRAG_ROUTER_SKILL_NAME,
         ).first()
         if existing:
+            if existing.content != ROUTER_SKILL_CONTENT:
+                existing.content = ROUTER_SKILL_CONTENT
+                db.commit()
             return existing
         skill = Skill(
             name=LIGHTRAG_ROUTER_SKILL_NAME,

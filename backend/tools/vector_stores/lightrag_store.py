@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
@@ -274,14 +275,46 @@ class LightRAGRetriever(BaseRetriever):
         return docs
 
 
+_LIGHTRAG_KEYWORDS_RE = re.compile(
+    r'\{[^{}]*"high_level_keywords"[^{}]*\}', re.DOTALL
+)
+# LightRAG global-mode context embeds community-report citation tags like
+# [Data: Reports (1, 2, 3)] or [Data: Entities (4)].  The outer LLM reads
+# these IDs and echoes them as "[N]" citations — meaningless to users.
+_LIGHTRAG_DATA_TAG_RE = re.compile(r'\[Data:[^\]]+\]')
+
+
+def _extract_lightrag_keywords(text: str) -> tuple[str, dict]:
+    """Split LightRAG context string into (clean_content, keywords_dict).
+
+    Strips two kinds of LightRAG metadata from page_content so the outer LLM
+    never sees them:
+    - The query-keyword JSON block (high_level_keywords / low_level_keywords)
+    - [Data: Reports (N, N)] citation tags from global-mode community reports
+    Both are internal LightRAG artefacts, not retrieved knowledge.
+    """
+    import json as _json
+    m = _LIGHTRAG_KEYWORDS_RE.search(text)
+    keywords = {}
+    if m:
+        try:
+            keywords = _json.loads(m.group())
+        except Exception:
+            pass
+        text = _LIGHTRAG_KEYWORDS_RE.sub("", text).strip()
+    text = _LIGHTRAG_DATA_TAG_RE.sub("", text).strip()
+    return text, keywords
+
+
 def _wrap_response(response: str, query_mode: str) -> List[Document]:
     """Wrap a plain string LightRAG response into a LangChain Document."""
     if not response or not str(response).strip():
         return []
+    content, keywords = _extract_lightrag_keywords(str(response))
     return [
         Document(
-            page_content=str(response),
-            metadata={"source": "lightrag", "query_mode": query_mode},
+            page_content=content,
+            metadata={"source": "lightrag", "query_mode": query_mode, "lightrag_keywords": keywords},
         )
     ]
 
@@ -304,9 +337,13 @@ def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
         content = (response.get("llm_response") or {}).get("content") or ""
         raw_data = response
     else:
-        content = getattr(response, "content", None) or str(response)
+        llm_r = getattr(response, "llm_response", None)
+        content = getattr(llm_r, "content", None) if llm_r else None
+        content = content or getattr(response, "content", None) or str(response)
         raw_data = getattr(response, "raw_data", None) or {}
-    if not str(content).strip():
+    content, keywords = _extract_lightrag_keywords(str(content))
+    if not content:
+        logger.warning("[LightRAG] content empty after strip for mode=%s", query_mode)
         return []
     graph_data = _normalize_lightrag_graph(raw_data)
     logger.info("[LightRAG] graph_data entities=%d relationships=%d chunks=%d",
@@ -320,6 +357,7 @@ def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
                 "source": "lightrag",
                 "query_mode": query_mode,
                 "lightrag_raw_data": graph_data,
+                "lightrag_keywords": keywords,
             },
         )
     ]
@@ -336,8 +374,11 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
         return {}
     data = raw_data.get("data", {})
     if not isinstance(data, dict):
-        return {}
-
+        try:
+            data = vars(data)
+        except TypeError:
+            logger.warning("[LightRAG] _normalize: cannot coerce %s to dict", type(data).__name__)
+            return {}
     entities = []
     known = set()
     for e in data.get("entities", []):

@@ -343,8 +343,10 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                     if artifact:
                         docs = artifact if isinstance(artifact, list) else [artifact]
                         for doc in docs:
-                            raw_data = getattr(doc, "metadata", {}).get("lightrag_raw_data")
-                            if raw_data:
+                            meta = (doc.get("metadata") if isinstance(doc, dict) else getattr(doc, "metadata", None)) or {}
+                            raw_data = meta.get("lightrag_raw_data")
+                            graph = (raw_data or {}).get("data", {})
+                            if graph.get("entities") or graph.get("chunks"):
                                 events.append({
                                     "type": "_lightrag_graph",
                                     "data": raw_data,
