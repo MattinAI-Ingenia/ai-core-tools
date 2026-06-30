@@ -39,17 +39,6 @@ logger = get_logger(__name__)
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
 
 
-def _is_router_skill_active(skill_associations) -> bool:
-    """Return True if the LightRAG Query Router skill is in the agent's active skills."""
-    if not skill_associations:
-        return False
-    return any(
-        getattr(assoc.skill, 'name', None) == LIGHTRAG_ROUTER_SKILL_NAME
-        for assoc in skill_associations
-        if assoc.skill
-    )
-
-
 def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
     """Return a retrieve_from_knowledge_base(query, mode) LangChain tool for skill-routed agents."""
     silo_id = silo.silo_id
@@ -955,7 +944,7 @@ def get_retriever_tool(silo: Silo, search_params=None, retrieval_config: Optiona
         # skill-routed: dynamic tool if routing skill is active, else fall back to hybrid
         lightrag_mode = (retrieval_config or {}).get("lightrag_query_mode")
         if lightrag_mode == "skill-routed":
-            if _is_router_skill_active(skill_associations):
+            if any(getattr(a.skill, 'name', None) == LIGHTRAG_ROUTER_SKILL_NAME for a in (skill_associations or []) if a.skill):
                 return _create_dynamic_lightrag_tool(silo, search_params)
             else:
                 # ponytail: routing skill toggled off — fall back transparently to hybrid

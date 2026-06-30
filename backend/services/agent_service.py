@@ -371,6 +371,8 @@ class AgentService:
             agent.vision_system_prompt = data.get('vision_system_prompt')
             agent.text_system_prompt = data.get('text_system_prompt')
         
+        agent.retrieval_config = data.get('retrieval_config')
+
         # Handle is_tool field - can be boolean from API or 'on' from form
         is_tool_value = data.get('is_tool')
         if isinstance(is_tool_value, bool):
@@ -531,13 +533,10 @@ class AgentService:
             AgentSkill.agent_id == agent_id,
             AgentSkill.skill_id == skill.skill_id,
         ).delete(synchronize_session=False)
-        db.commit()
-        remaining = db.query(AgentSkill).filter(
-            AgentSkill.skill_id == skill.skill_id,
-        ).count()
+        remaining = db.query(AgentSkill).filter(AgentSkill.skill_id == skill.skill_id).count()
         if remaining == 0:
             db.delete(skill)
-            db.commit()
+        db.commit()
 
     def update_agent_middlewares(self, db: Session, agent_id: int, middleware_ids: list):
         """Update agent middleware associations"""

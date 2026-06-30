@@ -406,11 +406,7 @@ async def create_or_update_agent(
     agent_service.update_agent_middlewares(db, created_agent_id, agent_data.middleware_ids)
 
     # LightRAG Query Router skill lifecycle
-    lightrag_mode = (
-        agent_data.retrieval_config.lightrag_query_mode
-        if agent_data.retrieval_config
-        else None
-    )
+    lightrag_mode = (agent_data.retrieval_config or {}).get("lightrag_query_mode")
     if lightrag_mode == "skill-routed":
         router_skill = agent_service.ensure_lightrag_router_skill(db, app_id)
         agent_service.attach_skill_to_agent(db, created_agent_id, router_skill.skill_id)

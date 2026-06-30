@@ -403,26 +403,24 @@ function AgentFormPage() {
     const skill = agent?.skills?.find(s => s.skill_id === skillId);
     const isRouterSkill = skill?.name === ROUTER_SKILL_NAME;
     const isCurrentlyOn = formData.skill_ids.includes(skillId);
+    const currentMode = formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed';
+    const snapToHybrid = isRouterSkill && isCurrentlyOn && currentMode === 'skill-routed';
+    const snapToSkillRouted = isRouterSkill && !isCurrentlyOn && currentMode !== 'skill-routed';
 
-    setFormData(prev => {
-      const newSkillIds = isCurrentlyOn
+    setFormData(prev => ({
+      ...prev,
+      skill_ids: isCurrentlyOn
         ? prev.skill_ids.filter(id => id !== skillId)
-        : [...prev.skill_ids, skillId];
+        : [...prev.skill_ids, skillId],
+      ...(snapToHybrid
+        ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'hybrid' } }
+        : snapToSkillRouted
+        ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'skill-routed' } }
+        : {}),
+    }));
 
-      // Snap query mode to hybrid when routing skill is toggled off while skill-routed
-      const snapToHybrid =
-        isRouterSkill &&
-        isCurrentlyOn &&
-        prev.retrieval_config?.lightrag_query_mode === 'skill-routed';
-
-      return {
-        ...prev,
-        skill_ids: newSkillIds,
-        ...(snapToHybrid
-          ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'hybrid' } }
-          : {}),
-      };
-    });
+    if (snapToHybrid) toast.info('Query mode switched to hybrid — save to apply.');
+    if (snapToSkillRouted) toast.info('Query mode switched to skill-routed — save to apply.');
   };
 
   const getMiddlewareStatus = (mw: { mcp_config_ids?: number[]; tool_agent_ids?: number[] }): 'available' | 'disabled' | 'partial' => {
@@ -536,7 +534,12 @@ function AgentFormPage() {
       mcp_config_ids: formData.mcp_config_ids,
       skill_ids: formData.skill_ids,
       middleware_ids: formData.middleware_ids,
-      retrieval_config: formData.retrieval_config,
+      retrieval_config: selectedSiloIsLightRAG
+        ? {
+            ...(formData.retrieval_config ?? {}),
+            lightrag_query_mode: formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed',
+          }
+        : formData.retrieval_config,
       // OCR-specific fields
       vision_service_id: formData.vision_service_id,
       vision_system_prompt: formData.vision_system_prompt,
@@ -1558,46 +1561,45 @@ function AgentFormPage() {
                   {agent.skills.length > 0 ? (
                     <>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {agent.skills.map((skill) => (
+                        {agent.skills.map((skill) => {
+                          const isRouterDisabled = skill.name === ROUTER_SKILL_NAME && !selectedSiloIsLightRAG;
+                          return (
                           <Fragment key={skill.skill_id}>
                             <button
                               type="button"
-                              className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.skill_ids.includes(skill.skill_id)
-                                ? 'border-purple-500 bg-purple-50'
-                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                                }`}
-                              onClick={() => handleSkillToggle(skill.skill_id)}
+                              disabled={isRouterDisabled}
+                              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full ${
+                                isRouterDisabled
+                                  ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                                  : formData.skill_ids.includes(skill.skill_id)
+                                  ? 'border-purple-500 bg-purple-50 cursor-pointer'
+                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
+                              }`}
+                              onClick={() => !isRouterDisabled && handleSkillToggle(skill.skill_id)}
                             >
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center">
                                   <input
                                     type="checkbox"
+                                    disabled={isRouterDisabled}
                                     checked={formData.skill_ids.includes(skill.skill_id)}
                                     onChange={() => handleSkillToggle(skill.skill_id)}
                                     className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                   />
                                   <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
                                 </div>
-                                <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
-                                  }`} />
+                                <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'}`} />
                               </div>
                               {skill.description && (
                                 <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
                               )}
+                              {isRouterDisabled && (
+                                <p className="mt-2 ml-7 text-xs text-gray-400">Requires a LightRAG silo</p>
+                              )}
                             </button>
-                            {skill.name === ROUTER_SKILL_NAME &&
-                              formData.skill_ids.includes(skill.skill_id) &&
-                              !selectedSiloIsLightRAG && (
-                              <div className="col-span-full mt-1 p-3 bg-orange-50 border border-orange-200 rounded-lg flex items-start gap-2">
-                                <span className="text-orange-500 mt-0.5 text-sm">⚠️</span>
-                                <p className="text-xs text-orange-800">
-                                  <span className="font-semibold">LightRAG Query Router</span> has no effect unless this agent
-                                  uses a LightRAG knowledge base. Assign a LightRAG silo above to enable routing.
-                                </p>
-                              </div>
-                            )}
                           </Fragment>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       {formData.skill_ids.length > 0 && (
