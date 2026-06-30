@@ -8,7 +8,7 @@ Tests cover:
 """
 
 import pytest
-from typing import Optional, get_args, get_origin
+from typing import Optional, Union, get_args, get_origin
 from pydantic import BaseModel
 
 from tools.outputParserTools import (
@@ -63,7 +63,8 @@ class TestCreateDynamicPydanticModelOptional:
         )
 
         annotation = Model.model_fields["value"].annotation
-        assert get_origin(annotation) is type(None).__mro__[0] or annotation is not int
+        assert get_origin(annotation) is Union
+        assert type(None) in get_args(annotation)
         # The field should accept None
         instance = Model()
         assert instance.value is None
