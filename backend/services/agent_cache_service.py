@@ -72,6 +72,7 @@ class CheckpointerCacheService:
 
         cls._pool = AsyncConnectionPool(
             conninfo=db_uri,
+            open=False,
             min_size=2,
             max_size=10,
             max_lifetime=1800,   # recycle connections after 30 min
