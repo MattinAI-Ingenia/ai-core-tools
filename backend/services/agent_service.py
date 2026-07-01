@@ -14,48 +14,46 @@ LIGHTRAG_ROUTER_SKILL_NAME = "LightRAG Query Router"
 ROUTER_SKILL_CONTENT = """# LightRAG Query Router
 
 You have access to `retrieve_from_knowledge_base(query, mode)`.
-Before every retrieval call, select the `mode` that best matches the question.
+Before every retrieval call, select the `mode` that best matches the CURRENT question.
+
+**Re-derive the mode fresh every single time.** Never reuse the mode from a
+previous tool call in this conversation just because it worked before — a
+run of nine `hybrid` calls in a row does not make the tenth question
+`hybrid` too. Judge each new question independently against the guide below.
 
 ---
 
 ## Mode Guide
 
-### local
-**Strategy:** Traverses entity neighborhoods in the knowledge graph — direct
-relationships, attributes, and co-occurring concepts around a specific node.
-
-**Use when:**
-- The question names or implies a specific entity, person, organization, or concept
-- "What does [X] do?", "Who is [Y]?", "What are the properties of [Z]?"
-- "List all [X]s related to [Y]", "What is the role of [Z] in this project?"
-
-**Avoid when:** The question is broad, comparative, or doesn't anchor to a named entity.
-
----
-
 ### global
 **Strategy:** Queries community-level summaries built from clusters of related
 entities — captures high-level themes and patterns across the whole graph.
 
-**Use when:**
-- The question asks for summaries, overviews, or thematic patterns
-- "What are the main topics covered?", "Summarize the overall approach to X"
-- "What are the key trends?", "What does this document focus on?"
-- Questions starting with "In general...", "Overall...", "What is the big picture of..."
+**Use when the question asks for synthesis, enumeration, or overview across the document:**
+- Conclusions, recommendations, or takeaways: "What is the conclusion?", "What does the paper recommend?"
+- Enumerations of a whole category: "What categories/types/kinds of X are there?", "List all the risks/causes/consequences"
+- Thematic summaries: "What are the main topics?", "Summarize the overall approach to X"
+- Trends or big-picture patterns: "What are the key trends?", "What is the central argument?"
+- Questions with "overall", "in general", "across", "in total", "as a whole"
 
-**Avoid when:** The question targets a specific named entity or fact.
+**Key rule:** Generic terms like "risk", "agency", "data source", "consequence" are NOT specific
+named entities. A question built only around generic terms belongs to global, not local.
+
+**Avoid when:** The question targets a single named person, organization, or specific technical term by name.
 
 ---
 
-### hybrid *(default)*
-**Strategy:** Runs local + global in parallel and merges results — balances
-entity precision with thematic breadth.
+### local
+**Strategy:** Traverses entity neighborhoods in the knowledge graph — direct
+relationships, attributes, and co-occurring concepts around a specific node.
 
-**Use when:**
-- The question has both specific and thematic aspects
-- "How does [X] relate to the broader strategy?", "What is [Y] and why does it matter?"
-- You are unsure which of local or global is more appropriate
-- Default to this mode when the question type is ambiguous
+**Use when the question anchors to a specific proper noun or well-defined named concept:**
+- "Who is [named person]?", "What does [named organization] do?"
+- "What is [specific technical term] and how does it work?"
+- "What is the role of [specific named entity] in X?"
+- Questions that name a single entity and ask only about that entity
+
+**Avoid when:** The question is broad, asks for enumeration of a category, or asks for document-wide patterns.
 
 ---
 
@@ -63,12 +61,27 @@ entity precision with thematic breadth.
 **Strategy:** Runs local + global + naive vector search — maximum coverage at
 the cost of speed and token usage.
 
-**Use when:**
-- Complex analytical or comparative questions: "Compare how X and Y are treated across all documents"
-- Questions where missing context would be a significant failure: "What are ALL the ways Z is discussed?"
-- The user explicitly asks for exhaustive or comprehensive answers
+**Use when the question contains an explicit comparison or an explicit demand
+for exhaustive/complete coverage — check this BEFORE hybrid, even if the
+question also names a specific entity:**
+- Explicit comparison between two or more things: "Compare X and Y", "X versus Y", "how does X differ from Y"
+- Explicit exhaustive-coverage language: "List ALL...", "every...", "all the ways...", "a complete list of..."
+- The user explicitly asks for a comprehensive or exhaustive answer
 
-**Avoid when:** Response time matters or the question is straightforward.
+**Avoid when:** Response time matters, or the question is a single non-comparative ask.
+
+---
+
+### hybrid *(default)*
+**Strategy:** Runs local + global in parallel and merges results — balances
+entity precision with thematic breadth.
+
+**Use when the question does NOT match mix above, and:**
+- The question mixes a specific entity with broader context: "How does [X] relate to the broader strategy?"
+- The question asks about a named concept AND its implications or relationships
+- You are unsure which of local or global is more appropriate
+
+**Default to hybrid when the question type is ambiguous and doesn't match any mode above.**
 
 ---
 
@@ -77,9 +90,8 @@ the cost of speed and token usage.
 Fast and precise for direct lexical or semantic matches.
 
 **Use when:**
-- Simple, direct fact lookups: "What is the definition of X?", "Find the section about Y"
-- Keyword or phrase searches where graph structure adds no value
-- The question is a verbatim search ("Does the document mention Z?")
+- Verbatim lookups: "Who are the authors?", "What year was this published?", "Find the section about Y"
+- The question is looking for a specific quoted phrase, number, or name
 
 **Avoid when:** The answer depends on relationships between entities or thematic context.
 
@@ -99,21 +111,20 @@ When in doubt, call the tool. An empty result is more honest than a hallucinated
 
 ## Decision flowchart
 
-Does the question name or anchor to a specific entity (person, org, concept)?
-  → Yes, and it's only about that entity → local
-  → Yes, but also asks about broader context → hybrid
+**Step 1 — Is the question asking for synthesis, enumeration, or a document-wide pattern (no comparison)?**
+  → Yes → global
 
-Does the question ask for themes, summaries, or patterns?
-  → Yes, no specific entity involved → global
+**Step 2 — Does the question contain an explicit comparison ("X vs Y", "compare A and B") or an explicit demand for exhaustive/complete coverage ("list ALL", "every", "comprehensive")?**
+  → Yes → mix (even if it also names a specific entity)
 
-Is it a complex comparison or exhaustive analysis?
-  → mix
+**Step 3 — Does the question anchor to a single specific proper noun or named concept?**
+  → Yes, and only about that entity → local
+  → Yes, but also asks about broader implications → hybrid
 
-Is it a simple keyword/fact lookup?
-  → naive
+**Step 4 — Is the question a simple verbatim or keyword lookup?**
+  → Yes → naive
 
-Unsure?
-  → hybrid
+**Otherwise → hybrid**
 """
 
 

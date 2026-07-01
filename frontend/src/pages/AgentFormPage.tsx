@@ -939,7 +939,7 @@ function AgentFormPage() {
                                 <p className="text-xs text-gray-500 mt-1">
                                   skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries · hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
                                 </p>
-                                {formData.retrieval_config?.lightrag_query_mode === 'skill-routed' && (
+                                {(formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed') === 'skill-routed' && (
                                   <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2">
                                     <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
                                     <p className="text-xs text-purple-800">

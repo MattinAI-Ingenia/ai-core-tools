@@ -32,7 +32,7 @@ from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_contex
 from utils.mcp_ssl_utils import inject_ssl_config
 from tools.skill_tools import create_skill_loader_tool, generate_skills_system_prompt_section
 from tools.python_sandbox_tools import create_python_repl_tool
-from services.agent_service import LIGHTRAG_ROUTER_SKILL_NAME
+from services.agent_service import LIGHTRAG_ROUTER_SKILL_NAME, ROUTER_SKILL_CONTENT
 
 logger = get_logger(__name__)
 
@@ -202,6 +202,26 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         user_context: Optional user context containing authentication tokens for MCP
     """
     retrieval_config = getattr(agent, 'retrieval_config', None)
+
+    # The router skill's mode-selection rules must be visible from the very
+    # first message — gating them behind an on-demand `load_skill` call means
+    # a memory-less agent can go a whole turn without knowing it should
+    # always call retrieve_from_knowledge_base first. Inline it directly into
+    # the system prompt and drop it from the generic on-demand skill list so
+    # it isn't offered twice.
+    router_skill_active = (
+        (retrieval_config or {}).get("lightrag_query_mode") == "skill-routed"
+        and any(
+            getattr(a.skill, "name", None) == LIGHTRAG_ROUTER_SKILL_NAME
+            for a in (getattr(agent, "skill_associations", None) or [])
+            if a.skill
+        )
+    )
+    other_skill_associations = [
+        a for a in (getattr(agent, "skill_associations", None) or [])
+        if getattr(a.skill, "name", None) != LIGHTRAG_ROUTER_SKILL_NAME
+    ]
+
     llm = get_llm(agent)
     if llm is None:
         raise ValueError("No LLM found for agent")
@@ -232,8 +252,10 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     # Build system prompt with optional skills section and format instructions
     # In LangChain v1, system_prompt is a static string passed to create_agent
     system_prompt_content = agent.system_prompt
-    if hasattr(agent, 'skill_associations') and agent.skill_associations:
-        skills_section = generate_skills_system_prompt_section(agent.skill_associations)
+    if router_skill_active:
+        system_prompt_content = system_prompt_content + "\n\n" + ROUTER_SKILL_CONTENT
+    if other_skill_associations:
+        skills_section = generate_skills_system_prompt_section(other_skill_associations)
         if skills_section:
             system_prompt_content = system_prompt_content + "\n" + skills_section
 
@@ -528,12 +550,24 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         logger.debug("Full MCP tools loading error:", exc_info=True)
         mcp_client = None
 
-    # Add skill loader tool if agent has skills
-    if hasattr(agent, 'skill_associations') and agent.skill_associations:
-        skill_tool = create_skill_loader_tool(agent.skill_associations)
+    # Add skill loader tool for non-router skills (the router skill is inlined
+    # into the system prompt above, not offered as an on-demand load).
+    if other_skill_associations:
+        skill_tool = create_skill_loader_tool(other_skill_associations)
         if skill_tool:
             tools.append(skill_tool)
-            logger.info(f"Skill loader tool added with {len(agent.skill_associations)} skills")
+            logger.info(f"Skill loader tool added with {len(other_skill_associations)} skills")
+
+    # Pre-bind tools with parallel_tool_calls=False so the LLM never fans out
+    # multiple simultaneous calls to the same tool (e.g. retrieve_from_knowledge_base
+    # called 6× in one turn). LangGraph's _should_bind_tools detects the pre-bound
+    # model and skips its own bind, preserving this setting.
+    try:
+        llm = llm.bind_tools(tools, parallel_tool_calls=False)
+    except TypeError:
+        # Some providers (e.g. older Anthropic builds) don't accept parallel_tool_calls;
+        # fall back to plain bind so the agent still works.
+        llm = llm.bind_tools(tools)
 
     if pydantic_model:
         # In LangChain v1, response_format accepts the pydantic model directly.
