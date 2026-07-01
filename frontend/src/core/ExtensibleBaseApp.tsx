@@ -16,7 +16,6 @@ import { defaultNavigation } from './defaultNavigation';
 import type { LibraryConfig, ExtraRoute } from './types';
 import { baseTheme } from '../themes/baseTheme';
 
-// Import base pages
 import LandingPage from '../pages/LandingPage';
 import AppsPage from '../pages/AppsPage';
 import AppDashboard from '../pages/AppDashboard';
@@ -53,6 +52,8 @@ import RegisterPage from '../pages/RegisterPage';
 import VerifyEmailPage from '../pages/VerifyEmailPage';
 import PasswordResetRequestPage from '../pages/PasswordResetRequestPage';
 import PasswordResetPage from '../pages/PasswordResetPage';
+import SetPasswordPage from '../pages/SetPasswordPage';
+import ChangePasswordPage from '../pages/ChangePasswordPage';
 import SubscriptionPage from '../pages/SubscriptionPage';
 import SaasUserListPage from '../pages/admin/SaasUserListPage';
 import SystemAIServicesPage from '../pages/admin/SystemAIServicesPage';
@@ -84,9 +85,7 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
   config,
   extraRoutes = [],
 }) => {
-  // Merge routes from config and extraRoutes prop
   const allExtraRoutes = [...(config.routes || []), ...extraRoutes];
-  // Convert LibraryConfig to ClientConfig for backward compatibility
   const clientConfig = {
     clientId: 'library-client',
     name: config.name || 'AI Core Tools',
@@ -115,7 +114,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
     navigation: config.navigationConfig
   };
 
-  // Initialize configuration service
   useEffect(() => {
     configService.setClientConfig(clientConfig);
   }, [clientConfig]);
@@ -127,7 +125,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
     ? mergeNavigationConfig(config.navigation)
     : (config.navigationConfig || defaultNavigation);
 
-  // Common layout props used across all routes
   const commonLayoutProps = useMemo(() => ({
     navigationConfig: mergedNavigationConfig,
     headerProps: {
@@ -163,15 +160,21 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                         <Route path="/verify-email" element={<VerifyEmailPage />} />
                         <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
                         <Route path="/password-reset" element={<PasswordResetPage />} />
+                        <Route path="/set-password" element={<SetPasswordPage />} />
+                        <Route path="/change-password" element={
+                          <ProtectedLayoutRoute {...commonLayoutProps}>
+                            <ChangePasswordPage />
+                          </ProtectedLayoutRoute>
+                        } />
 
                         {/* Public landing page — handles its own redirect when not in SaaS mode */}
                         <Route path="/" element={<LandingPage />} />
 
-                <Route path="/apps" element={
-                  <EditorLayoutRoute {...commonLayoutProps}>
-                      <AppsPage />
-                  </EditorLayoutRoute>
-                } />
+                        <Route path="/apps" element={
+                          <EditorLayoutRoute {...commonLayoutProps}>
+                            <AppsPage />
+                          </EditorLayoutRoute>
+                        } />
 
                         <Route path="/profile" element={
                           <ProtectedLayoutRoute {...commonLayoutProps}>
@@ -203,7 +206,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </ProtectedLayoutRoute>
                         } />
 
-                {/* App routes — editor and admin only */}
                 <Route path="/apps/:appId" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <AppDashboard />
@@ -396,11 +398,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                   </EditorLayoutRoute>
                 } />
 
-                        <Route path="/apps/:appId/settings/data-structures" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><DataStructuresPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
 
                         <Route path="/apps/:appId/settings/collaboration" element={
                           <ProtectedLayoutRoute {...commonLayoutProps}>

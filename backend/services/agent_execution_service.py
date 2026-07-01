@@ -118,6 +118,12 @@ class AgentExecutionService:
                     ctx, agent_id, session_id_for_media, db, temp_silo_ids
                 )
 
+            # Release the sync connection to the pool during the LLM call; the
+            # agent chain uses the async checkpointer, not this session. ctx
+            # objects expire but stay attached for _finalize_turn to reload.
+            if db is not None:
+                db.commit()
+
             response = await self._execute_agent_async(
                 ctx.fresh_agent,
                 ctx.enhanced_message,
