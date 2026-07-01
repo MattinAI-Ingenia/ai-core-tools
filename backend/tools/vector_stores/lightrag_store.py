@@ -341,11 +341,22 @@ def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
         content = getattr(llm_r, "content", None) if llm_r else None
         content = content or getattr(response, "content", None) or str(response)
         raw_data = getattr(response, "raw_data", None) or {}
-    content, keywords = _extract_lightrag_keywords(str(content))
-    if not content:
-        logger.warning("[LightRAG] content empty after strip for mode=%s", query_mode)
-        return []
+    raw_content = str(content)
+    content, keywords = _extract_lightrag_keywords(raw_content)
+    if keywords:
+        logger.info("[LightRAG] stripped keywords from content (found=%s)", list(keywords.keys()))
+    if "high_level_keywords" in raw_content and not keywords:
+        logger.warning("[LightRAG] keyword JSON in content but regex did NOT strip it; tail=%r", raw_content[-200:])
     graph_data = _normalize_lightrag_graph(raw_data)
+    graph = graph_data.get("data", {})
+    has_graph = bool(graph.get("entities") or graph.get("chunks"))
+    if not content:
+        logger.warning("[LightRAG] content empty after strip for mode=%s (has_graph=%s)", query_mode, has_graph)
+        if not has_graph:
+            return []
+        # Return a doc with a minimal placeholder so the artifact carries graph data
+        # even when LightRAG produces no context string (e.g. empty corpus, global mode).
+        content = "(no context retrieved)"
     logger.info("[LightRAG] graph_data entities=%d relationships=%d chunks=%d",
                 len(graph_data.get("data", {}).get("entities", [])),
                 len(graph_data.get("data", {}).get("relationships", [])),

@@ -980,16 +980,20 @@ def get_retriever_tool(silo: Silo, search_params=None, retrieval_config: Optiona
         # We'll use a closure to capture the retriever instead of storing it as an attribute
         original_retriever = retriever
         
+        _INTERNAL_META = {"lightrag_raw_data", "lightrag_keywords"}
+
         def format_docs_with_metadata(docs: List[Document]) -> List[Document]:
             """Format documents to include metadata in page_content"""
             formatted_docs = []
             for doc in docs:
-                metadata_str = json.dumps(doc.metadata, ensure_ascii=False) if doc.metadata else "{}"
+                # Exclude internal LightRAG keys so raw graph JSON never reaches the LLM.
+                visible_meta = {k: v for k, v in (doc.metadata or {}).items() if k not in _INTERNAL_META}
+                metadata_str = json.dumps(visible_meta, ensure_ascii=False) if visible_meta else "{}"
                 # Include metadata in the page_content so the agent can see it
                 formatted_content = f"Content: {doc.page_content}\nMetadata: {metadata_str}"
                 formatted_doc = Document(
                     page_content=formatted_content,
-                    metadata=doc.metadata  # Keep original metadata for filtering
+                    metadata=doc.metadata  # Keep full metadata (incl. lightrag_raw_data) for artifact
                 )
                 formatted_docs.append(formatted_doc)
             return formatted_docs
