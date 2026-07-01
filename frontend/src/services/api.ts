@@ -1030,7 +1030,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
 
     files.forEach(file => formData.append('files', file));
     formData.append('session_id', sessionId);
@@ -1043,14 +1042,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1065,7 +1058,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
 
     formData.append('url', url);
     formData.append('session_id', sessionId);
@@ -1078,14 +1070,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media/youtube`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1102,12 +1088,8 @@ class ApiService {
 
   async fetchPlaygroundMediaBlob(appId: number, agentId: number, mediaId: number, sessionId: string): Promise<Blob> {
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/playground-media/${mediaId}/stream?session_id=${encodeURIComponent(sessionId)}`;
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    const response = await fetch(url, { headers });
+    const headers = this.buildAuthHeaders('GET', false);
+    const response = await fetch(url, { credentials: 'include', headers });
     if (!response.ok) {
       throw new Error(`Failed to fetch media: ${response.status}`);
     }
@@ -1525,7 +1507,6 @@ class ApiService {
     }
   }
 
-  // ==================== FILE MANAGEMENT API ====================
   async resumeAgentChat(
     appId: number,
     agentId: number,
@@ -1544,11 +1525,7 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/chat/resume`;
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     const response = await fetch(url, {
       method: 'POST',
@@ -1587,7 +1564,6 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    // Associate file with specific conversation if provided
     if (conversationId) {
       formData.append('conversation_id', conversationId.toString());
     }
@@ -1599,7 +1575,6 @@ class ApiService {
   }
 
   async listAttachedFiles(appId: number, agentId: number, conversationId?: number | null) {
-    // Filter files by conversation if provided
     const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files`;
@@ -1793,8 +1768,6 @@ class ApiService {
     const response = await this.request('/internal/version/');
     return response;
   }
-
-  // ==================== FOLDERS API ====================
 
   async getFolders(appId: number, repositoryId: number) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/`);
@@ -2116,8 +2089,6 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    // Build query params
-    
     const params = new URLSearchParams();
     params.append('conflict_mode', conflictMode);
 
@@ -2125,13 +2096,6 @@ class ApiService {
       params.append('new_name', newName);
     }
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    // Use fetch directly to avoid issues with FormData
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
