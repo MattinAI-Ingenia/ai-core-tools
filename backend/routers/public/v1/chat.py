@@ -2,8 +2,11 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from typing import AsyncGenerator, List, Optional, Annotated
+
+from schemas.agent_schemas import RuntimeSearchParamsSchema
 
 from .schemas import (
     AgentResponseSchema,
@@ -47,6 +50,22 @@ def _parse_json_param(value: Optional[str], param_name: str):
         return None
 
 
+def _validate_search_params(parsed):
+    """Bound caller search params (DoS guard). Returns the original dict unchanged so
+    the caller>agent precedence and explicit-None semantics in resolve_search_params
+    are preserved; raises 422 on out-of-range values."""
+    if parsed is None:
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning("search_params is not a JSON object, ignoring")
+        return None
+    try:
+        RuntimeSearchParamsSchema(**parsed)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid search_params: {exc.errors()}")
+    return parsed
+
+
 
 
 # AGENT CHAT ENDPOINTS
@@ -76,7 +95,8 @@ async def call_agent(
     files: Annotated[List[UploadFile], File(description="Optional files to attach (images, PDFs, text files)")] = None,
     file_references: Annotated[Optional[str], Form(description="JSON array of existing file_ids to include. If not provided, all files are included.")] = None,
     search_params: Annotated[Optional[str], Form(description="JSON object with search parameters for silo-based agents")] = None,
-    conversation_id: Annotated[Optional[int], Form(description="Optional conversation ID to continue existing conversation")] = None,
+    conversation_id: Annotated[Optional[int], Form(description="Optional conversation ID to continue existing conversation")] = None,    
+    user_token: Annotated[Optional[str], Form(description="End-user Bearer token to forward to MCP servers. When provided, every MCP tool call in this execution will include Authorization: Bearer <token>.")] = None,
 ):
     """
     Call an agent for chat completion.
@@ -111,10 +131,10 @@ async def call_agent(
     fms = FileManagementService()
     all_file_references: List = []
     try:
-        parsed_search_params = _parse_json_param(search_params, "search_params")
+        parsed_search_params = _validate_search_params(_parse_json_param(search_params, "search_params"))
         parsed_file_references = _parse_json_param(file_references, "file_references")
 
-        user_context = create_api_key_user_context(app_id, api_key)
+        user_context = create_api_key_user_context(app_id, api_key, user_token=user_token)
 
         all_file_references = await fms.resolve_chat_files(
             files=files,
@@ -182,6 +202,8 @@ async def call_agent_stream(
     file_references: Annotated[Optional[str], Form(description="JSON array of existing file_ids to include")] = None,
     search_params: Annotated[Optional[str], Form(description="JSON object with search parameters")] = None,
     conversation_id: Annotated[Optional[int], Form(description="Optional conversation ID to continue")] = None,
+    user_token: Annotated[Optional[str], Form(description="End-user Bearer token to forward to MCP servers.")] = None,
+
 ):
     """
     Call an agent with Server-Sent Events streaming response.
@@ -203,10 +225,10 @@ async def call_agent_stream(
     agent = validate_agent_ownership(db, agent_id, app_id)
 
     try:
-        parsed_search_params = _parse_json_param(search_params, "search_params")
+        parsed_search_params = _validate_search_params(_parse_json_param(search_params, "search_params"))
         parsed_file_references = _parse_json_param(file_references, "file_references")
 
-        user_context = create_api_key_user_context(app_id, api_key)
+        user_context = create_api_key_user_context(app_id, api_key, user_token=user_token)
 
         fms = FileManagementService()
         all_file_references = await fms.resolve_chat_files(
@@ -236,6 +258,10 @@ async def call_agent_stream(
                 async for chunk in base_generator:
                     yield chunk
             finally:
+                # Release the request DB session here: for a StreamingResponse the
+                # get_db dependency teardown does not run until late, leaving the
+                # connection checked out (idle-in-transaction) for every stream.
+                db.close()
                 await fms.cleanup_ephemeral_refs(all_file_references)
 
         logger.info(f"Public API streaming chat for agent {agent_id}")

@@ -10,6 +10,9 @@ import Alert from '../components/ui/Alert';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
 import type { TabItem } from '../components/ui/Tabs';
+import RagConfigSection, { SCORE_THRESHOLD_REQUIRED_MSG } from '../components/forms/RagConfigSection';
+import type { RagConfigValue, RagFixedFilter, RagSearchType } from '../components/forms/RagConfigSection';
+import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
 import type { AgentMCPUsage } from '../core/types';
 import type { MarketplaceVisibility, MarketplaceProfileUpdate } from '../types/marketplace';
 import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
@@ -42,6 +45,12 @@ interface Agent {
   vision_service_id?: number;
   vision_system_prompt?: string;
   text_system_prompt?: string;
+  // RAG retrieval config
+  rag_k?: number;
+  rag_search_type?: RagSearchType;
+  rag_score_threshold?: number | null;
+  rag_max_retrieval_calls?: number | null;
+  rag_fixed_filters?: RagFixedFilter[];
   ai_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string; vector_db_type?: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
@@ -85,6 +94,12 @@ interface AgentFormData {
   vision_service_id?: number;
   vision_system_prompt?: string;
   text_system_prompt?: string;
+  // RAG retrieval config
+  rag_k: number;
+  rag_search_type: RagSearchType;
+  rag_score_threshold: number | null;
+  rag_max_retrieval_calls: number | null;
+  rag_fixed_filters: RagFixedFilter[];
 }
 
 // Output Parser Field Component
@@ -104,6 +119,7 @@ const OutputParserField = ({
   <div>
     <div className="flex items-center mb-2">
       <input
+        id="output_parser_toggle"
         type="checkbox"
         checked={showOutputParser}
         onChange={(e) => {
@@ -114,7 +130,7 @@ const OutputParserField = ({
         }}
         className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
       />
-      <span className="ml-2 text-sm font-medium text-gray-700">Data Structure</span>
+      <label htmlFor="output_parser_toggle" className="ml-2 text-sm font-medium text-gray-700">Data Structure</label>
     </div>
 
     {showOutputParser && (
@@ -211,9 +227,16 @@ function AgentFormPage() {
     mcp_config_ids: [],
     skill_ids: [],
     retrieval_config: null,
-    middleware_ids: []
+    middleware_ids: [],
+    rag_k: 10,
+    rag_search_type: 'similarity',
+    rag_score_threshold: null,
+    rag_max_retrieval_calls: 4,
+    rag_fixed_filters: []
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
+  const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
+  const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
 
   const selectedSiloIsLightRAG = agent?.silos?.find(
     s => s.silo_id === formData.silo_id
@@ -242,6 +265,31 @@ function AgentFormPage() {
       setLoading(false);
     }
   }, [appId, agentId]);
+
+  // Load the selected silo's metadata fields to power the fixed-filter editor.
+  useEffect(() => {
+    const siloId = formData.silo_id;
+    if (!appId || !siloId) {
+      setSiloMetadataFields([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingSiloMetadata(true);
+    apiService
+      .getSilo(Number.parseInt(appId), siloId)
+      .then((silo) => {
+        if (!cancelled) setSiloMetadataFields(silo?.metadata_fields ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setSiloMetadataFields([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSiloMetadata(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, formData.silo_id]);
 
   async function loadAgentData() {
     if (!appId || !agentId) return;
@@ -278,7 +326,16 @@ function AgentFormPage() {
         // OCR-specific fields
         vision_service_id: response.vision_service_id || undefined,
         vision_system_prompt: response.vision_system_prompt || '',
-        text_system_prompt: response.text_system_prompt || ''
+        text_system_prompt: response.text_system_prompt || '',
+        // RAG retrieval config
+        rag_k: response.rag_k ?? 10,
+        rag_search_type: response.rag_search_type ?? 'similarity',
+        rag_score_threshold: response.rag_score_threshold ?? null,
+        rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
+        rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
+          ...f,
+          _key: Math.random().toString(36).slice(2),
+        }))
       });
 
       // Set output parser toggle based on whether agent has an output parser
@@ -415,8 +472,8 @@ function AgentFormPage() {
       ...(snapToHybrid
         ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'hybrid' } }
         : snapToSkillRouted
-        ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'skill-routed' } }
-        : {}),
+          ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'skill-routed' } }
+          : {}),
     }));
 
     if (snapToHybrid) toast.info('Query mode switched to hybrid — save to apply.');
@@ -513,6 +570,22 @@ function AgentFormPage() {
 
     if (!appId || !agentId) return;
 
+    const hasSilo = !!formData.silo_id;
+    const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
+
+    // Mirror the backend invariant: a threshold strategy needs a threshold value.
+    if (usesThreshold && formData.rag_score_threshold == null) {
+      setActiveTab('configuration');
+      setError(SCORE_THRESHOLD_REQUIRED_MSG);
+      return;
+    }
+
+    // Drop incomplete filter rows and the editor-only _key; clear the threshold unless the
+    // threshold strategy is selected so we never persist a dead value.
+    const cleanedFilters: RagFixedFilter[] = formData.rag_fixed_filters
+      .filter((f) => f.field && (Array.isArray(f.value) ? f.value.length > 0 : String(f.value ?? '').trim() !== ''))
+      .map(({ _key, ...rest }) => rest);
+
     const submitData = {
       name: formData.name,
       description: formData.description,
@@ -536,14 +609,20 @@ function AgentFormPage() {
       middleware_ids: formData.middleware_ids,
       retrieval_config: selectedSiloIsLightRAG
         ? {
-            ...(formData.retrieval_config ?? {}),
-            lightrag_query_mode: formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed',
-          }
+          ...(formData.retrieval_config ?? {}),
+          lightrag_query_mode: formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed',
+        }
         : formData.retrieval_config,
       // OCR-specific fields
       vision_service_id: formData.vision_service_id,
       vision_system_prompt: formData.vision_system_prompt,
       text_system_prompt: formData.text_system_prompt,
+      // RAG retrieval config (full-replace; only meaningful with a silo)
+      rag_k: formData.rag_k,
+      rag_search_type: formData.rag_search_type,
+      rag_score_threshold: usesThreshold ? formData.rag_score_threshold : null,
+      rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+      rag_fixed_filters: hasSilo ? cleanedFilters : [],
       app_id: Number.parseInt(appId),
     };
 
@@ -931,8 +1010,8 @@ function AgentFormPage() {
                                       {mode === 'skill-routed'
                                         ? 'Skill-Routed (auto)'
                                         : mode === 'hybrid'
-                                        ? `${mode} (default fallback)`
-                                        : mode}
+                                          ? `${mode} (default fallback)`
+                                          : mode}
                                     </option>
                                   ))}
                                 </select>
@@ -1123,6 +1202,24 @@ function AgentFormPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* RAG retrieval config — only meaningful when a silo is selected */}
+                  {formData.silo_id && (
+                    <RagConfigSection
+                      value={{
+                        rag_k: formData.rag_k,
+                        rag_search_type: formData.rag_search_type,
+                        rag_score_threshold: formData.rag_score_threshold,
+                        rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+                        rag_fixed_filters: formData.rag_fixed_filters,
+                      }}
+                      onChange={(patch: Partial<RagConfigValue>) =>
+                        setFormData((prev) => ({ ...prev, ...patch }))
+                      }
+                      metadataFields={siloMetadataFields}
+                      loadingMetadata={loadingSiloMetadata}
+                    />
+                  )}
 
                   {/* Agent Capabilities Card */}
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
@@ -1564,40 +1661,39 @@ function AgentFormPage() {
                         {agent.skills.map((skill) => {
                           const isRouterDisabled = skill.name === ROUTER_SKILL_NAME && !selectedSiloIsLightRAG;
                           return (
-                          <Fragment key={skill.skill_id}>
-                            <button
-                              type="button"
-                              disabled={isRouterDisabled}
-                              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full ${
-                                isRouterDisabled
-                                  ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
-                                  : formData.skill_ids.includes(skill.skill_id)
-                                  ? 'border-purple-500 bg-purple-50 cursor-pointer'
-                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
-                              }`}
-                              onClick={() => !isRouterDisabled && handleSkillToggle(skill.skill_id)}
-                            >
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <input
-                                    type="checkbox"
-                                    disabled={isRouterDisabled}
-                                    checked={formData.skill_ids.includes(skill.skill_id)}
-                                    onChange={() => handleSkillToggle(skill.skill_id)}
-                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                  />
-                                  <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
+                            <Fragment key={skill.skill_id}>
+                              <button
+                                type="button"
+                                disabled={isRouterDisabled}
+                                className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full ${isRouterDisabled
+                                    ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                                    : formData.skill_ids.includes(skill.skill_id)
+                                      ? 'border-purple-500 bg-purple-50 cursor-pointer'
+                                      : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
+                                  }`}
+                                onClick={() => !isRouterDisabled && handleSkillToggle(skill.skill_id)}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center">
+                                    <input
+                                      type="checkbox"
+                                      disabled={isRouterDisabled}
+                                      checked={formData.skill_ids.includes(skill.skill_id)}
+                                      onChange={() => handleSkillToggle(skill.skill_id)}
+                                      className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                    />
+                                    <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
+                                  </div>
+                                  <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'}`} />
                                 </div>
-                                <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'}`} />
-                              </div>
-                              {skill.description && (
-                                <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
-                              )}
-                              {isRouterDisabled && (
-                                <p className="mt-2 ml-7 text-xs text-gray-400">Requires a LightRAG silo</p>
-                              )}
-                            </button>
-                          </Fragment>
+                                {skill.description && (
+                                  <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
+                                )}
+                                {isRouterDisabled && (
+                                  <p className="mt-2 ml-7 text-xs text-gray-400">Requires a LightRAG silo</p>
+                                )}
+                              </button>
+                            </Fragment>
                           );
                         })}
                       </div>

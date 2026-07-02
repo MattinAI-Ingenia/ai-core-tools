@@ -1,6 +1,15 @@
-// API Service - Think of this like your backend services!
 import { configService } from '../core/ConfigService';
+import { authService } from './auth';
+import { getCsrfToken } from './cookies';
 import type { StreamEvent } from '../types/streaming';
+
+/** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 import type {
   MarketplaceCatalogParams,
   MarketplaceCatalogResponse,
@@ -26,15 +35,37 @@ import type {
 
 type ConflictMode = 'fail' | 'rename' | 'override';
 
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+// DeploymentModeContext cannot be read here (not a hook), so it writes the
+// resolved auth mode via setApiAuthMode(). The default is derived from the
+// env/runtime OIDC flag so early requests (e.g. CapabilitiesContext) already
+// use the correct mode before the context resolves /internal/config.
+const _rc = (globalThis as Record<string, unknown>).__RUNTIME_CONFIG__ as Record<string, string> | undefined;
+const _oidcDefault = _rc?.VITE_OIDC_ENABLED === undefined
+  ? import.meta.env.VITE_OIDC_ENABLED === 'true'
+  : _rc.VITE_OIDC_ENABLED === 'true';
+let _apiAuthMode: 'oidc' | 'local' = _oidcDefault ? 'oidc' : 'local';
+
+export function setApiAuthMode(mode: 'oidc' | 'local'): void {
+  _apiAuthMode = mode;
+}
+
 class ApiService {
   private get baseURL(): string {
     return configService.getApiBaseUrl();
   }
 
-  private getAuthToken(): string | null {
-    // Get token from localStorage (same as auth service)
-    const token = localStorage.getItem('auth_token');
-    return token;
+  // Coalesces concurrent 401-triggered refreshes into a single in-flight promise.
+  private _refreshPromise: Promise<boolean> | null = null;
+
+  private async _doRefresh(): Promise<boolean> {
+    if (!this._refreshPromise) {
+      this._refreshPromise = authService.refresh().finally(() => {
+        this._refreshPromise = null;
+      });
+    }
+    return this._refreshPromise;
   }
 
   private getClientTimezone(): string | null {
@@ -45,18 +76,38 @@ class ApiService {
     }
   }
 
-  private prepareHeaders(options: RequestInit): Record<string, string> {
+  // Called when a refresh fails or a retried request still 401s (LOCAL mode only).
+  private clearClientAuthAndRedirect(): void {
+    // Use logout() (not clearAuth()) to clear the httpOnly session cookies. Best-effort.
+    authService.logout().catch(() => { }).finally(() => {
+      if (typeof globalThis !== 'undefined' && globalThis.location) {
+        globalThis.location.href = '/login';
+      }
+    });
+  }
+
+  // LOCAL: cookies carry auth; CSRF header on mutating calls. OIDC: Authorization bearer.
+  private buildAuthHeaders(method: string | undefined, isFormData: boolean): Record<string, string> {
     const headers: Record<string, string> = {};
 
-    // Only set Content-Type if not FormData (browser will set it automatically for FormData)
-    if (!(options.body instanceof FormData)) {
+    if (!isFormData) {
       headers['Content-Type'] = 'application/json';
     }
 
-    // Use token from auth service instead of hardcoded
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    const effectiveMethod = (method ?? 'GET').toUpperCase();
+
+    if (_apiAuthMode === 'oidc') {
+      const token = authService.getOIDCToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+    } else {
+      if (MUTATING_METHODS.has(effectiveMethod)) {
+        const csrf = getCsrfToken();
+        if (csrf) {
+          headers['X-CSRF-Token'] = csrf;
+        }
+      }
     }
 
     // Automatically include user's timezone if available
@@ -68,69 +119,84 @@ class ApiService {
     return headers;
   }
 
-  private extractErrorMessage(errorData: any): string | null {
-    if (!errorData) return null;
+  private extractErrorMessage(errorData: unknown): string | null {
+    if (!errorData || typeof errorData !== 'object') return null;
+    const data = errorData as Record<string, unknown>;
 
-    if (errorData.error) {
-      return errorData.error;
+    if (typeof data['error'] === 'string') return data['error'];
+    if (data['detail'] !== undefined) {
+      return typeof data['detail'] === 'string'
+        ? data['detail']
+        : JSON.stringify(data['detail']);
     }
-    if (errorData.detail) {
-      return typeof errorData.detail === 'string'
-        ? errorData.detail
-        : JSON.stringify(errorData.detail);
-    }
-    if (errorData.message) {
-      return errorData.message;
-    }
+    if (typeof data['message'] === 'string') return data['message'];
     return null;
   }
 
   private async handleResponseError(response: Response): Promise<never> {
-    // Handle 401 Unauthorized - token expired or invalid
-    if (response.status === 401) {
-      // Clear invalid token
-      localStorage.removeItem('auth_token');
-      localStorage.removeItem('auth_expires');
-
-      // Don't redirect - let the app handle auth state via ProtectedRoute
-      throw new Error('Authentication required');
-    }
-
-    // Try to parse error message from response
-    let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+    let message = `API Error: ${response.status} ${response.statusText}`;
 
     try {
-      const errorData = await response.json();
+      const errorData: unknown = await response.json();
       const extracted = this.extractErrorMessage(errorData);
       if (extracted) {
-        errorMessage = extracted;
+        message = extracted;
       }
     } catch (error) {
-      // Log error for debugging but continue to check status code
       console.debug('Failed to parse error response JSON:', error);
-
-      // Failed to parse JSON, check for specific status codes
       if (response.status === 403) {
-        errorMessage = "You do not have permission to perform this action.";
+        message = 'You do not have permission to perform this action.';
       }
     }
 
-    throw new Error(errorMessage);
+    throw new ApiError(message, response.status);
   }
 
-  async request(endpoint: string, options: RequestInit = {}) {
+  async request(
+    endpoint: string,
+    options: RequestInit = {},
+    _isRetryAfterRefresh = false,
+    _requestOptions: { suppressAuthRedirect?: boolean } = {},
+  ): Promise<unknown> {
     const url = `${this.baseURL}${endpoint}`;
-    const defaultHeaders = this.prepareHeaders(options);
+    const authHeaders = this.buildAuthHeaders(
+      typeof options.method === 'string' ? options.method : 'GET',
+      options.body instanceof FormData,
+    );
 
     const config: RequestInit = {
-      headers: {
-        ...defaultHeaders,
-        ...options.headers,
-      },
       ...options,
+      credentials: 'include',
+      headers: {
+        ...authHeaders,
+        ...(options.headers as Record<string, string> | undefined),
+      },
     };
 
     const response = await fetch(url, config);
+
+    if (response.status === 401) {
+      // Callers that probe optional endpoints can suppress the hard redirect.
+      if (_requestOptions.suppressAuthRedirect) {
+        throw new Error('Authentication required');
+      }
+
+      // OIDC re-auth is owned by oidc-client-ts / OIDCProvider / ProtectedRoute.
+      if (_apiAuthMode === 'oidc') {
+        throw new Error('Authentication required');
+      }
+
+      const isRefreshEndpoint = endpoint.includes('/auth/refresh');
+      if (!_isRetryAfterRefresh && !isRefreshEndpoint) {
+        const refreshed = await this._doRefresh();
+        if (refreshed) {
+          // Cookie may have rotated — rebuild headers on retry.
+          return this.request(endpoint, options, true, _requestOptions);
+        }
+      }
+      this.clearClientAuthAndRedirect();
+      throw new Error('Authentication required');
+    }
 
     if (!response.ok) {
       await this.handleResponseError(response);
@@ -140,7 +206,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== APPS API ====================
   async getApps() {
     return this.request('/internal/apps/');
   }
@@ -194,7 +259,6 @@ class ApiService {
     });
   }
 
-  // ==================== USAGE STATS API ====================
   async getUsageStats() {
     return this.request('/internal/usage-stats/');
   }
@@ -221,7 +285,6 @@ class ApiService {
     });
   }
 
-  // ==================== AGENTS API ====================
   async getAgents(appId: number) {
     return this.request(`/internal/apps/${appId}/agents/`);
   }
@@ -282,12 +345,7 @@ class ApiService {
     includeMCPConfigs: boolean = true,
     includeAgentTools: boolean = true
   ): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const params = new URLSearchParams({
       include_ai_service: String(includeAIService),
@@ -301,6 +359,7 @@ class ApiService {
       `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/export?${params}`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -324,12 +383,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/agents/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -347,6 +401,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -358,7 +413,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== AI SERVICES API ====================
   async getAIServices(appId: number) {
     return this.request(`/internal/apps/${appId}/ai-services/`);
   }
@@ -418,17 +472,13 @@ class ApiService {
   }
 
   async exportAIService(appId: number, serviceId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/ai-services/${serviceId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -449,12 +499,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/ai-services/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -463,6 +508,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -474,7 +520,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== EMBEDDING SERVICES ====================
   async getEmbeddingServices(appId: number) {
     return this.request(`/internal/apps/${appId}/embedding-services/`);
   }
@@ -522,17 +567,13 @@ class ApiService {
   }
 
   async exportEmbeddingService(appId: number, serviceId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/embedding-services/${serviceId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -553,12 +594,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/embedding-services/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -567,6 +603,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -578,7 +615,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== MCP CONFIGS ====================
   async getMCPConfigs(appId: number) {
     return this.request(`/internal/apps/${appId}/mcp-configs/`);
   }
@@ -621,17 +657,13 @@ class ApiService {
   }
 
   async exportMCPConfig(appId: number, configId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/mcp-configs/${configId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -652,12 +684,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/mcp-configs/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -666,6 +693,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -778,7 +806,6 @@ class ApiService {
     });
   }
 
-  // ==================== API KEYS ====================
   async getAPIKeys(appId: number) {
     return this.request(`/internal/apps/${appId}/api-keys/`);
   }
@@ -813,7 +840,6 @@ class ApiService {
     });
   }
 
-  // ==================== OUTPUT PARSERS (DATA STRUCTURES) ====================
   async getOutputParsers(appId: number) {
     return this.request(`/internal/apps/${appId}/output-parsers/`);
   }
@@ -843,17 +869,13 @@ class ApiService {
   }
 
   async exportOutputParser(appId: number, parserId: number): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/output-parsers/${parserId}/export`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -874,12 +896,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/output-parsers/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -888,6 +905,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -899,12 +917,10 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== USER SEARCH ====================
   async searchPlatformUsers(q: string): Promise<Array<{ user_id: number; name: string; email: string; platform_role: string }>> {
     return this.request(`/internal/users/search?q=${encodeURIComponent(q)}`);
   }
 
-  // ==================== COLLABORATION ====================
   async getCollaborators(appId: number) {
     return this.request(`/internal/collaboration/?app_id=${appId}`);
   }
@@ -945,7 +961,6 @@ class ApiService {
     });
   }
 
-  // ==================== MEDIA API ====================
   async uploadMedia(appId: number, repositoryId: number, files: File[], folderId?: number, config?: {
     forced_language?: string;
     chunk_min_duration?: number;
@@ -953,7 +968,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
 
     files.forEach(file => formData.append('files', file));
 
@@ -966,15 +980,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media`, {
       method: 'POST',
-      headers: headers,
       body: formData,
     });
   }
@@ -986,8 +993,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
 
     formData.append('url', url);
     if (folderId !== undefined && folderId !== null) {
@@ -998,13 +1003,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media/youtube`, {
       method: 'POST',
-      headers: headers,
       body: formData,
     });
   }
@@ -1048,7 +1048,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
 
     files.forEach(file => formData.append('files', file));
     formData.append('session_id', sessionId);
@@ -1061,14 +1060,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1083,7 +1076,6 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
 
     formData.append('url', url);
     formData.append('session_id', sessionId);
@@ -1096,14 +1088,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media/youtube`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1120,12 +1106,10 @@ class ApiService {
 
   async fetchPlaygroundMediaBlob(appId: number, agentId: number, mediaId: number, sessionId: string): Promise<Blob> {
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/playground-media/${mediaId}/stream?session_id=${encodeURIComponent(sessionId)}`;
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, {
+      credentials: 'include',
+      headers: this.buildAuthHeaders('GET', false),
+    });
     if (!response.ok) {
       throw new Error(`Failed to fetch media: ${response.status}`);
     }
@@ -1166,17 +1150,13 @@ class ApiService {
   }
 
   async exportSilo(appId: number, siloId: number, includeDependencies: boolean = true): Promise<Blob> {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', false);
 
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/export?include_dependencies=${includeDependencies}`,
       {
         method: 'POST',
+        credentials: 'include',
         headers,
       }
     );
@@ -1198,12 +1178,7 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+    const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/silos/import?conflict_mode=${conflictMode}`;
     if (newName) {
@@ -1215,6 +1190,7 @@ class ApiService {
 
     const response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers,
       body: formData,
     });
@@ -1264,7 +1240,7 @@ class ApiService {
     siloId: number,
     query: string,
     limit?: number,
-    filterMetadata?: Record<string, any>,
+    filterMetadata?: Record<string, unknown>,
     searchOptions?: {
       searchType?: string;
       scoreThreshold?: number;
@@ -1274,7 +1250,7 @@ class ApiService {
       maxContentLength?: number;
       lightragQueryMode?: string;
     },
-  ): Promise<{ data: any; serverMs: number | null }> {
+  ): Promise<{ data: unknown; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
     const body = JSON.stringify({
       query,
@@ -1292,15 +1268,14 @@ class ApiService {
       ...(searchOptions?.minContentLength != null && { min_content_length: searchOptions.minContentLength }),
       ...(searchOptions?.maxContentLength != null && { max_content_length: searchOptions.maxContentLength }),
     });
-    const options: RequestInit = { method: 'POST', body };
-    const headers = this.prepareHeaders(options);
-    const response = await fetch(url, { ...options, headers });
+    const headers = this.buildAuthHeaders('POST', false);
+    const response = await fetch(url, { method: 'POST', body, credentials: 'include', headers });
     if (!response.ok) {
       await this.handleResponseError(response);
     }
     const serverMsHeader = response.headers.get('x-server-time-ms');
     const serverMs = serverMsHeader !== null ? parseInt(serverMsHeader, 10) : null;
-    const data = await response.json();
+    const data: unknown = await response.json();
     return { data, serverMs };
   }
 
@@ -1364,12 +1339,8 @@ class ApiService {
     );
   }
 
-  // ==================== REPOSITORIES API ====================
   async getRepositories(appId: number) {
-    console.log('API: Getting repositories for appId:', appId);
-    const result = await this.request(`/internal/apps/${appId}/repositories/`);
-    console.log('API: Repositories result:', result);
-    return result;
+    return this.request(`/internal/apps/${appId}/repositories/`);
   }
 
   async getRepository(appId: number, repositoryId: number) {
@@ -1425,51 +1396,17 @@ class ApiService {
   }
 
   async uploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {
-    console.log('API: uploadResources called with:', { appId, repositoryId, filesCount: files.length, folderId });
-
     const formData = new FormData();
-    files.forEach(file => {
-      formData.append('files', file);
-      console.log('API: Added file to FormData:', file.name);
-    });
+    files.forEach(file => formData.append('files', file));
 
-    // Add folder_id if provided
     if (folderId !== undefined && folderId !== null) {
       formData.append('folder_id', folderId.toString());
-      console.log('API: Added folder_id to FormData:', folderId);
-    } else {
-      console.log('API: No folder_id provided or folderId is null/undefined');
     }
 
-    // Get the auth token manually for this request
-    const token = this.getAuthToken();
-    console.log('API: Auth token for upload:', token ? 'Token exists' : 'No token found');
-
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-      console.log('API: Authorization header set for upload');
-    } else {
-      console.log('API: WARNING - No token found for upload request');
-    }
-
-    console.log('API: Making upload request to:', `/internal/apps/${appId}/repositories/${repositoryId}/resources`);
-
-    try {
-      const result = await this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
-        method: 'POST',
-        headers: headers, // Only set Authorization, let browser handle Content-Type for FormData
-        body: formData,
-      });
-      console.log('API: Upload successful:', result);
-      console.log('API: Failed files in result:', result.failed_files);
-      console.log('API: Created resources in result:', result.created_resources);
-      return result;
-    } catch (error) {
-      console.error('API: Upload failed:', error);
-      throw error;
-    }
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
+      method: 'POST',
+      body: formData,
+    });
   }
 
   async getIngestionSessions(appId: number, siloId: number) {
@@ -1514,16 +1451,8 @@ class ApiService {
       formData.append('folder_id', folderId.toString());
     }
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources/estimate`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1547,17 +1476,16 @@ class ApiService {
   }
 
   async downloadResource(appId: number, repositoryId: number, resourceId: number) {
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
+    const headers = this.buildAuthHeaders('GET', false);
 
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    const response = await fetch(`${this.baseURL}/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}/download`, {
-      method: 'GET',
-      headers: headers,
-    });
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}/download`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`Download failed: ${response.status} ${response.statusText}`);
@@ -1577,7 +1505,6 @@ class ApiService {
     });
   }
 
-  // ==================== PLAYGROUND API ====================
   async chatWithAgent(appId: number, agentId: number, message: string, files?: File[], searchParams?: any, conversationId?: number | null) {
     const formData = new FormData();
     formData.append('message', message);
@@ -1615,18 +1542,14 @@ class ApiService {
     }
   }
 
-  /**
-   * Chat with agent using Server-Sent Events streaming.
-   * Posts to /internal/apps/{appId}/agents/{agentId}/chat/stream
-   * and reads the SSE response via ReadableStream (needed because EventSource only supports GET).
-   */
+  // EventSource only supports GET, so SSE is consumed via ReadableStream over fetch POST.
   async chatWithAgentStream(
     appId: number,
     agentId: number,
     message: string,
     options: {
       files?: File[];
-      searchParams?: any;
+      searchParams?: unknown;
       conversationId?: number | null;
       onEvent: (event: StreamEvent) => void;
       signal?: AbortSignal;
@@ -1646,9 +1569,12 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/chat/stream`;
+    const headers = this.buildAuthHeaders('POST', true);
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: this.prepareHeaders({ body: formData }),
+      credentials: 'include',
+      headers,
       body: formData,
       signal: options.signal,
     });
@@ -1672,9 +1598,7 @@ class ApiService {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE lines: each event is "data: {json}\n\n"
         const lines = buffer.split('\n\n');
-        // Keep the last incomplete chunk in the buffer
         buffer = lines.pop() || '';
 
         this.parseSSELines(lines, options.onEvent);
@@ -1703,15 +1627,11 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/chat/resume`;
-    const headers: Record<string, string> = {};
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
 
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
       signal: options.signal,
     });
@@ -1766,7 +1686,6 @@ class ApiService {
   }
 
   async removeAttachedFile(appId: number, agentId: number, fileId: string, conversationId?: number | null) {
-    // Include conversation_id for proper file lookup
     const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files/${fileId}?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files/${fileId}`;
@@ -1792,7 +1711,6 @@ class ApiService {
     });
   }
 
-  // ==================== DOMAINS API ====================
   async getDomains(appId: number) {
     return this.request(`/internal/apps/${appId}/domains/`);
   }
@@ -1843,8 +1761,6 @@ class ApiService {
       method: 'DELETE',
     });
   }
-
-  // ==================== DOMAIN URLS API ====================
 
   async listDomainUrls(
     appId: number,
@@ -1913,8 +1829,6 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/urls/${urlId}/content`);
   }
 
-  // ==================== CRAWL POLICY API ====================
-
   async getCrawlPolicy(appId: number, domainId: number): Promise<CrawlPolicy> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/crawl-policy`);
   }
@@ -1925,8 +1839,6 @@ class ApiService {
       body: JSON.stringify(data),
     });
   }
-
-  // ==================== CRAWL JOBS API ====================
 
   async triggerCrawl(appId: number, domainId: number): Promise<TriggerCrawlResponse> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/crawl-jobs`, {
@@ -1955,8 +1867,6 @@ class ApiService {
       method: 'POST',
     });
   }
-
-  // ==================== VERSION API ====================
 
   async getVersion(): Promise<{ name: string; version: string }> {
     const response = await this.request('/internal/version/');
@@ -2013,7 +1923,6 @@ class ApiService {
     return this.uploadResources(appId, repositoryId, files, folderId);
   }
 
-  // ==================== CONVERSATION METHODS ====================
   async createConversation(agentId: number, title?: string) {
     const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
     return this.request(`/internal/conversations?agent_id=${agentId}${titleParam}`, {
@@ -2144,10 +2053,7 @@ class ApiService {
     );
   }
 
-  /**
-   * Stream a marketplace chat turn as Server-Sent Events.
-   * Mirrors `chatWithAgentStream` so the marketplace UI can reuse `useStreamingChat`.
-   */
+  // Mirrors chatWithAgentStream so marketplace UI can reuse useStreamingChat.
   async chatMarketplaceStream(
     conversationId: number,
     message: string,
@@ -2169,9 +2075,12 @@ class ApiService {
     }
 
     const url = `${this.baseURL}/internal/marketplace/conversations/${conversationId}/chat/stream`;
+    const headers = this.buildAuthHeaders('POST', true);
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: this.prepareHeaders({ body: formData }),
+      credentials: 'include',
+      headers,
       body: formData,
       signal: options.signal,
     });
@@ -2235,8 +2144,6 @@ class ApiService {
     return this.request('/internal/marketplace/quota-usage');
   }
 
-  // Agent marketplace management (EDITOR+)
-
   async getAgentMarketplaceProfile(
     appId: number,
     agentId: number,
@@ -2274,11 +2181,11 @@ class ApiService {
     );
   }
 
-  // ==================== FULL APP EXPORT/IMPORT ====================
   async exportFullApp(appId: number): Promise<Blob> {
     const response = await fetch(`${this.baseURL}/internal/apps/${appId}/export`, {
       method: 'POST',
-      headers: this.prepareHeaders({}),
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', false),
     });
 
     if (!response.ok) {
@@ -2304,17 +2211,11 @@ class ApiService {
       params.append('new_name', newName);
     }
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    // Use fetch directly to avoid issues with FormData
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2325,22 +2226,15 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== IMPORT PREVIEW API ====================
-
   async previewAgentImport(appId: number, file: File) {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const url = `${this.baseURL}/internal/apps/${appId}/agents/preview-import`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2355,16 +2249,11 @@ class ApiService {
     const formData = new FormData();
     formData.append('file', file);
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     const url = `${this.baseURL}/internal/apps/preview-import`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2390,12 +2279,6 @@ class ApiService {
   ) {
     const formData = new FormData();
     formData.append('file', file);
-
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
 
     const params = new URLSearchParams();
     params.append('conflict_mode', options.conflictMode);
@@ -2427,7 +2310,8 @@ class ApiService {
     const url = `${this.baseURL}/internal/apps/${appId}/agents/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2456,12 +2340,6 @@ class ApiService {
       params.append('new_name', options.newAppName);
     }
 
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     if (options.componentSelection) {
       formData.append(
         'component_selection_json',
@@ -2478,7 +2356,8 @@ class ApiService {
     const url = `${this.baseURL}/internal/apps/import?${params}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers,
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
       body: formData,
     });
 
@@ -2489,7 +2368,6 @@ class ApiService {
     return response.json();
   }
 
-  // ==================== SYSTEM SETTINGS (ADMIN) ====================
   async fetchSystemSettings() {
     return this.request('/internal/admin/settings');
   }
@@ -2506,8 +2384,6 @@ class ApiService {
       method: 'DELETE',
     });
   }
-
-  // ==================== SAAS / SUBSCRIPTION METHODS ====================
 
   async getSubscription() {
     return this.request('/internal/subscription');
@@ -2529,8 +2405,6 @@ class ApiService {
   async getUsage() {
     return this.request('/internal/usage');
   }
-
-  // ==================== SAAS ADMIN METHODS ====================
 
   async getAdminSaasUsers() {
     return this.request('/internal/admin/saas/users');
@@ -2668,14 +2542,19 @@ class ApiService {
     });
   }
 
-  // ==================== PLATFORM CHATBOT API ====================
-
   async getPlatformChatbotConfig(): Promise<{
     enabled: boolean;
     agent_name: string | null;
     agent_description: string | null;
   }> {
-    return this.request('/internal/platform-chatbot/config');
+    // Mounted on public pages (/login, /set-password); 401 must not trigger
+    // global redirect — the provider's catch block disables the widget instead.
+    return this.request(
+      '/internal/platform-chatbot/config',
+      {},
+      false,
+      { suppressAuthRedirect: true },
+    );
   }
 
   async sendPlatformChatbotMessage(
@@ -2694,9 +2573,12 @@ class ApiService {
     options: { onEvent: (event: StreamEvent) => void; signal?: AbortSignal }
   ): Promise<void> {
     const url = `${this.baseURL}/internal/platform-chatbot/chat/stream`;
+    const headers = this.buildAuthHeaders('POST', false);
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: this.prepareHeaders({}),
+      credentials: 'include',
+      headers,
       body: JSON.stringify({ message, session_id: sessionId }),
       signal: options.signal,
     });
@@ -2720,9 +2602,7 @@ class ApiService {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE lines: each event is "data: {json}\n\n"
         const lines = buffer.split('\n\n');
-        // Keep the last incomplete chunk in the buffer
         buffer = lines.pop() || '';
 
         this.parseSSELines(lines, options.onEvent);
@@ -2731,9 +2611,6 @@ class ApiService {
       reader.releaseLock();
     }
   }
-
-  // ==================== UTILITY METHODS ====================
 }
 
-// Export singleton instance - like how you'd use services in backend
 export const apiService = new ApiService();

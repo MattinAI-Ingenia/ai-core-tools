@@ -63,6 +63,7 @@ reports/
 # but keep per-run artifacts and personal settings out of git.
 .claude/specs/
 .claude/agent-memory/
+**/.claude/agent-memory/
 .claude/settings.local.json
 
 # Spec-kit

@@ -16,7 +16,6 @@ import { defaultNavigation } from './defaultNavigation';
 import type { LibraryConfig, ExtraRoute } from './types';
 import { baseTheme } from '../themes/baseTheme';
 
-// Import base pages
 import LandingPage from '../pages/LandingPage';
 import AppsPage from '../pages/AppsPage';
 import AppDashboard from '../pages/AppDashboard';
@@ -53,6 +52,8 @@ import RegisterPage from '../pages/RegisterPage';
 import VerifyEmailPage from '../pages/VerifyEmailPage';
 import PasswordResetRequestPage from '../pages/PasswordResetRequestPage';
 import PasswordResetPage from '../pages/PasswordResetPage';
+import SetPasswordPage from '../pages/SetPasswordPage';
+import ChangePasswordPage from '../pages/ChangePasswordPage';
 import SubscriptionPage from '../pages/SubscriptionPage';
 import SaasUserListPage from '../pages/admin/SaasUserListPage';
 import SystemAIServicesPage from '../pages/admin/SystemAIServicesPage';
@@ -84,9 +85,7 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
   config,
   extraRoutes = [],
 }) => {
-  // Merge routes from config and extraRoutes prop
   const allExtraRoutes = [...(config.routes || []), ...extraRoutes];
-  // Convert LibraryConfig to ClientConfig for backward compatibility
   const clientConfig = {
     clientId: 'library-client',
     name: config.name || 'AI Core Tools',
@@ -115,19 +114,16 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
     navigation: config.navigationConfig
   };
 
-  // Initialize configuration service
   useEffect(() => {
     configService.setClientConfig(clientConfig);
   }, [clientConfig]);
 
   const features = config.features || {};
-
-  // Merge navigation configuration
+  
   const mergedNavigationConfig = config.navigation
     ? mergeNavigationConfig(config.navigation)
     : (config.navigationConfig || defaultNavigation);
 
-  // Common layout props used across all routes
   const commonLayoutProps = useMemo(() => ({
     navigationConfig: mergedNavigationConfig,
     headerProps: {
@@ -150,65 +146,64 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
         <UserProvider>
           <SettingsCacheProvider>
             <DeploymentModeProvider>
-              <CapabilitiesProvider>
-                <PlatformChatbotProvider>
-                  <Router>
-                    <ScrollToTop />
-                    <ConfirmProvider>
-                      <Routes>
-                        {/* Public routes */}
-                        <Route path="/login" element={<LoginPage />} />
-                        <Route path="/auth/success" element={<AuthSuccessPage />} />
-                        <Route path="/register" element={<RegisterPage />} />
-                        <Route path="/verify-email" element={<VerifyEmailPage />} />
-                        <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
-                        <Route path="/password-reset" element={<PasswordResetPage />} />
+            <CapabilitiesProvider>
+            <PlatformChatbotProvider>
+            <Router>
+              <ScrollToTop />
+              <ConfirmProvider>
+              <Routes>
+                {/* Public routes */}
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/auth/success" element={<AuthSuccessPage />} />
+                <Route path="/register" element={<RegisterPage />} />
+                <Route path="/verify-email" element={<VerifyEmailPage />} />
+                <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
+                <Route path="/password-reset" element={<PasswordResetPage />} />
+                <Route path="/set-password" element={<SetPasswordPage />} />
+                <Route path="/change-password" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <ChangePasswordPage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                        {/* Public landing page — handles its own redirect when not in SaaS mode */}
-                        <Route path="/" element={<LandingPage />} />
+                <Route path="/" element={<LandingPage />} />
 
                 <Route path="/apps" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <AppsPage />
                   </EditorLayoutRoute>
                 } />
-                        <Route path="/apps" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <AppsPage />
-                          </ProtectedLayoutRoute>
-                        } />
 
-                        <Route path="/profile" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <ProfilePage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/profile" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                      <ProfilePage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                        <Route path="/marketplace" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MarketplacePage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/marketplace" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <MarketplacePage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                        <Route path="/marketplace/agents/:agentId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MarketplaceAgentDetailPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/marketplace/agents/:agentId" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <MarketplaceAgentDetailPage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                        <Route path="/marketplace/chat/:conversationId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MarketplaceChatPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/marketplace/chat/:conversationId" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <MarketplaceChatPage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                        <Route path="/home" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MarketplaceHomePage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/home" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <MarketplaceHomePage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                {/* App routes — editor and admin only */}
                 <Route path="/apps/:appId" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <AppDashboard />
@@ -347,6 +342,12 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                   </EditorLayoutRoute>
                 } />
 
+                <Route path="/apps/:appId/middlewares" element={
+                  <EditorLayoutRoute {...commonLayoutProps}>
+                      <MiddlewaresPage />
+                  </EditorLayoutRoute>
+                } />
+
                 <Route path="/apps/:appId/settings" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <SettingsLayout><AppSettingsPage /></SettingsLayout>
@@ -394,299 +395,91 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                       <SettingsLayout><CollaborationPage /></SettingsLayout>
                   </EditorLayoutRoute>
                 } />
-                        {/* App-specific routes */}
-                        <Route path="/apps/:appId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <AppDashboard />
-                          </ProtectedLayoutRoute>
-                        } />
 
-                        {/* App-specific routes */}
-                        <Route path="/apps/:appId/agents" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <AgentsPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/users" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <UsersPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/agents/:agentId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <AgentFormPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/stats" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <StatsPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/agents/:agentId/playground" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <AgentPlaygroundPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/settings" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <SystemSettingsPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/silos" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SilosPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/saas-users" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <SaasUserListPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/silos/:siloId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SiloFormPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/system-ai-services" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <SystemAIServicesPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/silos/:siloId/playground" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SiloPlaygroundPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/system-embedding-services" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <SystemEmbeddingServicesPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/repositories" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <RepositoriesPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/admin/tier-config" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <TierConfigPage />
+                  </AdminLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/repositories/:repositoryId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <RepositoryFormPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                <Route path="/subscription" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                    <SubscriptionPage />
+                  </ProtectedLayoutRoute>
+                } />
 
-                        <Route path="/apps/:appId/repositories/:repositoryId/detail" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
+                <Route path="/about" element={
+                  <ProtectedLayoutRoute {...commonLayoutProps}>
+                      <AboutPage />
+                    </ProtectedLayoutRoute>
+                } />
 
-                            <RepositoryDetailPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                {allExtraRoutes.map(route => {
+                  let element;
+                  if (route.adminOnly) {
+                    element = <AdminLayoutRoute {...commonLayoutProps}>{route.element}</AdminLayoutRoute>;
+                  } else if (route.protected) {
+                    element = <ProtectedLayoutRoute {...commonLayoutProps}>{route.element}</ProtectedLayoutRoute>;
+                  } else {
+                    element = (
+                      <Layout {...commonLayoutProps}>
+                        {route.element}
+                      </Layout>
+                    );
+                  }
 
-                        <Route path="/apps/:appId/repositories/:repositoryId/playground" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <RepositoryPlaygroundPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                  return (
+                    <Route 
+                      key={route.path} 
+                      path={route.path} 
+                      element={element}
+                    />
+                  );
+                })}
 
-                        <Route path="/apps/:appId/domains" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <DomainsPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/domains/:domainId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-
-                            <DomainFormPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/domains/:domainId/detail" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <DomainDetailPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* Enterprise Edition info page */}
-                        <Route path="/apps/:appId/enterprise" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <EnterpriseFeaturePage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* SharePoint routes */}
-                        <Route path="/apps/:appId/sharepoint" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SharePointSourcesPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/sharepoint/new" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SharePointWizardPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/sharepoint/:sourceId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SharePointSourceDetailPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* MCP Servers routes */}
-                        <Route path="/apps/:appId/mcp-servers" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MCPServersPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/mcp-servers/new" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MCPServerFormPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/mcp-servers/:serverId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MCPServerDetailPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/mcp-servers/:serverId/edit" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MCPServerFormPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* Skills route */}
-                        <Route path="/apps/:appId/skills" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SkillsPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* Middlewares route */}
-                        <Route path="/apps/:appId/middlewares" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MiddlewaresPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* App-specific settings routes */}
-                        <Route path="/apps/:appId/settings" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><AppSettingsPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/general" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><AppSettingsPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/ai-services" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><AIServicesPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/embedding-services" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><EmbeddingServicesPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/mcp-configs" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><MCPConfigsPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/api-keys" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><APIKeysPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/data-structures" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><DataStructuresPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/settings/collaboration" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SettingsLayout><CollaborationPage /></SettingsLayout>
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* Admin routes */}
-                        <Route path="/admin/users" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <UsersPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/admin/stats" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <StatsPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/admin/settings" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <SystemSettingsPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/admin/saas-users" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <SaasUserListPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/admin/system-ai-services" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <SystemAIServicesPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/admin/system-embedding-services" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <SystemEmbeddingServicesPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/admin/tier-config" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <TierConfigPage />
-                          </AdminLayoutRoute>
-                        } />
-
-                        <Route path="/subscription" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <SubscriptionPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        <Route path="/about" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <AboutPage />
-                          </ProtectedLayoutRoute>
-                        } />
-
-                        {/* Client-specific extra routes */}
-                        {allExtraRoutes.map(route => {
-                          // Determine which route protection to use
-                          let element;
-                          if (route.adminOnly) {
-                            // Admin-only route (requires authentication AND admin privileges)
-                            element = <AdminLayoutRoute {...commonLayoutProps}>{route.element}</AdminLayoutRoute>;
-                          } else if (route.protected) {
-                            // Protected route (requires authentication only)
-                            element = <ProtectedLayoutRoute {...commonLayoutProps}>{route.element}</ProtectedLayoutRoute>;
-                          } else {
-                            // Public route
-                            element = (
-                              <Layout {...commonLayoutProps}>
-                                {route.element}
-                              </Layout>
-                            );
-                          }
-
-                          return (
-                            <Route
-                              key={route.path}
-                              path={route.path}
-                              element={element}
-                            />
-                          );
-                        })}
-
-                        {/* Default redirect for unmatched paths */}
-                        <Route path="*" element={<Navigate to="/apps" replace />} />
-                      </Routes>
-                      <PlatformChatbotWidget />
-                    </ConfirmProvider>
-                  </Router>
-                </PlatformChatbotProvider>
-              </CapabilitiesProvider>
+                <Route path="*" element={<Navigate to="/apps" replace />} />
+              </Routes>
+              <PlatformChatbotWidget />
+              </ConfirmProvider>
+            </Router>
+            </PlatformChatbotProvider>
+            </CapabilitiesProvider>
             </DeploymentModeProvider>
           </SettingsCacheProvider>
         </UserProvider>
