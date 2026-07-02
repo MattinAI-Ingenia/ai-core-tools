@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from models.agent import Agent, AgentMCP, AgentTool, AgentSkill
+from models.conversation import Conversation
 from models.middleware import AgentMiddleware
 from models.ocr_agent import OCRAgent
 from models.ai_service import AIService
@@ -112,6 +113,7 @@ class AgentRepository:
         db.query(AgentSkill).filter(AgentSkill.agent_id == agent_id).delete(synchronize_session=False)
         db.query(AgentTool).filter(AgentTool.agent_id == agent_id).delete(synchronize_session=False)
         db.query(AgentMiddleware).filter(AgentMiddleware.agent_id == agent_id).delete(synchronize_session=False)
+        db.query(Conversation).filter(Conversation.agent_id == agent_id).delete(synchronize_session=False)
         AgentRepository.remove_tool_references(db, agent_id)
         db.delete(agent)
         db.commit()
