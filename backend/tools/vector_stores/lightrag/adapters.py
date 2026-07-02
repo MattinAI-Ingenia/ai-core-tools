@@ -195,7 +195,11 @@ def build_llm_model_func(
             messages.extend(history_messages)
         messages.append({"role": "user", "content": prompt})
 
-        response = await llm.ainvoke(messages)
+        # lc_source tag → _INTERNAL_LC_SOURCES filter drops these tokens;
+        # untagged, the keyword-extraction JSON leaks into the chat stream.
+        response = await llm.ainvoke(
+            messages, config={"metadata": {"lc_source": "lightrag"}}
+        )
         # LangChain chat models return an AIMessage; fall back to str() for
         # custom wrappers that might return a plain string.
         content = getattr(response, "content", response)

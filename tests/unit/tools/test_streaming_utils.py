@@ -52,6 +52,16 @@ class TestMapMessagesChunk:
 
         assert _map_messages_chunk(chunk) is None
 
+    def test_drops_lightrag_internal_chunk(self):
+        # LightRAG's keyword-extraction call runs inside the retriever tool;
+        # tagged lc_source="lightrag", its JSON must never reach the stream.
+        chunk = (
+            _ai_chunk('{"high_level_keywords": ["paper authors"], "low_level_keywords": ["kb"]}'),
+            {"langgraph_node": "tools", "lc_source": "lightrag"},
+        )
+
+        assert _map_messages_chunk(chunk) is None
+
     def test_unknown_lc_source_is_not_dropped(self):
         # Only known internal sources are filtered; unknown values pass through
         # so that a future, unrelated `lc_source` does not silently break the stream.
