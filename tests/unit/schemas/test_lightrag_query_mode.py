@@ -1,24 +1,33 @@
-"""Unit tests for skill-routed mode in RetrievalConfig."""
+"""Unit tests for the LightRAG query mode field on the agent schemas."""
 import pytest
 from pydantic import ValidationError
 
-from schemas.agent_schemas import RetrievalConfig, AgentDetailSchema
+from schemas.agent_schemas import CreateUpdateAgentSchema, AgentDetailSchema
+
+
+def _agent(**kwargs):
+    return CreateUpdateAgentSchema(name="test-agent", **kwargs)
 
 
 def test_skill_routed_is_accepted():
-    config = RetrievalConfig(lightrag_query_mode="skill-routed")
-    assert config.lightrag_query_mode == "skill-routed"
+    agent = _agent(lightrag_query_mode="skill-routed")
+    assert agent.lightrag_query_mode == "skill-routed"
 
 
 def test_existing_modes_still_accepted():
     for mode in ("local", "global", "hybrid", "mix", "naive", "bypass"):
-        config = RetrievalConfig(lightrag_query_mode=mode)
-        assert config.lightrag_query_mode == mode
+        agent = _agent(lightrag_query_mode=mode)
+        assert agent.lightrag_query_mode == mode
+
+
+def test_none_is_accepted():
+    """Non-LightRAG agents leave the mode unset."""
+    assert _agent().lightrag_query_mode is None
 
 
 def test_invalid_mode_raises_validation_error():
     with pytest.raises(ValidationError):
-        RetrievalConfig(lightrag_query_mode="unknown")
+        _agent(lightrag_query_mode="unknown")
 
 
 def test_skill_routed_in_lightrag_query_modes_list():

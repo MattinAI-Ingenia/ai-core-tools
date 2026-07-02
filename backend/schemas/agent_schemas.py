@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
@@ -7,54 +7,8 @@ from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THR
 
 # ==================== RETRIEVAL CONFIG ====================
 
-class RetrievalConfig(BaseModel):
-    """Configures how an agent retrieves documents from its linked Silo.
-
-    Priority at runtime: runtime search_params > retrieval_config > system defaults.
-    """
-    search_type: Optional[Literal["similarity", "mmr", "similarity_score_threshold"]] = "similarity"
-    k: Optional[int] = 30
-    # MMR-specific
-    fetch_k: Optional[int] = 100
-    lambda_mult: Optional[float] = 0.5
-    # Similarity-score-threshold-specific
-    score_threshold: Optional[float] = None
-    # LightRAG-specific
-    lightrag_query_mode: Optional[Literal["local", "global", "hybrid", "mix", "naive", "bypass", "skill-routed"]] = None
-
-    @field_validator("k")
-    @classmethod
-    def validate_k(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and not (1 <= v <= 200):
-            raise ValueError("k must be between 1 and 200")
-        return v
-
-    @field_validator("fetch_k")
-    @classmethod
-    def validate_fetch_k(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v < 1:
-            raise ValueError("fetch_k must be at least 1")
-        return v
-
-    @field_validator("lambda_mult")
-    @classmethod
-    def validate_lambda_mult(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and not (0.0 <= v <= 1.0):
-            raise ValueError("lambda_mult must be between 0.0 and 1.0")
-        return v
-
-    @field_validator("score_threshold")
-    @classmethod
-    def validate_score_threshold(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and not (0.0 <= v <= 1.0):
-            raise ValueError("score_threshold must be between 0.0 and 1.0")
-        return v
-
-    @model_validator(mode="after")
-    def validate_consistency(self) -> "RetrievalConfig":
-        if self.search_type == "similarity_score_threshold" and self.score_threshold is None:
-            raise ValueError("score_threshold is required when search_type is 'similarity_score_threshold'")
-        return self
+# LightRAG query mode — the only LightRAG-specific per-agent retrieval knob.
+LightRAGQueryMode = Literal["local", "global", "hybrid", "mix", "naive", "bypass", "skill-routed"]
 
 
 _VALID_RAG_SEARCH_TYPES = {"similarity", "mmr", "similarity_score_threshold"}
@@ -192,7 +146,7 @@ class AgentDetailSchema(BaseModel):
     tool_ids: List[int] = []
     mcp_config_ids: List[int] = []
     skill_ids: List[int] = []
-    retrieval_config: Optional[Dict[str, Any]] = None
+    lightrag_query_mode: Optional[LightRAGQueryMode] = None
     middleware_ids: List[int] = []
     created_at: Optional[datetime] = None
     request_count: int
@@ -248,7 +202,7 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     tool_ids: Optional[List[int]] = []
     mcp_config_ids: Optional[List[int]] = []
     skill_ids: Optional[List[int]] = []
-    retrieval_config: Optional[Dict[str, Any]] = None
+    lightrag_query_mode: Optional[LightRAGQueryMode] = None
     middleware_ids: Optional[List[int]] = []
     # OCR-specific fields
     vision_service_id: Optional[int] = None

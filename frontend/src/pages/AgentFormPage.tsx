@@ -35,6 +35,8 @@ interface Agent {
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
+  // LightRAG-specific: query mode (skill-routed | local | global | hybrid | mix | naive | bypass)
+  lightrag_query_mode?: string | null;
   tool_ids?: number[];
   mcp_config_ids?: number[];
   skill_ids?: number[];
@@ -81,14 +83,7 @@ interface AgentFormData {
   tool_ids: number[];
   mcp_config_ids: number[];
   skill_ids: number[];
-  retrieval_config: {
-    search_type: string;
-    k: number;
-    fetch_k: number;
-    lambda_mult: number;
-    score_threshold: number | null;
-    lightrag_query_mode?: string;
-  } | null;
+  lightrag_query_mode: string | null;
   middleware_ids: number[];
   // OCR-specific fields
   vision_service_id?: number;
@@ -226,7 +221,7 @@ function AgentFormPage() {
     tool_ids: [],
     mcp_config_ids: [],
     skill_ids: [],
-    retrieval_config: null,
+    lightrag_query_mode: null,
     middleware_ids: [],
     rag_k: 10,
     rag_search_type: 'similarity',
@@ -321,7 +316,7 @@ function AgentFormPage() {
         tool_ids: response.tool_ids || [],
         mcp_config_ids: response.mcp_config_ids || [],
         skill_ids: response.skill_ids || [],
-        retrieval_config: response.retrieval_config || null,
+        lightrag_query_mode: response.lightrag_query_mode ?? null,
         middleware_ids: response.middleware_ids || [],
         // OCR-specific fields
         vision_service_id: response.vision_service_id || undefined,
@@ -460,7 +455,7 @@ function AgentFormPage() {
     const skill = agent?.skills?.find(s => s.skill_id === skillId);
     const isRouterSkill = skill?.name === ROUTER_SKILL_NAME;
     const isCurrentlyOn = formData.skill_ids.includes(skillId);
-    const currentMode = formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed';
+    const currentMode = formData.lightrag_query_mode ?? 'skill-routed';
     const snapToHybrid = isRouterSkill && isCurrentlyOn && currentMode === 'skill-routed';
     const snapToSkillRouted = isRouterSkill && !isCurrentlyOn && currentMode !== 'skill-routed';
 
@@ -470,9 +465,9 @@ function AgentFormPage() {
         ? prev.skill_ids.filter(id => id !== skillId)
         : [...prev.skill_ids, skillId],
       ...(snapToHybrid
-        ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'hybrid' } }
+        ? { lightrag_query_mode: 'hybrid' }
         : snapToSkillRouted
-          ? { retrieval_config: { ...prev.retrieval_config, lightrag_query_mode: 'skill-routed' } }
+          ? { lightrag_query_mode: 'skill-routed' }
           : {}),
     }));
 
@@ -607,12 +602,9 @@ function AgentFormPage() {
       mcp_config_ids: formData.mcp_config_ids,
       skill_ids: formData.skill_ids,
       middleware_ids: formData.middleware_ids,
-      retrieval_config: selectedSiloIsLightRAG
-        ? {
-          ...(formData.retrieval_config ?? {}),
-          lightrag_query_mode: formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed',
-        }
-        : formData.retrieval_config,
+      lightrag_query_mode: selectedSiloIsLightRAG
+        ? (formData.lightrag_query_mode ?? 'skill-routed')
+        : null,
       // OCR-specific fields
       vision_service_id: formData.vision_service_id,
       vision_system_prompt: formData.vision_system_prompt,
@@ -976,193 +968,56 @@ function AgentFormPage() {
                         </select>
                       </div>
 
-                      {/* Retrieval Settings - only shown when a silo is selected */}
-                      {formData.silo_id && (
+                      {/* LightRAG Query Mode — only for LightRAG silos.
+                          Generic RAG tuning (search_type / k / threshold / filters)
+                          lives in the RagConfigSection below. */}
+                      {formData.silo_id && selectedSiloIsLightRAG && (
                         <div className="border-t border-gray-200 pt-6">
                           <div className="flex items-center mb-6">
                             <div className="w-10 h-10 bg-green-100 rounded-xl flex items-center justify-center mr-4">
                               <Search className="w-5 h-5 text-green-600" />
                             </div>
                             <div className="flex-1">
-                              <h3 className="text-lg font-semibold text-gray-900">Retrieval Settings</h3>
-                              <p className="text-sm text-gray-600 mt-1">Configure how this agent retrieves documents from the knowledge base</p>
+                              <h3 className="text-lg font-semibold text-gray-900">LightRAG Retrieval</h3>
+                              <p className="text-sm text-gray-600 mt-1">Choose how this agent queries the LightRAG knowledge graph</p>
                             </div>
                           </div>
 
                           <div className="space-y-6">
-                            {/* LightRAG Query Mode — only for LightRAG silos */}
-                            {selectedSiloIsLightRAG && (
-                              <div>
-                                <label htmlFor="lightrag_query_mode" className="block text-sm font-medium text-gray-700 mb-2">
-                                  LightRAG Query Mode
-                                </label>
-                                <select
-                                  id="lightrag_query_mode"
-                                  value={formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed'}
-                                  onChange={(e) => handleInputChange('retrieval_config', {
-                                    ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                    lightrag_query_mode: e.target.value
-                                  })}
-                                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                >
-                                  {(agent?.lightrag_query_modes ?? ['skill-routed', 'local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map(mode => (
-                                    <option key={mode} value={mode}>
-                                      {mode === 'skill-routed'
-                                        ? 'Skill-Routed (auto)'
-                                        : mode === 'hybrid'
-                                          ? `${mode} (default fallback)`
-                                          : mode}
-                                    </option>
-                                  ))}
-                                </select>
-                                <p className="text-xs text-gray-500 mt-1">
-                                  skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries · hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
-                                </p>
-                                {(formData.retrieval_config?.lightrag_query_mode ?? 'skill-routed') === 'skill-routed' && (
-                                  <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2">
-                                    <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
-                                    <p className="text-xs text-purple-800">
-                                      <span className="font-semibold">LightRAG Query Router</span> — the agent will automatically
-                                      select the best retrieval strategy (local / global / hybrid / mix / naive) per question.
-                                      A routing skill will be added to this agent on save.
-                                    </p>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-
-                            {!selectedSiloIsLightRAG && (
-                              <>
-                                <div>
-                                  <label htmlFor="search_type" className="block text-sm font-medium text-gray-700 mb-2">
-                                    Search Strategy
-                                  </label>
-                                  <select
-                                    id="search_type"
-                                    value={formData.retrieval_config?.search_type ?? 'similarity'}
-                                    onChange={(e) => handleInputChange('retrieval_config', {
-                                      ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                      search_type: e.target.value
-                                    })}
-                                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                  >
-                                    <option value="similarity">Similarity (default)</option>
-                                    <option value="mmr">MMR — Max Marginal Relevance (diverse results)</option>
-                                    <option value="similarity_score_threshold">Score Threshold (precision)</option>
-                                  </select>
-                                  <p className="text-xs text-gray-500 mt-1">MMR reduces redundancy; Score Threshold filters low-quality matches</p>
+                            <div>
+                              <label htmlFor="lightrag_query_mode" className="block text-sm font-medium text-gray-700 mb-2">
+                                LightRAG Query Mode
+                              </label>
+                              <select
+                                id="lightrag_query_mode"
+                                value={formData.lightrag_query_mode ?? 'skill-routed'}
+                                onChange={(e) => handleInputChange('lightrag_query_mode', e.target.value)}
+                                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
+                              >
+                                {(agent?.lightrag_query_modes ?? ['skill-routed', 'local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map(mode => (
+                                  <option key={mode} value={mode}>
+                                    {mode === 'skill-routed'
+                                      ? 'Skill-Routed (auto)'
+                                      : mode === 'hybrid'
+                                        ? `${mode} (default fallback)`
+                                        : mode}
+                                  </option>
+                                ))}
+                              </select>
+                              <p className="text-xs text-gray-500 mt-1">
+                                skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries · hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
+                              </p>
+                              {(formData.lightrag_query_mode ?? 'skill-routed') === 'skill-routed' && (
+                                <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2">
+                                  <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
+                                  <p className="text-xs text-purple-800">
+                                    <span className="font-semibold">LightRAG Query Router</span> — the agent will automatically
+                                    select the best retrieval strategy (local / global / hybrid / mix / naive) per question.
+                                    A routing skill will be added to this agent on save.
+                                  </p>
                                 </div>
-
-                                <div>
-                                  <label htmlFor="retrieval_k" className="block text-sm font-medium text-gray-700 mb-2">
-                                    Documents to Retrieve (k)
-                                  </label>
-                                  <input
-                                    type="number"
-                                    id="retrieval_k"
-                                    min={1}
-                                    max={200}
-                                    value={formData.retrieval_config?.k ?? 30}
-                                    onChange={(e) => handleInputChange('retrieval_config', {
-                                      ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                      k: Number.parseInt(e.target.value)
-                                    })}
-                                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                  />
-                                  <p className="text-xs text-gray-500 mt-1">Number of documents the retriever will return per query (1–200, default 30)</p>
-                                </div>
-
-                                {/* MMR-specific fields */}
-                                {(formData.retrieval_config?.search_type ?? 'similarity') === 'mmr' && (
-                                  <>
-                                    <div>
-                                      <label htmlFor="fetch_k" className="block text-sm font-medium text-gray-700 mb-2">
-                                        Fetch K (MMR candidate pool)
-                                      </label>
-                                      <input
-                                        type="number"
-                                        id="fetch_k"
-                                        min={1}
-                                        value={formData.retrieval_config?.fetch_k ?? 100}
-                                        onChange={(e) => handleInputChange('retrieval_config', {
-                                          ...{ search_type: 'mmr', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                          fetch_k: Number.parseInt(e.target.value)
-                                        })}
-                                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                      />
-                                      <p className="text-xs text-gray-500 mt-1">Candidates fetched before diversity re-ranking (should be &gt; k)</p>
-                                    </div>
-
-                                    <div>
-                                      <label htmlFor="lambda_mult" className="block text-sm font-medium text-gray-700 mb-2">
-                                        Diversity (λ): {(formData.retrieval_config?.lambda_mult ?? 0.5).toFixed(2)}
-                                      </label>
-                                      <input
-                                        type="range"
-                                        id="lambda_mult"
-                                        min={0}
-                                        max={1}
-                                        step={0.05}
-                                        value={formData.retrieval_config?.lambda_mult ?? 0.5}
-                                        onChange={(e) => handleInputChange('retrieval_config', {
-                                          ...{ search_type: 'mmr', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                          lambda_mult: Number.parseFloat(e.target.value)
-                                        })}
-                                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                      />
-                                      <div className="flex justify-between text-xs text-gray-500 mt-1">
-                                        <span>0 — Max diversity</span>
-                                        <span>1 — Max relevance</span>
-                                      </div>
-                                    </div>
-                                  </>
-                                )}
-
-                                {/* Score threshold field */}
-                                {(formData.retrieval_config?.search_type ?? 'similarity') === 'similarity_score_threshold' && (
-                                  <div>
-                                    <label htmlFor="score_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-                                      Score Threshold
-                                    </label>
-                                    <input
-                                      type="number"
-                                      id="score_threshold"
-                                      min={0}
-                                      max={1}
-                                      step={0.01}
-                                      value={formData.retrieval_config?.score_threshold ?? 0.7}
-                                      onChange={(e) => handleInputChange('retrieval_config', {
-                                        ...{ search_type: 'similarity_score_threshold', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: 0.7, ...formData.retrieval_config },
-                                        score_threshold: Number.parseFloat(e.target.value)
-                                      })}
-                                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                    />
-                                    <p className="text-xs text-gray-500 mt-1">Only return documents with similarity &ge; this value (0–1)</p>
-                                  </div>
-                                )}
-                              </>
-                            )}
-
-                            {selectedSiloIsLightRAG && (
-                              <div>
-                                <label htmlFor="retrieval_k_lightrag" className="block text-sm font-medium text-gray-700 mb-2">
-                                  Top K results
-                                </label>
-                                <input
-                                  type="number"
-                                  id="retrieval_k_lightrag"
-                                  min={1}
-                                  max={200}
-                                  value={formData.retrieval_config?.k ?? 30}
-                                  onChange={(e) => handleInputChange('retrieval_config', {
-                                    ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                    k: Number.parseInt(e.target.value)
-                                  })}
-                                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                />
-                                <p className="text-xs text-gray-500 mt-1">Maximum number of results returned by LightRAG (mapped to top_k)</p>
-                              </div>
-                            )}
+                              )}
+                            </div>
                           </div>
                         </div>
                       )}

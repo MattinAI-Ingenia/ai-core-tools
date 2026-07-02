@@ -211,10 +211,8 @@ class AgentService:
         # Get related information
         silo_info = self._get_silo_info(db, agent) if agent_id != 0 else None
         output_parser_info = self._get_output_parser_info(db, agent) if agent_id != 0 else None
-        retrieval_config = getattr(agent, 'retrieval_config', None)
-        if not isinstance(retrieval_config, dict):
-            retrieval_config = None
-        
+        lightrag_query_mode = getattr(agent, 'lightrag_query_mode', None)
+
         return AgentDetailSchema(
             agent_id=agent.agent_id,
             name=agent.name or "",
@@ -236,7 +234,7 @@ class AgentService:
             tool_ids=associations.get('tool_ids', []),
             mcp_config_ids=associations.get('mcp_ids', []),
             skill_ids=associations.get('skill_ids', []),
-            retrieval_config=retrieval_config,
+            lightrag_query_mode=lightrag_query_mode,
             middleware_ids=associations.get('middleware_ids', []),
             created_at=agent.create_date,
             request_count=getattr(agent, 'request_count', 0) or 0,
@@ -437,7 +435,7 @@ class AgentService:
             agent.vision_system_prompt = data.get('vision_system_prompt')
             agent.text_system_prompt = data.get('text_system_prompt')
 
-        agent.retrieval_config = data.get('retrieval_config')
+        agent.lightrag_query_mode = data.get('lightrag_query_mode')
 
         # Handle is_tool field - can be boolean from API or 'on' from form
         is_tool_value = data.get('is_tool')

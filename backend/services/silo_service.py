@@ -496,7 +496,7 @@ class SiloService:
             )
     
     @staticmethod
-    def get_silo_retriever(silo_id: int, search_params=None, retrieval_config=None, **kwargs) -> Optional[VectorStoreRetriever]:
+    def get_silo_retriever(silo_id: int, search_params=None, **kwargs) -> Optional[VectorStoreRetriever]:
         """
         Get retriever for a silo with its corresponding embedding service
         
@@ -534,13 +534,7 @@ class SiloService:
             # --- Layer 1: system defaults ---
             merged_search_kwargs: dict = {'k': 30}
 
-            # --- Layer 2: agent-level retrieval_config (persisted) ---
-            if retrieval_config:
-                for key, value in retrieval_config.items():
-                    if value is not None and key in known_params:
-                        merged_search_kwargs[key] = value
-
-            # --- Layer 3: per-call search_params (highest priority) ---
+            # --- Layer 2: per-call search_params (highest priority) ---
             if search_params:
                 # Separate known params from filter fields
                 filter_fields = {}

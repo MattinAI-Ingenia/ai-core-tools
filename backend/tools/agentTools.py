@@ -60,8 +60,7 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
         logger.info("[skill-routed] query=%r mode_requested=%r mode_used=%r", query, mode, resolved_mode)
         retriever = SiloService.get_silo_retriever(
             silo_id,
-            search_params,
-            retrieval_config={"lightrag_query_mode": resolved_mode},
+            {**(search_params or {}), "lightrag_query_mode": resolved_mode},
         )
         docs = await retriever.ainvoke(query)
         if not docs:
@@ -202,16 +201,11 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         session_id: Optional session ID for memory-enabled agents (used to cache checkpointer)
         user_context: Optional user context containing authentication tokens for MCP
     """
-    retrieval_config = getattr(agent, 'retrieval_config', None)
-
     # The router skill's mode-selection rules must be visible from the very
-    # first message — gating them behind an on-demand `load_skill` call means
-    # a memory-less agent can go a whole turn without knowing it should
-    # always call retrieve_from_knowledge_base first. Inline it directly into
-    # the system prompt and drop it from the generic on-demand skill list so
-    # it isn't offered twice.
+    # first message — inline it directly into the system prompt (see below) and
+    # drop it from the generic on-demand skill list so it isn't offered twice.
     router_skill_active = (
-        (retrieval_config or {}).get("lightrag_query_mode") == "skill-routed"
+        getattr(agent, "lightrag_query_mode", None) == "skill-routed"
         and any(
             getattr(a.skill, "name", None) == LIGHTRAG_ROUTER_SKILL_NAME
             for a in (getattr(agent, "skill_associations", None) or [])
@@ -648,7 +642,7 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
     MUST be invoked via ``asyncio.to_thread`` so it never blocks the event loop.
 
     LightRAG silos ignore metadata filters (the query mode is their only knob):
-    ``retrieval_config['lightrag_query_mode']`` selects it. ``skill-routed`` returns
+    ``agent.lightrag_query_mode`` selects it. ``skill-routed`` returns
     a dynamic tool so the LLM picks the mode per call (router skill must be active,
     else it degrades transparently to ``hybrid``).
     """
@@ -659,8 +653,7 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
         getattr(silo, "vector_db_type", None)
         and str(silo.vector_db_type).upper() == "LIGHTRAG"
     )
-    retrieval_config = getattr(agent, "retrieval_config", None) or {}
-    lightrag_mode = retrieval_config.get("lightrag_query_mode") if is_lightrag else None
+    lightrag_mode = getattr(agent, "lightrag_query_mode", None) if is_lightrag else None
 
     if lightrag_mode == "skill-routed":
         skill_assocs = getattr(agent, "skill_associations", None) or []

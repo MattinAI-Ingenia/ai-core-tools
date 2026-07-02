@@ -56,7 +56,7 @@ def make_agent(
     agent.vision_service_id = None
     agent.vision_system_prompt = None
     agent.text_system_prompt = None
-    agent.retrieval_config = None
+    agent.lightrag_query_mode = None
     return agent
 
 

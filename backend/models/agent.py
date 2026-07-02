@@ -76,7 +76,11 @@ class Agent(Base):
     has_memory = Column(Boolean)
     enable_code_interpreter = Column(Boolean, default=False, nullable=False, server_default='false')
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
-    retrieval_config = Column(JSON, nullable=True, default=None)
+
+    # LightRAG query mode — the only per-agent retrieval knob that is LightRAG-specific
+    # (skill-routed | local | global | hybrid | mix | naive | bypass). NULL for non-LightRAG
+    # silos. Generic RAG tuning lives in the rag_* columns below.
+    lightrag_query_mode = Column(String(20), nullable=True)
 
     # RAG retrieval config (step_007 / FR-7); rag_search_type values validated in schemas (step_008).
     # server_default=30 keeps existing agents on the historical retriever default; new agents get

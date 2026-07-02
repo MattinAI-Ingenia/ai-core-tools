@@ -170,7 +170,7 @@ class ExportAgentSchema(BaseModel):
     memory_max_tokens: Optional[int] = None
     memory_summarize_threshold: Optional[int] = 10
     temperature: Optional[float] = 0.7
-    retrieval_config: Optional[Dict[str, Any]] = None
+    lightrag_query_mode: Optional[str] = None
     # OCR-specific fields
     vision_service_name: Optional[str] = None  # Reference by name (OCR agents only)
     vision_system_prompt: Optional[str] = None  # OCR agents only
