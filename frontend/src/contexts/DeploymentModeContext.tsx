@@ -62,7 +62,8 @@ export const DeploymentModeProvider: React.FC<DeploymentModeProviderProps> = ({ 
       try {
         const baseUrl = configService.getApiBaseUrl();
         const response = await fetch(`${baseUrl}/internal/config`);
-        if (response.ok) {
+        if (!response.ok) throw new Error(`config ${response.status}`);
+        {
           const data: {
             deployment_mode?: string;
             tiers?: Tiers;
