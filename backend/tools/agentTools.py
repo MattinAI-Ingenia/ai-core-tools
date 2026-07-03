@@ -27,7 +27,7 @@ import json
 import os
 import base64
 import mimetypes
-from datetime import datetime
+from datetime import datetime, timezone
 from utils.logger import get_logger
 from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_context
 from utils.mcp_ssl_utils import inject_ssl_config
@@ -289,7 +289,6 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
 
     # Localize current time and timezone for the agent context
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-    import datetime
 
     user_tz = None
     if user_context and (tz_name := user_context.get("timezone")):
@@ -298,7 +297,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         except ZoneInfoNotFoundError:
             logger.warning(f"Invalid timezone in user_context: {tz_name}")
 
-    local_now = datetime.datetime.now(user_tz) if user_tz else datetime.datetime.now(datetime.timezone.utc)
+    local_now = datetime.now(user_tz) if user_tz else datetime.now(timezone.utc)
     local_time_str = local_now.strftime("%Y-%m-%d %H:%M:%S %Z" if user_tz else "%Y-%m-%d %H:%M:%S UTC")
 
     system_prompt_content = (

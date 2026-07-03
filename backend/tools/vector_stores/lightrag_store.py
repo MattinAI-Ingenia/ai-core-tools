@@ -671,25 +671,35 @@ class LightRAGStore(VectorStoreInterface):
         ids,
         embedding_service=None,
     ) -> None:
-        rag = self._get_rag_instance(collection_name)
+        # ponytail: no-op by design. Per-document delete in LightRAG means
+        # unwinding the doc's entities/relations from the knowledge graph, which
+        # is not supported yet. Whole-silo teardown still works via
+        # delete_collection(). Upgrade path: wire adelete_by_doc_id + graph
+        # entity/relation cleanup (followup #2).
+        logger.warning(
+            "LightRAGStore.delete_documents is a no-op (per-document graph "
+            "deletion unsupported); data retained for workspace '%s'. Delete the "
+            "whole silo to purge.",
+            collection_name,
+        )
 
-        if isinstance(ids, list):
-            for doc_id in ids:
-                try:
-                    _run_async(rag.adelete_by_doc_id(str(doc_id)))
-                except Exception as exc:
-                    logger.warning(
-                        "LightRAG delete_by_doc_id failed for '%s': %s",
-                        doc_id,
-                        exc,
-                    )
-        else:
-            logger.warning(
-                "LightRAGStore.delete_documents only supports list-of-id "
-                "deletion.  Metadata-filter deletion is not supported; "
-                "ignoring request for workspace '%s'.",
-                collection_name,
-            )
+    def delete_documents_excluding(
+        self,
+        collection_name: str,
+        filter_metadata: Dict[str, Any],
+        exclude: Dict[str, Any],
+        embedding_service=None,
+    ) -> None:
+        # ponytail: no-op — LightRAG deletes by doc_id, not metadata filter, so
+        # it can't run the index-then-swap stale-chunk purge. Re-inserting the
+        # same content is idempotent (doc_id = content hash), so reindex still
+        # refreshes; orphaned chunks from removed content are the known ceiling.
+        # Upgrade path: map resource_id -> doc_ids and delete_by_doc_id (followup #2/#3).
+        logger.warning(
+            "LightRAGStore.delete_documents_excluding is a no-op (metadata-filter "
+            "deletion unsupported); stale chunks not purged for workspace '%s'.",
+            collection_name,
+        )
 
     def delete_collection(
         self,

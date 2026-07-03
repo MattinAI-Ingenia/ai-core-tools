@@ -1078,7 +1078,7 @@ const RepositoryDetailPage: React.FC = () => {
                               <RefreshCw className={`w-4 h-4 ${reindexingId === resource.resource_id ? 'animate-spin' : ''}`} />
                             </button>
                           )}
-                          {canEdit && (
+                          {canEdit && !isLightRAG && (
                             <button
                               onClick={() => handleDeleteResource(resource)}
                               className="p-2 text-gray-400 hover:text-red-600"

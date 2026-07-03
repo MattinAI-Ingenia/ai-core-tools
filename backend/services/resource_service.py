@@ -606,7 +606,20 @@ class ResourceService:
             HTTPException: If resource not found or could not be deleted
         """
         logger.info(f"Delete resource service called - app_id: {app_id}, repository_id: {repository_id}, resource_id: {resource_id}")
-        
+
+        # LightRAG has no real per-file delete (it would need to unwind the doc's
+        # entities/relations from the knowledge graph). Block it up-front so the
+        # file isn't removed from DB/disk while its graph data lingers — deleting
+        # would be a lie. Whole-silo delete is the supported way to purge.
+        resource = ResourceRepository.get_by_id(db, resource_id)
+        silo = getattr(getattr(resource, "repository", None), "silo", None)
+        if silo is not None and (silo.vector_db_type or "").upper() == "LIGHTRAG":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="LightRAG silos do not support deleting individual files; "
+                       "delete the whole silo to remove its data.",
+            )
+
         # Use delete_resource method with database session
         success = ResourceService.delete_resource(resource_id, db)
         if not success:
