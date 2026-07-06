@@ -65,7 +65,7 @@ services:
       ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-}
       ENTRA_CLIENT_SECRET: ${ENTRA_CLIENT_SECRET:-}
 
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+      FRONTEND_URL: ${AICT_PUBLIC_URL:-http://localhost}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -112,10 +112,12 @@ services:
         VITE_API_BASE_URL: ""
     container_name: mattin-frontend
     environment:
-      # SPA and API are same-origin behind Caddy, so the API base is the public
-      # FRONTEND_URL. (Empty here would make ConfigService fall back to its
-      # localhost:8000 dev default, which is not published.)
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-${FRONTEND_URL:-http://localhost}}
+      # SPA and API are same-origin behind Caddy, so the API base IS the public
+      # URL. Both this and the backend's FRONTEND_URL derive ONLY from the
+      # AICT_-namespaced AICT_PUBLIC_URL, never from ambient FRONTEND_URL /
+      # VITE_API_BASE_URL — so a stray shell export from another project
+      # (e.g. :3000 or :8000) can never hijack Mattin's URL.
+      VITE_API_BASE_URL: ${AICT_PUBLIC_URL:-http://localhost}
       VITE_OIDC_ENABLED: ${VITE_OIDC_ENABLED:-false}
       VITE_OIDC_AUTHORITY: ${VITE_OIDC_AUTHORITY:-}
       VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-}
