@@ -42,6 +42,11 @@ entities — captures high-level themes and patterns across the whole graph.
 **Key rule:** Generic terms like "risk", "agency", "data source", "consequence" are NOT specific
 named entities. A question built only around generic terms belongs to global, not local.
 
+**But single-concept questions are NOT global:** "What is X and why does it matter?"
+targets ONE concept (X) — that is local, even though "why it matters" sounds thematic.
+Global requires the question to span the WHOLE document or MANY entities (conclusions,
+enumerations of a full category, overall themes) — not the causes/effects of a single concept.
+
 **Avoid when:** The question targets a single named person, organization, or specific technical term by name.
 
 ---
@@ -56,7 +61,19 @@ relationships, attributes, and co-occurring concepts around a specific node.
 - "What is the role of [specific named entity] in X?"
 - Questions that name a single entity and ask only about that entity
 
-**Avoid when:** The question is broad, asks for enumeration of a category, or asks for document-wide patterns.
+**Definitional / explanatory questions about ONE named concept are local — this is the most common case:**
+- "What is X?", "Define X", "Explain X" where X is a domain concept or term
+  (e.g. "What is concept drift?", "What is operationalization bias?", "What does 'model staleness' mean?")
+- This stays local EVEN when the question also asks why that one concept matters,
+  how it works, or what it causes/affects — as long as it centers on a single
+  concept (e.g. "What is concept drift and why does it affect ML models?" → local).
+  Asking about the causes/effects of one concept is NOT document-wide synthesis.
+
+**Local beats naive for these:** a "what is / define / explain" question about a
+concept needs the graph neighborhood, not a verbatim span — send it to local, not naive.
+
+**Avoid when:** The question enumerates a whole category, compares two things, or
+asks for patterns across the WHOLE document spanning many entities.
 
 ---
 
@@ -82,6 +99,8 @@ entity precision with thematic breadth.
 **Use when the question does NOT match mix above, and:**
 - The question mixes a specific entity with broader context: "How does [X] relate to the broader strategy?"
 - The question asks about a named concept AND its implications or relationships
+- The question asks what **changed** about something, or what **consequences / impact / effects** a named entity or event had on something else — even if only one entity is named: "What changes occurred to [X]?", "What were the consequences of [X] for [Y]?", "How did [X] affect [Y]?"
+- The question has a **causal or temporal chain**: cause → effect, before → after, event → downstream impact
 - You are unsure which of local or global is more appropriate
 
 **Default to hybrid when the question type is ambiguous and doesn't match any mode above.**
@@ -96,7 +115,11 @@ Fast and precise for direct lexical or semantic matches.
 - Verbatim lookups: "Who are the authors?", "What year was this published?", "Find the section about Y"
 - The question is looking for a specific quoted phrase, number, or name
 
-**Avoid when:** The answer depends on relationships between entities or thematic context.
+**naive is ONLY for surface facts** — a name, date, number, or quoted span you could
+find by Ctrl+F. If the question asks to *define, explain, or understand* a concept
+("What is X?", "What does X mean?"), that is **local**, not naive.
+
+**Avoid when:** The answer depends on relationships between entities, on understanding a concept, or on thematic context.
 
 ---
 
@@ -114,18 +137,21 @@ When in doubt, call the tool. An empty result is more honest than a hallucinated
 
 ## Decision flowchart
 
-**Step 1 — Is the question asking for synthesis, enumeration, or a document-wide pattern (no comparison)?**
-  → Yes → global
+Evaluate in order; take the FIRST match.
 
-**Step 2 — Does the question contain an explicit comparison ("X vs Y", "compare A and B") or an explicit demand for exhaustive/complete coverage ("list ALL", "every", "comprehensive")?**
+**Step 1 — Explicit comparison ("X vs Y", "compare A and B") or explicit demand for exhaustive/complete coverage ("list ALL", "every", "comprehensive")?**
   → Yes → mix (even if it also names a specific entity)
 
-**Step 3 — Does the question anchor to a single specific proper noun or named concept?**
-  → Yes, and only about that entity → local
-  → Yes, but also asks about broader implications → hybrid
+**Step 2 — Does the question center on ONE named concept, term, person, or entity — including "What is X?", "Define X", "Explain X", or "What is X and why does it matter / how does it work / what does it affect"?**
+  → Yes, but it asks what CHANGED about X, what CONSEQUENCES/IMPACT/EFFECTS X had, or how X affected something else → hybrid (causal/temporal chains always need both local + global)
+  → Yes, and it stays focused on that one thing with no causal/temporal dimension → local
+  → Yes, but it also pulls in document-wide themes or several other entities → hybrid
 
-**Step 4 — Is the question a simple verbatim or keyword lookup?**
+**Step 3 — Is the answer a surface-level verbatim fact (a name, date, number, or quoted phrase you could Ctrl+F)?**
   → Yes → naive
+
+**Step 4 — Does the question ask for document-wide synthesis, enumeration of a whole category, or overall themes spanning many entities (no single anchor concept)?**
+  → Yes → global
 
 **Otherwise → hybrid**
 """

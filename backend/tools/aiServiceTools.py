@@ -1,7 +1,7 @@
 import base64
+import httpx
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.retrievers import BaseRetriever
 from langchain_mistralai import ChatMistralAI
@@ -198,16 +198,28 @@ def build_ollama_auth_headers(api_key: str | None, endpoint: str | None) -> dict
 
 
 def _build_custom_llm(ai_service, temperature):
-    client_kwargs = {"verify": False}
-    headers = build_ollama_auth_headers(ai_service.api_key, ai_service.endpoint)
-    if headers:
-        client_kwargs["headers"] = headers
+    """OpenAI-compatible endpoint (vLLM / SGLang / Ollama's /v1 API).
 
-    service = ChatOllama(
+    Routes through ChatOpenAI, not the Ollama-native /api/chat path: only the
+    /v1/chat/completions protocol surfaces structured ``tool_calls`` and
+    ``reasoning_content``. The native path returns tool calls as plain text in
+    ``content``, so LangGraph never executes the tool.
+    """
+    base_url = (ai_service.endpoint or "").rstrip("/")
+    if base_url and not base_url.endswith("/v1"):
+        base_url += "/v1"
+    headers = build_ollama_auth_headers(ai_service.api_key, ai_service.endpoint)
+
+    # ponytail: verify=False mirrors the prior ChatOllama behaviour (internal
+    # self-signed endpoints); drop it if all custom endpoints use valid certs.
+    service = ChatOpenAI(
         model=ai_service.description,
         temperature=temperature,
-        base_url=ai_service.endpoint,
-        client_kwargs=client_kwargs,
+        api_key=ai_service.api_key or "dummy",
+        base_url=base_url or None,
+        default_headers=headers or None,
+        http_client=httpx.Client(verify=False),
+        http_async_client=httpx.AsyncClient(verify=False),
     )
     logger.info(f"Service: {service}")
     return service
