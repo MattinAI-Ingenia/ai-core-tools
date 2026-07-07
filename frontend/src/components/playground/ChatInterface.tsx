@@ -572,12 +572,10 @@ function ChatInterface({
     try {
       await apiService.deletePlaygroundMedia(appId, agentId, currentSessionId);
       setPlaygroundMedia([]);
-      // Revoke blob URL so the player stops
-      if (videoBlobUrlRef.current) {
-        URL.revokeObjectURL(videoBlobUrlRef.current);
-        videoBlobUrlRef.current = null;
-      }
-      setVideoBlobUrl(null);
+      // Revoke all blob URLs so the players stop
+      Object.values(videoBlobUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      videoBlobUrlsRef.current = {};
+      setVideoBlobUrls({});
     } catch (error) {
       console.error('Error deleting playground media:', error);
     }
@@ -682,51 +680,59 @@ function ChatInterface({
     return results;
   };
 
-  // Fetch video blob with auth and create object URL for the <video> element
-  const readyVideoMedia = playgroundMedia.find((m) => m.status === 'ready');
-  const [videoBlobUrl, setVideoBlobUrl] = useState<string | null>(null);
-  const videoBlobUrlRef = useRef<string | null>(null);
+  // Fetch video blobs with auth and create object URLs for the <video> elements.
+  // Supports multiple ready media items per session.
+  const readyVideoMedias = playgroundMedia.filter((m) => m.status === 'ready');
+  const [videoBlobUrls, setVideoBlobUrls] = useState<Record<number, string>>({});
+  const videoBlobUrlsRef = useRef<Record<number, string>>({});
+  // Stable dependency key so the effect only re-runs when the set of ready media changes.
+  const readyMediaIdsKey = readyVideoMedias.map((m) => m.media_id).join(',');
 
   useEffect(() => {
-    if (!readyVideoMedia || !currentSessionId) {
-      // Revoke previous blob URL when media is removed or conversation changes
-      if (videoBlobUrlRef.current) {
-        URL.revokeObjectURL(videoBlobUrlRef.current);
-        videoBlobUrlRef.current = null;
-      }
-      setVideoBlobUrl(null);
+    if (readyVideoMedias.length === 0 || !currentSessionId) {
+      // Revoke all previous blob URLs when media is removed or conversation changes
+      Object.values(videoBlobUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      videoBlobUrlsRef.current = {};
+      setVideoBlobUrls({});
       return;
     }
 
     let cancelled = false;
-    apiService
-      .fetchPlaygroundMediaBlob(appId, agentId, readyVideoMedia.media_id, currentSessionId)
-      .then((blob) => {
-        if (cancelled) return;
-        // Revoke previous URL if any
-        if (videoBlobUrlRef.current) {
-          URL.revokeObjectURL(videoBlobUrlRef.current);
-        }
-        const url = URL.createObjectURL(blob);
-        videoBlobUrlRef.current = url;
-        setVideoBlobUrl(url);
-      })
-      .catch((err) => {
-        console.error('Failed to fetch media blob:', err);
-        if (!cancelled) setVideoBlobUrl(null);
-      });
+    const currentIds = new Set(readyVideoMedias.map((m) => m.media_id));
+
+    // Revoke blob URLs for media that are no longer present
+    Object.entries(videoBlobUrlsRef.current).forEach(([id, url]) => {
+      if (!currentIds.has(Number(id))) {
+        URL.revokeObjectURL(url);
+        delete videoBlobUrlsRef.current[Number(id)];
+      }
+    });
+
+    // Fetch blobs for media not yet fetched
+    readyVideoMedias.forEach((media) => {
+      if (videoBlobUrlsRef.current[media.media_id]) return; // already fetched
+      apiService
+        .fetchPlaygroundMediaBlob(appId, agentId, media.media_id, currentSessionId)
+        .then((blob) => {
+          if (cancelled) return;
+          const url = URL.createObjectURL(blob);
+          videoBlobUrlsRef.current[media.media_id] = url;
+          setVideoBlobUrls({ ...videoBlobUrlsRef.current });
+        })
+        .catch((err) => {
+          console.error('Failed to fetch media blob:', err);
+        });
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [readyVideoMedia?.media_id, currentSessionId, appId, agentId]);
+  }, [readyMediaIdsKey, currentSessionId, appId, agentId]);
 
-  // Clean up blob URL on unmount
+  // Clean up all blob URLs on unmount
   useEffect(() => {
     return () => {
-      if (videoBlobUrlRef.current) {
-        URL.revokeObjectURL(videoBlobUrlRef.current);
-      }
+      Object.values(videoBlobUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
 
@@ -976,7 +982,7 @@ function ChatInterface({
 
                   // Agent message — skip entrance animation for the message just committed from streaming
                   const wasStreamed = message.id === lastStreamedMsgIdRef.current;
-                  const msgTimestamps = videoBlobUrl ? parseTimestamps(String(message.content)) : [];
+                  const msgTimestamps = readyVideoMedias.length > 0 ? parseTimestamps(String(message.content)) : [];
                   return (
                     <div
                       key={message.id}
@@ -989,14 +995,20 @@ function ChatInterface({
                             resolveFileUrl={resolveFileUrl}
                           />
                         </div>
-                        {msgTimestamps.length > 0 && videoBlobUrl && (
-                          <VideoPlayer
-                            videoUrl={videoBlobUrl}
-                            timestamps={msgTimestamps}
-                            title={readyVideoMedia?.name}
-                            isAudio={readyVideoMedia?.media_type === 'audio'}
-                          />
-                        )}
+                        {msgTimestamps.length > 0 &&
+                          readyVideoMedias.map((media) => {
+                            const blobUrl = videoBlobUrls[media.media_id];
+                            if (!blobUrl) return null;
+                            return (
+                              <VideoPlayer
+                                key={media.media_id}
+                                videoUrl={blobUrl}
+                                timestamps={msgTimestamps}
+                                title={media.name}
+                                isAudio={media.media_type === 'audio'}
+                              />
+                            );
+                          })}
                         <div className="mt-1">
                           <span className="text-xs text-gray-400 dark:text-gray-500">
                             {message.timestamp.toLocaleTimeString([], {
