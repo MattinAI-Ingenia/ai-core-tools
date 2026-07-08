@@ -5,6 +5,8 @@ export const DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20;
 
 // Retrieval configuration defaults (must stay in sync with the backend
 // Agent model defaults in backend/models/agent.py)
+export const DEFAULT_RETRIEVAL_SEARCH_METHOD = 'dense';
 export const DEFAULT_RETRIEVAL_SEARCH_TYPE = 'similarity';
 export const DEFAULT_RETRIEVAL_K = 30;
-export const DEFAULT_RETRIEVAL_STRATEGY = 'passthrough';
+// retrieval_strategy has no default: an empty value means no post-retrieval
+// strategy is applied (the search-method retriever is used as-is).

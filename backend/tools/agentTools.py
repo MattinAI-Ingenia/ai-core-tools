@@ -709,13 +709,16 @@ def _build_agent_retrieval_config(agent) -> dict:
     """Build silo search params from an agent's persisted retrieval config.
 
     Returns a dict with the keys understood by ``SiloService.get_silo_retriever``
-    (``search_type``, ``k``, ``strategy``, ``top_n``). Keys whose value is unset
-    are omitted so the downstream defaults still apply.
+    (``search_method``, ``search_type``, ``k``, ``strategy``, ``top_n``). Keys
+    whose value is unset are omitted so the downstream defaults still apply.
     """
     if agent is None:
         return {}
 
     config = {}
+    search_method = getattr(agent, 'retrieval_search_method', None)
+    if search_method:
+        config['search_method'] = search_method
     search_type = getattr(agent, 'retrieval_search_type', None)
     if search_type:
         config['search_type'] = search_type

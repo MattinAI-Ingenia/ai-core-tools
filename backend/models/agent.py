@@ -20,9 +20,11 @@ DEFAULT_AGENT_TEMPERATURE = 0.7
 DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20
 
 # Default retrieval configuration (per-agent RAG behaviour)
+DEFAULT_RETRIEVAL_SEARCH_METHOD = "dense"     # dense | bm25
 DEFAULT_RETRIEVAL_SEARCH_TYPE = "similarity"  # similarity | mmr | similarity_score_threshold
 DEFAULT_RETRIEVAL_K = 30                      # candidate documents fetched from the vector store
-DEFAULT_RETRIEVAL_STRATEGY = "passthrough"    # passthrough | rerank
+# retrieval_strategy has no default: when unset, no post-retrieval strategy is
+# applied (the search-method retriever is used as-is). Only 'rerank' is available.
 
 
 class AgentSkill(Base):
@@ -104,6 +106,12 @@ class Agent(Base):
     # adding a new retrieval parameter never requires a schema migration. The
     # ``retrieval_k`` / ``retrieval_top_n`` properties below keep the historical
     # flat attribute access working transparently on top of the JSON payload.
+    retrieval_search_method = Column(
+        String(45),
+        default=DEFAULT_RETRIEVAL_SEARCH_METHOD,
+        nullable=False,
+        server_default=DEFAULT_RETRIEVAL_SEARCH_METHOD,
+    )  # which search method produces the retriever (dense / bm25)
     retrieval_search_type = Column(
         String(45),
         default=DEFAULT_RETRIEVAL_SEARCH_TYPE,
@@ -112,10 +120,8 @@ class Agent(Base):
     )  # how the vector store is queried (Phase 1)
     retrieval_strategy = Column(
         String(45),
-        default=DEFAULT_RETRIEVAL_STRATEGY,
-        nullable=False,
-        server_default=DEFAULT_RETRIEVAL_STRATEGY,
-    )  # post-retrieval strategy applied to candidates (Phase 2)
+        nullable=True,
+    )  # post-retrieval strategy applied to candidates (Phase 2); None = no strategy
     retrieval_params = Column(
         JSON,
         default=dict,

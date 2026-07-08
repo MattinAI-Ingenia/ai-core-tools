@@ -1,10 +1,11 @@
 from typing import Union, List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_RETRIEVAL_SEARCH_TYPE, DEFAULT_RETRIEVAL_K, DEFAULT_RETRIEVAL_STRATEGY
+from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_RETRIEVAL_SEARCH_METHOD, DEFAULT_RETRIEVAL_SEARCH_TYPE, DEFAULT_RETRIEVAL_K
 from models.ocr_agent import OCRAgent
 from schemas.agent_schemas import AgentListItemSchema, AgentDetailSchema
 from repositories.agent_repository import AgentRepository
 from repositories.skill_repository import SkillRepository
+from tools.retrieval.search_methods.search_method_factory import SearchMethodFactory
 from tools.retrieval.strategies.strategy_factory import StrategyFactory
 
 # Vector store search types (Phase 1 — how the underlying vector DB is queried).
@@ -115,9 +116,10 @@ class AgentService:
             silo_id=getattr(agent, 'silo_id', None),
             output_parser_id=getattr(agent, 'output_parser_id', None),
             temperature=agent.temperature if agent.temperature is not None else DEFAULT_AGENT_TEMPERATURE,
+            retrieval_search_method=getattr(agent, 'retrieval_search_method', None) or DEFAULT_RETRIEVAL_SEARCH_METHOD,
             retrieval_search_type=getattr(agent, 'retrieval_search_type', None) or DEFAULT_RETRIEVAL_SEARCH_TYPE,
             retrieval_k=getattr(agent, 'retrieval_k', None) or DEFAULT_RETRIEVAL_K,
-            retrieval_strategy=getattr(agent, 'retrieval_strategy', None) or DEFAULT_RETRIEVAL_STRATEGY,
+            retrieval_strategy=getattr(agent, 'retrieval_strategy', None),
             retrieval_top_n=getattr(agent, 'retrieval_top_n', None),
             tool_ids=associations['tool_ids'],
             mcp_config_ids=associations['mcp_ids'],
@@ -139,6 +141,7 @@ class AgentService:
             mcp_configs=form_data['mcp_configs'],
             skills=form_data['skills'],
             # Retrieval option catalogs
+            retrieval_search_method_options=SearchMethodFactory.get_available_search_method_options(),
             retrieval_search_type_options=RETRIEVAL_SEARCH_TYPE_OPTIONS,
             retrieval_strategy_options=StrategyFactory.get_available_strategy_options(),
             # Marketplace
@@ -276,12 +279,16 @@ class AgentService:
 
         # Retrieval configuration — only overwrite when a value is provided so
         # partial updates keep the existing config.
+        if data.get('retrieval_search_method') is not None:
+            agent.retrieval_search_method = data['retrieval_search_method']
         if data.get('retrieval_search_type') is not None:
             agent.retrieval_search_type = data['retrieval_search_type']
         if data.get('retrieval_k') is not None:
             agent.retrieval_k = data['retrieval_k']
-        if data.get('retrieval_strategy') is not None:
-            agent.retrieval_strategy = data['retrieval_strategy']
+        # retrieval_strategy is nullable: an explicit key updates it, and an
+        # empty value clears it (None = no post-retrieval strategy).
+        if 'retrieval_strategy' in data:
+            agent.retrieval_strategy = data['retrieval_strategy'] or None
         # top_n is nullable: an explicit key (even None) updates it
         if 'retrieval_top_n' in data:
             agent.retrieval_top_n = data['retrieval_top_n']

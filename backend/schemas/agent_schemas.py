@@ -4,9 +4,9 @@ from datetime import datetime
 from models.agent import (
     DEFAULT_AGENT_TEMPERATURE,
     DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
+    DEFAULT_RETRIEVAL_SEARCH_METHOD,
     DEFAULT_RETRIEVAL_SEARCH_TYPE,
     DEFAULT_RETRIEVAL_K,
-    DEFAULT_RETRIEVAL_STRATEGY,
 )
 
 # ==================== AGENT SCHEMAS ====================
@@ -48,9 +48,10 @@ class AgentDetailSchema(BaseModel):
     output_parser_id: Optional[int] = None
     temperature: float = DEFAULT_AGENT_TEMPERATURE
     # Retrieval configuration (per-agent RAG behaviour)
+    retrieval_search_method: str = DEFAULT_RETRIEVAL_SEARCH_METHOD
     retrieval_search_type: str = DEFAULT_RETRIEVAL_SEARCH_TYPE
     retrieval_k: int = DEFAULT_RETRIEVAL_K
-    retrieval_strategy: str = DEFAULT_RETRIEVAL_STRATEGY
+    retrieval_strategy: Optional[str] = None
     retrieval_top_n: Optional[int] = None
     tool_ids: List[int] = []
     mcp_config_ids: List[int] = []
@@ -73,6 +74,7 @@ class AgentDetailSchema(BaseModel):
     mcp_configs: List[Dict[str, Any]]
     skills: List[Dict[str, Any]]
     # Retrieval option catalogs for the agent config UI
+    retrieval_search_method_options: List[Dict[str, str]] = []
     retrieval_search_type_options: List[Dict[str, str]] = []
     retrieval_strategy_options: List[Dict[str, str]] = []
     marketplace_visibility: Optional[str] = None
@@ -101,9 +103,10 @@ class CreateUpdateAgentSchema(BaseModel):
     output_parser_id: Optional[int] = None
     temperature: Optional[float] = DEFAULT_AGENT_TEMPERATURE
     # Retrieval configuration (per-agent RAG behaviour)
+    retrieval_search_method: Optional[str] = DEFAULT_RETRIEVAL_SEARCH_METHOD
     retrieval_search_type: Optional[str] = DEFAULT_RETRIEVAL_SEARCH_TYPE
     retrieval_k: Optional[int] = DEFAULT_RETRIEVAL_K
-    retrieval_strategy: Optional[str] = DEFAULT_RETRIEVAL_STRATEGY
+    retrieval_strategy: Optional[str] = None
     retrieval_top_n: Optional[int] = None
     tool_ids: Optional[List[int]] = []
     mcp_config_ids: Optional[List[int]] = []

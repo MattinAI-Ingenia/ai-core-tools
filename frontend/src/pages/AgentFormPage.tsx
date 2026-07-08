@@ -4,7 +4,7 @@ import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb,
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
-import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_RETRIEVAL_SEARCH_TYPE, DEFAULT_RETRIEVAL_K, DEFAULT_RETRIEVAL_STRATEGY } from '../constants/agentConstants';
+import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_RETRIEVAL_SEARCH_METHOD, DEFAULT_RETRIEVAL_SEARCH_TYPE, DEFAULT_RETRIEVAL_K } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
@@ -31,6 +31,7 @@ interface Agent {
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
+  retrieval_search_method?: string;
   retrieval_search_type?: string;
   retrieval_k?: number;
   retrieval_strategy?: string;
@@ -51,6 +52,7 @@ interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
+  retrieval_search_method_options?: Array<{ code: string; label: string }>;
   retrieval_search_type_options?: Array<{ code: string; label: string }>;
   retrieval_strategy_options?: Array<{ code: string; label: string }>;
 }
@@ -72,6 +74,7 @@ interface AgentFormData {
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
+  retrieval_search_method: string;
   retrieval_search_type: string;
   retrieval_k: number;
   retrieval_strategy: string;
@@ -205,9 +208,10 @@ function AgentFormPage() {
     memory_max_tokens: 4000,
     memory_summarize_threshold: DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
     temperature: DEFAULT_AGENT_TEMPERATURE,
+    retrieval_search_method: DEFAULT_RETRIEVAL_SEARCH_METHOD,
     retrieval_search_type: DEFAULT_RETRIEVAL_SEARCH_TYPE,
     retrieval_k: DEFAULT_RETRIEVAL_K,
-    retrieval_strategy: DEFAULT_RETRIEVAL_STRATEGY,
+    retrieval_strategy: '',
     tool_ids: [],
     mcp_config_ids: [],
     skill_ids: []
@@ -265,9 +269,10 @@ function AgentFormPage() {
         silo_id: response.silo_id || undefined,
         output_parser_id: response.output_parser_id || undefined,
         temperature: response.temperature ?? DEFAULT_AGENT_TEMPERATURE,
+        retrieval_search_method: response.retrieval_search_method || DEFAULT_RETRIEVAL_SEARCH_METHOD,
         retrieval_search_type: response.retrieval_search_type || DEFAULT_RETRIEVAL_SEARCH_TYPE,
         retrieval_k: response.retrieval_k ?? DEFAULT_RETRIEVAL_K,
-        retrieval_strategy: response.retrieval_strategy || DEFAULT_RETRIEVAL_STRATEGY,
+        retrieval_strategy: response.retrieval_strategy ?? '',
         retrieval_top_n: response.retrieval_top_n ?? undefined,
         tool_ids: response.tool_ids || [],
         mcp_config_ids: response.mcp_config_ids || [],
@@ -438,6 +443,7 @@ function AgentFormPage() {
       silo_id: formData.silo_id,
       output_parser_id: formData.output_parser_id,
       temperature: formData.temperature,
+      retrieval_search_method: formData.retrieval_search_method,
       retrieval_search_type: formData.retrieval_search_type,
       retrieval_k: formData.retrieval_k,
       retrieval_strategy: formData.retrieval_strategy,
@@ -810,6 +816,24 @@ function AgentFormPage() {
                           </div>
 
                           <div>
+                            <label htmlFor="retrieval_search_method" className="block text-sm font-medium text-gray-700 mb-2">
+                              Search Method
+                            </label>
+                            <select
+                              id="retrieval_search_method"
+                              value={formData.retrieval_search_method}
+                              onChange={(e) => handleInputChange('retrieval_search_method', e.target.value)}
+                              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                            >
+                              {(agent?.retrieval_search_method_options ?? []).map((option) => (
+                                <option key={option.code} value={option.code}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div>
                             <label htmlFor="retrieval_search_type" className="block text-sm font-medium text-gray-700 mb-2">
                               Search Type
                             </label>
@@ -851,6 +875,7 @@ function AgentFormPage() {
                               onChange={(e) => handleInputChange('retrieval_strategy', e.target.value)}
                               className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                             >
+                              <option value="">None (no post-retrieval strategy)</option>
                               {(agent?.retrieval_strategy_options ?? []).map((option) => (
                                 <option key={option.code} value={option.code}>
                                   {option.label}

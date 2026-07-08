@@ -10,8 +10,8 @@ The retrieval layer is built from two kinds of components, both of which are
 
 * :class:`RetrievalTransformer` — a **strategy** (a *transformer*). Given one or
   more already-built retrievers, it returns a single wrapped/combined
-  retriever. Examples: passthrough (no-op), embeddings rerank, ensemble (RRF),
-  multi-query.
+  retriever. Examples: embeddings rerank, ensemble (RRF), multi-query. When no
+  strategy is selected the pipeline returns the search-method retriever as-is.
 
 Keeping the two contracts separate (instead of forcing everything through one
 ``build_retriever(base_retriever, ...)`` signature) is what allows the

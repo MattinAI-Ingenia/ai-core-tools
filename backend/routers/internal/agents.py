@@ -387,6 +387,7 @@ async def create_or_update_agent(
         'output_parser_id': agent_data.output_parser_id,
         'temperature': agent_data.temperature,
         # Retrieval configuration (per-agent RAG behaviour)
+        'retrieval_search_method': agent_data.retrieval_search_method,
         'retrieval_search_type': agent_data.retrieval_search_type,
         'retrieval_k': agent_data.retrieval_k,
         'retrieval_strategy': agent_data.retrieval_strategy,

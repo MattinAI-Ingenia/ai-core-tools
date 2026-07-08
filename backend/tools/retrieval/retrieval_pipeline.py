@@ -8,7 +8,7 @@ Composes a final retriever from two ordered stages:
 * **Search methods** (dense, BM25, sparse, ...) each produce a retriever from
   the corpus. With more than one search method, a combining transformer
   (e.g. ensemble / RRF) is expected to fuse them.
-* **Transformers** are strategies (passthrough, rerank, ensemble, ...) applied
+* **Transformers** are strategies (rerank, ensemble, ...) applied
   left to right. Each one collapses the current list of retrievers into a new
   list (usually a single retriever) for the next transformer.
 

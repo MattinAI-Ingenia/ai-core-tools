@@ -14,7 +14,6 @@ from tools.vector_stores.vector_store_interface import VectorStoreInterface
 from tools.retrieval.retrieval_context import RetrievalContext
 from tools.retrieval.retrieval_pipeline import RetrievalPipeline
 from tools.retrieval.search_methods.search_method_factory import DEFAULT_SEARCH_METHOD
-from tools.retrieval.strategies.strategy_factory import DEFAULT_STRATEGY
 from models.silo import SiloType
 from services.output_parser_service import OutputParserService
 from langchain_core.vectorstores.base import VectorStoreRetriever
@@ -239,8 +238,13 @@ class SiloService:
             # Extract the retrieval search method (defaults to dense vector search).
             search_method_name = merged_search_kwargs.pop("search_method", None)
 
-            # Extract the retrieval strategy (defaults to passthrough = no-op).
+            # Extract the retrieval strategy. When none is selected the pipeline
+            # returns the search-method retriever unchanged (no transformer).
             strategy_name = merged_search_kwargs.pop("strategy", None)
+            # 'passthrough' was a former no-op strategy that has been removed;
+            # map any legacy persisted value to "no strategy" for compatibility.
+            if strategy_name == "passthrough":
+                strategy_name = None
 
             # Component-specific parameters must not leak into the vector store
             # search_kwargs; pull them into a separate dict for the pipeline.
@@ -262,7 +266,7 @@ class SiloService:
             )
 
             search_method_names = [search_method_name or DEFAULT_SEARCH_METHOD]
-            transformer_names = [strategy_name or DEFAULT_STRATEGY]
+            transformer_names = [strategy_name] if strategy_name else []
 
             logger.info(
                 "Silo %s retrieval pipeline -> search_method=%s, search_type='%s', "
@@ -1177,7 +1181,7 @@ class SiloService:
                 params={},
             )
             try:
-                retriever = RetrievalPipeline.build(ctx, ["bm25"], [DEFAULT_STRATEGY])
+                retriever = RetrievalPipeline.build(ctx, ["bm25"], [])
                 docs = retriever.invoke(query)
             except ValueError:
                 # Empty corpus / nothing to index — return no results.
