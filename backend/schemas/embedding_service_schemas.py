@@ -26,6 +26,7 @@ class EmbeddingServiceDetailSchema(BaseModel):
     model_name: str
     api_key: str
     base_url: str
+    api_version: Optional[str] = None
     created_at: Optional[datetime] = None
     available_providers: List[Dict[str, Any]] = []
     needs_api_key: bool = False
@@ -40,8 +41,9 @@ class CreateUpdateEmbeddingServiceSchema(BaseModel):
     model_name: str
     api_key: str
     base_url: Optional[str] = ""
+    api_version: Optional[str] = None
 
-    @field_validator("api_key", "base_url", mode="before")
+    @field_validator("api_key", "base_url", "api_version", mode="before")
     @classmethod
     def _strip_credentials(cls, v):
         # Trim whitespace/newlines that often sneak in when pasting from

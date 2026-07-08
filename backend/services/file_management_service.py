@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import uuid
 import tempfile
 import logging
@@ -11,6 +12,19 @@ from tools.PDFTools import extract_text_from_pdf, convert_pdf_to_images, check_p
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Storage strategies for uploaded files.
+# - "ephemeral": the file is only needed for the current request (e.g. a
+#   one-shot Vision agent call via public API key). It lives under
+#   ``data/tmp/ephemeral/{session_key}/`` and is removed by the caller in
+#   a ``finally`` block (or by the background cleanup worker if missed).
+# - "persistent": the file may be referenced again in later messages of the
+#   same conversation (agent has memory AND an explicit ``conversation_id``).
+#   It lives under ``data/tmp/persistent/{session_key}/`` and is removed by
+#   the background cleanup worker after TMP_PERSISTENT_TTL_DAYS of inactivity.
+STORAGE_STRATEGY_EPHEMERAL = "ephemeral"
+STORAGE_STRATEGY_PERSISTENT = "persistent"
 
 
 class FileReference:
@@ -152,10 +166,12 @@ class FileManagementService:
         app_config = get_app_config()
         self._tmp_base_folder = app_config['TMP_BASE_FOLDER']
         self._persistent_dir = os.path.join(self._tmp_base_folder, "persistent")
+        self._ephemeral_dir = os.path.join(self._tmp_base_folder, "ephemeral")
         self._temp_dir = os.path.join(self._tmp_base_folder, "uploads")
-        
+
         # Ensure directories exist
         os.makedirs(self._persistent_dir, exist_ok=True)
+        os.makedirs(self._ephemeral_dir, exist_ok=True)
         os.makedirs(self._temp_dir, exist_ok=True)
         os.makedirs(os.path.join(self._tmp_base_folder, "downloads"), exist_ok=True)
         os.makedirs(os.path.join(self._tmp_base_folder, "images"), exist_ok=True)
@@ -163,39 +179,60 @@ class FileManagementService:
         # Files will be loaded on-demand per session
     
     async def upload_file(
-        self, 
-        file: UploadFile, 
+        self,
+        file: UploadFile,
         agent_id: int,
         user_context: Dict = None,
-        conversation_id: Optional[int] = None
+        conversation_id: Optional[int] = None,
+        has_memory: bool = False,
     ) -> FileReference:
         """
-        Upload file for agent consumption
-        
+        Upload file for agent consumption.
+
+        The storage strategy is decided here based on ``has_memory`` and
+        ``conversation_id``:
+
+        - **Ephemeral** (default): no memory, or memory enabled but no
+          ``conversation_id``. The file is stored under
+          ``data/tmp/ephemeral/{session_key}/`` and the caller is expected to
+          remove it in a ``finally`` block via
+          :meth:`cleanup_ephemeral_refs`. A background sweep also reaps any
+          ephemeral file older than ``TMP_EPHEMERAL_ORPHAN_HOURS``.
+        - **Persistent**: ``has_memory=True`` AND ``conversation_id`` is set.
+          The file lives under the existing ``data/tmp/persistent/{session_key}/``
+          layout and the background worker expires it after
+          ``TMP_PERSISTENT_TTL_DAYS`` of inactivity.
+
         Args:
-            file: Uploaded file
-            agent_id: ID of the agent
-            user_context: User context (api_key, user_id, etc.)
-            conversation_id: Optional conversation ID to organize files
-            
+            file: Uploaded file.
+            agent_id: ID of the agent.
+            user_context: User context (api_key, user_id, etc.).
+            conversation_id: Optional conversation ID to organize files.
+            has_memory: Whether the target agent persists conversation state.
+                Callers MUST pass this so the storage strategy is correct;
+                defaulting to ``False`` keeps backward compatibility with
+                callers that have not been migrated yet.
+
         Returns:
-            FileReference object
+            FileReference object. The instance is decorated with two
+            attributes used by :meth:`cleanup_ephemeral_refs`:
+            ``storage_strategy`` (``"ephemeral"`` or ``"persistent"``) and
+            ``_session_key`` (used to locate the sidecar metadata).
         """
+        temp_path: Optional[str] = None
         try:
             # Validate file
             if not file.filename:
                 raise HTTPException(status_code=400, detail="No filename provided")
-            
-            # Generate unique file ID
+
             file_id = str(uuid.uuid4())
-            
-            # Determine file type
             file_type = self._get_file_type(file.filename)
-            
+
             # Process file based on type (also returns file size)
             content, temp_path, file_size = await self._process_file_content(file, file_type)
-            
-            # Create file reference with visual feedback data
+
+            storage_strategy = self._resolve_storage_strategy(has_memory, conversation_id)
+
             file_ref = FileReference(
                 file_id=file_id,
                 filename=file.filename,
@@ -203,33 +240,58 @@ class FileManagementService:
                 content=content,
                 file_path=None,  # Will be set by _save_file_to_disk
                 file_size_bytes=file_size,
-                conversation_id=str(conversation_id) if conversation_id else None
+                conversation_id=str(conversation_id) if conversation_id else None,
             )
-            
-            # Create session key for this agent, user, and conversation
-            # conversation_id ensures files are isolated per conversation
-            session_key = self._get_session_key(agent_id, user_context, str(conversation_id) if conversation_id else None)
-            
-            # Initialize session if not exists
+
+            # Session key for this agent, user, and conversation.
+            session_key = self._get_session_key(
+                agent_id,
+                user_context,
+                str(conversation_id) if conversation_id else None,
+            )
+
+            # Stamp metadata used by cleanup_ephemeral_refs and the
+            # background sweep. These attributes are not part of the public
+            # FileReference contract; they are internal annotations.
+            file_ref.storage_strategy = storage_strategy
+            file_ref._session_key = session_key
+
             if session_key not in self._files:
                 self._files[session_key] = {}
-            
-            # Save file to disk for persistence (including original file)
-            await self._save_file_to_disk(session_key, file_id, file_ref, temp_path, conversation_id)
-            
-            # Store file reference in session (after file_path is set)
+
+            await self._save_file_to_disk(
+                session_key,
+                file_id,
+                file_ref,
+                temp_path,
+                conversation_id,
+                storage_strategy=storage_strategy,
+            )
+
             self._files[session_key][file_id] = file_ref
-            
-            # Clean up temporary file after saving to persistent storage
-            if temp_path and os.path.exists(temp_path):
-                os.remove(temp_path)
-            
-            logger.info(f"Uploaded file {file.filename} for agent {agent_id}, session {session_key}")
+
+            logger.info(
+                "Uploaded file %s for agent %s, session %s (strategy=%s)",
+                file.filename, agent_id, session_key, storage_strategy,
+            )
             return file_ref
-            
+
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error uploading file: {str(e)}")
             raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+        finally:
+            # Always remove the spool file, even when the persistent copy
+            # failed (e.g. ENOSPC). Without this the temp directory leaks.
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError as cleanup_err:
+                    logger.warning(
+                        "Failed to remove temp upload %s: %s",
+                        temp_path, cleanup_err,
+                    )
     
     async def process_file_for_agent(
         self, 
@@ -297,11 +359,15 @@ class FileManagementService:
         try:
             # Get session key for this agent, user, and optionally conversation
             session_key = self._get_session_key(agent_id, user_context, conversation_id)
-            
-            # Load files for this session if not already loaded
-            if session_key not in self._files:
-                self._load_session_files(session_key)
-            
+
+            # Always re-sync from disk. The in-memory cache is per-worker, so
+            # an upload handled by worker A is invisible to worker B unless
+            # worker B re-reads the on-disk sidecars. The previous guard
+            # (only load when the key was missing) was wrong: an earlier
+            # listing on worker B would create an empty entry that then
+            # masked subsequent disk uploads.
+            self._load_session_files(session_key)
+
             # Return files for this session
             if session_key in self._files:
                 files_list = [file_ref.to_dict() for file_ref in self._files[session_key].values()]
@@ -338,11 +404,11 @@ class FileManagementService:
         try:
             # Get session key for this agent, user, and optionally conversation
             session_key = self._get_session_key(agent_id, user_context, conversation_id)
-            
-            # Load files for this session if not already loaded
-            if session_key not in self._files:
-                self._load_session_files(session_key)
-            
+
+            # Always re-sync from disk so removals work consistently across
+            # uvicorn workers (the in-memory cache is per-process).
+            self._load_session_files(session_key)
+
             if session_key in self._files and file_id in self._files[session_key]:
                 del self._files[session_key][file_id]
                 
@@ -561,17 +627,67 @@ class FileManagementService:
         else:
             return f"agent_{agent_id}_anonymous"
 
-    async def _save_file_to_disk(self, session_key: str, file_id: str, file_ref: FileReference, original_file_path: str = None, conversation_id: Optional[int] = None):
-        """Save file reference to disk for persistence"""
+    @staticmethod
+    def _resolve_storage_strategy(
+        has_memory: bool,
+        conversation_id: Optional[int],
+    ) -> str:
+        """Decide whether an upload should be stored as ephemeral or persistent.
+
+        Persistent storage is only chosen when both conditions hold:
+        - the target agent persists conversation state (``has_memory=True``)
+        - the caller supplied an explicit ``conversation_id``
+
+        Either condition missing implies the upload is for a single turn
+        only (e.g. one-shot Vision API call) and qualifies as ephemeral.
+        """
+        if has_memory and conversation_id is not None:
+            return STORAGE_STRATEGY_PERSISTENT
+        return STORAGE_STRATEGY_EPHEMERAL
+
+    async def _save_file_to_disk(
+        self,
+        session_key: str,
+        file_id: str,
+        file_ref: FileReference,
+        original_file_path: str = None,
+        conversation_id: Optional[int] = None,
+        storage_strategy: str = STORAGE_STRATEGY_PERSISTENT,
+    ):
+        """Save the uploaded file and its sidecars under the right directory.
+
+        Layout:
+
+        - ``ephemeral``: original file, ``{file_id}.json`` and
+          ``{file_id}.content`` are co-located under
+          ``ephemeral/{session_key}/`` so cleanup is a single ``rmdir``.
+        - ``persistent`` with ``conversation_id``: keeps the legacy layout —
+          original file goes to ``conversations/{conversation_id}/`` while
+          metadata sidecars stay in ``persistent/{session_key}/`` so
+          ``_load_session_files`` keeps working.
+        - ``persistent`` without ``conversation_id``: everything in
+          ``persistent/{session_key}/`` (same as before).
+        """
         try:
-            session_dir = os.path.join(self._persistent_dir, session_key)
+            base_dir = (
+                self._ephemeral_dir
+                if storage_strategy == STORAGE_STRATEGY_EPHEMERAL
+                else self._persistent_dir
+            )
+            session_dir = os.path.join(base_dir, session_key)
             os.makedirs(session_dir, exist_ok=True)
-            
+
             # Save original file FIRST (to set file_path before saving metadata)
             if original_file_path and os.path.exists(original_file_path):
-                # Determine target directory
-                if conversation_id:
-                    target_dir = os.path.join(self._tmp_base_folder, "conversations", str(conversation_id))
+                # Ephemeral files always co-locate with their sidecars; this
+                # keeps cleanup atomic. Persistent + conversation keeps the
+                # legacy `conversations/{id}/` layout.
+                if storage_strategy == STORAGE_STRATEGY_EPHEMERAL:
+                    target_dir = session_dir
+                elif conversation_id:
+                    target_dir = os.path.join(
+                        self._tmp_base_folder, "conversations", str(conversation_id),
+                    )
                 else:
                     target_dir = session_dir
 
@@ -583,7 +699,6 @@ class FileManagementService:
                 safe_filename = file_ref.filename.replace('/', '_').replace('\\', '_')
                 original_file = os.path.join(target_dir, safe_filename)
 
-                import shutil
                 shutil.copy2(original_file_path, original_file)
 
                 # Calculate relative path from TMP_BASE_FOLDER
@@ -591,53 +706,144 @@ class FileManagementService:
                 # Ensure forward slashes for URLs
                 file_ref.file_path = relative_path.replace(os.sep, '/')
 
-                logger.info(f"Saved file as '{safe_filename}' in {target_dir} (relative: {relative_path})")
+                logger.info(
+                    "Saved file as '%s' in %s (relative: %s, strategy: %s)",
+                    safe_filename, target_dir, relative_path, storage_strategy,
+                )
                 logger.info(f"FileReference file_path set to: {file_ref.file_path}")
-            
+
             # Save file metadata AFTER setting file_path
             metadata_file = os.path.join(session_dir, f"{file_id}.json")
             with open(metadata_file, 'w') as f:
                 json.dump(file_ref.to_dict(), f, indent=2)
-            
+
             # Save file content (extracted text)
             content_file = os.path.join(session_dir, f"{file_id}.content")
             with open(content_file, 'w', encoding='utf-8') as f:
                 f.write(file_ref.content)
-                
-            logger.info(f"Saved file {file_id} to disk: {session_dir}")
-            
+
+            logger.info(
+                "Saved file %s to disk: %s (strategy: %s)",
+                file_id, session_dir, storage_strategy,
+            )
+
         except Exception as e:
             logger.error(f"Error saving file to disk: {str(e)}")
 
+    async def cleanup_ephemeral_refs(self, refs: List["FileReference"]) -> None:
+        """Best-effort removal of ephemeral artifacts for a chat turn.
+
+        Idempotent: silently skips refs that are persistent, already removed,
+        or missing the internal ``_session_key`` annotation. Designed to be
+        called from a router's ``finally`` block so a single request never
+        leaks files.
+
+        Each ephemeral ref has at most three on-disk artifacts to clean:
+        the original file (via ``file_path``), the ``{file_id}.json``
+        metadata sidecar, and the ``{file_id}.content`` sidecar — all under
+        ``ephemeral/{session_key}/``. After removing the per-file artifacts
+        the session directory is removed if it becomes empty.
+        """
+        session_keys_seen: set = set()
+        removed_count = 0
+        skipped_count = 0
+        for ref in refs:
+            if getattr(ref, "storage_strategy", STORAGE_STRATEGY_PERSISTENT) != STORAGE_STRATEGY_EPHEMERAL:
+                skipped_count += 1
+                continue
+            session_key = getattr(ref, "_session_key", None)
+            file_id = ref.file_id
+            try:
+                # Original file (relative to tmp_base_folder).
+                if ref.file_path:
+                    abs_path = os.path.join(self._tmp_base_folder, ref.file_path)
+                    if os.path.isfile(abs_path):
+                        os.remove(abs_path)
+                # Sidecars live next to each other under ephemeral/{session_key}/.
+                if session_key:
+                    session_dir = os.path.join(self._ephemeral_dir, session_key)
+                    for suffix in (".json", ".content"):
+                        sidecar = os.path.join(session_dir, f"{file_id}{suffix}")
+                        if os.path.isfile(sidecar):
+                            os.remove(sidecar)
+                    session_keys_seen.add(session_key)
+                # Drop in-memory registry entry too so a subsequent
+                # list_attached_files() in the same process doesn't surface it.
+                if session_key and session_key in self._files:
+                    self._files[session_key].pop(file_id, None)
+                removed_count += 1
+            except OSError as exc:
+                logger.warning(
+                    "Best-effort ephemeral cleanup failed for %s: %s",
+                    file_id, exc,
+                )
+
+        if removed_count or skipped_count:
+            logger.info(
+                "cleanup_ephemeral_refs: removed=%d ephemeral, kept=%d persistent",
+                removed_count, skipped_count,
+            )
+
+        # Remove empty session directories so the ephemeral root stays tidy.
+        for session_key in session_keys_seen:
+            session_dir = os.path.join(self._ephemeral_dir, session_key)
+            try:
+                if os.path.isdir(session_dir) and not os.listdir(session_dir):
+                    os.rmdir(session_dir)
+            except OSError:
+                # Concurrent uploads from the same session may have re-created
+                # files inside the directory between the listdir and rmdir.
+                # The background sweep will catch this on the next pass.
+                pass
+
     def _load_session_files(self, session_key: str):
-        """Load existing files from disk for a specific session"""
+        """Load existing files from disk for a specific session.
+
+        Sidecar metadata (.json/.content) may live under either
+        ``persistent/{session_key}/`` or ``ephemeral/{session_key}/`` since
+        the storage strategy is decided per-upload. We have to look in both
+        so the visible file list survives across uvicorn workers (the
+        in-memory ``self._files`` cache is per-process, but the on-disk
+        layout is shared).
+        """
         try:
-            if not os.path.exists(self._persistent_dir):
+            session_path = None
+            loaded_strategy = STORAGE_STRATEGY_PERSISTENT
+            for base_dir, strategy in (
+                (self._persistent_dir, STORAGE_STRATEGY_PERSISTENT),
+                (self._ephemeral_dir, STORAGE_STRATEGY_EPHEMERAL),
+            ):
+                if not os.path.exists(base_dir):
+                    continue
+                candidate = os.path.join(base_dir, session_key)
+                if os.path.exists(candidate) and os.path.isdir(candidate):
+                    session_path = candidate
+                    loaded_strategy = strategy
+                    # Prefer persistent if it exists; ephemeral is only checked
+                    # when persistent does not have the session.
+                    break
+            if session_path is None:
                 return
-                
-            session_path = os.path.join(self._persistent_dir, session_key)
-            if not os.path.exists(session_path) or not os.path.isdir(session_path):
-                return
-                
+
             # Initialize session if not exists
             if session_key not in self._files:
                 self._files[session_key] = {}
-            
+
             # Load files for this session
             for filename in os.listdir(session_path):
                 if filename.endswith('.json'):
                     file_id = filename[:-5]  # Remove .json extension
                     metadata_file = os.path.join(session_path, filename)
                     content_file = os.path.join(session_path, f"{file_id}.content")
-                    
+
                     if os.path.exists(content_file):
                         try:
                             with open(metadata_file, 'r') as f:
                                 metadata = json.load(f)
-                            
+
                             with open(content_file, 'r', encoding='utf-8') as f:
                                 content = f.read()
-                            
+
                             # Recreate FileReference with visual feedback data
                             file_ref = FileReference(
                                 file_id=metadata['file_id'],
@@ -648,6 +854,13 @@ class FileManagementService:
                                 file_size_bytes=metadata.get('file_size_bytes'),
                                 conversation_id=metadata.get('conversation_id')
                             )
+                            # Re-stamp the lifecycle markers that the original
+                            # upload set on the in-memory ref. Without these
+                            # cleanup_ephemeral_refs cannot tell ephemeral
+                            # refs apart from persistent ones when the chat
+                            # happens in a later request than the upload.
+                            file_ref.storage_strategy = loaded_strategy
+                            file_ref._session_key = session_key
                             
                             # If file_path is missing, try to regenerate it
                             if not file_ref.file_path:
@@ -826,6 +1039,7 @@ class FileManagementService:
         agent_id: int,
         user_context: Dict,
         conversation_id: Optional[int],
+        has_memory: bool = False,
     ) -> List["FileReference"]:
         """Upload new files and merge with the existing attached files for a chat turn.
 
@@ -841,10 +1055,19 @@ class FileManagementService:
             agent_id: ID of the agent receiving the files.
             user_context: Caller context dict (``user_id``, ``app_id``, …).
             conversation_id: Optional conversation ID used to scope file storage.
+            has_memory: Whether the target agent persists conversation state.
+                Propagated to :meth:`upload_file` so it can pick the right
+                storage strategy. Callers should pass ``agent.has_memory``;
+                the default ``False`` keeps callers that have not been
+                migrated yet backward-compatible (their uploads will be
+                treated as ephemeral and cleaned up by the worker).
 
         Returns:
             Ordered list of :class:`FileReference` objects ready to pass to
             ``AgentExecutionService.execute_agent_chat_with_file_refs``.
+            Refs from new uploads carry a ``storage_strategy`` attribute so
+            the caller can invoke :meth:`cleanup_ephemeral_refs` in a
+            ``finally`` block.
         """
         all_refs: List[FileReference] = []
         uploaded_ids: set = set()
@@ -859,6 +1082,7 @@ class FileManagementService:
                             agent_id=agent_id,
                             user_context=user_context,
                             conversation_id=conversation_id,
+                            has_memory=has_memory,
                         )
                         all_refs.append(file_ref)
                         uploaded_ids.add(file_ref.file_id)
@@ -884,12 +1108,28 @@ class FileManagementService:
                 "Filtered to %d file(s) based on file_reference_ids", len(existing_files)
             )
 
-        # 4. Append existing files not already added via upload
+        # 4. Append existing files not already added via upload.
+        #    Prefer the in-memory FileReference (already populated by step 2's
+        #    list_attached_files -> _load_session_files): it carries the
+        #    ``storage_strategy`` and ``_session_key`` annotations that the
+        #    cleanup pass needs. Rebuilding from the dict would drop those.
+        session_key = self._get_session_key(
+            agent_id,
+            user_context,
+            str(conversation_id) if conversation_id else None,
+        )
+        cached_refs = self._files.get(session_key, {})
         for file_data in existing_files:
-            if file_data["file_id"] not in uploaded_ids:
+            file_id = file_data["file_id"]
+            if file_id in uploaded_ids:
+                continue
+            cached = cached_refs.get(file_id)
+            if cached is not None:
+                all_refs.append(cached)
+            else:
                 all_refs.append(
                     FileReference(
-                        file_id=file_data["file_id"],
+                        file_id=file_id,
                         filename=file_data["filename"],
                         file_type=file_data["file_type"],
                         content=file_data["content"],

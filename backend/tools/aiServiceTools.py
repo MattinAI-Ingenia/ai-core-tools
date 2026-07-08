@@ -1,4 +1,3 @@
-import logging
 import base64
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -17,13 +16,11 @@ from tools.outputParserTools import get_parser_model_by_id
 from typing import List
 from langchain_core.documents import Document
 from tools.embeddingTools import get_embeddings_model
+from utils.logger import get_logger
+
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Initialize VectorStore lazily when needed
 
@@ -64,6 +61,7 @@ def create_llm_from_service(ai_service, temperature=0, is_vision=False):
         ProviderEnum.Azure.value: lambda: _build_azure_llm(ai_service, temperature),
         ProviderEnum.Google.value: lambda: _build_google_llm(ai_service, temperature),
         ProviderEnum.GoogleCloud.value: lambda: _build_google_cloud_llm(ai_service, temperature),
+        ProviderEnum.OpenRouter.value: lambda: _build_openrouter_llm(ai_service, temperature),
     }
 
     # Handle case where provider might be an Enum object instead of string
@@ -119,6 +117,36 @@ def _build_openai_llm(ai_service, temperature):
         temperature=temperature,
         api_key=ai_service.api_key,
         base_url=base_url,
+    )
+
+
+# OpenRouter session-level defaults — configurable later via env vars.
+_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _build_openrouter_llm(ai_service, temperature):
+    """Build a ChatOpenAI instance pointed at OpenRouter's API.
+
+    OpenRouter speaks the OpenAI chat completions protocol, so we reuse
+    ChatOpenAI with a different base_url. The description field stores
+    the full model identifier (e.g. ``openai/gpt-4o``).
+
+    Attribution headers (HTTP-Referer, X-Title) identify MattinAI on
+    the OpenRouter platform.
+    """
+    base_url = (ai_service.endpoint or _OPENROUTER_DEFAULT_BASE_URL).rstrip("/")
+
+    default_headers = {
+        "HTTP-Referer": "https://github.com/lksnext-ai-lab/ai-core-tools",
+        "X-Title": "MattinAI",
+    }
+
+    return ChatOpenAI(
+        model=ai_service.description,
+        temperature=temperature,
+        api_key=ai_service.api_key,
+        base_url=base_url,
+        default_headers=default_headers,
     )
 
 

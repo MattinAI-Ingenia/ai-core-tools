@@ -25,12 +25,13 @@ class CrawlJob(Base):
         sa.Enum(CrawlTrigger, name='crawl_trigger', create_type=False),
         nullable=False,
     )
-    triggered_by_user_id = Column(Integer, sa.ForeignKey('User.user_id'), nullable=True)
+    triggered_by_user_id = Column(Integer, sa.ForeignKey('User.user_id', ondelete='SET NULL'), nullable=True)
 
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
 
     discovered_count = Column(Integer, nullable=False, default=0)
+    excluded_count = Column(Integer, nullable=False, default=0)
     indexed_count = Column(Integer, nullable=False, default=0)
     skipped_count = Column(Integer, nullable=False, default=0)
     removed_count = Column(Integer, nullable=False, default=0)

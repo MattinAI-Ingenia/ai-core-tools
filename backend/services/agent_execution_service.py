@@ -99,6 +99,12 @@ class AgentExecutionService:
                 db=db,
             )
 
+            # Release the sync connection to the pool during the LLM call; the
+            # agent chain uses the async checkpointer, not this session. ctx
+            # objects expire but stay attached for _finalize_turn to reload.
+            if db is not None:
+                db.commit()
+
             # Resolve temporary playground media silos for this session
             temp_silo_ids = None
             session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
@@ -1083,65 +1089,59 @@ class AgentExecutionService:
         temp_silo_ids: Optional[List[int]] = None
     ) -> Any:
         """Execute agent in FastAPI's event loop using shared checkpointer pool.
-        
+
         Returns:
             str for plain text responses, dict/Pydantic model for structured output (v1).
         """
-        import langsmith as ls
-        from tools.agentTools import create_agent, prepare_agent_config
-        from langchain.messages import HumanMessage
+        from tools.agentTools import create_agent, prepare_agent_config, build_human_message
+        from tools.langsmith_config import (
+            apply_tracing_to_config,
+            build_tracing_config,
+            resolve_langsmith_settings,
+        )
 
         mcp_client = None
         try:
             # Create the agent chain with all tools and capabilities
-            agent_chain, langsmith_config, mcp_client = await create_agent(
+            agent_chain, mcp_client = await create_agent(
                 fresh_agent, search_params, session_id_for_cache, user_context, working_dir,
                 temp_silo_ids=temp_silo_ids
             )
-            
+
             # Prepare configuration
             config = prepare_agent_config(fresh_agent)
-            
+
             # Add session-specific configuration if memory is enabled
             if fresh_agent.has_memory and session_id_for_cache:
                 config["configurable"]["thread_id"] = f"thread_{fresh_agent.agent_id}_{session_id_for_cache}"
                 logger.info(f"Using session-aware thread_id: {config['configurable']['thread_id']}")
             else:
                 config["configurable"]["thread_id"] = f"thread_{fresh_agent.agent_id}"
-            
+
             # Add the question to config
             config["configurable"]["question"] = message
-            
+
             # Build the HumanMessage (handles text-only and multimodal images)
-            from tools.agentTools import build_human_message
             message_payload = build_human_message(fresh_agent, message, image_files or [], user_context)
-            
-            if langsmith_config:
-                from langchain_core.tracers.langchain import LangChainTracer, wait_for_all_tracers
-                
+
+            # Attach LangSmith tracer + metadata when configured
+            ls_settings = resolve_langsmith_settings(fresh_agent.app)
+            if ls_settings:
+                tracer, overrides = build_tracing_config(
+                    ls_settings,
+                    agent=fresh_agent,
+                    user_context=user_context,
+                    conversation_id=None,
+                    session_id=session_id_for_cache,
+                )
+                apply_tracing_to_config(config, tracer, overrides)
                 logger.info(
-                    f"LangSmith tracing ENABLED for app '{langsmith_config['project_name']}'"
+                    "LangSmith tracing ENABLED — project='%s' source='%s'",
+                    ls_settings.project_name,
+                    ls_settings.source,
                 )
-                
-                per_app_tracer = LangChainTracer(
-                    client=langsmith_config["client"],
-                    project_name=langsmith_config["project_name"],
-                )
-                config.setdefault("callbacks", []).append(per_app_tracer)
-                
-                with ls.tracing_context(
-                    client=langsmith_config["client"],
-                    project_name=langsmith_config["project_name"],
-                    enabled=True,
-                ):
-                    result = await agent_chain.ainvoke({"messages": [message_payload]}, config=config)
-                
-                try:
-                    wait_for_all_tracers()
-                except Exception as flush_err:
-                    logger.warning(f"Error flushing LangSmith traces: {flush_err}")
-            else:
-                result = await agent_chain.ainvoke({"messages": [message_payload]}, config=config)
+
+            result = await agent_chain.ainvoke({"messages": [message_payload]}, config=config)
 
             # LangChain v1: structured output is in 'structured_response' key
             # when create_agent is called with response_format=pydantic_model

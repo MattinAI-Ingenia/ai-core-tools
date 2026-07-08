@@ -14,22 +14,24 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# Fix for Windows: psycopg requires SelectorEventLoop instead of ProactorEventLoop
+# psycopg requires SelectorEventLoop on Windows (not ProactorEventLoop).
 import sys
 import asyncio
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
+import errno
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from scalar_fastapi import get_scalar_api_reference
 import os
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from config import CLIENT_CONFIG
 
 from models.app import App
@@ -57,22 +59,20 @@ from lks_idprovider_fastapi.dependencies import get_default_provider
 
 from utils.logger import get_logger
 from utils.auth_config import AuthConfig
+from utils.secret_key import validate_secret_key
 from deployment_mode import is_saas_mode, validate_saas_env
 
 logger = get_logger(__name__)
 
-# ==================== LIFESPAN CONTEXT MANAGER ====================
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan (startup and shutdown)"""
-    # Startup
+    """Application lifespan: startup and shutdown."""
     try:
-        # Validate SaaS mode environment variables early (before anything else)
+        validate_secret_key()
+
         if is_saas_mode():
             validate_saas_env()
             logger.info("SaaS mode: environment validation passed")
-            # Seed default tier configs
             from db.database import SessionLocal
             from services.tier_config_seeder import seed_default_tier_configs
             _db = SessionLocal()
@@ -81,10 +81,8 @@ async def lifespan(app: FastAPI):
             finally:
                 _db.close()
 
-        # Load authentication configuration
         AuthConfig.load_config()
-        
-        # Only initialize EntraID provider if using OIDC mode
+
         if AuthConfig.LOGIN_MODE == "OIDC":
             logger.info("🔐 Initializing EntraID provider for OIDC authentication")
             await initialize_provider()
@@ -98,7 +96,6 @@ async def lifespan(app: FastAPI):
                 "EntraID provider NOT initialized (development/testing only)"
             )
         
-        # Load plugins via entry points
         from plugins.registry import plugin_registry
         app.state.plugin_registry = plugin_registry
         import importlib.metadata
@@ -109,14 +106,41 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Failed to load plugin '{ep.name}': {e}", exc_info=True)
 
-        # Initialize checkpointer connection pool for LangGraph agent memory
+        if AuthConfig.LOGIN_MODE == "LOCAL":
+            from db.database import SessionLocal as _SessionLocal
+            from services.auth.omniadmin_bootstrap import bootstrap_omniadmins
+            _bootstrap_db = _SessionLocal()
+            try:
+                await bootstrap_omniadmins(_bootstrap_db)
+            except Exception as _bootstrap_exc:
+                logger.error(
+                    "omniadmin_bootstrap: unexpected error during startup bootstrap — %s",
+                    _bootstrap_exc,
+                    exc_info=True,
+                )
+            finally:
+                _bootstrap_db.close()
+
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.initialize_pool()
+
+        # Ensure vector-store backend tables exist before any background workers run.
+        # Best-effort: try once and log warnings on failure; do not break startup.
+        try:
+            from db.database import db as db_obj
+            from tools.vector_store_factory import VectorStoreFactory
+            VectorStoreFactory.get_vector_store(db_obj)
+            logger.info("VectorStoreFactory: ensured backend readiness at startup")
+        except Exception as _vs_exc:
+            logger.warning("VectorStoreFactory startup readiness check failed: %s", _vs_exc)
 
         # Start crawl workers (job executor + scheduler)
         from services.crawl.worker import start_crawl_workers, stop_crawl_workers
         crawl_tasks = await start_crawl_workers(app)
         app.state.crawl_tasks = crawl_tasks
+
+        from services.file_cleanup_worker import start_file_cleanup_worker
+        app.state.file_cleanup_task = start_file_cleanup_worker()
 
         print("✅ Application startup complete")
     except Exception as e:
@@ -126,15 +150,17 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     try:
-        # Stop crawl workers gracefully
         crawl_tasks = getattr(app.state, 'crawl_tasks', None)
         if crawl_tasks:
             from services.crawl.worker import stop_crawl_workers
             await stop_crawl_workers(crawl_tasks)
 
-        # Stop SharePoint sync workers gracefully (if plugin installed)
+        file_cleanup_task = getattr(app.state, 'file_cleanup_task', None)
+        if file_cleanup_task is not None:
+            from services.file_cleanup_worker import stop_file_cleanup_worker
+            await stop_file_cleanup_worker(file_cleanup_task)
+
         sharepoint_tasks = getattr(app.state, 'sharepoint_tasks', None)
         if sharepoint_tasks:
             try:
@@ -143,11 +169,16 @@ async def lifespan(app: FastAPI):
             except ImportError:
                 pass
 
-        # Close checkpointer connection pool
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.close_pool()
 
-        # Only shutdown provider if it was initialized (OIDC mode)
+        try:
+            from tools.langsmith_config import flush_langsmith_clients, clear_client_cache
+            flush_langsmith_clients()
+            clear_client_cache()
+        except Exception as exc:
+            logger.warning("LangSmith flush during shutdown failed: %s", exc)
+
         if AuthConfig.LOGIN_MODE == "OIDC":
             await shutdown_provider()
             logger.info("✅ EntraID provider shutdown complete")
@@ -164,9 +195,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Secure static files serving
-# This allows accessing uploaded images via URL (e.g. for multimodal models)
-# We serve files from TMP_BASE_FOLDER (default: data/tmp) at /static with signature verification
 from utils.config import get_app_config
 from utils.security import verify_signature
 
@@ -176,55 +204,44 @@ os.makedirs(tmp_base_folder, exist_ok=True)
 
 @app.get("/static/{file_path:path}")
 async def get_static_file(file_path: str, user: str = None, sig: str = None, filename: str = None):
-    # Verify signature
     if not user or not sig or not verify_signature(file_path, user, sig):
         raise HTTPException(status_code=403, detail="Invalid signature or missing parameters")
 
-    # Prevent directory traversal - check for .. sequences
-    if ".." in file_path:
+    if ".." in file_path:  # directory traversal guard
         raise HTTPException(status_code=403, detail="Invalid path")
 
-    # Strip leading slashes to prevent absolute path injection
-    # os.path.join("data/tmp", "/etc/passwd") would return "/etc/passwd" otherwise
+    # os.path.join ignores the base when the suffix starts with '/' — strip it.
     file_path = file_path.lstrip("/\\")
 
-    # Build full path and resolve to absolute
     full_path = os.path.abspath(os.path.join(tmp_base_folder, file_path))
     base_path = os.path.abspath(tmp_base_folder)
 
-    # Verify the resolved path is within the allowed directory
     if not full_path.startswith(base_path + os.sep) and full_path != base_path:
         raise HTTPException(status_code=403, detail="Invalid path")
 
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Use original filename for Content-Disposition if provided, else use path basename
     download_filename = filename or os.path.basename(full_path)
     return FileResponse(full_path, filename=download_filename)
 
 
-# ==================== CORS MIDDLEWARE ====================
-
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-
-# Load auth config to check login mode
 AuthConfig.load_config()
 
 cors_origins = [
-    FRONTEND_URL,  # Main frontend URL from environment
-    os.getenv('CORS_ORIGIN_DEV_SERVER', 'http://localhost:5173'),  # React dev server
-    os.getenv('CORS_ORIGIN_DEV_SERVER_ALT', 'http://127.0.0.1:5173'),  # Alternative localhost
-    os.getenv('CORS_ORIGIN_DOCKER', 'http://localhost:3000'),  # Docker frontend
-    os.getenv('CORS_ORIGIN_DOCKER_ALT', 'http://127.0.0.1:3000'),  # Alternative localhost for Docker
+    FRONTEND_URL,
+    os.getenv('CORS_ORIGIN_DEV_SERVER', 'http://localhost:5173'),
+    os.getenv('CORS_ORIGIN_DEV_SERVER_ALT', 'http://127.0.0.1:5173'),
+    os.getenv('CORS_ORIGIN_DOCKER', 'http://localhost:3000'),
+    os.getenv('CORS_ORIGIN_DOCKER_ALT', 'http://127.0.0.1:3000'),
 ]
 
-# In non-OIDC modes (FAKE, etc.), allow additional dev ports for easier testing
 if AuthConfig.LOGIN_MODE != "OIDC":
     cors_origins.extend([
-        os.getenv('CORS_ORIGIN_DEV_8080', 'http://localhost:8080'),  # Additional dev ports
+        os.getenv('CORS_ORIGIN_DEV_8080', 'http://localhost:8080'),
         os.getenv('CORS_ORIGIN_DEV_8080_ALT', 'http://127.0.0.1:8080'),
-        os.getenv('CORS_ORIGIN_VITE_PREVIEW', 'http://localhost:4173'),  # Vite preview
+        os.getenv('CORS_ORIGIN_VITE_PREVIEW', 'http://localhost:4173'),
         os.getenv('CORS_ORIGIN_VITE_PREVIEW_ALT', 'http://127.0.0.1:4173'),
     ])
 
@@ -232,19 +249,53 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+
+@app.exception_handler(OSError)
+async def _oserror_handler(_request: Request, exc: OSError) -> JSONResponse:
+    """Surface disk-full conditions to clients as 507 Insufficient Storage.
+
+    Without this handler, ``OSError(ENOSPC)`` leaking out of a handler
+    becomes an opaque 500 ("Internal server error") that doesn't tell the
+    operator what's actually wrong. Other ``OSError`` codes (permission,
+    not-found, …) fall through to the framework default.
+    """
+    if exc.errno == errno.ENOSPC:
+        logger.error("Server storage exhausted (ENOSPC): %s", exc)
+        return JSONResponse(
+            status_code=507,
+            content={
+                "detail": (
+                    "Server storage exhausted. The operator must free disk "
+                    "space on the host before retrying."
+                )
+            },
+        )
+    raise exc
+
+
+@app.exception_handler(SQLAlchemyPoolTimeout)
+async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout) -> JSONResponse:
+    """Map DB connection-pool exhaustion to 503 with Retry-After instead of an opaque 500."""
+    logger.error("Database connection pool exhausted: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Service temporarily unavailable, please retry shortly."},
+        headers={"Retry-After": "5"},
+    )
+
 
 # Mount routers - clean structure with no nesting
 app.include_router(internal_router, prefix="/internal")
 app.include_router(public_v1_router, prefix="/public/v1")
 app.include_router(mcp_router, prefix="/mcp/v1", tags=["MCP"])
 
-# Add client config endpoint
 @app.get("/api/internal/client-config")
 async def get_client_config():
-    """Get client configuration for frontend"""
+    """Return client configuration for the frontend."""
     return {
         "client_id": CLIENT_CONFIG.client_id,
         "client_name": CLIENT_CONFIG.client_name,
@@ -252,8 +303,6 @@ async def get_client_config():
         "oidc_authority": CLIENT_CONFIG.oidc_authority,
         "oidc_client_id": CLIENT_CONFIG.oidc_client_id
     }
-
-# ==================== CUSTOM OPENAPI DOCS ====================
 
 _openapi_internal_schema = None
 _openapi_public_schema = None
@@ -302,7 +351,7 @@ def get_openapi_public():
 
 @app.get("/docs/internal", include_in_schema=False)
 async def internal_docs():
-    """Swagger UI for internal API"""
+    """Swagger UI for the internal API."""
     from fastapi.openapi.docs import get_swagger_ui_html
     return get_swagger_ui_html(
         openapi_url=os.getenv('INTERNAL_DOCS_OPENAPI_URL', '/openapi-internal.json'),
@@ -311,7 +360,7 @@ async def internal_docs():
 
 @app.get("/docs/public", include_in_schema=False)
 async def public_docs():
-    """Swagger UI for public API"""
+    """Swagger UI for the public API."""
     from fastapi.openapi.docs import get_swagger_ui_html
     return get_swagger_ui_html(
         openapi_url=os.getenv('PUBLIC_DOCS_OPENAPI_URL', '/openapi-public.json'),
@@ -320,18 +369,15 @@ async def public_docs():
 
 @app.get("/openapi-internal.json", include_in_schema=False)
 async def internal_openapi():
-    """OpenAPI JSON for internal API"""
     return get_openapi_internal()
 
 @app.get("/openapi-public.json", include_in_schema=False)
 async def public_openapi():
-    """OpenAPI JSON for public API"""
     return get_openapi_public()
 
-# ==================== SCALAR API REFERENCE ====================
 @app.get("/scalar", include_in_schema=False)
 async def scalar_html():
-    """Scalar API Reference documentation"""
+    """Scalar API reference."""
     return get_scalar_api_reference(
         openapi_url=app.openapi_url,
         title=f"{CLIENT_CONFIG.client_name} API Reference"

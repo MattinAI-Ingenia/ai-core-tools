@@ -4,11 +4,14 @@ import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb,
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
-import { DEFAULT_AGENT_TEMPERATURE } from '../constants/agentConstants';
+import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
 import type { TabItem } from '../components/ui/Tabs';
+import RagConfigSection, { SCORE_THRESHOLD_REQUIRED_MSG } from '../components/forms/RagConfigSection';
+import type { RagConfigValue, RagFixedFilter, RagSearchType } from '../components/forms/RagConfigSection';
+import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
 import type { AgentMCPUsage } from '../core/types';
 import type { MarketplaceVisibility, MarketplaceProfileUpdate } from '../types/marketplace';
 import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
@@ -41,6 +44,12 @@ interface Agent {
   vision_service_id?: number;
   vision_system_prompt?: string;
   text_system_prompt?: string;
+  // RAG retrieval config
+  rag_k?: number;
+  rag_search_type?: RagSearchType;
+  rag_score_threshold?: number | null;
+  rag_max_retrieval_calls?: number | null;
+  rag_fixed_filters?: RagFixedFilter[];
   ai_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
@@ -69,17 +78,16 @@ interface AgentFormData {
   tool_ids: number[];
   mcp_config_ids: number[];
   skill_ids: number[];
-  retrieval_config: {
-    search_type: string;
-    k: number;
-    fetch_k: number;
-    lambda_mult: number;
-    score_threshold: number | null;
-  } | null;
   // OCR-specific fields
   vision_service_id?: number;
   vision_system_prompt?: string;
   text_system_prompt?: string;
+  // RAG retrieval config
+  rag_k: number;
+  rag_search_type: RagSearchType;
+  rag_score_threshold: number | null;
+  rag_max_retrieval_calls: number | null;
+  rag_fixed_filters: RagFixedFilter[];
 }
 
 // Output Parser Field Component
@@ -99,6 +107,7 @@ const OutputParserField = ({
   <div>
     <div className="flex items-center mb-2">
       <input
+        id="output_parser_toggle"
         type="checkbox"
         checked={showOutputParser}
         onChange={(e) => {
@@ -109,7 +118,7 @@ const OutputParserField = ({
         }}
         className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
       />
-      <span className="ml-2 text-sm font-medium text-gray-700">Data Structure</span>
+      <label htmlFor="output_parser_toggle" className="ml-2 text-sm font-medium text-gray-700">Data Structure</label>
     </div>
 
     {showOutputParser && (
@@ -192,7 +201,7 @@ function AgentFormPage() {
     name: '',
     description: '',
     system_prompt: '',
-    prompt_template: '',
+    prompt_template: '{question}',
     type: 'agent',
     is_tool: false,
     has_memory: false,
@@ -200,14 +209,20 @@ function AgentFormPage() {
     server_tools: [],
     memory_max_messages: 20,
     memory_max_tokens: 4000,
-    memory_summarize_threshold: 4000,
+    memory_summarize_threshold: DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
     temperature: DEFAULT_AGENT_TEMPERATURE,
     tool_ids: [],
     mcp_config_ids: [],
     skill_ids: [],
-    retrieval_config: null
+    rag_k: 10,
+    rag_search_type: 'similarity',
+    rag_score_threshold: null,
+    rag_max_retrieval_calls: 4,
+    rag_fixed_filters: []
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
+  const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
+  const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
 
   // Marketplace state
   const [showMarketplace, setShowMarketplace] = useState(false);
@@ -233,6 +248,31 @@ function AgentFormPage() {
     }
   }, [appId, agentId]);
 
+  // Load the selected silo's metadata fields to power the fixed-filter editor.
+  useEffect(() => {
+    const siloId = formData.silo_id;
+    if (!appId || !siloId) {
+      setSiloMetadataFields([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingSiloMetadata(true);
+    apiService
+      .getSilo(Number.parseInt(appId), siloId)
+      .then((silo) => {
+        if (!cancelled) setSiloMetadataFields(silo?.metadata_fields ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setSiloMetadataFields([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSiloMetadata(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, formData.silo_id]);
+
   async function loadAgentData() {
     if (!appId || !agentId) return;
 
@@ -255,7 +295,7 @@ function AgentFormPage() {
         server_tools: response.server_tools || [],
         memory_max_messages: response.memory_max_messages || 20,
         memory_max_tokens: response.memory_max_tokens || 4000,
-        memory_summarize_threshold: response.memory_summarize_threshold || 4000,
+        memory_summarize_threshold: response.memory_summarize_threshold || DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
         service_id: response.service_id || undefined,
         silo_id: response.silo_id || undefined,
         output_parser_id: response.output_parser_id || undefined,
@@ -263,11 +303,19 @@ function AgentFormPage() {
         tool_ids: response.tool_ids || [],
         mcp_config_ids: response.mcp_config_ids || [],
         skill_ids: response.skill_ids || [],
-        retrieval_config: response.retrieval_config || null,
         // OCR-specific fields
         vision_service_id: response.vision_service_id || undefined,
         vision_system_prompt: response.vision_system_prompt || '',
-        text_system_prompt: response.text_system_prompt || ''
+        text_system_prompt: response.text_system_prompt || '',
+        // RAG retrieval config
+        rag_k: response.rag_k ?? 10,
+        rag_search_type: response.rag_search_type ?? 'similarity',
+        rag_score_threshold: response.rag_score_threshold ?? null,
+        rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
+        rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
+          ...f,
+          _key: Math.random().toString(36).slice(2),
+        }))
       });
 
       // Set output parser toggle based on whether agent has an output parser
@@ -413,6 +461,22 @@ function AgentFormPage() {
 
     if (!appId || !agentId) return;
 
+    const hasSilo = !!formData.silo_id;
+    const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
+
+    // Mirror the backend invariant: a threshold strategy needs a threshold value.
+    if (usesThreshold && formData.rag_score_threshold == null) {
+      setActiveTab('configuration');
+      setError(SCORE_THRESHOLD_REQUIRED_MSG);
+      return;
+    }
+
+    // Drop incomplete filter rows and the editor-only _key; clear the threshold unless the
+    // threshold strategy is selected so we never persist a dead value.
+    const cleanedFilters: RagFixedFilter[] = formData.rag_fixed_filters
+      .filter((f) => f.field && (Array.isArray(f.value) ? f.value.length > 0 : String(f.value ?? '').trim() !== ''))
+      .map(({ _key, ...rest }) => rest);
+
     const submitData = {
       name: formData.name,
       description: formData.description,
@@ -437,6 +501,12 @@ function AgentFormPage() {
       vision_service_id: formData.vision_service_id,
       vision_system_prompt: formData.vision_system_prompt,
       text_system_prompt: formData.text_system_prompt,
+      // RAG retrieval config (full-replace; only meaningful with a silo)
+      rag_k: formData.rag_k,
+      rag_search_type: formData.rag_search_type,
+      rag_score_threshold: usesThreshold ? formData.rag_score_threshold : null,
+      rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+      rag_fixed_filters: hasSilo ? cleanedFilters : [],
       app_id: Number.parseInt(appId),
     };
 
@@ -460,7 +530,6 @@ function AgentFormPage() {
         tool_ids: formData.tool_ids,
         mcp_config_ids: formData.mcp_config_ids,
         skill_ids: formData.skill_ids,
-        retrieval_config: formData.retrieval_config,
         // OCR-specific fields
         vision_service_id: formData.vision_service_id,
         vision_system_prompt: formData.vision_system_prompt,
@@ -816,131 +885,6 @@ function AgentFormPage() {
                         </select>
                       </div>
 
-                      {/* Retrieval Settings - only shown when a silo is selected */}
-                      {formData.silo_id && (
-                        <div className="border-t border-gray-200 pt-6">
-                          <div className="flex items-center mb-6">
-                            <div className="w-10 h-10 bg-green-100 rounded-xl flex items-center justify-center mr-4">
-                              <Search className="w-5 h-5 text-green-600" />
-                            </div>
-                            <div className="flex-1">
-                              <h3 className="text-lg font-semibold text-gray-900">Retrieval Settings</h3>
-                              <p className="text-sm text-gray-600 mt-1">Configure how this agent retrieves documents from the knowledge base</p>
-                            </div>
-                          </div>
-
-                          <div className="space-y-6">
-                            <div>
-                              <label htmlFor="search_type" className="block text-sm font-medium text-gray-700 mb-2">
-                                Search Strategy
-                              </label>
-                              <select
-                                id="search_type"
-                                value={formData.retrieval_config?.search_type ?? 'similarity'}
-                                onChange={(e) => handleInputChange('retrieval_config', {
-                                  ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                  search_type: e.target.value
-                                })}
-                                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                              >
-                                <option value="similarity">Similarity (default)</option>
-                                <option value="mmr">MMR — Max Marginal Relevance (diverse results)</option>
-                                <option value="similarity_score_threshold">Score Threshold (precision)</option>
-                              </select>
-                              <p className="text-xs text-gray-500 mt-1">MMR reduces redundancy; Score Threshold filters low-quality matches</p>
-                            </div>
-
-                            <div>
-                              <label htmlFor="retrieval_k" className="block text-sm font-medium text-gray-700 mb-2">
-                                Documents to Retrieve (k)
-                              </label>
-                              <input
-                                type="number"
-                                id="retrieval_k"
-                                min={1}
-                                max={200}
-                                value={formData.retrieval_config?.k ?? 30}
-                                onChange={(e) => handleInputChange('retrieval_config', {
-                                  ...{ search_type: 'similarity', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                  k: Number.parseInt(e.target.value)
-                                })}
-                                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                              />
-                              <p className="text-xs text-gray-500 mt-1">Number of documents the retriever will return per query (1–200, default 30)</p>
-                            </div>
-
-                            {/* MMR-specific fields */}
-                            {(formData.retrieval_config?.search_type ?? 'similarity') === 'mmr' && (
-                              <>
-                                <div>
-                                  <label htmlFor="fetch_k" className="block text-sm font-medium text-gray-700 mb-2">
-                                    Fetch K (MMR candidate pool)
-                                  </label>
-                                  <input
-                                    type="number"
-                                    id="fetch_k"
-                                    min={1}
-                                    value={formData.retrieval_config?.fetch_k ?? 100}
-                                    onChange={(e) => handleInputChange('retrieval_config', {
-                                      ...{ search_type: 'mmr', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                      fetch_k: Number.parseInt(e.target.value)
-                                    })}
-                                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                  />
-                                  <p className="text-xs text-gray-500 mt-1">Candidates fetched before diversity re-ranking (should be &gt; k)</p>
-                                </div>
-
-                                <div>
-                                  <label htmlFor="lambda_mult" className="block text-sm font-medium text-gray-700 mb-2">
-                                    Diversity (λ): {(formData.retrieval_config?.lambda_mult ?? 0.5).toFixed(2)}
-                                  </label>
-                                  <input
-                                    type="range"
-                                    id="lambda_mult"
-                                    min={0}
-                                    max={1}
-                                    step={0.05}
-                                    value={formData.retrieval_config?.lambda_mult ?? 0.5}
-                                    onChange={(e) => handleInputChange('retrieval_config', {
-                                      ...{ search_type: 'mmr', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: null, ...formData.retrieval_config },
-                                      lambda_mult: Number.parseFloat(e.target.value)
-                                    })}
-                                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                  />
-                                  <div className="flex justify-between text-xs text-gray-500 mt-1">
-                                    <span>0 — Max diversity</span>
-                                    <span>1 — Max relevance</span>
-                                  </div>
-                                </div>
-                              </>
-                            )}
-
-                            {/* Score threshold field */}
-                            {(formData.retrieval_config?.search_type ?? 'similarity') === 'similarity_score_threshold' && (
-                              <div>
-                                <label htmlFor="score_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-                                  Score Threshold
-                                </label>
-                                <input
-                                  type="number"
-                                  id="score_threshold"
-                                  min={0}
-                                  max={1}
-                                  step={0.01}
-                                  value={formData.retrieval_config?.score_threshold ?? 0.7}
-                                  onChange={(e) => handleInputChange('retrieval_config', {
-                                    ...{ search_type: 'similarity_score_threshold', k: 30, fetch_k: 100, lambda_mult: 0.5, score_threshold: 0.7, ...formData.retrieval_config },
-                                    score_threshold: Number.parseFloat(e.target.value)
-                                  })}
-                                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                                />
-                                <p className="text-xs text-gray-500 mt-1">Only return documents with similarity &ge; this value (0–1)</p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
                       <div>
                         <label htmlFor="temperature" className="block text-sm font-medium text-gray-700 mb-2">
                           Temperature
@@ -976,6 +920,24 @@ function AgentFormPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* RAG retrieval config — only meaningful when a silo is selected */}
+                  {formData.silo_id && (
+                    <RagConfigSection
+                      value={{
+                        rag_k: formData.rag_k,
+                        rag_search_type: formData.rag_search_type,
+                        rag_score_threshold: formData.rag_score_threshold,
+                        rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+                        rag_fixed_filters: formData.rag_fixed_filters,
+                      }}
+                      onChange={(patch: Partial<RagConfigValue>) =>
+                        setFormData((prev) => ({ ...prev, ...patch }))
+                      }
+                      metadataFields={siloMetadataFields}
+                      loadingMetadata={loadingSiloMetadata}
+                    />
+                  )}
 
                   {/* Agent Capabilities Card */}
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
@@ -1127,7 +1089,7 @@ function AgentFormPage() {
                           const toggle = () => handleInputChange(
                             'server_tools',
                             active
-                              ? formData.server_tools.filter(t => t === tool.id)
+                              ? formData.server_tools.filter(t => t !== tool.id)
                               : [...formData.server_tools, tool.id]
                           );
                           return (

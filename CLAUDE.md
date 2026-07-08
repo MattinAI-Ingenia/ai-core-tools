@@ -8,6 +8,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Tech Stack**: Python 3.11+, FastAPI, SQLAlchemy, Alembic, LangChain/LangGraph, PostgreSQL + pgvector, React 18, TypeScript, Vite, Tailwind CSS.
 
+## Claude Code Agent System (`.claude/`)
+
+This repo ships a native **Claude Code** multi-agent system under [`.claude/`](.claude/README.md) — separate from and parallel to the `.github/` GitHub Copilot ecosystem (the two never modify each other). It provides spec-driven development, issue resolution, full-stack implementation experts, and a **self-correcting review board** that audits every change before it is committed.
+
+Because Claude Code subagents cannot spawn other subagents, the **main conversation orchestrates**: a slash-command spawns specialist subagents, runs auditors in parallel on the diff, loops expert ⇄ auditors until the change converges, then commits behind confirmation gates.
+
+**Entry commands:** `/spec` · `/plan` · `/implement` · `/solve-issue` · `/fix` · `/review` · `/production-audit` · `/ship` · `/new-agent`.
+**21 agents** (research · discovery/spec/plan · 7 implementation experts · 8-auditor review board incl. a `reliability-auditor` for concurrency / fault tolerance / isolation · system maintenance), **4 shared skills** (incl. a `production-standards` best-practice rubric), and **PowerShell hooks** (secret guards + frontend eslint + session context).
+
+Full roster, delegation graph, and conventions: **[`.claude/README.md`](.claude/README.md)**. Specs live (untracked) under `.claude/specs/`.
+
 ## Development Commands
 
 ### Backend
@@ -94,7 +105,7 @@ docker compose down -v           # Parar y borrar volúmenes
 | **Agent** | Core AI agent. Configured with system prompt, LLM (AIService), optional RAG (Silo), memory settings, output parser, skills, and MCP tool configs. Agents with `is_tool=True` can be used as tools by other agents. |
 | **OCRAgent** | Agent subclass (STI via `type` column). Dual-LLM: vision model for scanned pages + text model for structuring output. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom). |
-| **EmbeddingService** | Embedding model config for vector stores. |
+| **EmbeddingService** | Embedding model config for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
 | **Skill** | Reusable markdown prompt block attached to agents (M:N). Injected into system prompt at execution time. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Dynamically generates a Pydantic model at runtime. |
 | **Conversation** | Chat session. Memory state in LangGraph's PostgreSQL checkpointer; metadata in Conversation table. |
@@ -194,8 +205,11 @@ cd ../clients/<client-name> && npm install
 
 ```env
 SQLALCHEMY_DATABASE_URI=postgresql://user:pass@localhost:5432/dbname
-AICT_LOGIN=FAKE                 # FAKE (dev) | LOCAL (SaaS email+password) | OIDC (production)
-SECRET_KEY=your-secret-key
+AICT_LOGIN=OIDC                 # OIDC (Microsoft Entra, default) | LOCAL (admin-provisioned email+password)
+                                # FAKE mode is retired — the dev-login endpoint no longer exists.
+SECRET_KEY=                     # REQUIRED. No default. App fails fast if missing, too short (<32 chars),
+                                # or a known-insecure placeholder. Rotating this key invalidates ALL sessions.
+                                # Generate: python -c "import secrets; print(secrets.token_hex(32))"
 AICT_OMNIADMINS=admin@example.com
 
 OPENAI_API_KEY=sk-...
@@ -209,6 +223,24 @@ QDRANT_URL=http://localhost:6333
 ENTRA_TENANT_ID=...
 ENTRA_CLIENT_ID=...
 ENTRA_CLIENT_SECRET=...
+
+# LOCAL mode tuning (all optional — defaults shown)
+# AUTH_COOKIE_SECURE=true       # Set false ONLY for plain-HTTP local dev
+# LOCAL_ACCESS_TTL_MINUTES=15
+# LOCAL_REFRESH_TTL_DAYS=14
+# LOCAL_LOCKOUT_THRESHOLD=5
+# LOCAL_LOCKOUT_BASE_SECONDS=60
+# LOCAL_TOKEN_LEEWAY_SECONDS=30
+# LOCAL_SET_PASSWORD_TOKEN_MAX_AGE_HOURS=48
+
+# SMTP for LOCAL mode set-password emails (both vars required to enable; omitting uses NoopSender)
+# SMTP_HOST=smtp.example.com
+# SMTP_PORT=587
+# SMTP_USER=...
+# SMTP_PASSWORD=...             # Never logged
+# SMTP_TLS=true
+# SMTP_FROM=no-reply@example.com
+# SMTP_TIMEOUT_SECONDS=10
 
 # Optional
 LANGSMITH_TRACING=false
@@ -235,7 +267,7 @@ Local dev: port 5173 (Vite). Docker: port 3000.
 - **Multimodal chat**: Agents accept images (base64 or signed static URLs)
 - **Secure static files**: `/static/{path}` requires cryptographic signature
 - **Cascade deletion**: `AppService.delete_app()` performs ordered deletion across all entity types
-- **LangSmith tracing**: Optional per-app tracing via `App.langsmith_api_key`
+- **LangSmith tracing**: Per-App key in `App.langsmith_api_key` (project = app name) with optional global env-var fallback (`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` + `LANGSMITH_PROJECT`). Validated via `POST /internal/apps/{id}/langsmith/test`. Central module: `backend/tools/langsmith_config.py`
 - **MCP dual-role**: Mattin AI acts as both MCP server (exposing agents) and MCP client (consuming external tool servers)
 
 ## Anti-Patterns

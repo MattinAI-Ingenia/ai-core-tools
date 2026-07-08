@@ -1,6 +1,6 @@
 from typing import Optional
 from sqlalchemy.orm import Session, joinedload, selectinload
-from models.agent import Agent, AgentTool, AgentSkill
+from models.agent import Agent, AgentTool, AgentSkill, AgentMCP
 from models.ocr_agent import OCRAgent
 from models.silo import Silo
 from models.output_parser import OutputParser
@@ -25,12 +25,13 @@ class AgentExecutionRepository:
         - Lazy loading issues in async contexts
         
         This is critical when agents use other agents as tools, as the tool agents
-        also need their relationships (ai_service, silo, tool_associations) loaded.
+        also need their relationships (ai_service, silo, tool_associations,
+        mcp_associations) loaded.
         """
         agent = db.query(Agent).options(
             # Main agent relationships
             joinedload(Agent.silo).joinedload(Silo.embedding_service),
-            joinedload(Agent.mcp_associations),
+            joinedload(Agent.mcp_associations).joinedload(AgentMCP.mcp),
             joinedload(Agent.ai_service),
             joinedload(Agent.output_parser),
             joinedload(Agent.app),
@@ -39,6 +40,7 @@ class AgentExecutionRepository:
             # Tool agents and their relationships (critical for IACTTool)
             selectinload(Agent.tool_associations).joinedload(AgentTool.tool).joinedload(Agent.ai_service),
             selectinload(Agent.tool_associations).joinedload(AgentTool.tool).joinedload(Agent.silo),
+            selectinload(Agent.tool_associations).joinedload(AgentTool.tool).selectinload(Agent.mcp_associations).joinedload(AgentMCP.mcp),
             selectinload(Agent.tool_associations).joinedload(AgentTool.tool).joinedload(Agent.tool_associations)
         ).filter(Agent.agent_id == agent_id).first()
         

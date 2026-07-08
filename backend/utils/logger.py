@@ -100,7 +100,13 @@ class LoggerConfig:
         # Add shared file handlers
         logger.addHandler(LoggerConfig._shared_file_handler)
         logger.addHandler(LoggerConfig._shared_error_handler)
-        
+
+        # Don't propagate to the root logger. If anything in the import chain
+        # configures a root handler (e.g. a stray `logging.basicConfig()` in
+        # third-party code), this prevents our messages from being emitted
+        # a second time by that root handler with a different formatter.
+        logger.propagate = False
+
         return logger
     
     @staticmethod

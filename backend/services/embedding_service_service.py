@@ -78,6 +78,7 @@ class EmbeddingServiceService:
             model_name=service.description or "",
             api_key=mask_api_key(service.api_key),
             base_url=service.endpoint or "",
+            api_version=service.api_version,
             created_at=service.create_date,
             available_providers=providers,
             needs_api_key=needs_api_key,
@@ -111,6 +112,7 @@ class EmbeddingServiceService:
         if not is_masked_key(service_data.api_key):
             service.api_key = service_data.api_key
         service.endpoint = service_data.base_url
+        service.api_version = service_data.api_version
         
         if service_id == 0:
             return EmbeddingServiceRepository.create(db, service)
@@ -149,6 +151,8 @@ class EmbeddingServiceService:
             return {"status": "error", "message": "Provider is required"}
         if not model_name:
             return {"status": "error", "message": "Model name is required"}
+        if provider == EmbeddingProvider.GoogleCloud.value and not endpoint:
+            return {"status": "error", "message": "Project ID is required for Google Cloud provider"}
 
         # Ollama runs locally and may not need an API key; every other
         # provider requires one to talk to its remote endpoint.
@@ -169,9 +173,11 @@ class EmbeddingServiceService:
         class _MockEmbeddingService:
             def __init__(self, data):
                 self.provider = data.get("provider")
-                self.name = data.get("description")  # embeddingTools uses .name as model
+                self.name = data.get("name")
+                self.description = data.get("description")
                 self.api_key = data.get("api_key")
                 self.endpoint = data.get("endpoint")
+                self.api_version = data.get("api_version")
 
         try:
             embeddings = get_embeddings_model(_MockEmbeddingService(config))
@@ -184,7 +190,7 @@ class EmbeddingServiceService:
             logger.error(
                 "Error testing embedding service connection (provider: %s): %s",
                 provider,
-                str(e),
+                type(e).__name__,
             )
             return {"status": "error", "message": str(e)}
 

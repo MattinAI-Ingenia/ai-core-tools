@@ -16,6 +16,9 @@ AGENT_ID = 'Agent.agent_id'
 # Default temperature for agents
 DEFAULT_AGENT_TEMPERATURE = 0.7
 
+# Default memory summarize threshold (number of messages)
+DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20
+
 
 class AgentSkill(Base):
     """Association table for Agent-Skill many-to-many relationship"""
@@ -74,10 +77,19 @@ class Agent(Base):
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
     retrieval_config = Column(JSON, nullable=True, default=None)
 
+    # RAG retrieval config (step_007 / FR-7); rag_search_type values validated in schemas (step_008).
+    # server_default=30 keeps existing agents on the historical retriever default; new agents get
+    # k=10 / max_calls=4 from AgentService._update_normal_agent.
+    rag_k = Column(Integer, default=30, nullable=False, server_default='30')
+    rag_search_type = Column(String(45), default='similarity', nullable=False, server_default='similarity')
+    rag_score_threshold = Column(Float, nullable=True)  # only used when rag_search_type='similarity_score_threshold'
+    rag_fixed_filters = Column(JSON, nullable=True)     # list of {field, op, value} filter clauses applied on every retrieval
+    rag_max_retrieval_calls = Column(Integer, nullable=True)  # NULL = legacy unbounded behaviour
+
     # Memory management via LangChain SummarizationMiddleware (when has_memory=True)
     memory_max_messages = Column(Integer, default=20, nullable=False)  # SummarizationMiddleware.keep=("messages", N) — messages to preserve after summarization
     memory_max_tokens = Column(Integer, default=4000, nullable=True)  # SummarizationMiddleware.trigger=("tokens", N) — token count that triggers summarization
-    memory_summarize_threshold = Column(Integer, default=4000, nullable=False)  # SummarizationMiddleware.trim_tokens_to_summarize — max tokens sent to summarizer LLM
+    memory_summarize_threshold = Column(Integer, default=DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, nullable=False)  # SummarizationMiddleware.trim_tokens_to_summarize — max tokens sent to summarizer LLM
     
     output_parser_id = Column(Integer,
                         ForeignKey('OutputParser.parser_id'),
@@ -100,7 +112,8 @@ class Agent(Base):
 
     app = relationship('App',
                            back_populates='agents',
-                           foreign_keys=[app_id])
+                           foreign_keys=[app_id],
+                           overlaps="ocr_agents")
     
     output_parser = relationship('OutputParser',
                            foreign_keys=[output_parser_id])

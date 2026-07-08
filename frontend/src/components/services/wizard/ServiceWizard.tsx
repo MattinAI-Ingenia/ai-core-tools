@@ -187,7 +187,11 @@ function ServiceWizard({
     setTestResult(null);
     try {
       const client = getServiceApiClient(kind, scope, appId);
-      setTestResult(await client.testConnection(buildPayload()));
+      // In edit-model mode the existing service is being mutated, so we
+      // pass its id to the backend — that allows the masked API key to be
+      // resolved from DB instead of forcing the user to re-type the secret.
+      const editServiceId = mode === 'edit-model' ? initialService?.service_id : undefined;
+      setTestResult(await client.testConnection(buildPayload(), editServiceId));
     } catch (e) {
       setTestResult({
         status: 'error',
