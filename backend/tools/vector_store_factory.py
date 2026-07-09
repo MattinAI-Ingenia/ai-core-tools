@@ -168,4 +168,8 @@ class VectorStoreFactory:
             lightrag_chunk_token_size=kwargs.get('lightrag_chunk_token_size'),
             lightrag_chunk_overlap_token_size=kwargs.get('lightrag_chunk_overlap_token_size'),
             lightrag_chunk_strategy=kwargs.get('lightrag_chunk_strategy'),
+            lightrag_language=kwargs.get('lightrag_language'),
+            lightrag_entity_extract_max_gleaning=kwargs.get('lightrag_entity_extract_max_gleaning'),
+            lightrag_max_source_ids_per_entity=kwargs.get('lightrag_max_source_ids_per_entity'),
+            lightrag_max_source_ids_per_relation=kwargs.get('lightrag_max_source_ids_per_relation'),
         )

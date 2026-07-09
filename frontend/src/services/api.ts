@@ -1129,14 +1129,14 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/silos/0`);
   }
 
-  async createSilo(appId: number, data: { name: string; description?: string; embedding_service_id?: number; vector_db_type?: string; fixed_metadata?: boolean; indexing_service_id?: number; lightrag_chunk_strategy?: string; lightrag_chunk_token_size?: number; lightrag_chunk_overlap_token_size?: number }) {
+  async createSilo(appId: number, data: { name: string; description?: string; embedding_service_id?: number; vector_db_type?: string; fixed_metadata?: boolean; indexing_service_id?: number; extract_service_id?: number; keywords_service_id?: number; vlm_service_id?: number; lightrag_chunk_strategy?: string; lightrag_chunk_token_size?: number; lightrag_chunk_overlap_token_size?: number; lightrag_language?: string; lightrag_entity_extract_max_gleaning?: number; lightrag_max_source_ids_per_entity?: number; lightrag_max_source_ids_per_relation?: number }) {
     return this.request(`/internal/apps/${appId}/silos/`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateSilo(appId: number, siloId: number, data: { name: string; description?: string; fixed_metadata?: boolean; status?: string }) {
+  async updateSilo(appId: number, siloId: number, data: { name: string; description?: string; fixed_metadata?: boolean; status?: string; keywords_service_id?: number }) {
     return this.request(`/internal/apps/${appId}/silos/${siloId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -1361,6 +1361,10 @@ class ApiService {
     lightrag_chunk_strategy?: string;
     lightrag_chunk_token_size?: number;
     lightrag_chunk_overlap_token_size?: number;
+    lightrag_language?: string;
+    lightrag_entity_extract_max_gleaning?: number;
+    lightrag_max_source_ids_per_entity?: number;
+    lightrag_max_source_ids_per_relation?: number;
   }) {
     return this.request(`/internal/apps/${appId}/repositories/`, {
       method: 'POST',
@@ -1382,6 +1386,10 @@ class ApiService {
     lightrag_chunk_strategy?: string;
     lightrag_chunk_token_size?: number;
     lightrag_chunk_overlap_token_size?: number;
+    lightrag_language?: string;
+    lightrag_entity_extract_max_gleaning?: number;
+    lightrag_max_source_ids_per_entity?: number;
+    lightrag_max_source_ids_per_relation?: number;
   }) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`, {
       method: 'PUT',

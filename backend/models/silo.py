@@ -51,6 +51,22 @@ class Silo(Base):
     lightrag_chunk_strategy = Column(String(45), nullable=True)
     lightrag_chunk_token_size = Column(Integer, nullable=True)
     lightrag_chunk_overlap_token_size = Column(Integer, nullable=True)
+
+    # Output language for LightRAG's entity-extraction and query-keyword
+    # prompts (addon_params['language']). Set on creation only — changing it
+    # later would mix entities extracted in different languages in the same
+    # graph. NULL means LightRAG's own default (env SUMMARY_LANGUAGE or English).
+    lightrag_language = Column(String(45), nullable=True)
+
+    # Advanced LightRAG indexing settings. Set on creation only — like
+    # language, they shape the extraction pipeline, so changing them mid-way
+    # would produce an inconsistent graph across old/new documents. NULL
+    # falls back to the global default (config.ENTITY_EXTRACT_MAX_GLEANING
+    # env var, or LightRAG's own built-in default for the source-ids caps).
+    lightrag_entity_extract_max_gleaning = Column(Integer, nullable=True)
+    lightrag_max_source_ids_per_entity = Column(Integer, nullable=True)
+    lightrag_max_source_ids_per_relation = Column(Integer, nullable=True)
+
     lightrag_graph_context_enabled = Column(Boolean, default=False, nullable=True)
     use_agent_as_query = Column(Boolean, default=False, nullable=False, server_default='false')
 

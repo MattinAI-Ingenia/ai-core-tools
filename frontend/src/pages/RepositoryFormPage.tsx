@@ -10,6 +10,7 @@ import {
   type LightRAGRole,
 } from '../utils/lightragModelSpecs';
 import { LightRAGModelHints } from '../components/forms/LightRAGModelHints';
+import { LightRAGAdvancedSettings } from '../components/forms/LightRAGAdvancedSettings';
 
 interface RepositoryFormData {
   name: string;
@@ -25,6 +26,10 @@ interface RepositoryFormData {
   lightrag_chunk_strategy?: string;
   lightrag_chunk_token_size?: number;
   lightrag_chunk_overlap_token_size?: number;
+  lightrag_language?: string;
+  lightrag_entity_extract_max_gleaning?: number;
+  lightrag_max_source_ids_per_entity?: number;
+  lightrag_max_source_ids_per_relation?: number;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -76,6 +81,10 @@ const RepositoryFormPage: React.FC = () => {
     lightrag_chunk_strategy: 'fixed_token',
     lightrag_chunk_token_size: 1200,
     lightrag_chunk_overlap_token_size: 100,
+    lightrag_language: 'English',
+    lightrag_entity_extract_max_gleaning: 0,
+    lightrag_max_source_ids_per_entity: 1000,
+    lightrag_max_source_ids_per_relation: 1000,
   });
 
   const isNewRepository = repositoryId === '0';
@@ -226,6 +235,10 @@ const RepositoryFormPage: React.FC = () => {
       lightrag_chunk_strategy: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_chunk_strategy : undefined,
       lightrag_chunk_token_size: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_chunk_token_size : undefined,
       lightrag_chunk_overlap_token_size: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_chunk_overlap_token_size : undefined,
+      lightrag_language: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_language : undefined,
+      lightrag_entity_extract_max_gleaning: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_entity_extract_max_gleaning : undefined,
+      lightrag_max_source_ids_per_entity: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_max_source_ids_per_entity : undefined,
+      lightrag_max_source_ids_per_relation: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_max_source_ids_per_relation : undefined,
     };
 
     setError(null);
@@ -537,54 +550,11 @@ const RepositoryFormPage: React.FC = () => {
                 );
               })}
 
-              {/* Chunking Strategy */}
-              <div>
-                <label htmlFor="lightrag_chunk_strategy" className="block text-sm font-medium text-gray-700 mb-2">
-                  Chunking strategy
-                </label>
-                <select
-                  id="lightrag_chunk_strategy"
-                  value={formData.lightrag_chunk_strategy || 'fixed_token'}
-                  onChange={(e) => setFormData({ ...formData, lightrag_chunk_strategy: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                >
-                  <option value="fixed_token">Fixed token (default)</option>
-                  <option value="recursive_character">Recursive character</option>
-                  <option value="semantic_vector">Semantic vector</option>
-                  <option value="paragraph_semantic">Paragraph semantic</option>
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="lightrag_chunk_token_size" className="block text-sm font-medium text-gray-700 mb-2">
-                    Chunk token size
-                  </label>
-                  <input
-                    type="number"
-                    id="lightrag_chunk_token_size"
-                    value={formData.lightrag_chunk_token_size ?? 1200}
-                    onChange={(e) => setFormData({ ...formData, lightrag_chunk_token_size: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })}
-                    min={100}
-                    max={8000}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="lightrag_chunk_overlap_token_size" className="block text-sm font-medium text-gray-700 mb-2">
-                    Overlap token size
-                  </label>
-                  <input
-                    type="number"
-                    id="lightrag_chunk_overlap_token_size"
-                    value={formData.lightrag_chunk_overlap_token_size ?? 100}
-                    onChange={(e) => setFormData({ ...formData, lightrag_chunk_overlap_token_size: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })}
-                    min={0}
-                    max={2000}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
-              </div>
+              <LightRAGAdvancedSettings
+                formData={formData}
+                onFieldChange={(field, value) => setFormData({ ...formData, [field]: value })}
+                forewarnImmutable
+              />
 
             </div>
           )}

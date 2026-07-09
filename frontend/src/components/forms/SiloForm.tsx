@@ -8,6 +8,7 @@ import {
   type LightRAGRole,
 } from '../../utils/lightragModelSpecs';
 import { LightRAGModelHints } from './LightRAGModelHints';
+import { LightRAGAdvancedSettings } from './LightRAGAdvancedSettings';
 
 interface VectorDbOption {
   code: string;
@@ -35,6 +36,10 @@ interface Silo {
   lightrag_chunk_strategy?: string;
   lightrag_chunk_token_size?: number;
   lightrag_chunk_overlap_token_size?: number;
+  lightrag_language?: string;
+  lightrag_entity_extract_max_gleaning?: number;
+  lightrag_max_source_ids_per_entity?: number;
+  lightrag_max_source_ids_per_relation?: number;
   ai_services?: AIServiceOption[];
 }
 
@@ -62,6 +67,10 @@ interface SiloFormData {
   lightrag_chunk_strategy?: string;
   lightrag_chunk_token_size?: number;
   lightrag_chunk_overlap_token_size?: number;
+  lightrag_language?: string;
+  lightrag_entity_extract_max_gleaning?: number;
+  lightrag_max_source_ids_per_entity?: number;
+  lightrag_max_source_ids_per_relation?: number;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -89,6 +98,10 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     lightrag_chunk_strategy: 'fixed_token',
     lightrag_chunk_token_size: 1200,
     lightrag_chunk_overlap_token_size: 100,
+    lightrag_language: 'English',
+    lightrag_entity_extract_max_gleaning: 0,
+    lightrag_max_source_ids_per_entity: 1000,
+    lightrag_max_source_ids_per_relation: 1000,
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,6 +157,10 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       lightrag_chunk_strategy: silo?.lightrag_chunk_strategy || 'fixed_token',
       lightrag_chunk_token_size: silo?.lightrag_chunk_token_size || 1200,
       lightrag_chunk_overlap_token_size: silo?.lightrag_chunk_overlap_token_size || 100,
+      lightrag_language: silo?.lightrag_language || 'English',
+      lightrag_entity_extract_max_gleaning: silo?.lightrag_entity_extract_max_gleaning ?? 0,
+      lightrag_max_source_ids_per_entity: silo?.lightrag_max_source_ids_per_entity || 1000,
+      lightrag_max_source_ids_per_relation: silo?.lightrag_max_source_ids_per_relation || 1000,
     }));
   }, [silo]);
 
@@ -196,7 +213,6 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     const intFields = [
       'embedding_service_id', 'output_parser_id', 'indexing_service_id',
       'extract_service_id', 'keywords_service_id', 'vlm_service_id',
-      'lightrag_chunk_token_size', 'lightrag_chunk_overlap_token_size',
     ];
     if (intFields.includes(name)) {
       parsedValue = value === '' ? undefined : Number.parseInt(value, 10);
@@ -253,7 +269,10 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       };
       const payload = isEditing
         ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi,
-              extract_service_id: _esi2, keywords_service_id: _ksi,
+              extract_service_id: _esi2, lightrag_language: _lang,
+              lightrag_entity_extract_max_gleaning: _gleaning,
+              lightrag_max_source_ids_per_entity: _maxEnt,
+              lightrag_max_source_ids_per_relation: _maxRel,
               vlm_service_id: _vsi, ...rest }) => rest)(normalized)
         : { ...normalized, vector_db_type: normalized.vector_db_type!.toUpperCase() };
       await onSubmit(payload);
@@ -470,7 +489,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                       onChange={handleChange}
                       required={required}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
-                      disabled={isSubmitting || isEditing}
+                      disabled={isSubmitting || (isEditing && role !== 'keywords')}
                     >
                       <option value="">{placeholder}</option>
                       {aiServices.map((service: AIServiceOption) => (
@@ -480,6 +499,12 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                       ))}
                     </select>
                     <p className="mt-1 text-sm text-gray-500">{helper}</p>
+                    {isEditing && role !== 'keywords' && (
+                      <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
+                        <Info className="w-3.5 h-3.5 shrink-0" />
+                        Cannot be changed after a silo is created.
+                      </p>
+                    )}
                     <LightRAGModelHints role={role} />
                     {warning && (
                       <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
@@ -497,60 +522,12 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                 );
               })}
 
-              {/* Chunking Strategy */}
-              <div>
-                <label htmlFor="lightrag_chunk_strategy" className="block text-sm font-medium text-gray-700 mb-2">
-                  Chunking strategy
-                </label>
-                <select
-                  id="lightrag_chunk_strategy"
-                  name="lightrag_chunk_strategy"
-                  value={formData.lightrag_chunk_strategy || 'fixed_token'}
-                  onChange={handleChange}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                  disabled={isSubmitting}
-                >
-                  <option value="fixed_token">Fixed token (default)</option>
-                  <option value="recursive_character">Recursive character</option>
-                  <option value="semantic_vector">Semantic vector</option>
-                  <option value="paragraph_semantic">Paragraph semantic</option>
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="lightrag_chunk_token_size" className="block text-sm font-medium text-gray-700 mb-2">
-                    Chunk token size
-                  </label>
-                  <input
-                    type="number"
-                    id="lightrag_chunk_token_size"
-                    name="lightrag_chunk_token_size"
-                    value={formData.lightrag_chunk_token_size ?? 1200}
-                    onChange={handleChange}
-                    min={100}
-                    max={8000}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                    disabled={isSubmitting}
-                  />
-                </div>
-                <div>
-                  <label htmlFor="lightrag_chunk_overlap_token_size" className="block text-sm font-medium text-gray-700 mb-2">
-                    Overlap token size
-                  </label>
-                  <input
-                    type="number"
-                    id="lightrag_chunk_overlap_token_size"
-                    name="lightrag_chunk_overlap_token_size"
-                    value={formData.lightrag_chunk_overlap_token_size ?? 100}
-                    onChange={handleChange}
-                    min={0}
-                    max={2000}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                    disabled={isSubmitting}
-                  />
-                </div>
-              </div>
+              <LightRAGAdvancedSettings
+                formData={formData}
+                onFieldChange={(field, value) => setFormData(prev => ({ ...prev, [field]: value }))}
+                disabled={isSubmitting}
+                locked={isEditing}
+              />
 
             </div>
           )}

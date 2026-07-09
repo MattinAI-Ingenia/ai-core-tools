@@ -185,6 +185,10 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
             lightrag_chunk_token_size=getattr(silo, 'lightrag_chunk_token_size', None),
             lightrag_chunk_overlap_token_size=getattr(silo, 'lightrag_chunk_overlap_token_size', None),
             lightrag_chunk_strategy=getattr(silo, 'lightrag_chunk_strategy', None),
+            lightrag_language=getattr(silo, 'lightrag_language', None),
+            lightrag_entity_extract_max_gleaning=getattr(silo, 'lightrag_entity_extract_max_gleaning', None),
+            lightrag_max_source_ids_per_entity=getattr(silo, 'lightrag_max_source_ids_per_entity', None),
+            lightrag_max_source_ids_per_relation=getattr(silo, 'lightrag_max_source_ids_per_relation', None),
         )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
@@ -725,34 +729,40 @@ class SiloService:
                 if vlm_service_id:
                     SiloService._validate_vlm_service(int(vlm_service_id), session)
 
-            # Set role-specific services on creation only — immutable after creation.
-            # Legacy indexing_service_id is preserved for back-compat and also
-            # written into extract_service_id when the caller didn't provide
-            # the new field explicitly.
+            # extract/vlm/indexing are set on creation only — immutable after,
+            # since changing them mid-way would mix entities extracted with
+            # different models in the same graph. keywords_service_id is
+            # query-time only (never touches indexed data) so it stays
+            # editable on update too.
             if not silo_id:
                 role_fields = (
                     'indexing_service_id',
                     'extract_service_id',
-                    'keywords_service_id',
                     'vlm_service_id',
                 )
                 for field in role_fields:
                     if silo_data.get(field):
                         setattr(silo, field, silo_data[field])
 
-                # Compatibility shim: when the UI sent only the new
-                # extract_service_id, mirror it into the legacy column so
-                # downstream code that still reads indexing_service_id keeps
-                # working until it is migrated.
-                if silo.extract_service_id and not silo.indexing_service_id:
-                    silo.indexing_service_id = silo.extract_service_id
-                elif silo.indexing_service_id and not silo.extract_service_id:
-                    silo.extract_service_id = silo.indexing_service_id
+            if silo_data.get('keywords_service_id'):
+                silo.keywords_service_id = silo_data['keywords_service_id']
+
+            # Compatibility shim: when the UI sent only the new
+            # extract_service_id, mirror it into the legacy column so
+            # downstream code that still reads indexing_service_id keeps
+            # working until it is migrated.
+            if silo.extract_service_id and not silo.indexing_service_id:
+                silo.indexing_service_id = silo.extract_service_id
+            elif silo.indexing_service_id and not silo.extract_service_id:
+                silo.extract_service_id = silo.indexing_service_id
 
             # Set LightRAG config columns on creation
             if not silo_id:
                 for field in ('lightrag_chunk_strategy', 'lightrag_chunk_token_size',
-                              'lightrag_chunk_overlap_token_size'):
+                              'lightrag_chunk_overlap_token_size', 'lightrag_language',
+                              'lightrag_entity_extract_max_gleaning',
+                              'lightrag_max_source_ids_per_entity',
+                              'lightrag_max_source_ids_per_relation'):
                     if field in silo_data and silo_data[field] is not None:
                         setattr(silo, field, silo_data[field])
 
@@ -2090,6 +2100,10 @@ class SiloService:
                 lightrag_chunk_strategy=silo.lightrag_chunk_strategy,
                 lightrag_chunk_token_size=silo.lightrag_chunk_token_size,
                 lightrag_chunk_overlap_token_size=silo.lightrag_chunk_overlap_token_size,
+                lightrag_language=getattr(silo, 'lightrag_language', None),
+                lightrag_entity_extract_max_gleaning=getattr(silo, 'lightrag_entity_extract_max_gleaning', None),
+                lightrag_max_source_ids_per_entity=getattr(silo, 'lightrag_max_source_ids_per_entity', None),
+                lightrag_max_source_ids_per_relation=getattr(silo, 'lightrag_max_source_ids_per_relation', None),
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -2132,6 +2146,10 @@ class SiloService:
             'lightrag_chunk_strategy': getattr(silo_data, 'lightrag_chunk_strategy', None),
             'lightrag_chunk_token_size': getattr(silo_data, 'lightrag_chunk_token_size', None),
             'lightrag_chunk_overlap_token_size': getattr(silo_data, 'lightrag_chunk_overlap_token_size', None),
+            'lightrag_language': getattr(silo_data, 'lightrag_language', None),
+            'lightrag_entity_extract_max_gleaning': getattr(silo_data, 'lightrag_entity_extract_max_gleaning', None),
+            'lightrag_max_source_ids_per_entity': getattr(silo_data, 'lightrag_max_source_ids_per_entity', None),
+            'lightrag_max_source_ids_per_relation': getattr(silo_data, 'lightrag_max_source_ids_per_relation', None),
         }
         
         # Create or update using the existing service

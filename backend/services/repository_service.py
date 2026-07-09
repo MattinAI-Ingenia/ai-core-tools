@@ -75,6 +75,10 @@ class RepositoryService:
         lightrag_chunk_strategy: Optional[str] = None,
         lightrag_chunk_token_size: Optional[int] = None,
         lightrag_chunk_overlap_token_size: Optional[int] = None,
+        lightrag_language: Optional[str] = None,
+        lightrag_entity_extract_max_gleaning: Optional[int] = None,
+        lightrag_max_source_ids_per_entity: Optional[int] = None,
+        lightrag_max_source_ids_per_relation: Optional[int] = None,
     ) -> Repository:
         """
         Create a new repository with its associated silo
@@ -120,6 +124,10 @@ class RepositoryService:
             'lightrag_chunk_strategy': lightrag_chunk_strategy,
             'lightrag_chunk_token_size': lightrag_chunk_token_size,
             'lightrag_chunk_overlap_token_size': lightrag_chunk_overlap_token_size,
+            'lightrag_language': lightrag_language,
+            'lightrag_entity_extract_max_gleaning': lightrag_entity_extract_max_gleaning,
+            'lightrag_max_source_ids_per_entity': lightrag_max_source_ids_per_entity,
+            'lightrag_max_source_ids_per_relation': lightrag_max_source_ids_per_relation,
         }
         silo = silo_service.create_or_update_silo(silo_data, SiloType.REPO, db)
 
@@ -542,6 +550,10 @@ class RepositoryService:
             lightrag_chunk_strategy=repo_data.lightrag_chunk_strategy,
             lightrag_chunk_token_size=repo_data.lightrag_chunk_token_size,
             lightrag_chunk_overlap_token_size=repo_data.lightrag_chunk_overlap_token_size,
+            lightrag_language=repo_data.lightrag_language,
+            lightrag_entity_extract_max_gleaning=repo_data.lightrag_entity_extract_max_gleaning,
+            lightrag_max_source_ids_per_entity=repo_data.lightrag_max_source_ids_per_entity,
+            lightrag_max_source_ids_per_relation=repo_data.lightrag_max_source_ids_per_relation,
         )
 
     @staticmethod

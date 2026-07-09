@@ -40,6 +40,10 @@ class SiloDetailSchema(BaseModel):
     lightrag_chunk_strategy: Optional[str] = None
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_language: Optional[str] = None
+    lightrag_entity_extract_max_gleaning: Optional[int] = None
+    lightrag_max_source_ids_per_entity: Optional[int] = None
+    lightrag_max_source_ids_per_relation: Optional[int] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -69,14 +73,21 @@ class CreateSiloSchema(BaseModel):
     lightrag_chunk_strategy: Optional[str] = None
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_language: Optional[str] = None
+    lightrag_entity_extract_max_gleaning: Optional[int] = None
+    lightrag_max_source_ids_per_entity: Optional[int] = None
+    lightrag_max_source_ids_per_relation: Optional[int] = None
 
 
 class UpdateSiloSchema(BaseModel):
-    """Schema for updating an existing silo (vector_db_type and embedding_service_id are immutable after creation)"""
+    """Schema for updating an existing silo. vector_db_type, embedding_service_id,
+    extract/vlm/indexing_service_id, chunking, and lightrag_language are immutable
+    after creation. keywords_service_id is query-time only and stays editable."""
     name: str
     description: Optional[str] = None
     type: Optional[str] = None
     output_parser_id: Optional[int] = None
+    keywords_service_id: Optional[int] = None
 
 
 class _ContentLengthFilterSchema(BaseModel):

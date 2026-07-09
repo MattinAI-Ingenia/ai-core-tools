@@ -490,6 +490,10 @@ class LightRAGStore(VectorStoreInterface):
         lightrag_chunk_token_size: Optional[int] = None,
         lightrag_chunk_overlap_token_size: Optional[int] = None,
         lightrag_chunk_strategy: Optional[str] = None,
+        lightrag_language: Optional[str] = None,
+        lightrag_entity_extract_max_gleaning: Optional[int] = None,
+        lightrag_max_source_ids_per_entity: Optional[int] = None,
+        lightrag_max_source_ids_per_relation: Optional[int] = None,
     ):
         self.db = db
         # ``ai_service`` is the legacy single-LLM parameter — it acts as the
@@ -506,6 +510,10 @@ class LightRAGStore(VectorStoreInterface):
         self._chunk_process_option = _CHUNK_STRATEGY_OPTION.get(
             lightrag_chunk_strategy, "F"
         )
+        self.language = lightrag_language
+        self.entity_extract_max_gleaning = lightrag_entity_extract_max_gleaning
+        self.max_source_ids_per_entity = lightrag_max_source_ids_per_entity
+        self.max_source_ids_per_relation = lightrag_max_source_ids_per_relation
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
         self._rag_instances: Dict[str, Any] = {}
@@ -555,16 +563,25 @@ class LightRAGStore(VectorStoreInterface):
         )
         emb_func = build_embedding_func(self.embedding_service)
 
-        # Forward the silo's chunking config so LightRAG chunks the (now
-        # un-pre-split) page/file text by token size instead of using its
-        # own defaults. Omit when None so LightRAG keeps its defaults.
-        chunk_kwargs: Dict[str, Any] = {}
+        # Forward the silo's chunking/source-id-cap config to LightRAG.
+        # Omit each key when unset so LightRAG keeps its own defaults.
+        extra_kwargs: Dict[str, Any] = {}
         if self._chunk_token_size:
-            chunk_kwargs["chunk_token_size"] = self._chunk_token_size
+            extra_kwargs["chunk_token_size"] = self._chunk_token_size
         if self._chunk_overlap_token_size is not None:
-            chunk_kwargs["chunk_overlap_token_size"] = self._chunk_overlap_token_size
+            extra_kwargs["chunk_overlap_token_size"] = self._chunk_overlap_token_size
+        if self.max_source_ids_per_entity:
+            extra_kwargs["max_source_ids_per_entity"] = self.max_source_ids_per_entity
+        if self.max_source_ids_per_relation:
+            extra_kwargs["max_source_ids_per_relation"] = self.max_source_ids_per_relation
 
-        return LightRAG(
+        gleaning = (
+            self.entity_extract_max_gleaning
+            if self.entity_extract_max_gleaning is not None
+            else config.ENTITY_EXTRACT_MAX_GLEANING
+        )
+
+        rag = LightRAG(
             working_dir=self._working_dir,
             workspace=collection_name,
             llm_model_func=base_llm_func,
@@ -574,9 +591,16 @@ class LightRAGStore(VectorStoreInterface):
             vector_storage=storage_cfg["vector_storage"],
             kv_storage=storage_cfg["kv_storage"],
             doc_status_storage=storage_cfg["doc_status_storage"],
-            entity_extract_max_gleaning=config.ENTITY_EXTRACT_MAX_GLEANING,
-            **chunk_kwargs,
+            entity_extract_max_gleaning=gleaning,
+            **extra_kwargs,
         )
+        # Mutate in place (not a constructor kwarg) so LightRAG's own
+        # addon_params defaults (e.g. entity_types) aren't clobbered.
+        # Shared by both entity extraction (indexing) and keyword extraction
+        # (query) — LightRAG has no per-role language override.
+        if self.language:
+            rag.addon_params["language"] = self.language
+        return rag
 
     async def _aget_rag_instance(self, collection_name: str):
         """Async version of _get_rag_instance.

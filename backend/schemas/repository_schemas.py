@@ -72,6 +72,10 @@ class CreateRepositorySchema(BaseModel):
     lightrag_chunk_strategy: Optional[str] = None
     lightrag_chunk_token_size: Optional[int] = None
     lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_language: Optional[str] = None
+    lightrag_entity_extract_max_gleaning: Optional[int] = None
+    lightrag_max_source_ids_per_entity: Optional[int] = None
+    lightrag_max_source_ids_per_relation: Optional[int] = None
 
 
 class UpdateRepositorySchema(BaseModel):
