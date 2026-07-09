@@ -402,6 +402,9 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
             "entity_type": e.get("entity_type", ""),
             "description": e.get("description", ""),
             "file_path": e.get("file_path", ""),
+            # <SEP>-joined chunk ids this entity was extracted from — lets the
+            # frontend highlight entities that came from cited chunks.
+            "source_id": e.get("source_id", ""),
         })
 
     relationships = []
@@ -414,6 +417,7 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
             "target": tgt,
             "description": r.get("description", ""),
             "keywords": r.get("keywords", ""),
+            "source_id": r.get("source_id", ""),
         })
         # LightRAG truncates entities and relationships by independent token
         # budgets, so a relationship endpoint may not appear in the entity list.

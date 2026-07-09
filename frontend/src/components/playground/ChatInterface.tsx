@@ -1010,6 +1010,17 @@ function ChatInterface({
                   // Agent message — skip entrance animation for the message just committed from streaming
                   const wasStreamed = message.id === lastStreamedMsgIdRef.current;
                   const msgTimestamps = videoBlobUrl ? parseTimestamps(String(message.content)) : [];
+                  // Which retrieved chunks did the answer actually cite ([N](cite://N))?
+                  // Map those N back to chunk ids so the subgraph can highlight the
+                  // entities/relationships that came from them.
+                  const graphChunks = message.lightragGraph?.data?.chunks ?? [];
+                  const citedChunkIds = graphChunks.length
+                    ? Array.from(new Set(
+                        Array.from(String(message.content).matchAll(/\(cite:\/\/(\d+)\)/g))
+                          .map((m) => graphChunks[Number(m[1]) - 1]?.id)
+                          .filter((id): id is string => Boolean(id))
+                      ))
+                    : [];
                   return (
                     <div
                       key={message.id}
@@ -1020,6 +1031,7 @@ function ChatInterface({
                           <MessageContent
                             content={message.content}
                             resolveFileUrl={resolveFileUrl}
+                            citationChunks={message.lightragGraph?.data?.chunks}
                           />
                         </div>
                         {msgTimestamps.length > 0 && videoBlobUrl && (
@@ -1031,7 +1043,7 @@ function ChatInterface({
                           />
                         )}
                         {message.lightragGraph && (
-                          <LightRAGGraphBubble graphData={message.lightragGraph} />
+                          <LightRAGGraphBubble graphData={message.lightragGraph} citedChunkIds={citedChunkIds} />
                         )}
                         <div className="mt-1">
                           <span className="text-xs text-gray-400 dark:text-gray-500">

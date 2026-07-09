@@ -3,14 +3,18 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import InlineFileImage from './InlineFileImage';
 import InlineFileDownload from './InlineFileDownload';
+import CitationBadge from './CitationBadge';
+import type { LightRAGChunk } from '../../types/streaming';
 
 interface MessageContentProps {
   content: string | object;
   resolveFileUrl?: (fileId: string) => Promise<string>;
+  citationChunks?: LightRAGChunk[];
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 const ResolveFileUrlContext = createContext<((fileId: string) => Promise<string>) | undefined>(undefined);
+const CitationChunksContext = createContext<LightRAGChunk[] | undefined>(undefined);
 
 function isImageFilename(filename: string): boolean {
   const ext = filename.toLowerCase().lastIndexOf('.');
@@ -111,6 +115,15 @@ function MarkdownImage({ src, alt }: any) {
 
 function MarkdownLink({ children, href, ...props }: any) {
   const resolveFileUrl = useContext(ResolveFileUrlContext);
+  const citationChunks = useContext(CitationChunksContext);
+  // Inline LightRAG citation: [N](cite://N) — render as a source badge, not a link.
+  if (href?.startsWith('cite://')) {
+    const index = parseInt(href.slice('cite://'.length), 10);
+    if (Number.isFinite(index) && index > 0) {
+      return <CitationBadge index={index} chunk={citationChunks?.[index - 1]} />;
+    }
+    return <>{children}</>;
+  }
   if (href?.startsWith('file://') && resolveFileUrl) {
     const fileId = href.slice('file://'.length);
     const filename = typeof children === 'string'
@@ -188,7 +201,7 @@ const markdownComponents: Record<string, React.ComponentType<any>> = {
   td: MarkdownTd,
 };
 
-const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl }) => {
+const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl, citationChunks }) => {
   const renderedContent = useMemo(() => {
     if (typeof content === 'object' && content !== null) {
       return (
@@ -223,9 +236,11 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
 
   return (
     <ResolveFileUrlContext.Provider value={resolveFileUrl}>
-      <div className="text-gray-800 dark:text-gray-200">
-        {renderedContent}
-      </div>
+      <CitationChunksContext.Provider value={citationChunks}>
+        <div className="text-gray-800 dark:text-gray-200">
+          {renderedContent}
+        </div>
+      </CitationChunksContext.Provider>
     </ResolveFileUrlContext.Provider>
   );
 };

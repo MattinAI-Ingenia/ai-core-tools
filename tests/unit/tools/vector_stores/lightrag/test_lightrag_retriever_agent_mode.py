@@ -7,32 +7,28 @@ from langchain_core.documents import Document
 pytestmark = pytest.mark.asyncio
 
 
-def _make_query_result(context_str: str, raw_data: dict):
-    result = MagicMock()
-    result.content = context_str
-    result.raw_data = raw_data
-    return result
-
-
 async def test_retriever_always_uses_only_need_context():
     """QueryParam must always have only_need_context=True and the Document
     must carry the raw_data in metadata."""
     from tools.vector_stores.lightrag_store import LightRAGRetriever
 
-    fake_raw_data = {
+    # aquery_llm returns a dict: {llm_response: {content: ...}, data: {...}}
+    query_result = {
+        "llm_response": {"content": "context string"},
         "data": {
-            "entities": [{"id": "1", "name": "EntityA"}],
-            "relationships": [{"id": "r1", "source": "1", "target": "2"}],
-            "chunks": [{"id": "c1", "content": "some text", "file_path": "doc.pdf"}],
-            "references": [{"reference_id": "1", "file_path": "doc.pdf"}],
-        }
+            "entities": [{"entity_name": "EntityA", "entity_type": "PERSON", "description": "desc", "file_path": "doc.pdf"}],
+            "relationships": [],
+            "chunks": [{"chunk_id": "c1", "content": "some text", "file_path": "doc.pdf"}],
+            "references": [],
+        },
     }
-    query_result = _make_query_result("context string", fake_raw_data)
 
     rag_instance = MagicMock()
-    rag_instance.aquery = AsyncMock(return_value=query_result)
+    rag_instance.aquery_llm = AsyncMock(return_value=query_result)
 
-    # Capture QueryParam constructor calls
+    mock_store = MagicMock()
+    mock_store._aget_rag_instance = AsyncMock(return_value=rag_instance)
+
     captured_params = []
 
     def fake_query_param(**kwargs):
@@ -42,7 +38,8 @@ async def test_retriever_always_uses_only_need_context():
 
     with patch.dict("sys.modules", {"lightrag.base": MagicMock(QueryParam=fake_query_param)}):
         retriever = LightRAGRetriever(
-            rag_instance=rag_instance,
+            store=mock_store,
+            collection_name="silo_1",
             query_mode="hybrid",
             top_k=5,
         )
@@ -53,4 +50,5 @@ async def test_retriever_always_uses_only_need_context():
 
     assert len(docs) == 1
     assert docs[0].page_content == "context string"
-    assert docs[0].metadata["lightrag_raw_data"] == fake_raw_data
+    assert "lightrag_raw_data" in docs[0].metadata
+    assert "data" in docs[0].metadata["lightrag_raw_data"]

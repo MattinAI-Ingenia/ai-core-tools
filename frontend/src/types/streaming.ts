@@ -43,6 +43,9 @@ export interface ErrorEventData {
 export interface LightRAGEntity {
   id: string;
   name?: string;
+  /** <SEP>-joined chunk ids this entity was extracted from (empty for partial nodes). */
+  source_id?: string;
+  partial?: boolean;
   [key: string]: unknown;
 }
 
@@ -50,6 +53,8 @@ export interface LightRAGRelationship {
   id: string;
   source?: string;
   target?: string;
+  /** <SEP>-joined chunk ids this relationship was extracted from. */
+  source_id?: string;
   [key: string]: unknown;
 }
 

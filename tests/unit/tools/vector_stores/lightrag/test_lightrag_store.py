@@ -77,9 +77,12 @@ def test_index_documents_calls_ainsert(store, mock_rag):
         Document(page_content="Hello world"),
         Document(page_content="Second doc"),
     ]
-    store.index_documents("silo_1", docs)
+    with patch("tools.vector_stores.lightrag_store._ainsert_with_progress", new_callable=AsyncMock) as mock_insert:
+        store.index_documents("silo_1", docs)
 
-    mock_rag.ainsert.assert_called_once_with(["Hello world", "Second doc"])
+    mock_insert.assert_called_once()
+    texts = mock_insert.call_args[0][1]
+    assert texts == ["Hello world", "Second doc"]
 
 
 def test_index_documents_skips_empty(store):
@@ -107,14 +110,13 @@ def test_index_documents_skips_blank_content(store, mock_rag):
 # ---------------------------------------------------------------------------
 
 
-def test_delete_documents_calls_adelete_by_doc_id(store, mock_rag):
+def test_delete_documents_is_noop(store, mock_rag):
+    # delete_documents is a deliberate no-op (per-document graph deletion unsupported)
     store._get_rag_instance = MagicMock(return_value=mock_rag)
 
     store.delete_documents("silo_1", ["doc1", "doc2"])
 
-    assert mock_rag.adelete_by_doc_id.call_count == 2
-    mock_rag.adelete_by_doc_id.assert_any_call("doc1")
-    mock_rag.adelete_by_doc_id.assert_any_call("doc2")
+    mock_rag.adelete_by_doc_id.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +151,7 @@ def test_search_similar_documents_calls_aquery(store, mock_rag):
 
     assert len(results) == 1
     assert results[0].page_content == "Some response"
-    assert results[0].metadata == {"source": "lightrag", "query_mode": "hybrid"}
+    assert results[0].metadata == {"source": "lightrag", "query_mode": "hybrid", "lightrag_keywords": {}}
 
 
 def test_search_similar_documents_bypass_returns_empty(store):

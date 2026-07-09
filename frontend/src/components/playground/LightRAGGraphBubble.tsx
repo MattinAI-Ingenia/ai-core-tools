@@ -7,19 +7,39 @@ import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship, LightRAGC
 
 interface Props {
   graphData: LightRAGGraphData;
+  /** Chunk ids the answer actually cited ([N](cite://N)). Entities/relationships
+   *  extracted from one of these are highlighted green ("used"). */
+  citedChunkIds?: string[];
 }
 
-function toNvlNodes(entities: LightRAGEntity[]): NvlNode[] {
+// LightRAG joins the chunk ids an entity/relationship was extracted from with
+// this separator inside `source_id`.
+const GRAPH_FIELD_SEP = '<SEP>';
+const COLOR_USED = '#22c55e';       // green-500  — from a cited chunk
+const COLOR_RETRIEVED = '#6366f1';  // indigo-500 — retrieved into the subgraph
+const COLOR_PARTIAL = '#94a3b8';    // slate-400  — partial node / non-cited edge
+
+// True when any chunk the element was extracted from is among the cited chunks.
+function fromCitedChunk(sourceId: string | undefined, cited: Set<string>): boolean {
+  if (!sourceId || cited.size === 0) return false;
+  return sourceId.split(GRAPH_FIELD_SEP).some((id) => cited.has(id.trim()));
+}
+
+function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>): NvlNode[] {
   return entities.map((e) => ({
     id: String(e.id),
     captions: [{ value: String(e.name ?? e.id) }],
-    // "partial" nodes are relationship endpoints LightRAG truncated from the
-    // entity list — drawn in a muted blue-gray to flag we only know their name.
-    color: e.partial ? '#94a3b8' : '#6366f1',
+    // partial = relationship endpoint LightRAG truncated from the entity list
+    // (muted gray); green if it came from a cited chunk; else plain retrieved blue.
+    color: e.partial
+      ? COLOR_PARTIAL
+      : fromCitedChunk(e.source_id, cited)
+        ? COLOR_USED
+        : COLOR_RETRIEVED,
   }));
 }
 
-function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>): NvlRelationship[] {
+function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Set<string>): NvlRelationship[] {
   return rels
     .filter((r) => r.source && r.target && nodeIds.has(String(r.source)) && nodeIds.has(String(r.target)))
     .map((r) => {
@@ -29,12 +49,12 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>): NvlRelat
         from: String(r.source),
         to: String(r.target),
         captions: label ? [{ value: label }] : [],
-        color: '#94a3b8',
+        color: fromCitedChunk(r.source_id, cited) ? COLOR_USED : COLOR_PARTIAL,
       };
     });
 }
 
-export default function LightRAGGraphBubble({ graphData }: Props) {
+export default function LightRAGGraphBubble({ graphData, citedChunkIds }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [openChunk, setOpenChunk] = useState<number | null>(null);
@@ -97,15 +117,25 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
   const entityCount = entities.filter((e) => !e.partial).length;
   const chunkCount = chunks.length;
 
+  // Memoize the cited-chunk set on a stable key so identity churn in the parent
+  // doesn't force the graph to re-layout every render.
+  const citedKey = (citedChunkIds ?? []).join(',');
+  const citedSet = useMemo(() => new Set(citedChunkIds ?? []), [citedKey]);
+  const hasCited = citedSet.size > 0;
+
   const { nvlNodes, nvlRels } = useMemo(() => {
-    const nodes = toNvlNodes(entities);
+    const nodes = toNvlNodes(entities, citedSet);
     const ids = new Set(nodes.map((n) => n.id));
-    return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids) };
-  }, [entities, relationships]);
+    return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids, citedSet) };
+  }, [entities, relationships, citedSet]);
 
   // Count only the relationships actually drawn (both endpoints present) so the
   // header matches the canvas instead of LightRAG's raw relationship total.
   const relCount = nvlRels.length;
+
+  // naive mode returns chunks but no graph — then the banner shows only the chunk
+  // count, no "subgraph"/entities wording.
+  const hasGraph = entityCount > 0 || relCount > 0;
 
   if (entityCount === 0 && relCount === 0 && chunkCount === 0) return null;
 
@@ -138,12 +168,20 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
           aria-expanded={expanded}
         >
           <svg className="w-4 h-4 text-indigo-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" />
+            {hasGraph ? (
+              <>
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" />
+              </>
+            ) : (
+              // naive/chunks-only → document icon (matches the chunk chips below)
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            )}
           </svg>
           <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300 flex-1">
-            Subgrafo · {entityCount} entidades · {relCount} relaciones
-            {chunkCount > 0 && ` · ${chunkCount} fragmento${chunkCount > 1 ? 's' : ''}`}
+            {hasGraph
+              ? `Knowledge subgraph · ${entityCount} ${entityCount === 1 ? 'entity' : 'entities'} · ${relCount} ${relCount === 1 ? 'relationship' : 'relationships'}${chunkCount > 0 ? ` · ${chunkCount} ${chunkCount === 1 ? 'chunk' : 'chunks'}` : ''}`
+              : `${chunkCount} ${chunkCount === 1 ? 'chunk' : 'chunks'}`}
           </span>
           <svg
             className={`w-4 h-4 text-indigo-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
@@ -190,7 +228,7 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
                   <circle cx="12" cy="12" r="3" />
                   <path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14" />
                 </svg>
-                Ver subgrafo
+                View subgraph
               </button>
             )}
           </div>
@@ -223,12 +261,12 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
                 {chunks[openChunk].file_path && chunks[openChunk].file_path !== 'unknown_source'
                   ? chunks[openChunk].file_path
                   : 'Unknown source'}
-                <span className="ml-1 font-normal text-gray-400">· Fragmento {openChunk + 1}</span>
+                <span className="ml-1 font-normal text-gray-400">· Chunk {openChunk + 1}</span>
               </span>
               <button
                 onClick={() => { setOpenChunk(null); setPopoverPos(null); }}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0"
-                aria-label="Cerrar"
+                aria-label="Close"
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -237,7 +275,7 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
             </div>
             <div className="max-h-80 overflow-y-auto p-3">
               <p className="whitespace-pre-wrap leading-relaxed">
-                {chunks[openChunk].content ?? '(sin contenido)'}
+                {chunks[openChunk].content ?? '(no content)'}
               </p>
             </div>
           </div>
@@ -251,7 +289,7 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
           onClick={closeModal}
           role="dialog"
           aria-modal="true"
-          aria-label="Subgrafo de conocimiento"
+          aria-label="Knowledge subgraph"
         >
           <div
             className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-[90vw] h-[80vh] max-w-5xl flex flex-col overflow-hidden"
@@ -259,17 +297,35 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
               <span className="font-semibold text-gray-800 dark:text-gray-100 text-sm">
-                Subgrafo · {entityCount} entidades · {relCount} relaciones
+                Knowledge subgraph · {entityCount} {entityCount === 1 ? 'entity' : 'entities'} · {relCount} {relCount === 1 ? 'relationship' : 'relationships'}
               </span>
               <button
                 onClick={closeModal}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
-                aria-label="Cerrar"
+                aria-label="Close"
               >
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 border-b border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-300">
+              {hasCited && (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLOR_USED }} aria-hidden="true" />
+                  In cited sources
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLOR_RETRIEVED }} aria-hidden="true" />
+                Retrieved
+              </span>
+              {entities.some((e) => e.partial) && (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLOR_PARTIAL }} aria-hidden="true" />
+                  Partial (relationship endpoint)
+                </span>
+              )}
             </div>
             <div className="flex-1 relative">
               {nvlNodes.length > 0 ? (
@@ -291,7 +347,7 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
                         <button
                           onClick={() => setSelectedEntity(null)}
                           className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0 mt-0.5"
-                          aria-label="Cerrar detalle"
+                          aria-label="Close details"
                         >
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -316,7 +372,7 @@ export default function LightRAGGraphBubble({ graphData }: Props) {
                 </>
               ) : (
                 <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-                  Sin entidades para visualizar
+                  No entities to display
                 </div>
               )}
             </div>

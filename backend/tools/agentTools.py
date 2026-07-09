@@ -71,9 +71,13 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
             meta = {k: v for k, v in (doc.metadata or {}).items() if k not in _INTERNAL_META}
             metadata_str = json.dumps(meta, ensure_ascii=False) if meta else "{}"
             parts.append(f"Content: {doc.page_content}\nMetadata: {metadata_str}")
-        # naive = vector-only, no graph traversal → no subgraph to show
-        artifact = [] if resolved_mode == "naive" else docs
-        return "\n\n---\n\n".join(parts), artifact
+        # naive has no graph but still returns chunks — surface them so chunk chips
+        # + inline citations work. The frontend hides the "Ver subgrafo" button when
+        # there are no entities/relationships (LightRAGGraphBubble), so naive shows
+        # chunks-only. ponytail: header still reads "Subgrafo · 0 entidades…"; relabel
+        # only if it bothers anyone.
+        content = _append_lightrag_citation_sources("\n\n---\n\n".join(parts), docs)
+        return content, docs
 
     return retrieve_from_knowledge_base
 
@@ -1013,6 +1017,51 @@ class IACTTool(BaseTool):
 _SEARCH_ERROR_MSG = "The knowledge base search failed; try rephrasing or removing filters."
 
 
+# --- LightRAG inline citations ---------------------------------------------
+# When a LightRAG retriever surfaces document chunks, we number them and ask the
+# LLM to cite statements inline as [N](cite://N) Markdown links. N is the chunk's
+# 1-based position in lightrag_raw_data.data.chunks — the same order the frontend
+# renders chunk chips (LightRAGGraphBubble) and resolves cite://N against, so a
+# citation opens the exact source chunk.
+# ponytail: positional index, single-retrieval-call scope. Streaming keeps only
+# the last _lightrag_graph event, so a turn with multiple retrieval calls can
+# misalign; the frontend degrades a cite with no matching chunk to a plain
+# marker. Global/id-based citations across calls is a follow-up, not this MVP.
+_CITATION_EXCERPT_CHARS = 240
+
+_CITATION_INSTRUCTION = (
+    "The knowledge base returned the numbered sources below. When a sentence in "
+    "your answer uses information from a source, append an inline citation "
+    "immediately after that sentence using this exact Markdown syntax: "
+    "[N](cite://N), where N is the source number. Cite only sources you actually "
+    "used; combine several as [1](cite://1)[2](cite://2) when a sentence draws on "
+    "more than one. Do not add a separate reference list at the end."
+)
+
+
+def _append_lightrag_citation_sources(content: str, docs: List[Document]) -> str:
+    """Append a numbered SOURCES block + citation instruction for LightRAG chunks.
+
+    No-op when *docs* carry no LightRAG chunk provenance (e.g. PGVector/Qdrant
+    silos), so it is safe to call on any retriever path. Numbering mirrors
+    ``lightrag_raw_data.data.chunks`` order 1:1 (no dedup) to match the chunk
+    order the frontend renders and resolves ``cite://N`` against.
+    """
+    lines: List[str] = []
+    idx = 0
+    for doc in docs:
+        raw = (doc.metadata or {}).get("lightrag_raw_data") or {}
+        data = raw.get("data") or {}
+        for chunk in (data.get("chunks") or []):
+            idx += 1
+            src = chunk.get("file_path") or "Unknown source"
+            excerpt = " ".join((chunk.get("content") or "").split())[:_CITATION_EXCERPT_CHARS]
+            lines.append(f"[{idx}] (source: {src}) {excerpt}")
+    if not lines:
+        return content
+    return f"{content}\n\n{_CITATION_INSTRUCTION}\n\n" + "\n".join(lines)
+
+
 def _format_docs_with_metadata(docs: List[Document]) -> str:
     """Serialize retrieved documents as a text block with metadata for the LLM."""
     parts: List[str] = []
@@ -1321,6 +1370,7 @@ def get_retriever_tool(
                 f"{len(docs)} results {filter_label}\n\n"
                 f"{_format_docs_with_metadata(docs)}"
             )
+            content = _append_lightrag_citation_sources(content, docs)
             logger.info(
                 "get_retriever_tool[%s]: fallback retrieved %d docs for silo_id=%d",
                 tool_name, len(docs), silo_id,
@@ -1332,6 +1382,7 @@ def get_retriever_tool(
             f"{len(docs)} results {filter_label}\n\n"
             f"{_format_docs_with_metadata(docs)}"
         )
+        content = _append_lightrag_citation_sources(content, docs)
         logger.info(
             "get_retriever_tool[%s]: retrieved %d docs for silo_id=%d, filter_fields=%s",
             tool_name, len(docs), silo_id, applied_fields or "(none)",
