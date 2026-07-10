@@ -1004,8 +1004,7 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
-    
+
     files.forEach(file => formData.append('files', file));
     formData.append('session_id', sessionId);
     
@@ -1017,14 +1016,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1039,8 +1032,7 @@ class ApiService {
     chunk_overlap?: number;
   }) {
     const formData = new FormData();
-    const headers: Record<string, string> = {};
-    
+
     formData.append('url', url);
     formData.append('session_id', sessionId);
     
@@ -1052,14 +1044,8 @@ class ApiService {
     if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
     if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
 
-    const token = this.getAuthToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
     return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media/youtube`, {
       method: 'POST',
-      headers,
       body: formData,
     });
   }
@@ -1076,12 +1062,8 @@ class ApiService {
 
   async fetchPlaygroundMediaBlob(appId: number, agentId: number, mediaId: number, sessionId: string): Promise<Blob> {
     const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/playground-media/${mediaId}/stream?session_id=${encodeURIComponent(sessionId)}`;
-    const token = this.getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    const response = await fetch(url, { headers });
+    const headers = this.buildAuthHeaders('GET', false);
+    const response = await fetch(url, { headers, credentials: 'include' });
     if (!response.ok) {
       throw new Error(`Failed to fetch media: ${response.status}`);
     }
