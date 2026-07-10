@@ -44,6 +44,8 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
     """Return a retrieve_from_knowledge_base(query, mode) LangChain tool for skill-routed agents."""
     silo_id = silo.silo_id
     VALID_MODES = {"local", "global", "hybrid", "mix", "naive"}
+    # Shared across calls within the same turn — see _append_lightrag_citation_sources.
+    _citation_offset: List[int] = [0]
 
     @tool(response_format="content_and_artifact")
     async def retrieve_from_knowledge_base(query: str, mode: str) -> tuple:
@@ -76,7 +78,7 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None):
         # there are no entities/relationships (LightRAGGraphBubble), so naive shows
         # chunks-only. ponytail: header still reads "Subgrafo · 0 entidades…"; relabel
         # only if it bothers anyone.
-        content = _append_lightrag_citation_sources("\n\n---\n\n".join(parts), docs)
+        content = _append_lightrag_citation_sources("\n\n---\n\n".join(parts), docs, _citation_offset)
         return content, docs
 
     return retrieve_from_knowledge_base
@@ -1023,10 +1025,10 @@ _SEARCH_ERROR_MSG = "The knowledge base search failed; try rephrasing or removin
 # 1-based position in lightrag_raw_data.data.chunks — the same order the frontend
 # renders chunk chips (LightRAGGraphBubble) and resolves cite://N against, so a
 # citation opens the exact source chunk.
-# ponytail: positional index, single-retrieval-call scope. Streaming keeps only
-# the last _lightrag_graph event, so a turn with multiple retrieval calls can
-# misalign; the frontend degrades a cite with no matching chunk to a plain
-# marker. Global/id-based citations across calls is a follow-up, not this MVP.
+# Numbering is global across every retrieval call within the same turn (see the
+# `offset` mutable-cell param below) and agent_streaming_service.py merges every
+# _lightrag_graph event of the turn instead of keeping only the last one — so a
+# turn with several retrieval calls (e.g. multi-silo) still resolves correctly.
 _CITATION_EXCERPT_CHARS = 240
 
 _CITATION_INSTRUCTION = (
@@ -1039,24 +1041,31 @@ _CITATION_INSTRUCTION = (
 )
 
 
-def _append_lightrag_citation_sources(content: str, docs: List[Document]) -> str:
+def _append_lightrag_citation_sources(
+    content: str, docs: List[Document], offset: Optional[List[int]] = None
+) -> str:
     """Append a numbered SOURCES block + citation instruction for LightRAG chunks.
 
     No-op when *docs* carry no LightRAG chunk provenance (e.g. PGVector/Qdrant
     silos), so it is safe to call on any retriever path. Numbering mirrors
     ``lightrag_raw_data.data.chunks`` order 1:1 (no dedup) to match the chunk
     order the frontend renders and resolves ``cite://N`` against.
+
+    offset: same mutable-cell pattern as ``_call_count`` — pass the SAME
+    single-item list across multiple retrieval calls in one turn so numbering
+    continues (4, 5, 6...) instead of restarting at 1 each call. Omit for the
+    old single-call behavior.
     """
+    counter = offset if offset is not None else [0]
     lines: List[str] = []
-    idx = 0
     for doc in docs:
         raw = (doc.metadata or {}).get("lightrag_raw_data") or {}
         data = raw.get("data") or {}
         for chunk in (data.get("chunks") or []):
-            idx += 1
+            counter[0] += 1
             src = chunk.get("file_path") or "Unknown source"
             excerpt = " ".join((chunk.get("content") or "").split())[:_CITATION_EXCERPT_CHARS]
-            lines.append(f"[{idx}] (source: {src}) {excerpt}")
+            lines.append(f"[{counter[0]}] (source: {src}) {excerpt}")
     if not lines:
         return content
     return f"{content}\n\n{_CITATION_INSTRUCTION}\n\n" + "\n".join(lines)
@@ -1305,6 +1314,8 @@ def get_retriever_tool(
 
     # Not async-safe under parallel tool calls; safe with LangGraph's serialized model.
     _call_count: List[int] = [0]
+    # Shared across calls within the same turn — see _append_lightrag_citation_sources.
+    _citation_offset: List[int] = [0]
 
     async def _search(query: str, **metadata_kwargs: Any) -> Tuple[str, List[Document]]:
         if max_retrieval_calls is not None and _call_count[0] >= max_retrieval_calls:
@@ -1370,7 +1381,7 @@ def get_retriever_tool(
                 f"{len(docs)} results {filter_label}\n\n"
                 f"{_format_docs_with_metadata(docs)}"
             )
-            content = _append_lightrag_citation_sources(content, docs)
+            content = _append_lightrag_citation_sources(content, docs, _citation_offset)
             logger.info(
                 "get_retriever_tool[%s]: fallback retrieved %d docs for silo_id=%d",
                 tool_name, len(docs), silo_id,
@@ -1382,7 +1393,7 @@ def get_retriever_tool(
             f"{len(docs)} results {filter_label}\n\n"
             f"{_format_docs_with_metadata(docs)}"
         )
-        content = _append_lightrag_citation_sources(content, docs)
+        content = _append_lightrag_citation_sources(content, docs, _citation_offset)
         logger.info(
             "get_retriever_tool[%s]: retrieved %d docs for silo_id=%d, filter_fields=%s",
             tool_name, len(docs), silo_id, applied_fields or "(none)",

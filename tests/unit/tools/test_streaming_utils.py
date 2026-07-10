@@ -14,6 +14,7 @@ from tools.streaming_utils import (
     SSE_TOKEN,
     _map_messages_chunk,
     map_stream_event,
+    merge_lightrag_graph,
 )
 
 
@@ -137,3 +138,41 @@ class TestMapStreamEventDispatcher:
         )
 
         assert map_stream_event("messages", chunk) is None
+
+
+class TestMergeLightragGraph:
+    """A turn calling the retrieval tool more than once (multi-silo, or the
+    agent searching twice) must end up with ALL of it, not just the last call —
+    this is the fix for citations/subgraph misaligning on multi-call turns."""
+
+    def test_first_call_returned_as_is(self):
+        graph = {"data": {"entities": [{"id": "e1"}], "relationships": [], "chunks": [{"id": "c1"}]}}
+
+        assert merge_lightrag_graph(None, graph) == graph
+
+    def test_second_call_concatenates_chunks_in_order(self):
+        first = {"data": {"entities": [], "relationships": [], "chunks": [{"id": "a1"}, {"id": "a2"}]}}
+        second = {"data": {"entities": [], "relationships": [], "chunks": [{"id": "b1"}]}}
+
+        merged = merge_lightrag_graph(first, second)
+
+        assert [c["id"] for c in merged["data"]["chunks"]] == ["a1", "a2", "b1"]
+
+    def test_entities_deduped_by_id_across_calls(self):
+        first = {"data": {"entities": [{"id": "e1", "name": "Empresa A"}], "relationships": [], "chunks": []}}
+        second = {"data": {"entities": [{"id": "e1", "name": "Empresa A"}, {"id": "e2", "name": "Empresa B"}], "relationships": [], "chunks": []}}
+
+        merged = merge_lightrag_graph(first, second)
+
+        assert sorted(e["id"] for e in merged["data"]["entities"]) == ["e1", "e2"]
+
+    def test_relationships_concatenated_without_dedup(self):
+        # ponytail: LightRAG's fallback relationship id ("rel_0", "rel_1"...) is
+        # call-local, not globally stable — deduping by id here could wrongly
+        # merge two unrelated relationships that happen to share a fallback id.
+        first = {"data": {"entities": [], "relationships": [{"id": "rel_0"}], "chunks": []}}
+        second = {"data": {"entities": [], "relationships": [{"id": "rel_0"}], "chunks": []}}
+
+        merged = merge_lightrag_graph(first, second)
+
+        assert len(merged["data"]["relationships"]) == 2

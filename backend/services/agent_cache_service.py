@@ -5,7 +5,7 @@ from psycopg.errors import UniqueViolation
 import logging
 import os
 
-from tools.streaming_utils import extract_lightrag_graph_from_artifact
+from tools.streaming_utils import extract_lightrag_graph_from_artifact, merge_lightrag_graph
 
 logger = logging.getLogger(__name__)
 
@@ -230,11 +230,11 @@ class CheckpointerCacheService:
                         elif msg_type == 'tool':
                             # Not shown in history, but its artifact may carry the
                             # LightRAG graph (sources/subgraph) for the AI answer
-                            # that follows. Last one before that answer wins —
-                            # matches the live streaming accumulator's behavior.
+                            # that follows. Merged across every tool message of the
+                            # turn — matches the live streaming accumulator.
                             raw_data = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
                             if raw_data:
-                                pending_lightrag_graph = raw_data
+                                pending_lightrag_graph = merge_lightrag_graph(pending_lightrag_graph, raw_data)
                             continue
                         else:
                             role = msg_type

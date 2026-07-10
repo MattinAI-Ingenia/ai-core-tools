@@ -44,3 +44,27 @@ def test_noop_without_lightrag_chunks():
     # No chunks list at all.
     empty = _lightrag_doc([])
     assert _append_lightrag_citation_sources("A", [empty]) == "A"
+
+
+def test_offset_continues_numbering_across_calls_in_the_same_turn():
+    """A turn with 2 retrieval calls (e.g. multi-silo) must number 1,2,3,4 —
+    not restart at 1 on the second call — passing the SAME counter cell,
+    same pattern as _call_count."""
+    doc1 = _lightrag_doc([
+        {"id": "a1", "content": "alpha", "file_path": "a.pdf"},
+        {"id": "a2", "content": "beta", "file_path": "a.pdf"},
+    ])
+    doc2 = _lightrag_doc([{"id": "b1", "content": "gamma", "file_path": "b.pdf"}])
+
+    offset = [0]
+    out1 = _append_lightrag_citation_sources("PART A", [doc1], offset)
+    out2 = _append_lightrag_citation_sources("PART B", [doc2], offset)
+
+    assert "[1] (source: a.pdf) alpha" in out1
+    assert "[2] (source: a.pdf) beta" in out1
+    assert "[3] (source: b.pdf) gamma" in out2  # continues, doesn't restart at 1
+
+
+def test_offset_omitted_keeps_old_single_call_behavior():
+    doc = _lightrag_doc([{"id": "c1", "content": "x", "file_path": "a.pdf"}])
+    assert "[1] (source: a.pdf) x" in _append_lightrag_citation_sources("A", [doc])

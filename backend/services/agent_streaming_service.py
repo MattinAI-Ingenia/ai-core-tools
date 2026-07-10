@@ -21,6 +21,7 @@ from tools.langsmith_config import (
 from tools.streaming_utils import (
     format_sse_event,
     map_stream_event,
+    merge_lightrag_graph,
     SSE_TOKEN,
     SSE_HITL_INTERRUPT,
 )
@@ -326,7 +327,7 @@ class AgentStreamingService:
                         if events:
                             for event in events:
                                 if event["type"] == "_lightrag_graph":
-                                    lightrag_graph_data = event["data"]
+                                    lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
                                 elif event["type"] != SSE_TOKEN:
                                     yield format_sse_event(event["type"], event["data"])
                         continue
@@ -338,7 +339,7 @@ class AgentStreamingService:
                             if event["type"] == SSE_TOKEN:
                                 accumulated_content += event["data"].get("content", "")
                             elif event["type"] == "_lightrag_graph":
-                                lightrag_graph_data = event["data"]
+                                lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
                                 continue
                             else:
                                 yield format_sse_event(event["type"], event["data"])

@@ -265,6 +265,40 @@ def extract_lightrag_graph_from_artifact(artifact: Any) -> dict | None:
     return None
 
 
+def merge_lightrag_graph(accumulated: dict | None, new: dict) -> dict:
+    """Fold one turn's LightRAG raw_data payload into the turn's running total.
+
+    A turn can call the retrieval tool more than once (multi-silo, or the agent
+    searching twice). Chunks are concatenated *without* dedup — citation numbers
+    are positional (cite://N -> chunks[N-1]) and must keep matching across every
+    call in the turn, same as the offset param on _append_lightrag_citation_sources.
+
+    Entities are deduped by id (stable — it's the entity name). Relationships are
+    concatenated without dedup: ponytail — when LightRAG gives no real id,
+    lightrag_store.py falls back to a call-local "rel_{i}" that collides across
+    calls, so dedup-by-id could wrongly merge two unrelated relationships. A
+    doubled edge in the subgraph view is cosmetic; dedup by (source, target,
+    description) instead if that ever becomes visible enough to matter.
+    """
+    if accumulated is None:
+        return new
+    acc_data = accumulated.get("data", {}) or {}
+    new_data = new.get("data", {}) or {}
+
+    entities_by_id = {e.get("id"): e for e in acc_data.get("entities", [])}
+    entities_by_id.update({e.get("id"): e for e in new_data.get("entities", [])})
+
+    return {
+        **accumulated,
+        "data": {
+            **acc_data,
+            "entities": list(entities_by_id.values()),
+            "relationships": [*acc_data.get("relationships", []), *new_data.get("relationships", [])],
+            "chunks": [*acc_data.get("chunks", []), *new_data.get("chunks", [])],
+        },
+    }
+
+
 def _map_updates_chunk(chunk: Any) -> list[dict] | None:
     """Handle a single ``updates``-mode chunk from LangGraph astream.
 

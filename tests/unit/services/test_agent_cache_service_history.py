@@ -55,11 +55,11 @@ async def test_final_ai_answer_gets_the_preceding_tool_messages_graph():
 
 
 @pytest.mark.asyncio
-async def test_multi_tool_call_turn_uses_the_last_tool_messages_graph():
-    """Matches the live streaming accumulator: agent_streaming_service.py plainly
-    overwrites lightrag_graph_data on each _lightrag_graph event, so a turn that
-    calls two silos ends up showing only the last one's graph. Reconstruction
-    mirrors that so reload and live view agree."""
+async def test_multi_tool_call_turn_merges_both_tool_messages_graphs():
+    """Matches the live streaming accumulator (agent_streaming_service.py merges
+    every _lightrag_graph event of the turn via merge_lightrag_graph instead of
+    overwriting): a turn that calls two silos must keep chunks from BOTH, in
+    order, not just the last one."""
     messages = [
         HumanMessage(content="question"),
         AIMessage(
@@ -71,12 +71,12 @@ async def test_multi_tool_call_turn_uses_the_last_tool_messages_graph():
         ),
         _lightrag_tool_message("call_1", chunk_id="c1"),
         _lightrag_tool_message("call_2", chunk_id="c2"),
-        AIMessage(content="Answer [1](cite://1)"),
+        AIMessage(content="Answer [1](cite://1)[2](cite://2)"),
     ]
 
     history = await _history_for(messages)
 
-    assert history[1]["lightrag_graph"]["data"]["chunks"] == [{"id": "c2"}]
+    assert history[1]["lightrag_graph"]["data"]["chunks"] == [{"id": "c1"}, {"id": "c2"}]
 
 
 @pytest.mark.asyncio
