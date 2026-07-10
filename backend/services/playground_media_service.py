@@ -145,11 +145,18 @@ class PlaygroundMediaService:
                 )
             return existing
 
-        # Resolve embedding service: explicit > first available in app
+        # Resolve embedding service: explicit > first app-scoped > first system service.
+        # System services (app_id IS NULL) are shared across all apps; without this
+        # fallback, apps that rely solely on a platform embedding service would create
+        # the temp silo with no embedding service, breaking retrieval later.
         if not embedding_service_id:
             app_emb_services = EmbeddingServiceRepository.get_by_app_id(db, app_id)
             if app_emb_services:
                 embedding_service_id = app_emb_services[0].service_id
+            else:
+                system_emb_services = EmbeddingServiceRepository.get_system_services(db)
+                if system_emb_services:
+                    embedding_service_id = system_emb_services[0].service_id
 
         repo = Repository(
             name=_temp_repo_name(agent_id, session_id),
