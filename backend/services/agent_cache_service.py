@@ -5,6 +5,8 @@ from psycopg.errors import UniqueViolation
 import logging
 import os
 
+from tools.streaming_utils import extract_lightrag_graph_from_artifact
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,6 +200,10 @@ class CheckpointerCacheService:
                 messages = channel_values.get("messages", [])
 
                 history = []
+                # Needed evil: this only survives until SummarizationMiddleware
+                # trims the turn away (it deletes ToolMessages permanently, not
+                # just from view) — see docs/LIGHTRAG_FOLLOWUPS.md.
+                pending_lightrag_graph = None
                 for msg in messages:
                     if hasattr(msg, 'type'):
                         msg_type = msg.type
@@ -222,6 +228,13 @@ class CheckpointerCacheService:
                         elif msg_type == 'system':
                             continue
                         elif msg_type == 'tool':
+                            # Not shown in history, but its artifact may carry the
+                            # LightRAG graph (sources/subgraph) for the AI answer
+                            # that follows. Last one before that answer wins —
+                            # matches the live streaming accumulator's behavior.
+                            raw_data = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
+                            if raw_data:
+                                pending_lightrag_graph = raw_data
                             continue
                         else:
                             role = msg_type
@@ -236,10 +249,14 @@ class CheckpointerCacheService:
                         if not content_str or not content_str.strip():
                             continue
 
-                        history.append({
+                        entry = {
                             "role": role,
                             "content": content_str
-                        })
+                        }
+                        if role == 'agent' and pending_lightrag_graph:
+                            entry["lightrag_graph"] = pending_lightrag_graph
+                        pending_lightrag_graph = None
+                        history.append(entry)
 
                 logger.info(f"Retrieved {len(history)} messages from thread {thread_id}")
                 return history

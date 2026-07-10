@@ -28,6 +28,7 @@ class ConversationMessageSchema(BaseModel):
     """Schema for a single conversation message"""
     role: str  # 'user' or 'agent'
     content: str
+    lightrag_graph: Optional[dict] = None
 
 
 class ConversationHistorySchema(BaseModel):

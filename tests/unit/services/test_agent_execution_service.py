@@ -400,3 +400,33 @@ class TestFileSnapshotting:
             )
 
             mock_inject.assert_called_once_with("ok", [mock_file_ref])
+
+
+# ---------------------------------------------------------------------------
+# Regression: _execute_agent_async must not reference the undefined
+# `temp_silo_ids` name — this path (public API / MCP / marketplace) has no
+# playground-session context to source it from, unlike the streaming path.
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteAgentAsync:
+    @pytest.mark.asyncio
+    async def test_does_not_raise_nameerror_and_omits_temp_silo_ids(self):
+        svc, _ = make_service()
+        fresh_agent = make_agent(has_memory=False)
+
+        mock_chain = MagicMock()
+        mock_chain.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="Hello")]})
+        mock_create_agent = AsyncMock(return_value=(mock_chain, None, None, None))
+
+        with (
+            patch("tools.agentTools.create_agent", new=mock_create_agent),
+            patch("tools.agentTools.prepare_agent_config", return_value={"configurable": {}}),
+            patch("tools.agentTools.build_human_message", return_value=MagicMock()),
+            patch("tools.langsmith_config.resolve_langsmith_settings", return_value=None),
+        ):
+            result = await svc._execute_agent_async(fresh_agent, "hello")
+
+        assert result == "Hello"
+        mock_create_agent.assert_awaited_once()
+        assert "temp_silo_ids" not in mock_create_agent.call_args.kwargs

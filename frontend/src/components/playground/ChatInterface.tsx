@@ -26,6 +26,7 @@ interface Message {
 interface RawHistoryMessage {
   role: string;
   content: string;
+  lightrag_graph?: LightRAGGraphData | null;
 }
 
 /** Shape returned by the API for each attached/persistent file. */
@@ -203,6 +204,7 @@ function ChatInterface({
                 type: msg.role === 'user' ? 'user' : 'agent',
                 content: msg.content,
                 timestamp: new Date(),
+                lightragGraph: msg.lightrag_graph ?? null,
               })
             );
             setMessages(loadedMessages);
@@ -219,6 +221,7 @@ function ChatInterface({
                 type: msg.role === 'user' ? 'user' : 'agent',
                 content: msg.content,
                 timestamp: new Date(),
+                lightragGraph: msg.lightrag_graph ?? null,
               })
             );
             setMessages(loadedMessages);

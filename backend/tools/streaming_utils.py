@@ -240,6 +240,31 @@ def _map_messages_chunk(chunk: Any) -> list[dict] | None:
     return [{"type": SSE_TOKEN, "data": {"content": text}}]
 
 
+def extract_lightrag_graph_from_artifact(artifact: Any) -> dict | None:
+    """Pull the first LightRAG raw_data payload (entities/chunks) out of a
+    ToolMessage.artifact — same shape the frontend's LightRAGGraphData expects.
+
+    Shared by the live streaming path (below) and checkpoint-history reconstruction
+    (``agent_cache_service.get_conversation_history_async``), so both surfaces agree
+    on what counts as "this ToolMessage carries a LightRAG graph".
+
+    Never raises — returns None if artifact isn't LightRAG-shaped.
+    """
+    if not artifact:
+        return None
+    try:
+        docs = artifact if isinstance(artifact, list) else [artifact]
+        for doc in docs:
+            meta = (doc.get("metadata") if isinstance(doc, dict) else getattr(doc, "metadata", None)) or {}
+            raw_data = meta.get("lightrag_raw_data")
+            graph = (raw_data or {}).get("data", {})
+            if graph.get("entities") or graph.get("chunks"):
+                return raw_data
+    except Exception:
+        logger.debug("Could not extract LightRAG graph data from artifact", exc_info=True)
+    return None
+
+
 def _map_updates_chunk(chunk: Any) -> list[dict] | None:
     """Handle a single ``updates``-mode chunk from LangGraph astream.
 
@@ -340,22 +365,9 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                         exc_info=True,
                     )
                 # Detect LightRAG graph context carried in the artifact
-                try:
-                    artifact = getattr(msg, "artifact", None)
-                    if artifact:
-                        docs = artifact if isinstance(artifact, list) else [artifact]
-                        for doc in docs:
-                            meta = (doc.get("metadata") if isinstance(doc, dict) else getattr(doc, "metadata", None)) or {}
-                            raw_data = meta.get("lightrag_raw_data")
-                            graph = (raw_data or {}).get("data", {})
-                            if graph.get("entities") or graph.get("chunks"):
-                                events.append({
-                                    "type": "_lightrag_graph",
-                                    "data": raw_data,
-                                })
-                                break
-                except Exception:
-                    logger.debug("Could not extract LightRAG graph data from artifact", exc_info=True)
+                raw_data = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
+                if raw_data:
+                    events.append({"type": "_lightrag_graph", "data": raw_data})
 
     # --- __interrupt__: HumanInTheLoop middleware paused execution ---
     # This check MUST be outside the for-loop above because when LangGraph

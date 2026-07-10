@@ -1006,8 +1006,7 @@ class AgentExecutionService:
         try:
             # Create the agent chain with all tools and capabilities
             agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
-                fresh_agent, search_params, session_id_for_cache, user_context, working_dir,
-                temp_silo_ids=temp_silo_ids
+                fresh_agent, search_params, session_id_for_cache, user_context, working_dir
             )
 
             # Prepare configuration
