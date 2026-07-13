@@ -9,7 +9,8 @@ from tools.outputParserTools import get_parser_model_by_id
 from tools.aiServiceTools import get_llm, get_output_parser
 from tools.ai.fileTools import fetch_file_in_base64
 from tools.ai.workspaceTools import create_download_url_tool
-from typing import Any, Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple, Type
+from pydantic import BaseModel, Field
 import types as _types
 from services.silo_service import SiloService
 from db.database import SessionLocal
@@ -504,9 +505,23 @@ def build_human_message(
     return HumanMessage(content=content)
 
 
+class AgentToolInput(BaseModel):
+    """Input schema for an agent-as-tool.
+
+    Pinned explicitly so the provider function schema is exactly
+    ``{query: string}``. Without it, ``BaseTool`` derives the schema from the
+    ``_run(self, query, *args, **kwargs)`` signature, which emits an untyped
+    ``args`` array (``items`` with no ``type``) that OpenAI rejects with
+    ``schema must have a 'type' key``.
+    """
+
+    query: str = Field(description="The question or instruction to send to the sub-agent.")
+
+
 class IACTTool(BaseTool):
     name: str = "agent_tool"
     description: str = "Search for a repository"
+    args_schema: Type[BaseModel] = AgentToolInput
     agent: Agent
     user_context: Optional[Dict] = None
     react_agent: Any = None
