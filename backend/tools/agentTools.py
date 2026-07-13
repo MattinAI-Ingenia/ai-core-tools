@@ -1,6 +1,7 @@
 from langchain.messages import HumanMessage, SystemMessage, AnyMessage
 from langchain.agents import create_agent as create_langchain_agent, AgentState
 from langchain.agents.middleware import SummarizationMiddleware
+from utils.schema_utils import sanitize_identifier, ensure_json_schema_types
 from models.agent import Agent
 from models.silo import Silo
 from langchain.tools import BaseTool, tool
@@ -259,6 +260,9 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         if (mcp_client):
             mcp_tools = await mcp_client.get_tools()
             logger.info(f"MCP tools loaded successfully: {len(mcp_tools)} tools")
+            for tool in mcp_tools:
+                if hasattr(tool, "args_schema") and isinstance(tool.args_schema, dict):
+                    ensure_json_schema_types(tool.args_schema)
             if (mcp_tools):
                 tools.extend(mcp_tools)
     except Exception as e:
@@ -514,7 +518,7 @@ class IACTTool(BaseTool):
 
         self.agent = agent
         self.user_context = user_context
-        self.name = agent.name.replace(" ", "_")
+        self.name = sanitize_identifier(agent.name)
         self.description = agent.description or "Agent tool"
         self.llm = get_llm(agent)
         if self.llm is None:
