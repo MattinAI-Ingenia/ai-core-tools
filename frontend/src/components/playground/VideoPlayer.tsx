@@ -5,6 +5,8 @@ export interface VideoTimestamp {
   end_time: number;
   text_preview: string;
   is_agent_cited?: boolean;
+  /** Filename of the media the agent cited this timestamp for (used to disambiguate multiple media). */
+  mediaLabel?: string;
 }
 
 interface VideoPlayerProps {

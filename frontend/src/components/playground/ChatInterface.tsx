@@ -631,14 +631,17 @@ function ChatInterface({
 
   /**
    * Parse timestamp patterns from agent response text.
-   * Matches: [02:05 - 03:00], [02:05-03:00], [02:05], [1:02:05 - 1:03:00]
+   * Matches optional media label prefixes so timestamps can be tied to a
+   * specific video/audio when several media are uploaded:
+   *   [lesson.mp4 @ 02:05 - 03:00], [02:05 - 03:00], [02:05-03:00],
+   *   [lesson.mp4 @ 02:05], [02:05], [1:02:05 - 1:03:00]
    */
   const parseTimestamps = (text: string): VideoTimestamp[] => {
     if (typeof text !== 'string') return [];
-    // Match range patterns: [02:05 - 03:00] or [02:05-03:00]
-    const rangeRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–]\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
-    // Match single timestamp patterns: [02:05]
-    const singleRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    // Optional label prefix "<name> @ " inside the bracket, then a time range.
+    const rangeRegex = /\[(?:\s*([^[\]@]+?)\s*@\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–]\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    // Optional label prefix, then a single timestamp.
+    const singleRegex = /\[(?:\s*([^[\]@]+?)\s*@\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
 
     const results: VideoTimestamp[] = [];
     const seen = new Set<string>();
@@ -649,31 +652,37 @@ function ChatInterface({
       return parts[0] * 60 + parts[1];
     };
 
+    const normalizeLabel = (label?: string) => {
+      const trimmed = label?.trim();
+      return trimmed ? trimmed : undefined;
+    };
+
     // First pass: ranges
     let match: RegExpExecArray | null;
     while ((match = rangeRegex.exec(text)) !== null) {
-      const startStr = match[1];
-      const endStr = match[2];
-      const key = `${startStr}-${endStr}`;
+      const mediaLabel = normalizeLabel(match[1]);
+      const startStr = match[2];
+      const endStr = match[3];
+      const key = `${mediaLabel ?? ''}|${startStr}-${endStr}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      // Also mark individual timestamps as seen so single-pass doesn't duplicate
-      seen.add(startStr);
-      seen.add(endStr);
 
       results.push({
         start_time: toSeconds(startStr),
         end_time: toSeconds(endStr),
         text_preview: '',
         is_agent_cited: true,
+        mediaLabel,
       });
     }
 
     // Second pass: single timestamps not already part of a range
     while ((match = singleRegex.exec(text)) !== null) {
-      const ts = match[1];
-      if (seen.has(ts)) continue;
-      seen.add(ts);
+      const mediaLabel = normalizeLabel(match[1]);
+      const ts = match[2];
+      const key = `${mediaLabel ?? ''}|${ts}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       const secs = toSeconds(ts);
 
       results.push({
@@ -681,12 +690,53 @@ function ChatInterface({
         end_time: secs + 30, // Default 30s window for single timestamps
         text_preview: '',
         is_agent_cited: true,
+        mediaLabel,
       });
     }
 
     // Sort by start_time
     results.sort((a, b) => a.start_time - b.start_time);
     return results;
+  };
+
+  /**
+   * Associate parsed timestamps to a specific media so each VideoPlayer only
+   * shows the moments the agent actually cited for that video/audio.
+   * - With a single uploaded media, every cited timestamp belongs to it (the
+   *   agent may omit the filename when there is no ambiguity).
+   * - With multiple media, only timestamps explicitly labelled with this
+   *   media's name are attributed to it; ambiguous/unlabelled ones are skipped.
+   */
+  const getTimestampsForMedia = (
+    all: VideoTimestamp[],
+    mediaName: string,
+    readyCount: number,
+  ): VideoTimestamp[] => {
+    if (readyCount <= 1) return all;
+
+    const name = mediaName.toLowerCase().trim();
+    const nameNoExt = name.replace(/\.[^./\\]+$/, '');
+    return all.filter((t) => {
+      if (t.mediaLabel === undefined) return false;
+      const label = t.mediaLabel.toLowerCase().trim();
+      const labelNoExt = label.replace(/\.[^./\\]+$/, '');
+      return label === name || label === nameNoExt || labelNoExt === nameNoExt || label.includes(name);
+    });
+  };
+
+  /**
+   * Remove the media-name prefix from timestamp citations for display, keeping
+   * only the time portion. The raw text still carries the label so the players
+   * can be associated to the right media, but the user sees plain timestamps:
+   *   [lesson.mp4 @ 02:05 - 03:00] -> [02:05 - 03:00]
+   *   [lesson.mp4 @ 02:05]         -> [02:05]
+   */
+  const stripTimestampLabels = (content: string | object): string | object => {
+    if (typeof content !== 'string') return content;
+    return content.replace(
+      /\[\s*[^[\]@]+?\s*@\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?)\]/g,
+      '[$1]',
+    );
   };
 
   // Direct stream URLs for ready media so the <video>/<audio> element issues
@@ -963,19 +1013,24 @@ function ChatInterface({
                       <div className="max-w-[90%] lg:max-w-[80%]">
                         <div className="pg-bubble-agent text-gray-800 dark:text-gray-100">
                           <MessageContent
-                            content={message.content}
+                            content={stripTimestampLabels(message.content)}
                             resolveFileUrl={resolveFileUrl}
                           />
                         </div>
                         {msgTimestamps.length > 0 &&
                           readyVideoMedias.map((media) => {
                             const streamUrl = videoStreamUrls[media.media_id];
-                            if (!streamUrl) return null;
+                            const mediaTimestamps = getTimestampsForMedia(
+                              msgTimestamps,
+                              media.name,
+                              readyVideoMedias.length,
+                            );
+                            if (!streamUrl || mediaTimestamps.length === 0) return null;
                             return (
                               <VideoPlayer
                                 key={media.media_id}
                                 videoUrl={streamUrl}
-                                timestamps={msgTimestamps}
+                                timestamps={mediaTimestamps}
                                 title={media.name}
                                 isAudio={media.media_type === 'audio'}
                               />
@@ -999,7 +1054,7 @@ function ChatInterface({
                     keeping content visible until the final message is committed. */}
                 {showStreaming && (
                   <StreamingMessage
-                    content={streamingContent}
+                    content={stripTimestampLabels(streamingContent) as string}
                     isStreaming={isStreaming}
                     activeTools={activeTools}
                     thinkingMessage={thinkingMessage}
