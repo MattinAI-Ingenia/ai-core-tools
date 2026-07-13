@@ -88,13 +88,13 @@ function ChatInterface({
     [appId, agentId],
   );
 
-  const { streamingContent, activeTools, thinkingMessage, isStreaming, sendMessage, abortStream } =
+  const { streamingContent, activeTools, thinkingMessage, isStreaming, hitlInterrupt, sendMessage, abortStream, clearHitlInterrupt } =
     useStreamingChat(playgroundStream);
 
   // Hold streaming content visible briefly after isStreaming flips to false,
   // so the transition to the final committed message is seamless.
   const [holdStreamingContent, setHoldStreamingContent] = useState(false);
-  const showStreaming = isStreaming || holdStreamingContent;
+  const showStreaming = isStreaming || holdStreamingContent || hitlInterrupt !== null;
 
   // ─── Scroll helpers ──────────────────────────────────────────────────────────
 
@@ -232,6 +232,37 @@ function ChatInterface({
       setFiltersKey((prev) => prev + 1);
     }
   }, [metadataFields, filterMetadata]);
+
+  // ─── HITL Resume ──────────────────────────────────────────────────────────
+
+  const resumeWithDecisions = useCallback(
+    async (decisions: Array<{ type: string; edited_action?: { name: string; args: Record<string, unknown> }; message?: string }>) => {
+      let finalResponse: string | Record<string, unknown> = '';
+      let finalConversationId: number | null = currentConversationId;
+
+      await apiService.resumeAgentChat(appId, agentId, decisions, {
+        conversationId: currentConversationId,
+        onEvent: (event) => {
+          // Reuse the sendMessage's onEvent is not possible since sendMessage drives
+          // its own stream. Instead, we handle the resume events inline.
+          if (event.type === 'done') {
+            const doneData = event.data as {
+              response?: string | Record<string, unknown>;
+              conversation_id?: number;
+            };
+            finalResponse = doneData.response ?? '';
+            if (doneData.conversation_id) finalConversationId = doneData.conversation_id;
+          }
+        },
+      });
+
+      return {
+        response: finalResponse,
+        conversationId: finalConversationId,
+      };
+    },
+    [appId, agentId, currentConversationId],
+  );
 
   // ─── Message sending ─────────────────────────────────────────────────────────
 
@@ -479,9 +510,8 @@ function ChatInterface({
               Filter by Metadata
             </span>
             <svg
-              className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${
-                isFilterExpanded ? 'rotate-180' : ''
-              }`}
+              className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${isFilterExpanded ? 'rotate-180' : ''
+                }`}
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -498,9 +528,8 @@ function ChatInterface({
 
           <div
             id={filterPanelId}
-            className={`border-t border-white/20 dark:border-gray-700/30 px-4 py-3 bg-white/20 dark:bg-gray-800/20 ${
-              isFilterExpanded ? '' : 'hidden'
-            }`}
+            className={`border-t border-white/20 dark:border-gray-700/30 px-4 py-3 bg-white/20 dark:bg-gray-800/20 ${isFilterExpanded ? '' : 'hidden'
+              }`}
           >
             <SearchFilters
               key={filtersKey}
@@ -728,6 +757,105 @@ function ChatInterface({
                     activeTools={activeTools}
                     thinkingMessage={thinkingMessage}
                   />
+                )}
+
+                {/* HITL Approval UI */}
+                {hitlInterrupt && !isStreaming && (
+                  <div className="flex justify-start mb-4">
+                    <div className="max-w-[85%] w-full">
+                      <div className="bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-xl p-4 space-y-3">
+                        <div className="flex items-center gap-2 text-amber-800 dark:text-amber-200 text-sm font-medium">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                          </svg>
+                          Aprobación requerida
+                        </div>
+                        {hitlInterrupt.actionRequests.map((req, idx) => (
+                          <div key={idx} className="bg-white dark:bg-gray-800 rounded-lg p-3 border border-amber-100 dark:border-amber-800">
+                            <div className="text-sm font-mono text-gray-700 dark:text-gray-300 mb-1">
+                              🔧 {req.name}
+                            </div>
+                            <pre className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 rounded p-2 overflow-x-auto max-h-32">
+                              {JSON.stringify(req.args, null, 2)}
+                            </pre>
+                          </div>
+                        ))}
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const decisions = hitlInterrupt.actionRequests.map(() => ({ type: 'approve' as const }));
+                              clearHitlInterrupt();
+                              setHoldStreamingContent(true);
+                              try {
+                                const result = await resumeWithDecisions(decisions);
+                                const responseContent = typeof result.response === 'object'
+                                  ? JSON.stringify(result.response, null, 2)
+                                  : String(result.response || '');
+                                const agentMsgId = (Date.now() + 1).toString();
+                                lastStreamedMsgIdRef.current = agentMsgId;
+                                setMessages((prev) => [...prev, {
+                                  id: agentMsgId,
+                                  type: 'agent' as const,
+                                  content: responseContent,
+                                  timestamp: new Date(),
+                                }]);
+                                setHoldStreamingContent(false);
+                              } catch (err) {
+                                setHoldStreamingContent(false);
+                                setMessages((prev) => [...prev, {
+                                  id: (Date.now() + 1).toString(),
+                                  type: 'error' as const,
+                                  content: err instanceof Error ? err.message : 'Resume failed',
+                                  timestamp: new Date(),
+                                }]);
+                              }
+                            }}
+                            className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                          >
+                            ✓ Aprobar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const decisions = hitlInterrupt.actionRequests.map((req) => ({
+                                type: 'reject' as const,
+                                message: `User rejected tool call: ${req.name}`,
+                              }));
+                              clearHitlInterrupt();
+                              setHoldStreamingContent(true);
+                              try {
+                                const result = await resumeWithDecisions(decisions);
+                                const responseContent = typeof result.response === 'object'
+                                  ? JSON.stringify(result.response, null, 2)
+                                  : String(result.response || '');
+                                const agentMsgId = (Date.now() + 1).toString();
+                                lastStreamedMsgIdRef.current = agentMsgId;
+                                setMessages((prev) => [...prev, {
+                                  id: agentMsgId,
+                                  type: 'agent' as const,
+                                  content: responseContent,
+                                  timestamp: new Date(),
+                                }]);
+                                setHoldStreamingContent(false);
+                              } catch (err) {
+                                setHoldStreamingContent(false);
+                                setMessages((prev) => [...prev, {
+                                  id: (Date.now() + 1).toString(),
+                                  type: 'error' as const,
+                                  content: err instanceof Error ? err.message : 'Resume failed',
+                                  timestamp: new Date(),
+                                }]);
+                              }
+                            }}
+                            className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors"
+                          >
+                            ✗ Rechazar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </>
             )}

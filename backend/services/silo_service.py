@@ -371,8 +371,8 @@ class SiloService:
                 collection_name,
                 silo.embedding_service,
                 merged_search_kwargs,
+                use_async=True,  # Use async psycopg engine for LangGraph compatibility
                 search_type=retriever_search_type,
-                use_async=True  # Use async psycopg engine for LangGraph compatibility
             )
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
@@ -1659,8 +1659,8 @@ class SiloService:
     
     @staticmethod
     def search_silo_documents_router(
-        silo_id: int,
-        query: str,
+        silo_id: int, 
+        query: str, 
         filter_metadata: Optional[Dict[str, Any]] = None,
         limit: Optional[int] = None,
         search_type: str = "similarity",
@@ -1681,17 +1681,10 @@ class SiloService:
         
         # Perform the search with metadata filtering
         results = SiloService.find_docs_in_collection(
-            silo_id,
-            query,
+            silo_id, 
+            query, 
             filter_metadata=filter_metadata,
-            limit=limit,
-            search_type=search_type,
-            score_threshold=score_threshold,
-            fetch_k=fetch_k,
-            lambda_mult=lambda_mult,
-            min_content_length=min_content_length,
-            max_content_length=max_content_length,
-            db=db,
+            db=db
         )
         
         # Convert results to response format

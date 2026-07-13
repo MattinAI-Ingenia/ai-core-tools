@@ -5,7 +5,8 @@ export type StreamEventType =
   | 'thinking'
   | 'metadata'
   | 'error'
-  | 'done';
+  | 'done'
+  | 'hitl_interrupt';
 
 export interface StreamEvent {
   type: StreamEventType;

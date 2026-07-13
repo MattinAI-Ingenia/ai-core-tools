@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
-import { apiService } from '../../services/api';
 
 export type MetadataOperator = '$eq' | '$ne' | '$gt' | '$gte' | '$lt' | '$lte' | '$in';
 export type SupportedDbType = 'PGVECTOR' | 'QDRANT';
@@ -18,20 +17,11 @@ interface PreparedFilter {
   value: unknown;
 }
 
-interface SavedFilter {
-  id: number;
-  name: string;
-  filter: Record<string, unknown>;
-}
-
 interface SearchFiltersProps {
   metadataFields?: SearchFilterMetadataField[];
   dbType?: string;
   disabled?: boolean;
   onFilterMetadataChange: (filterMetadata: Record<string, unknown> | undefined) => void;
-  appId?: string | number;
-  siloId?: string | number;
-  siloStorageKey?: string;
 }
 
 const DEFAULT_DB_TYPE: SupportedDbType = 'PGVECTOR';
@@ -221,9 +211,6 @@ export function SearchFilters({
   dbType,
   disabled = false,
   onFilterMetadataChange,
-  appId,
-  siloId,
-  siloStorageKey,
 }: Readonly<SearchFiltersProps>) {
   const [metadataFilters, setMetadataFilters] = useState<Record<string, string>>({});
   const [filterOperators, setFilterOperators] = useState<Record<string, MetadataOperator>>({});
@@ -268,102 +255,24 @@ export function SearchFilters({
   const normalizedDbType = useMemo(() => normalizeDbType(dbType), [dbType]);
   const operatorMapping = FILTER_OPERATOR_MAPPINGS[normalizedDbType];
 
-  const filterMetadata = useMemo(() => {
+  useEffect(() => {
     const prepared = prepareFilters(metadataFilters, filterOperators, metadataFields, operatorMapping);
-    return normalizedDbType === 'QDRANT'
+    const filterMetadata = normalizedDbType === 'QDRANT'
       ? buildQdrantFilter(prepared, logicalOperator)
       : buildPgvectorFilter(prepared, logicalOperator);
-  }, [metadataFilters, filterOperators, logicalOperator, metadataFields, normalizedDbType, operatorMapping]);
 
-  useEffect(() => {
     onFilterMetadataChange(filterMetadata);
-  }, [filterMetadata, onFilterMetadataChange]);
-
-  // Autocomplete fetch
-  const fetchSuggestions = useCallback(
-    (fieldName: string, prefix: string) => {
-      if (!appId || !siloId || prefix.length < 1) {
-        setSuggestions((prev) => ({ ...prev, [fieldName]: [] }));
-        return;
-      }
-      void apiService
-        .getSiloMetadataValues(appId, siloId, fieldName, prefix, 10)
-        .then((res) => {
-          const values = (res as { values?: string[] }).values ?? [];
-          setSuggestions((prev) => ({ ...prev, [fieldName]: values }));
-          if (values.length > 0) setOpenSuggestionField(fieldName);
-        })
-        .catch(() => {
-          setSuggestions((prev) => ({ ...prev, [fieldName]: [] }));
-        });
-    },
-    [appId, siloId],
-  );
+  }, [metadataFilters, filterOperators, logicalOperator, metadataFields, normalizedDbType, operatorMapping, onFilterMetadataChange]);
 
   const handleMetadataFilterChange = (fieldName: string, value: string, operator: MetadataOperator) => {
-    setMetadataFilters((prev) => ({ ...prev, [fieldName]: value }));
-    setFilterOperators((prev) => ({ ...prev, [fieldName]: operator }));
-  };
-
-  const handleStringInputChange = (field: SearchFilterMetadataField, value: string, operator: MetadataOperator) => {
-    handleMetadataFilterChange(field.name, value, operator);
-    if (operator === '$in') return; // comma-separated — skip autocomplete
-
-    if (debounceTimers.current[field.name]) clearTimeout(debounceTimers.current[field.name]);
-    debounceTimers.current[field.name] = setTimeout(() => fetchSuggestions(field.name, value), 250);
-  };
-
-  const handleSuggestionClick = (fieldName: string, suggestion: string) => {
-    handleMetadataFilterChange(fieldName, suggestion, filterOperators[fieldName] || '$eq');
-    setSuggestions((prev) => ({ ...prev, [fieldName]: [] }));
-    setOpenSuggestionField(null);
-  };
-
-  const handleInputBlur = (fieldName: string) => {
-    setTimeout(() => {
-      setOpenSuggestionField((prev) => (prev === fieldName ? null : prev));
-    }, 150);
-  };
-
-  const handleInputKeyDown = (_fieldName: string, e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') setOpenSuggestionField(null);
-  };
-
-  // Saved filters helpers
-  const persistSavedFilters = (filters: SavedFilter[]) => {
-    setSavedFilters(filters);
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(filters));
-    } catch {
-      // ignore storage errors
-    }
-  };
-
-  const handleSaveFilter = () => {
-    const name = saveFilterName.trim();
-    if (!name || !filterMetadata) return;
-    persistSavedFilters([...savedFilters, { id: Date.now(), name, filter: filterMetadata }]);
-    setSaveFilterName('');
-    setShowSaveForm(false);
-  };
-
-  const handleLoadFilter = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const id = Number(e.target.value);
-    if (!id) return;
-    const found = savedFilters.find((f) => f.id === id);
-    if (found) {
-      onFilterMetadataChange(found.filter);
-      setLoadedFilterName(found.name);
-    }
-    setLoadSelectValue('');
-  };
-
-  const handleRemoveLoadedFilter = () => {
-    if (!loadedFilterName) return;
-    const found = savedFilters.find((f) => f.name === loadedFilterName);
-    if (found) persistSavedFilters(savedFilters.filter((f) => f.id !== found.id));
-    onFilterMetadataChange(undefined);
-    setLoadedFilterName(null);
+    setMetadataFilters((prev) => ({
+      ...prev,
+      [fieldName]: value,
+    }));
+    setFilterOperators((prev) => ({
+      ...prev,
+      [fieldName]: operator,
+    }));
   };
 
   if (!metadataFields || metadataFields.length === 0) {
@@ -393,74 +302,38 @@ export function SearchFilters({
           </select>
         </div>
       </div>
-
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {metadataFields.map((field) => {
-          const allowedOps = getOperatorsForType(field.type);
-          const rawOp = filterOperators[field.name] || '$eq';
-          const currentOp = allowedOps.includes(rawOp) ? rawOp : allowedOps[0];
-          const isStringField = isStringType(field.type);
-          const fieldSuggestions = suggestions[field.name] ?? [];
-          const showSuggestions = openSuggestionField === field.name && fieldSuggestions.length > 0;
-
+          const operator = filterOperators[field.name] || '$eq';
           return (
-            <div key={field.name} className="relative">
+            <div key={field.name}>
               <label htmlFor={`filter_${field.name}`} className="block text-sm font-medium text-gray-700 mb-1">
                 {field.name}
                 <span className="text-xs text-gray-500 ml-1">({field.type})</span>
               </label>
               <div className="flex items-center gap-2">
                 <select
-                  value={currentOp}
-                  onChange={(e) => {
-                    const newOp = e.target.value as MetadataOperator;
-                    handleMetadataFilterChange(field.name, metadataFilters[field.name] || '', newOp);
-                  }}
-                  className="px-2 py-1 border border-gray-300 rounded-lg text-sm shrink-0"
+                  value={operator}
+                  onChange={(e) => handleMetadataFilterChange(field.name, metadataFilters[field.name] || '', e.target.value as MetadataOperator)}
+                  className="px-2 py-1 border border-gray-300 rounded-lg text-sm"
                   disabled={disabled}
                 >
-                  {allowedOps.map((op) => (
-                    <option key={op} value={op}>
-                      {OPERATOR_LABELS[op]}
-                    </option>
-                  ))}
+                  <option value="$eq">equals</option>
+                  <option value="$ne">not equals</option>
+                  <option value="$gt">greater than</option>
+                  <option value="$gte">greater than or equal</option>
+                  <option value="$lt">less than</option>
+                  <option value="$lte">less than or equal</option>
                 </select>
-                <div className="relative w-full">
-                  <input
-                    type="text"
-                    id={`filter_${field.name}`}
-                    value={metadataFilters[field.name] || ''}
-                    onChange={(e) => {
-                      if (isStringField) {
-                        handleStringInputChange(field, e.target.value, currentOp);
-                      } else {
-                        handleMetadataFilterChange(field.name, e.target.value, currentOp);
-                      }
-                    }}
-                    onBlur={() => handleInputBlur(field.name)}
-                    onKeyDown={(e) => handleInputKeyDown(field.name, e)}
-                    onFocus={() => {
-                      if (fieldSuggestions.length > 0) setOpenSuggestionField(field.name);
-                    }}
-                    placeholder={currentOp === '$in' ? 'value1, value2, value3' : `Filter by ${field.name}`}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent text-sm"
-                    disabled={disabled}
-                  />
-                  {showSuggestions && (
-                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-md max-h-40 overflow-y-auto">
-                      {fieldSuggestions.map((s) => (
-                        <button
-                          key={s}
-                          type="button"
-                          onMouseDown={() => handleSuggestionClick(field.name, s)}
-                          className="w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-amber-50 hover:text-amber-800 block"
-                        >
-                          {s}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                <input
+                  type="text"
+                  id={`filter_${field.name}`}
+                  value={metadataFilters[field.name] || ''}
+                  onChange={(e) => handleMetadataFilterChange(field.name, e.target.value, operator)}
+                  placeholder={`Filter by ${field.name}`}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent text-sm"
+                  disabled={disabled}
+                />
               </div>
               {field.description && (
                 <p className="text-xs text-gray-500 mt-1">{field.description}</p>

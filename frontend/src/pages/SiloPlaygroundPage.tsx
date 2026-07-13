@@ -1,8 +1,7 @@
-import type { Dispatch, SetStateAction } from 'react';
-import { useParams } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Search, Info, Clock, History, Bot, SplitSquareHorizontal } from 'lucide-react';
-import SearchControls from '../components/playground/SearchControls';
-import SiloAPISnippets from '../components/playground/SiloAPISnippets';
+import { useState, useEffect, useCallback } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { AlertTriangle, ArrowLeft, Trash2, Search, Info } from 'lucide-react';
+import { apiService } from '../services/api';
 import SearchFilters from '../components/playground/SearchFilters';
 import ResultCard from '../components/playground/ResultCard';
 import Modal from '../components/ui/Modal';
@@ -11,73 +10,116 @@ import type { PanelState } from '../hooks/useSiloSearch';
 
 function SiloPlaygroundPage() {
   const { appId, siloId } = useParams();
-  const {
-    silo,
-    loading,
-    error,
-    systemDBConfig,
-    searchQuery,
-    setSearchQuery,
-    searchResults,
-    isSearching,
-    searchError,
-    hasSearched,
-    filterMetadata,
-    minContentLength,
-    setMinContentLength,
-    maxContentLength,
-    setMaxContentLength,
-    searchControls,
-    setSearchControls,
-    selectedIds,
-    setSelectedIds,
-    deletingId,
-    showBulkDeleteModal,
-    setShowBulkDeleteModal,
-    bulkDeleteLoading,
-    deleteTarget,
-    setDeleteTarget,
-    showDeleteByFilterModal,
-    setShowDeleteByFilterModal,
-    deleteByFilterCount,
-    deleteByFilterLoading,
-    deleteByFilterConfirmName,
-    setDeleteByFilterConfirmName,
-    showApiSnippets,
-    setShowApiSnippets,
-    reindexLoading,
-    reindexMessage,
-    queryHistory,
-    showHistory,
-    setShowHistory,
-    lastClientMs,
-    lastServerMs,
-    showAgentShortcut,
-    setShowAgentShortcut,
-    appAgentsForSilo,
-    compareMode,
-    setCompareMode,
-    panelA,
-    setPanelA,
-    panelB,
-    setPanelB,
-    maxScore,
-    sharedIds,
-    handleSearch,
-    handleBack,
-    handleFilterMetadataChange,
-    handleDeleteDocument,
-    handleDeleteConfirmed,
-    handleSelectResult,
-    handleBulkDelete,
-    handleOpenDeleteByFilter,
-    handleDeleteByFilterConfirmed,
-    handleReindex,
-    searchPanel,
-    deleteHistoryEntry,
-    rerunHistoryEntry,
-    handleNavigateToAgent,
-  } = useSiloSearch(appId, siloId);
+  const navigate = useNavigate();
+  const [silo, setSilo] = useState<Silo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [filterMetadata, setFilterMetadata] = useState<Record<string, any> | undefined>(undefined);
+
+  // Load silo data
+  useEffect(() => {
+    if (appId && siloId) {
+      void loadSilo();
+    }
+  }, [appId, siloId]);
+
+
+  async function loadSilo() {
+    if (!appId || !siloId) return;
+    
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await apiService.getSilo(Number.parseInt(appId), Number.parseInt(siloId));
+      setSilo(response);
+      setSystemDBConfig(response.vector_db_type ? response.vector_db_type.toUpperCase() : DEFAULT_DB_TYPE);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load silo');
+      console.error('Error loading silo:', err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSearch(e: React.FormEvent) {
+    e.preventDefault();
+    
+    if (!appId || !siloId) return;
+
+    try {
+      setIsSearching(true);
+      setSearchError(null);
+      setSearchResults([]);
+      setHasSearched(true);
+      const response = await apiService.searchSiloDocuments(
+        Number.parseInt(appId), 
+        Number.parseInt(siloId), 
+        searchQuery,
+        10,
+        filterMetadata
+      );
+      
+      // Extract _id from metadata and set as top-level id field
+      const resultsWithIds = (response.results || []).map((result: SearchResult) => ({
+        ...result,
+        id: result.metadata?._id,  // Extract document ID from metadata
+      }));
+      setSearchResults(resultsWithIds);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Search failed');
+      console.error('Error searching silo:', err);
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  function handleBack() {
+    navigate(`/apps/${appId}/silos`);
+  }
+
+  const handleFilterMetadataChange = useCallback((metadata: Record<string, any> | undefined) => {
+    setFilterMetadata(metadata);
+  }, []);
+
+  async function handleDeleteDocument(result: SearchResult, index: number) {
+    if (!appId || !siloId || !result.id) {
+      alert('Cannot delete: Document ID not available');
+      return;
+    }
+    
+    if (!globalThis.confirm('Are you sure you want to delete this document from the silo? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      setDeletingId(result.id);
+      
+      // Delete using document ID
+      await apiService.deleteSiloDocuments(
+        Number.parseInt(appId),
+        Number.parseInt(siloId),
+        [result.id]  // Pass as array of IDs
+      );
+      
+      // Remove from results locally
+      setSearchResults(prev => prev.filter((_, i) => i !== index));
+      
+      // Reload silo to update document count
+      await loadSilo();
+      
+    } catch (err) {
+      console.error('Error deleting document:', err);
+      setSearchError(err instanceof Error ? err.message : 'Failed to delete document');
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   if (loading) {
     return (
@@ -255,57 +297,7 @@ function SiloPlaygroundPage() {
             dbType={systemDBConfig}
             disabled={isSearching}
             onFilterMetadataChange={handleFilterMetadataChange}
-            appId={appId}
-            siloId={siloId}
-            siloStorageKey={siloId}
           />
-
-          <SearchControls
-            siloId={siloId ?? ''}
-            value={searchControls}
-            onChange={setSearchControls}
-            disabled={isSearching}
-          />
-
-          {/* Content-length filter */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <span className="text-sm font-medium text-gray-700">Content length (chars):</span>
-            <div className="flex items-center gap-1">
-              <label htmlFor="minContentLength" className="text-xs text-gray-500">Min</label>
-              <input
-                type="number"
-                id="minContentLength"
-                min={0}
-                placeholder="–"
-                value={minContentLength ?? ''}
-                onChange={(e) => setMinContentLength(e.target.value === '' ? null : Number(e.target.value))}
-                className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-yellow-400"
-                disabled={isSearching}
-              />
-            </div>
-            <div className="flex items-center gap-1">
-              <label htmlFor="maxContentLength" className="text-xs text-gray-500">Max</label>
-              <input
-                type="number"
-                id="maxContentLength"
-                min={0}
-                placeholder="–"
-                value={maxContentLength ?? ''}
-                onChange={(e) => setMaxContentLength(e.target.value === '' ? null : Number(e.target.value))}
-                className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-yellow-400"
-                disabled={isSearching}
-              />
-            </div>
-            {(minContentLength != null || maxContentLength != null) && (
-              <button
-                type="button"
-                onClick={() => { setMinContentLength(null); setMaxContentLength(null); }}
-                className="text-xs text-gray-400 hover:text-gray-600 underline"
-              >
-                Clear
-              </button>
-            )}
-          </div>
 
           {/* Search Query */}
           <div>
@@ -528,21 +520,69 @@ function SiloPlaygroundPage() {
           </div>
           
           <div className="space-y-4">
-            {searchResults.map((result, index) => (
-              <ResultCard
-                key={result.id ?? `result-${index}`}
-                result={result}
-                index={index}
-                maxScore={maxScore}
-                onDelete={handleDeleteDocument}
-                isDeleting={deletingId === result.id}
-                appId={appId ?? ''}
-                siloId={siloId ?? ''}
-                isSelected={selectedIds.has(result.id ?? '')}
-                onSelect={handleSelectResult}
-                onReindex={reindexLoading === null ? handleReindex : undefined}
-              />
-            ))}
+            {searchResults.map((result, index) => {
+              const resultKey = result.id
+                ?? result.metadata?._id
+                ?? `${result.page_content}-${result.score ?? 'no-score'}`;
+              return (
+                <div key={resultKey} className="border border-gray-200 rounded-lg p-4">
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-500">
+                        Result #{index + 1}
+                      </span>
+                      {result.id && (
+                        <span className="text-xs text-gray-400" title={`Document ID: ${result.id}`}>
+                          (ID: {result.id.substring(0, 8)}...)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {result.score && (
+                        <span className="text-sm text-gray-500">
+                          Score: {result.score.toFixed(3)}
+                        </span>
+                      )}
+                      {result.id && (
+                        <button
+                          onClick={() => handleDeleteDocument(result, index)}
+                          disabled={deletingId === result.id}
+                          className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Delete this document from silo"
+                        >
+                          {deletingId === result.id ? (
+                            <span className="flex items-center gap-1">
+                              <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-red-600"></div>
+                              Deleting...
+                            </span>
+                          ) : (
+                              <span className="flex items-center gap-1"><Trash2 className="w-3 h-3" /> Delete</span>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mb-3">
+                    <h3 className="text-sm font-medium text-gray-700 mb-1">Content:</h3>
+                    <p className="text-gray-900 text-sm leading-relaxed">
+                      {result.page_content}
+                    </p>
+                  </div>
+
+                  {result.metadata && Object.keys(result.metadata).length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-medium text-gray-700 mb-1">Metadata:</h3>
+                      <div className="bg-gray-50 rounded p-2">
+                        <pre className="text-xs text-gray-600 overflow-x-auto">
+                          {JSON.stringify(result.metadata, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
