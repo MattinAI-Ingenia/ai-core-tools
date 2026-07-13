@@ -1061,13 +1061,23 @@ class ApiService {
   }
 
   async fetchPlaygroundMediaBlob(appId: number, agentId: number, mediaId: number, sessionId: string): Promise<Blob> {
-    const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/playground-media/${mediaId}/stream?session_id=${encodeURIComponent(sessionId)}`;
+    const url = this.getPlaygroundMediaStreamUrl(appId, agentId, mediaId, sessionId);
     const headers = this.buildAuthHeaders('GET', false);
     const response = await fetch(url, { headers, credentials: 'include' });
     if (!response.ok) {
       throw new Error(`Failed to fetch media: ${response.status}`);
     }
     return response.blob();
+  }
+
+  /**
+   * Build the direct stream URL for a playground media item. Used as the
+   * <video>/<audio> `src` so the browser can issue HTTP Range requests for
+   * true seeking instead of downloading the whole file into memory. The
+   * session cookie is sent automatically for same-origin requests.
+   */
+  getPlaygroundMediaStreamUrl(appId: number, agentId: number, mediaId: number, sessionId: string): string {
+    return `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/playground-media/${mediaId}/stream?session_id=${encodeURIComponent(sessionId)}`;
   }
 
   // ==================== SILOS API ====================

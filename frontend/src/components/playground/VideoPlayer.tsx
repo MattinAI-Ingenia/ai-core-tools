@@ -68,7 +68,7 @@ export default function VideoPlayer({ videoUrl, timestamps, title, isAudio = fal
       >
         <span className="flex items-center gap-2 text-sm font-medium text-white">
           <span className="text-purple-400">{hasCited ? '📍' : isAudio ? '🎵' : '🎬'}</span>
-          {title ?? `Momentos relevantes (${timestamps.length})`}
+          {title ?? `Relevant moments (${timestamps.length})`}
         </span>
         <span className="text-gray-400 text-xs">{isExpanded ? '▼' : '▲'}</span>
       </button>
@@ -144,7 +144,7 @@ export default function VideoPlayer({ videoUrl, timestamps, title, isAudio = fal
 
           {/* Timestamp buttons */}
           <div className="bg-gray-800 p-3">
-            <p className="text-xs text-gray-500 mb-2">Salta a los momentos mencionados:</p>
+            <p className="text-xs text-gray-500 mb-2">Jump to the mentioned moments:</p>
             <div className="flex flex-wrap gap-2">
               {timestamps.map((ts, i) => (
                 <button

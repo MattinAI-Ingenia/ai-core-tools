@@ -252,37 +252,52 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     has_media_content = False
     has_file_content = False
     if temp_silo_ids:
-        from repositories.silo_repository import SiloRepository
-        from models.media import Media
-        from db.database import SessionLocal
-        temp_db = SessionLocal()
-        try:
-            for idx, temp_silo_id in enumerate(temp_silo_ids):
-                temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
-                if temp_silo:
+        def _build_temp_retrievers():
+            """Sync silo/media inspection + retriever build (own DB session).
+
+            Runs off the event loop via ``asyncio.to_thread`` so the synchronous
+            embedding/vector-store setup inside ``get_retriever_tool`` and the
+            Media lookups do not block the loop during chain construction.
+            """
+            from repositories.silo_repository import SiloRepository
+            from models.media import Media
+            from db.database import SessionLocal
+            built = []
+            media_found = False
+            temp_db = SessionLocal()
+            try:
+                for idx, temp_silo_id in enumerate(temp_silo_ids):
+                    temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
+                    if not temp_silo:
+                        continue
                     temp_tool = get_retriever_tool(temp_silo, search_params)
-                    if temp_tool:
-                        temp_tool.name = f"playground_content_retriever_{idx}"
-                        temp_tool.description = (
-                            "Use this tool to search for information from content uploaded "
-                            "in this conversation (documents, PDFs, text files, video/audio "
-                            "transcriptions). Always use this when the user asks about "
-                            "attached or uploaded content."
-                        )
-                        tools.append(temp_tool)
-                        has_temp_retrievers = True
+                    if not temp_tool:
+                        continue
+                    temp_tool.name = f"playground_content_retriever_{idx}"
+                    temp_tool.description = (
+                        "Use this tool to search for information from content uploaded "
+                        "in this conversation (documents, PDFs, text files, video/audio "
+                        "transcriptions). Always use this when the user asks about "
+                        "attached or uploaded content."
+                    )
+                    built.append(temp_tool)
 
-                        # Check if silo contains media content (for timestamp instructions)
-                        if temp_silo.repository:
-                            repo_list = temp_silo.repository if isinstance(temp_silo.repository, list) else [temp_silo.repository]
-                            for repo in repo_list:
-                                if temp_db.query(Media).filter(Media.repository_id == repo.repository_id).first():
-                                    has_media_content = True
-                                    break
+                    # Check if silo contains media content (for timestamp instructions)
+                    if temp_silo.repository:
+                        repo_list = temp_silo.repository if isinstance(temp_silo.repository, list) else [temp_silo.repository]
+                        for repo in repo_list:
+                            if temp_db.query(Media).filter(Media.repository_id == repo.repository_id).first():
+                                media_found = True
+                                break
+            finally:
+                temp_db.close()
+            return built, media_found
 
-                        logger.info(f"Added temp silo retriever {temp_silo_id} for agent {agent.agent_id}")
-        finally:
-            temp_db.close()
+        temp_tools, has_media_content = await asyncio.to_thread(_build_temp_retrievers)
+        for temp_tool in temp_tools:
+            tools.append(temp_tool)
+            has_temp_retrievers = True
+            logger.info(f"Added temp silo retriever for agent {agent.agent_id}")
 
         # Check if files were vectorized by looking at silo content
         if has_temp_retrievers:

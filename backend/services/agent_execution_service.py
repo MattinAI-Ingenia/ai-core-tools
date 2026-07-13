@@ -236,10 +236,11 @@ class AgentExecutionService:
         if not fresh_agent:
             raise HTTPException(status_code=404, detail="Agent not found in database")
 
-        # 8. Build enhanced message + separate image files
-        # Exclude vectorizable files (pdf, text) from message context — they are
-        # already in the temp silo (vectorized at upload time) and will be
-        # retrieved via RAG.
+        # 8. Build enhanced message + separate image files.
+        # Vectorizable files (pdf, text) are excluded from the message context —
+        # every upload path vectorizes them into the session's temp playground
+        # silo at upload time (a silo is always created), so they are retrieved
+        # via RAG instead of being pasted into the prompt.
         from services.playground_media_service import VECTORIZABLE_FILE_TYPES
         non_vectorized_files = [
             f for f in processed_files
@@ -280,7 +281,6 @@ class AgentExecutionService:
             session_id_for_cache=session_id_for_cache,
             working_dir=working_dir,
             pre_existing_files=pre_existing_files,
-            original_message=message,
             processed_files=processed_files,
             search_params=search_params,
             user_context=user_context,
@@ -521,27 +521,45 @@ class AgentExecutionService:
             
             # Validate user has access to this agent
             await self._validate_agent_access(agent, user_context)
-            
-            # Reset session if memory enabled
+
+            from services.conversation_service import ConversationService
+
+            conversation_id = user_context.get("conversation_id") if user_context else None
+
+            # Resolve the real conversation up front so memory/checkpointer
+            # operations key off its actual session_id (thread key) rather than
+            # the integer conversation_id, which would generate a non-existent
+            # session and miss both the in-memory reset and the checkpointer.
+            conversation = None
+            if conversation_id and db:
+                conversation = ConversationService.get_conversation(
+                    db, conversation_id, user_context, agent_id
+                )
+
+            # Reset the in-memory session if memory enabled. Use the real session
+            # suffix (conv_{agent_id}_{uuid} -> uuid) so the cached session is hit.
             if agent.has_memory:
-                # Extract conversation_id from user_context if present
-                conversation_id = user_context.get("conversation_id")
-                
-                # IMPORTANT: First get the session to find the session_id before resetting
-                # This ensures we can invalidate the checkpointer for the correct session
-                from services.agent_cache_service import CheckpointerCacheService
-                
-                # Get the session to find the session_id (pass conversation_id explicitly)
-                session = await self.session_service.get_user_session(agent_id, user_context, conversation_id)
-                if session:
-                    # Invalidate the checkpointer for this specific session (use async version)
-                    await CheckpointerCacheService.invalidate_checkpointer_async(agent_id, session.id)
-                    logger.info(f"Invalidated checkpointer for agent {agent_id}, session {session.id}")
-                
-                # Reset the session object (clears messages and memory)
-                # This should be done after invalidating checkpointer to ensure we have the session ID
-                await self.session_service.reset_user_session(agent_id, user_context)
-            
+                memory_context = dict(user_context or {})
+                if conversation and conversation.session_id:
+                    memory_context["conversation_id"] = conversation.session_id.replace(
+                        f"conv_{agent_id}_", ""
+                    )
+                else:
+                    # No conversation row (e.g. public API without conversation_id):
+                    # invalidate the checkpointer for the derived oauth/api session.
+                    from services.agent_cache_service import CheckpointerCacheService
+                    session = await self.session_service.get_user_session(
+                        agent_id, memory_context, memory_context.get("conversation_id")
+                    )
+                    if session:
+                        await CheckpointerCacheService.invalidate_checkpointer_async(
+                            agent_id, session.id
+                        )
+                        logger.info(
+                            f"Invalidated checkpointer for agent {agent_id}, session {session.id}"
+                        )
+                await self.session_service.reset_user_session(agent_id, memory_context)
+
             # Clear all attached files for this user/agent session
             from services.file_management_service import FileManagementService
             file_service = FileManagementService()
@@ -563,31 +581,20 @@ class AgentExecutionService:
             
             logger.info(f"Conversation reset for agent {agent_id} - cleared {len(attached_files)} files")
 
-            # Clean up playground temp media repositories
-            conversation_id = user_context.get("conversation_id") if user_context else None
-            app_id = user_context.get("app_id") if user_context else None
-            if conversation_id and app_id and db:
+            # Tear down the conversation: playground temp media (silo + repo +
+            # vectors), the LangGraph checkpointer (keyed by the real session_id),
+            # and the Conversation row — all handled correctly by the service so
+            # the reset path does not duplicate (and mis-key) that logic.
+            if conversation and db:
                 try:
-                    from services.playground_media_service import PlaygroundMediaService
-                    from services.conversation_service import ConversationService
-                    conv = ConversationService.get_conversation(db, conversation_id, user_context)
-                    if conv and conv.session_id:
-                        PlaygroundMediaService.cleanup(app_id, agent_id, conv.session_id, db)
-                        logger.info(f"Cleaned up playground media for agent {agent_id} session {conv.session_id}")
+                    await ConversationService.delete_conversation(
+                        db, conversation_id, user_context
+                    )
+                    logger.info(
+                        f"Deleted conversation {conversation_id} during reset for agent {agent_id}"
+                    )
                 except Exception as e:
-                    logger.error(f"Error cleaning up playground media during reset: {e}")
-
-            # Delete the Conversation record from the database
-            if conversation_id and db:
-                try:
-                    from services.conversation_service import ConversationService
-                    conversation = ConversationService.get_conversation(db, conversation_id, user_context)
-                    if conversation:
-                        db.delete(conversation)
-                        db.commit()
-                        logger.info(f"Deleted conversation record {conversation_id} for agent {agent_id}")
-                except Exception as e:
-                    logger.error(f"Error deleting conversation record during reset: {e}")
+                    logger.error(f"Error deleting conversation during reset: {e}")
 
             return True
             

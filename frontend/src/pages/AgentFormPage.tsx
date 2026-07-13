@@ -53,6 +53,7 @@ interface Agent {
   // Media processing configuration (playground media upload)
   transcription_service_id?: number;
   video_ai_service_id?: number;
+  media_embedding_service_id?: number;
   media_forced_language?: string;
   media_chunk_min_duration?: number;
   media_chunk_max_duration?: number;
@@ -98,6 +99,7 @@ interface AgentFormData {
   // Media processing configuration (playground media upload)
   transcription_service_id?: number;
   video_ai_service_id?: number;
+  media_embedding_service_id?: number;
   media_forced_language?: string;
   media_chunk_min_duration: number;
   media_chunk_max_duration: number;
@@ -233,6 +235,7 @@ function AgentFormPage() {
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
     rag_fixed_filters: [],
+    media_embedding_service_id: undefined,
     media_chunk_min_duration: 30,
     media_chunk_max_duration: 120,
     media_chunk_overlap: 5
@@ -240,6 +243,7 @@ function AgentFormPage() {
   const [showOutputParser, setShowOutputParser] = useState(false);
   const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
   const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
+  const [embeddingServices, setEmbeddingServices] = useState<Array<{ service_id: number; name: string }>>([]);
 
   // Marketplace state
   const [showMarketplace, setShowMarketplace] = useState(false);
@@ -264,6 +268,31 @@ function AgentFormPage() {
       setLoading(false);
     }
   }, [appId, agentId]);
+
+  // Load the app's embedding services to populate the media embedding selector.
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    apiService
+      .getEmbeddingServices(Number.parseInt(appId))
+      .then((services) => {
+        if (cancelled) return;
+        const list = Array.isArray(services) ? services : [];
+        setEmbeddingServices(
+          list.map((s: { service_id: number; name: string }) => ({
+            service_id: s.service_id,
+            name: s.name,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error('Error loading embedding services:', err);
+        setEmbeddingServices([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
 
   // Load the selected silo's metadata fields to power the fixed-filter editor.
   useEffect(() => {
@@ -336,6 +365,7 @@ function AgentFormPage() {
         // Media processing configuration
         transcription_service_id: response.transcription_service_id || undefined,
         video_ai_service_id: response.video_ai_service_id || undefined,
+        media_embedding_service_id: response.media_embedding_service_id || undefined,
         media_forced_language: response.media_forced_language || '',
         media_chunk_min_duration: response.media_chunk_min_duration ?? 30,
         media_chunk_max_duration: response.media_chunk_max_duration ?? 120,
@@ -495,6 +525,14 @@ function AgentFormPage() {
       return;
     }
 
+    // Mirror the backend invariant: a media embedding service is required so
+    // uploaded media/documents are always vectorized with a valid model.
+    if (!formData.media_embedding_service_id) {
+      setActiveTab('configuration');
+      setError('Select a media embedding service in Media Processing before saving.');
+      return;
+    }
+
     // Drop incomplete filter rows and the editor-only _key; clear the threshold unless the
     // threshold strategy is selected so we never persist a dead value.
     const cleanedFilters: RagFixedFilter[] = formData.rag_fixed_filters
@@ -534,6 +572,7 @@ function AgentFormPage() {
       // Media processing configuration
       transcription_service_id: formData.transcription_service_id,
       video_ai_service_id: formData.video_ai_service_id,
+      media_embedding_service_id: formData.media_embedding_service_id,
       media_forced_language: formData.media_forced_language || undefined,
       media_chunk_min_duration: formData.media_chunk_min_duration,
       media_chunk_max_duration: formData.media_chunk_max_duration,
@@ -1150,6 +1189,30 @@ function AgentFormPage() {
                       </div>
                     </div>
 
+                    <div className="mb-6">
+                      <label htmlFor="media_embedding_service" className="block text-sm font-medium text-gray-700 mb-2">
+                        Embedding Service <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        id="media_embedding_service"
+                        required
+                        value={formData.media_embedding_service_id || ''}
+                        onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      >
+                        <option value="">Select Embedding Service</option>
+                        {embeddingServices.map((service) => (
+                          <option key={service.service_id} value={service.service_id}>
+                            {service.name}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Required. Model used to vectorize uploaded media/documents into the conversation's
+                        temporary knowledge base for retrieval.
+                      </p>
+                    </div>
+
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div>
                         <label htmlFor="transcription_service" className="block text-sm font-medium text-gray-700 mb-2">
@@ -1221,7 +1284,7 @@ function AgentFormPage() {
                           min={10}
                           max={60}
                           value={formData.media_chunk_min_duration}
-                          onChange={(e) => handleInputChange('media_chunk_min_duration', Number.parseInt(e.target.value) || 0)}
+                          onChange={(e) => handleInputChange('media_chunk_min_duration', Number.parseInt(e.target.value) || 30)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                         />
                       </div>
@@ -1235,7 +1298,7 @@ function AgentFormPage() {
                           min={60}
                           max={300}
                           value={formData.media_chunk_max_duration}
-                          onChange={(e) => handleInputChange('media_chunk_max_duration', Number.parseInt(e.target.value) || 0)}
+                          onChange={(e) => handleInputChange('media_chunk_max_duration', Number.parseInt(e.target.value) || 120)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                         />
                       </div>
@@ -1249,7 +1312,7 @@ function AgentFormPage() {
                           min={0}
                           max={20}
                           value={formData.media_chunk_overlap}
-                          onChange={(e) => handleInputChange('media_chunk_overlap', Number.parseInt(e.target.value) || 0)}
+                          onChange={(e) => handleInputChange('media_chunk_overlap', Number.parseInt(e.target.value) || 5)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                         />
                       </div>

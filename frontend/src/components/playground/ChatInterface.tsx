@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { apiService } from '../../services/api';
 import { useStreamingChat } from '../../hooks/useStreamingChat';
 import MessageContent from './MessageContent';
@@ -278,16 +278,25 @@ function ChatInterface({
       return;
     }
 
+    // Cap total polling so a media item stuck in a processing state (e.g. a
+    // dead background task) does not poll forever: 3s interval × 200 = 10 min.
+    const MAX_POLLS = 200;
+    let polls = 0;
+
     // Start polling only when there is processing media and no interval is active
     pollingRef.current = setInterval(async () => {
+      polls += 1;
       try {
         const media = await apiService.listPlaygroundMedia(appId, agentId, currentSessionId);
         const list = Array.isArray(media) ? media : [];
         playgroundMediaRef.current = list;
         setPlaygroundMedia(list);
 
-        // Stop polling if all done
-        if (list.every((m: { status: string }) => m.status === 'ready' || m.status === 'error')) {
+        // Stop polling if all done or the max poll budget is exhausted
+        const allDone = list.every(
+          (m: { status: string }) => m.status === 'ready' || m.status === 'error'
+        );
+        if (allDone || polls >= MAX_POLLS) {
           if (pollingRef.current) {
             clearInterval(pollingRef.current);
             pollingRef.current = null;
@@ -295,6 +304,10 @@ function ChatInterface({
         }
       } catch {
         // keep polling — transient network errors should not kill the status display
+        if (polls >= MAX_POLLS && pollingRef.current) {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+        }
       }
     }, 3000);
 
@@ -572,10 +585,6 @@ function ChatInterface({
     try {
       await apiService.deletePlaygroundMedia(appId, agentId, currentSessionId);
       setPlaygroundMedia([]);
-      // Revoke all blob URLs so the players stop
-      Object.values(videoBlobUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
-      videoBlobUrlsRef.current = {};
-      setVideoBlobUrls({});
     } catch (error) {
       console.error('Error deleting playground media:', error);
     }
@@ -680,61 +689,24 @@ function ChatInterface({
     return results;
   };
 
-  // Fetch video blobs with auth and create object URLs for the <video> elements.
-  // Supports multiple ready media items per session.
+  // Direct stream URLs for ready media so the <video>/<audio> element issues
+  // HTTP Range requests for true seeking instead of downloading the whole file
+  // into browser memory. Same-origin requests carry the session cookie.
   const readyVideoMedias = playgroundMedia.filter((m) => m.status === 'ready');
-  const [videoBlobUrls, setVideoBlobUrls] = useState<Record<number, string>>({});
-  const videoBlobUrlsRef = useRef<Record<number, string>>({});
-  // Stable dependency key so the effect only re-runs when the set of ready media changes.
   const readyMediaIdsKey = readyVideoMedias.map((m) => m.media_id).join(',');
 
-  useEffect(() => {
-    if (readyVideoMedias.length === 0 || !currentSessionId) {
-      // Revoke all previous blob URLs when media is removed or conversation changes
-      Object.values(videoBlobUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
-      videoBlobUrlsRef.current = {};
-      setVideoBlobUrls({});
-      return;
-    }
-
-    let cancelled = false;
-    const currentIds = new Set(readyVideoMedias.map((m) => m.media_id));
-
-    // Revoke blob URLs for media that are no longer present
-    Object.entries(videoBlobUrlsRef.current).forEach(([id, url]) => {
-      if (!currentIds.has(Number(id))) {
-        URL.revokeObjectURL(url);
-        delete videoBlobUrlsRef.current[Number(id)];
-      }
-    });
-
-    // Fetch blobs for media not yet fetched
-    readyVideoMedias.forEach((media) => {
-      if (videoBlobUrlsRef.current[media.media_id]) return; // already fetched
-      apiService
-        .fetchPlaygroundMediaBlob(appId, agentId, media.media_id, currentSessionId)
-        .then((blob) => {
-          if (cancelled) return;
-          const url = URL.createObjectURL(blob);
-          videoBlobUrlsRef.current[media.media_id] = url;
-          setVideoBlobUrls({ ...videoBlobUrlsRef.current });
-        })
-        .catch((err) => {
-          console.error('Failed to fetch media blob:', err);
-        });
-    });
-
-    return () => {
-      cancelled = true;
-    };
+  const videoStreamUrls = useMemo<Record<number, string>>(() => {
+    if (!currentSessionId) return {};
+    return readyVideoMedias.reduce<Record<number, string>>((map, media) => {
+      map[media.media_id] = apiService.getPlaygroundMediaStreamUrl(
+        appId,
+        agentId,
+        media.media_id,
+        currentSessionId,
+      );
+      return map;
+    }, {});
   }, [readyMediaIdsKey, currentSessionId, appId, agentId]);
-
-  // Clean up all blob URLs on unmount
-  useEffect(() => {
-    return () => {
-      Object.values(videoBlobUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, []);
 
   // ─── Render ───────────────────────────────────────────────────────────────────
 
@@ -997,12 +969,12 @@ function ChatInterface({
                         </div>
                         {msgTimestamps.length > 0 &&
                           readyVideoMedias.map((media) => {
-                            const blobUrl = videoBlobUrls[media.media_id];
-                            if (!blobUrl) return null;
+                            const streamUrl = videoStreamUrls[media.media_id];
+                            if (!streamUrl) return null;
                             return (
                               <VideoPlayer
                                 key={media.media_id}
-                                videoUrl={blobUrl}
+                                videoUrl={streamUrl}
                                 timestamps={msgTimestamps}
                                 title={media.name}
                                 isAudio={media.media_type === 'audio'}

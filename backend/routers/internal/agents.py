@@ -400,6 +400,7 @@ async def create_or_update_agent(
         # Media processing configuration (playground media upload)
         'transcription_service_id': agent_data.transcription_service_id,
         'video_ai_service_id': agent_data.video_ai_service_id,
+        'media_embedding_service_id': agent_data.media_embedding_service_id,
         'media_forced_language': agent_data.media_forced_language,
         'media_chunk_min_duration': agent_data.media_chunk_min_duration,
         'media_chunk_max_duration': agent_data.media_chunk_max_duration,
@@ -830,7 +831,7 @@ async def reset_conversation(
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
     db: Annotated[Session, Depends(get_db)],
-    conversation_id: int = None,
+    conversation_id: Optional[int] = None,
 ):
     """
     Internal API: Reset conversation for playground (OAuth authentication)
@@ -965,14 +966,15 @@ async def upload_file_for_chat(
             has_memory=bool(getattr(agent, "has_memory", False)),
         )
 
-        # Vectorize at upload time: derive session_id from conversation
+        # Vectorize at upload time: derive session_id from conversation.
+        # Ownership is validated (user + agent + app) so a caller cannot inject
+        # document content into another user's / app's conversation silo (IDOR).
         vectorized = False
         if conversation_id and file_ref.file_type in VECTORIZABLE_FILE_TYPES and file_ref.content:
-            from models.conversation import Conversation
-            from services.playground_media_service import PlaygroundMediaService
-            conversation = db.query(Conversation).filter(
-                Conversation.conversation_id == conversation_id
-            ).first()
+            from services.conversation_service import ConversationService
+            conversation = ConversationService.get_conversation(
+                db, conversation_id, user_context, agent_id
+            )
             if conversation and conversation.session_id:
                 try:
                     vectorized = PlaygroundMediaService.vectorize_uploaded_file(
@@ -1294,9 +1296,8 @@ async def upload_playground_media(
     _: Annotated[None, Depends(enforce_file_size_limit)] = None,
 ):
   
+    _get_agent_or_404(db, agent_id, app_id)
     try:
-        _get_agent_or_404(db, agent_id, app_id)
-
         result = await PlaygroundMediaService.upload_media_files(
             app_id=app_id,
             agent_id=agent_id,
@@ -1318,12 +1319,18 @@ async def upload_playground_media(
             "message": f"Uploaded {len(result['created_media'])} media file(s)",
             "repository_id": result["repository_id"],
             "silo_id": result["silo_id"],
-            "created_media": [MR(**m.__dict__) for m in result["created_media"]],
+            "created_media": [
+                MR.model_validate(m, from_attributes=True) for m in result["created_media"]
+            ],
             "failed_files": result["failed_files"],
         }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error uploading playground media: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error uploading playground media: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Media upload failed")
 
 
 @agents_router.post(
@@ -1350,9 +1357,8 @@ async def add_playground_youtube(
     chunk_overlap: Annotated[Optional[int], Form()] = None,
 ):
     """Add a YouTube URL to the playground temp repository."""
+    _get_agent_or_404(db, agent_id, app_id)
     try:
-        _get_agent_or_404(db, agent_id, app_id)
-
         result = await PlaygroundMediaService.upload_youtube(
             app_id=app_id,
             agent_id=agent_id,
@@ -1373,13 +1379,15 @@ async def add_playground_youtube(
         return {
             "repository_id": result["repository_id"],
             "silo_id": result["silo_id"],
-            "media": MR(**result["media"].__dict__),
+            "media": MR.model_validate(result["media"], from_attributes=True),
         }
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error adding playground YouTube: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error adding playground YouTube: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to add YouTube video")
 
 
 @agents_router.get(
@@ -1464,13 +1472,26 @@ async def stream_playground_media(
 
     # Support HTTP Range requests (required for video seeking/playback)
     range_header = request.headers.get("range")
-    if range_header:
-        # Parse "bytes=start-end"
-        range_spec = range_header.replace("bytes=", "").strip()
-        parts = range_spec.split("-")
-        start = int(parts[0]) if parts[0] else 0
-        end = int(parts[1]) if parts[1] else file_size - 1
+    if range_header and range_header.strip().startswith("bytes="):
+        # Parse "bytes=start-end"; reject malformed/unsatisfiable ranges with 416.
+        range_spec = range_header.split("=", 1)[1].strip()
+        first, _, last = range_spec.partition("-")
+        try:
+            start = int(first) if first else 0
+            end = int(last) if last else file_size - 1
+        except ValueError:
+            raise HTTPException(
+                status_code=416,
+                detail="Invalid Range header",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
         end = min(end, file_size - 1)
+        if start < 0 or start > end or start >= file_size:
+            raise HTTPException(
+                status_code=416,
+                detail="Requested range not satisfiable",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
         length = end - start + 1
 
         def ranged_file():

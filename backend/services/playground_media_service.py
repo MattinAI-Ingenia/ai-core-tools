@@ -20,11 +20,9 @@ from sqlalchemy.orm import Session
 from models.repository import Repository
 from models.media import Media
 from models.agent import Agent
-from repositories.repository_repository import RepositoryRepository
 from services.repository_service import RepositoryService
 from services.media_service import MediaService
 from services.silo_service import SiloService
-from repositories.embedding_service_repository import EmbeddingServiceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +100,11 @@ class PlaygroundMediaService:
     ) -> Optional[Repository]:
         """Find the temp playground repository for a given agent + session."""
         name = _temp_repo_name(agent_id, session_id)
-        repos = RepositoryRepository.get_by_app_id(db, app_id)
-        return next((r for r in repos if r.name == name), None)
+        return (
+            db.query(Repository)
+            .filter(Repository.app_id == app_id, Repository.name == name)
+            .first()
+        )
 
     @staticmethod
     def get_or_create_temp_repository(
@@ -126,12 +127,21 @@ class PlaygroundMediaService:
         if existing:
             # Keep the temp repo in sync with the latest resolved media config
             # (e.g. the agent's transcription/video services were configured
-            # after the repo was first created in this session).
+            # after the repo was first created in this session). Only explicit
+            # (non-None) values overwrite existing config — callers that don't
+            # resolve media services (e.g. file vectorization) pass None and
+            # must not wipe an in-flight transcription's service configuration.
             updated = False
-            if existing.transcription_service_id != transcription_service_id:
+            if (
+                transcription_service_id is not None
+                and existing.transcription_service_id != transcription_service_id
+            ):
                 existing.transcription_service_id = transcription_service_id
                 updated = True
-            if existing.video_ai_service_id != video_ai_service_id:
+            if (
+                video_ai_service_id is not None
+                and existing.video_ai_service_id != video_ai_service_id
+            ):
                 existing.video_ai_service_id = video_ai_service_id
                 updated = True
             if updated:
@@ -145,18 +155,18 @@ class PlaygroundMediaService:
                 )
             return existing
 
-        # Resolve embedding service: explicit > first app-scoped > first system service.
-        # System services (app_id IS NULL) are shared across all apps; without this
-        # fallback, apps that rely solely on a platform embedding service would create
-        # the temp silo with no embedding service, breaking retrieval later.
+        # Resolve embedding service: explicit request value > the agent's
+        # configured media embedding service. There is NO arbitrary app/system
+        # fallback — the embedding service is required on the agent so media is
+        # never vectorized with a wrong/misconfigured model.
         if not embedding_service_id:
-            app_emb_services = EmbeddingServiceRepository.get_by_app_id(db, app_id)
-            if app_emb_services:
-                embedding_service_id = app_emb_services[0].service_id
-            else:
-                system_emb_services = EmbeddingServiceRepository.get_system_services(db)
-                if system_emb_services:
-                    embedding_service_id = system_emb_services[0].service_id
+            agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+            embedding_service_id = getattr(agent, "media_embedding_service_id", None)
+        if not embedding_service_id:
+            raise ValueError(
+                "No media embedding service configured for this agent. Set it in "
+                "the agent's Media Processing configuration before uploading media."
+            )
 
         repo = Repository(
             name=_temp_repo_name(agent_id, session_id),

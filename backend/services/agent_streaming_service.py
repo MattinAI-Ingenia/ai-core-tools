@@ -131,8 +131,8 @@ class AgentStreamingService:
                         temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
                             app_id, agent_id, session_id_for_media, effective_db
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not resolve temp silos: {e}")
 
             agent_chain, mcp_client = await create_agent(
                 ctx.fresh_agent,
