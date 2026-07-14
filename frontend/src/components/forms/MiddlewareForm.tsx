@@ -147,8 +147,8 @@ const GUARDRAILS_DEFAULT_CUSTOM_PROMPT =
 
 function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<MiddlewareFormProps>) {
     const [formData, setFormData] = useState<MiddlewareFormData>({
-        name: '',
-        description: '',
+        name: MIDDLEWARE_TYPES.find(t => t.value === 'monitoring')?.label ?? '',
+        description: MIDDLEWARE_TYPES.find(t => t.value === 'monitoring')?.description ?? '',
         middleware_type: 'monitoring',
         config: null
     });
