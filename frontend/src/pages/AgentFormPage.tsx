@@ -235,6 +235,7 @@ function AgentFormPage() {
     tags: null,
     icon_url: null,
     cover_image_url: null,
+    conversation_starters: [],
   });
   const [savingMarketplace, setSavingMarketplace] = useState(false);
   const [marketplaceSuccess, setMarketplaceSuccess] = useState<string | null>(null);
@@ -330,20 +331,22 @@ function AgentFormPage() {
           console.error('Error loading MCP usage:', usageErr);
         }
 
-        try {
-          const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
-          setMarketplaceProfile({
-            display_name: profile.display_name || null,
-            short_description: profile.short_description || null,
-            long_description: profile.long_description || null,
-            category: profile.category || null,
-            tags: profile.tags || null,
-            icon_url: profile.icon_url || null,
-            cover_image_url: profile.cover_image_url || null,
-          });
-        } catch {
-          // Profile may not exist yet — that's fine
-        }
+          try {
+            const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
+            setMarketplaceProfile({
+              display_name: profile.display_name || null,
+              short_description: profile.short_description || null,
+              long_description: profile.long_description || null,
+              category: profile.category || null,
+              tags: profile.tags || null,
+              icon_url: profile.icon_url || null,
+              cover_image_url: profile.cover_image_url || null,
+              conversation_starters: profile.conversation_starters?.map(s => s.prompt) || [],
+            });
+          } catch {
+            // Profile may not exist yet — that's fine
+          }
+
 
         // Marketplace visibility comes from agent detail
         if (response.marketplace_visibility) {
@@ -452,6 +455,7 @@ function AgentFormPage() {
       tags: saved.tags || null,
       icon_url: saved.icon_url || null,
       cover_image_url: saved.cover_image_url || null,
+      conversation_starters: saved.conversation_starters?.map(s => s.prompt) || [],
     });
     setMarketplaceSuccess('Marketplace profile saved successfully');
   }, [appId, agentId, marketplaceProfile, mutate]);
@@ -1562,19 +1566,76 @@ function AgentFormPage() {
                       />
                     )}
                   </div>
-                  <div className="flex items-center gap-4 mt-4">
-                    <button
-                      type="button"
-                      onClick={handleSaveMarketplaceProfile}
-                      className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                      disabled={savingMarketplace}
-                    >
-                      {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
-                    </button>
-                    {marketplaceSuccess && (
-                      <span className="text-sm text-green-600">{marketplaceSuccess}</span>
-                    )}
-                  </div>
+                   <div className="flex items-center gap-4 mt-4">
+                     <button
+                       type="button"
+                       onClick={handleSaveMarketplaceProfile}
+                       className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                       disabled={savingMarketplace}
+                     >
+                       {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
+                     </button>
+                     {marketplaceSuccess && (
+                       <span className="text-sm text-green-600">{marketplaceSuccess}</span>
+                     )}
+                   </div>
+                   <div className="mt-8 pt-6 border-t border-gray-200">
+                     <label className="block text-sm font-medium text-gray-700 mb-3">Conversation Starters</label>
+                     <p className="text-xs text-gray-500 mb-4">
+                       Suggested opening messages for users. These only appear at the start of a new conversation.
+                     </p>
+                     <div className="space-y-3">
+                       {marketplaceProfile.conversation_starters?.map((starter, idx) => (
+                         <div key={idx} className="flex items-center gap-2">
+                           <input
+                             type="text"
+                             value={starter}
+                             onChange={(e) => {
+                               const newStarters = [...(marketplaceProfile.conversation_starters || [])];
+                               newStarters[idx] = e.target.value;
+                               handleMarketplaceProfileChange('conversation_starters', newStarters);
+                             }}
+                             className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                             placeholder="Enter a starter prompt..."
+                           />
+                           <button
+                             type="button"
+                             onClick={() => {
+                               const newStarters = marketplaceProfile.conversation_starters?.filter((_, i) => i !== idx) || [];
+                               handleMarketplaceProfileChange('conversation_starters', newStarters);
+                             }}
+                             className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                           >
+                             <span className="text-xs font-bold">✕</span>
+                           </button>
+                         </div>
+                       ))}
+                       <button
+                         type="button"
+                         onClick={() => {
+                           const newStarters = [...(marketplaceProfile.conversation_starters || []), ''];
+                           handleMarketplaceProfileChange('conversation_starters', newStarters);
+                         }}
+                         className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+                       >
+                         <Plus className="w-4 h-4 mr-1" /> Add Starter
+                       </button>
+                     </div>
+                   </div>
+                   <div className="flex items-center gap-4 mt-4">
+                     <button
+                       type="button"
+                       onClick={handleSaveMarketplaceProfile}
+                       className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                       disabled={savingMarketplace}
+                     >
+                       {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
+                     </button>
+                     {marketplaceSuccess && (
+                       <span className="text-sm text-green-600">{marketplaceSuccess}</span>
+                     )}
+                   </div>
+
                 </div>
               )}
               </>

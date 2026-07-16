@@ -49,6 +49,7 @@ export default function MarketplaceChatPage() {
   const [agentId, setAgentId] = useState<number | null>(null);
   const [agentName, setAgentName] = useState('Agent');
   const [conversationTitle, setConversationTitle] = useState<string | null>(null);
+  const [starters, setStarters] = useState<{ id: number; prompt: string }[]>([]);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
@@ -176,11 +177,9 @@ export default function MarketplaceChatPage() {
         setConversationTitle(data.title);
 
         try {
-          const convData = await apiService.getMarketplaceConversations(100, 0);
-          if (!isMounted) return;
-          const match = convData.conversations.find((c) => c.conversation_id === numericId);
-          if (match) {
-            setAgentName(match.agent_display_name);
+          const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
+          if (profile && profile.conversation_starters) {
+            setStarters(profile.conversation_starters.map(s => ({ id: s.id, prompt: s.prompt })));
           }
         } catch {
           // Non-critical
@@ -237,11 +236,12 @@ export default function MarketplaceChatPage() {
     }
   }, [numericId]);
 
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInputMessage(e.target.value);
-    const el = e.target;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  const handleStarterClick = useCallback((prompt: string) => {
+    setInputMessage(prompt);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
+    }
   }, []);
 
   const handleSendMessage = useCallback(async () => {
@@ -498,19 +498,17 @@ export default function MarketplaceChatPage() {
                      dark:from-gray-900/50 dark:to-gray-800/30
                      scroll-smooth"
         >
-          {messages.length === 0 && !showStreaming && (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-12">
-              <div className="w-12 h-12 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
-                <MessageCircle className="w-6 h-6 text-indigo-500" aria-hidden="true" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-300">
-                  Start chatting with {agentName}
-                </p>
-                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                  Type a message below to begin
-                </p>
-              </div>
+          {messages.length === 0 && !showStreaming && starters.length > 0 && (
+            <div className="flex flex-wrap justify-center gap-2 mb-6 px-2">
+              {starters.map((starter) => (
+                <button
+                  key={starter.id}
+                  onClick={() => handleStarterClick(starter.prompt)}
+                  className="px-4 py-2 bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-800/40 rounded-full text-sm text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-all duration-150 shadow-sm"
+                >
+                  {starter.prompt}
+                </button>
+              ))}
             </div>
           )}
 
