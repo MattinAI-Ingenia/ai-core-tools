@@ -40,7 +40,8 @@ def _emit_monitoring_log(
 
     Args:
         agent_id: The agent being monitored.
-        monitoring_handler: UsageMetadataCallbackHandler instance.
+        monitoring_handler: _CountingUsageMetadataCallbackHandler instance
+            (a UsageMetadataCallbackHandler subclass that also tracks call_count).
         monitoring_config: The ``config`` dict from the Monitoring middleware
             entity, or None.  Absent or None means all metrics enabled.
         log_fn: callable used for logging (e.g. logger.info).
@@ -67,7 +68,8 @@ def _emit_monitoring_log(
             total = sum(u.get("total_tokens", 0) for u in usage_by_model.values())
             parts.append(f"total_tokens={total}")
         if enabled("llm_calls"):
-            parts.append(f"llm_calls={len(usage_by_model)}")
+            call_count = getattr(monitoring_handler, "call_count", len(usage_by_model))
+            parts.append(f"llm_calls={call_count}")
 
         if len(parts) > 1:  # more than just the prefix
             log_fn(" | ".join(parts))
@@ -294,7 +296,7 @@ class AgentStreamingService:
                 yield format_sse_event(
                     "done",
                     {
-                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
+                        "response": "⏸️ Execution paused — awaiting human approval.",
                         "conversation_id": ctx.effective_conv_id,
                         "files": [],
                     },
@@ -374,7 +376,7 @@ class AgentStreamingService:
                 yield format_sse_event(
                     "done",
                     {
-                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
+                        "response": "⏸️ Execution paused — awaiting human approval.",
                         "conversation_id": ctx.effective_conv_id if ctx else None,
                         "files": [],
                     },
@@ -484,7 +486,7 @@ class AgentStreamingService:
             try:
                 graph_state = await agent_chain.aget_state(config)
                 if hasattr(graph_state, 'tasks'):
-                    for task in graph_state.tasks:
+                    for task in graph_state.tasks or []:
                         if hasattr(task, 'interrupts') and task.interrupts:
                             has_pending_interrupt = True
                             for intr in task.interrupts:
@@ -508,7 +510,7 @@ class AgentStreamingService:
                 yield format_sse_event(
                     "done",
                     {
-                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
+                        "response": "⏸️ Execution paused — awaiting human approval.",
                         "conversation_id": ctx.effective_conv_id,
                         "files": [],
                     },

@@ -88,7 +88,7 @@ function ChatInterface({
     [appId, agentId],
   );
 
-  const { streamingContent, activeTools, thinkingMessage, isStreaming, hitlInterrupt, sendMessage, abortStream, clearHitlInterrupt } =
+  const { streamingContent, activeTools, thinkingMessage, isStreaming, hitlInterrupt, sendMessage, abortStream, clearHitlInterrupt, setHitlInterrupt } =
     useStreamingChat(playgroundStream);
 
   // Hold streaming content visible briefly after isStreaming flips to false,
@@ -243,9 +243,21 @@ function ChatInterface({
       await apiService.resumeAgentChat(appId, agentId, decisions, {
         conversationId: currentConversationId,
         onEvent: (event) => {
-          // Reuse the sendMessage's onEvent is not possible since sendMessage drives
-          // its own stream. Instead, we handle the resume events inline.
-          if (event.type === 'done') {
+          if (event.type === 'hitl_interrupt') {
+            // Handle subsequent HITL interrupts during resume — show approval window
+            const data = event.data as {
+              action_requests?: Array<{ name?: string; args?: Record<string, unknown>; description?: string }>;
+              review_configs?: Array<{ action_name: string; allowed_decisions: string[] }>;
+            };
+            const actionRequests = (data.action_requests ?? []).map((r) => ({
+              name: r.name ?? 'unknown_tool',
+              args: r.args ?? {},
+              description: r.description,
+            }));
+            const reviewConfigs = data.review_configs ?? [];
+            setHitlInterrupt({ actionRequests, reviewConfigs });
+            setHoldStreamingContent(false);
+          } else if (event.type === 'done') {
             const doneData = event.data as {
               response?: string | Record<string, unknown>;
               conversation_id?: number;
@@ -261,7 +273,7 @@ function ChatInterface({
         conversationId: finalConversationId,
       };
     },
-    [appId, agentId, currentConversationId],
+    [appId, agentId, currentConversationId, setHitlInterrupt, setHoldStreamingContent],
   );
 
   // ─── Message sending ─────────────────────────────────────────────────────────
@@ -768,23 +780,50 @@ function ChatInterface({
                           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
                           </svg>
-                          Aprobación requerida
+                          Approval required
                         </div>
                         {hitlInterrupt.actionRequests.map((req, idx) => (
                           <div key={idx} className="bg-white dark:bg-gray-800 rounded-lg p-3 border border-amber-100 dark:border-amber-800">
                             <div className="text-sm font-mono text-gray-700 dark:text-gray-300 mb-1">
                               🔧 {req.name}
                             </div>
-                            <pre className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 rounded p-2 overflow-x-auto max-h-32">
-                              {JSON.stringify(req.args, null, 2)}
-                            </pre>
+                            <textarea
+                              className="w-full text-xs text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-700 rounded p-2 font-mono border-2 border-amber-300 dark:border-amber-600 resize-none focus:outline-none focus:ring-2 focus:ring-amber-500"
+                              rows={Math.min(8, Math.max(3, JSON.stringify(req.args, null, 2).split('\n').length))}
+                              defaultValue={JSON.stringify(req.args, null, 2)}
+                              data-tool-args={idx}
+                              spellCheck="false"
+                            />
                           </div>
                         ))}
                         <div className="flex gap-2 pt-1">
                           <button
                             type="button"
                             onClick={async () => {
-                              const decisions = hitlInterrupt.actionRequests.map(() => ({ type: 'approve' as const }));
+                              const decisions = hitlInterrupt.actionRequests.map((req, idx) => {
+                                const textareas = document.querySelectorAll('textarea[data-tool-args]');
+                                let editedArgs = req.args;
+                                if (textareas.length > idx) {
+                                  const textarea = textareas[idx] as HTMLTextAreaElement;
+                                  try {
+                                    editedArgs = JSON.parse(textarea.value);
+                                  } catch {
+                                    // Keep original if invalid JSON
+                                  }
+                                }
+                                // If args were edited, send as 'edit' decision; otherwise 'approve'
+                                const hasEdits = JSON.stringify(editedArgs) !== JSON.stringify(req.args);
+                                if (hasEdits) {
+                                  return {
+                                    type: 'edit' as const,
+                                    edited_action: {
+                                      name: req.name,
+                                      args: editedArgs,
+                                    },
+                                  };
+                                }
+                                return { type: 'approve' as const };
+                              });
                               clearHitlInterrupt();
                               setHoldStreamingContent(true);
                               try {
@@ -792,14 +831,18 @@ function ChatInterface({
                                 const responseContent = typeof result.response === 'object'
                                   ? JSON.stringify(result.response, null, 2)
                                   : String(result.response || '');
-                                const agentMsgId = (Date.now() + 1).toString();
-                                lastStreamedMsgIdRef.current = agentMsgId;
-                                setMessages((prev) => [...prev, {
-                                  id: agentMsgId,
-                                  type: 'agent' as const,
-                                  content: responseContent,
-                                  timestamp: new Date(),
-                                }]);
+                                // Only add message if response is not empty and not a HITL pause message
+                                const isHitlPause = responseContent.includes('awaiting human approval') || responseContent.includes('Execution paused');
+                                if (responseContent.trim() && !isHitlPause) {
+                                  const agentMsgId = (Date.now() + 1).toString();
+                                  lastStreamedMsgIdRef.current = agentMsgId;
+                                  setMessages((prev) => [...prev, {
+                                    id: agentMsgId,
+                                    type: 'agent' as const,
+                                    content: responseContent,
+                                    timestamp: new Date(),
+                                  }]);
+                                }
                                 setHoldStreamingContent(false);
                               } catch (err) {
                                 setHoldStreamingContent(false);
@@ -811,9 +854,9 @@ function ChatInterface({
                                 }]);
                               }
                             }}
-                            className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
                           >
-                            ✓ Aprobar
+                            ✓ Approve
                           </button>
                           <button
                             type="button"
@@ -829,14 +872,18 @@ function ChatInterface({
                                 const responseContent = typeof result.response === 'object'
                                   ? JSON.stringify(result.response, null, 2)
                                   : String(result.response || '');
-                                const agentMsgId = (Date.now() + 1).toString();
-                                lastStreamedMsgIdRef.current = agentMsgId;
-                                setMessages((prev) => [...prev, {
-                                  id: agentMsgId,
-                                  type: 'agent' as const,
-                                  content: responseContent,
-                                  timestamp: new Date(),
-                                }]);
+                                // Only add message if response is not empty and not a HITL pause message
+                                const isHitlPause = responseContent.includes('awaiting human approval') || responseContent.includes('Execution paused');
+                                if (responseContent.trim() && !isHitlPause) {
+                                  const agentMsgId = (Date.now() + 1).toString();
+                                  lastStreamedMsgIdRef.current = agentMsgId;
+                                  setMessages((prev) => [...prev, {
+                                    id: agentMsgId,
+                                    type: 'agent' as const,
+                                    content: responseContent,
+                                    timestamp: new Date(),
+                                  }]);
+                                }
                                 setHoldStreamingContent(false);
                               } catch (err) {
                                 setHoldStreamingContent(false);
@@ -848,9 +895,9 @@ function ChatInterface({
                                 }]);
                               }
                             }}
-                            className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors"
+                            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors"
                           >
-                            ✗ Rechazar
+                            ✗ Reject
                           </button>
                         </div>
                       </div>

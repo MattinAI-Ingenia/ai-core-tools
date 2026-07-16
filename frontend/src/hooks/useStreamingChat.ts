@@ -46,6 +46,7 @@ interface UseStreamingChatReturn {
   readonly sendMessage: (message: string, options?: SendOptions) => Promise<StreamResult>;
   readonly abortStream: () => void;
   readonly clearHitlInterrupt: () => void;
+  readonly setHitlInterrupt: (data: HitlInterruptData | null) => void;
 }
 
 function buildActiveTool(toolName: string): ActiveTool {
@@ -263,5 +264,6 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
     sendMessage,
     abortStream,
     clearHitlInterrupt,
+    setHitlInterrupt,
   };
 }

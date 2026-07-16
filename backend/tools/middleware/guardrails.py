@@ -11,6 +11,9 @@ act as a persistent self-check reminder across multi-turn conversations.
 """
 from langchain.agents.middleware import AgentMiddleware
 from langchain.messages import SystemMessage
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Default config shape (all protections on)
 GUARDRAILS_DEFAULT_CONFIG = {
@@ -143,11 +146,22 @@ class GuardrailsMiddleware(AgentMiddleware):
         self._input_text = compose_input_guardrail_message(config)
         self._output_text = compose_output_guardrail_message(config)
 
+        input_flags = config.get("input", {})
+        output_flags = config.get("output", {})
+        custom_prompt = config.get("custom_prompt", "")
+
+        logger.info(
+            f"[Guardrails] Initialized — input_flags={input_flags}, "
+            f"output_flags={output_flags}, has_custom_prompt={bool(custom_prompt)}"
+        )
+
     def before_model(self, state: dict, runtime: object) -> dict | None:
         """Inject input guardrail rules before the model generates its response."""
         if not self._input_text:
+            logger.info("[Guardrails] before_model: no input guardrails configured")
             return None
 
+        logger.info("[Guardrails] before_model: injecting INPUT guardrail message")
         messages: list = list(state.get("messages", []))
         guardrail_msg = SystemMessage(content=self._input_text)
 
@@ -168,8 +182,10 @@ class GuardrailsMiddleware(AgentMiddleware):
         visible in the next model call and acts as an ongoing self-check reminder.
         """
         if not self._output_text:
+            logger.info("[Guardrails] after_model: no output guardrails configured")
             return None
 
+        logger.info("[Guardrails] after_model: injecting OUTPUT guardrail message")
         messages: list = list(state.get("messages", []))
         messages.append(SystemMessage(content=self._output_text))
         return {"messages": messages}

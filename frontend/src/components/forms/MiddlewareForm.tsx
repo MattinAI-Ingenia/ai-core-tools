@@ -1015,7 +1015,8 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                     {/* Edge-case notice: all metrics off */}
                     {(() => {
                         const m = formData.config?.metrics ?? {};
-                        const allOff = Object.keys(m).length > 0 && Object.values(m).every(v => v === false);
+                        const metricKeys = ['input_tokens', 'output_tokens', 'total_tokens', 'models', 'llm_calls'] as const;
+                        const allOff = metricKeys.every(key => (m[key] ?? true) === false);
                         return allOff ? (
                             <div className="flex items-start gap-2 p-3 mt-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs">
                                 <span>⚠️</span>

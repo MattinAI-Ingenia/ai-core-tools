@@ -40,6 +40,24 @@ logger = get_logger(__name__)
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
 
 
+class _CountingUsageMetadataCallbackHandler(UsageMetadataCallbackHandler):
+    """UsageMetadataCallbackHandler that also tracks the number of LLM invocations.
+
+    ``usage_metadata`` is keyed by model name and accumulates token counts across
+    calls, so ``len(usage_metadata)`` only reflects how many distinct models were
+    used — not how many times the LLM was actually invoked. ``call_count`` fixes
+    that for the "llm_calls" monitoring metric.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.call_count = 0
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        self.call_count += 1
+        super().on_llm_end(response, **kwargs)
+
+
 def _extract_mcp_root_causes(exc: BaseException) -> str:
     """Extract concise root-cause messages from (possibly nested) ExceptionGroups."""
     causes: list[str] = []
@@ -269,6 +287,11 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         _trim_tokens = trim_tokens
         _s_llm = summarization_llm
         _agent_id = agent.agent_id
+        _model_name = (
+            getattr(_s_llm, "model_name", None)
+            or getattr(_s_llm, "model", None)
+            or type(_s_llm).__name__
+        )
 
         class _DiagnosticSummarizationMiddleware(SummarizationMiddleware):
             """Wraps SummarizationMiddleware to add diagnostic logging."""
@@ -276,14 +299,14 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                 msgs = state.get("messages", [])
                 approx = self.token_counter(msgs)
                 logger.info(
-                    f"[Summarization] abefore_model: agent={_agent_id}, "
+                    f"[Summarization] abefore_model: agent={_agent_id}, model={_model_name}, "
                     f"messages={len(msgs)}, approx_tokens={approx}, trigger={self.trigger}"
                 )
                 result = await super().abefore_model(state, runtime)
                 if result is not None:
                     new_count = len(result.get("messages", []))
                     logger.info(
-                        f"[Summarization] TRIGGERED for agent {_agent_id}: "
+                        f"[Summarization] TRIGGERED for agent {_agent_id} (model={_model_name}): "
                         f"reduced to {new_count} messages (summary generated)"
                     )
                 else:
@@ -314,7 +337,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             mw_type = assoc.middleware.middleware_type.value
             mw_config = assoc.middleware.config or {}
             if mw_type == 'monitoring':
-                monitoring_handler = UsageMetadataCallbackHandler()
+                monitoring_handler = _CountingUsageMetadataCallbackHandler()
                 logger.info(f"MonitoringMiddleware (UsageMetadataCallbackHandler) enabled for agent {agent.agent_id}")
             elif mw_type == 'summarization':
                 # Only add if not already added via has_memory (avoid duplicates)
@@ -346,11 +369,46 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                     )
             elif mw_type == 'model_call_limit':
                 max_calls = mw_config.get('max_calls', 50)
-                middleware.append(ModelCallLimitMiddleware(run_limit=max_calls))
+                _mcl_agent_id = agent.agent_id
+                _mcl_limit = max_calls
+
+                class _DiagnosticModelCallLimitMiddleware(ModelCallLimitMiddleware):
+                    """Wraps ModelCallLimitMiddleware to log when the limit triggers."""
+                    async def abefore_model(self, state, runtime):
+                        result = await super().abefore_model(state, runtime)
+                        if result is not None:
+                            logger.info(
+                                f"[ModelCallLimit] TRIGGERED for agent {_mcl_agent_id}: "
+                                f"run_limit={_mcl_limit} reached, jumping to end"
+                            )
+                        return result
+
+                middleware.append(_DiagnosticModelCallLimitMiddleware(run_limit=max_calls))
                 logger.info(f"ModelCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
             elif mw_type == 'tool_call_limit':
                 max_calls = mw_config.get('max_calls', 100)
-                middleware.append(ToolCallLimitMiddleware(run_limit=max_calls))
+                _tcl_agent_id = agent.agent_id
+                _tcl_limit = max_calls
+
+                class _DiagnosticToolCallLimitMiddleware(ToolCallLimitMiddleware):
+                    """Wraps ToolCallLimitMiddleware to log when the limit triggers."""
+                    async def aafter_model(self, state, runtime):
+                        result = await super().aafter_model(state, runtime)
+                        if result is not None:
+                            from langchain_core.messages import ToolMessage
+                            blocked = [
+                                m for m in result.get("messages", [])
+                                if isinstance(m, ToolMessage) and m.status == "error"
+                            ]
+                            if blocked:
+                                blocked_names = [m.name for m in blocked]
+                                logger.info(
+                                    f"[ToolCallLimit] TRIGGERED for agent {_tcl_agent_id}: "
+                                    f"run_limit={_tcl_limit} reached, blocked calls={blocked_names}"
+                                )
+                        return result
+
+                middleware.append(_DiagnosticToolCallLimitMiddleware(run_limit=max_calls))
                 logger.info(f"ToolCallLimitMiddleware enabled for agent {agent.agent_id} (limit={max_calls})")
             elif mw_type == 'pii':
                 pii_types = mw_config.get('pii_types', ['email', 'credit_card', 'ip', 'mac_address', 'url'])

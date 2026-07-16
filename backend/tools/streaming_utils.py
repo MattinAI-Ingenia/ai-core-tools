@@ -344,30 +344,13 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
     # This check MUST be outside the for-loop above because when LangGraph
     # emits an interrupt the chunk is {"__interrupt__": [Interrupt(...)]}.
     # The list value is not a dict, so the `continue` inside the loop skips it.
+    # NOTE: We skip emitting this event because the actual interrupt with proper
+    # action_requests will be detected and emitted in agent_streaming_service.py
+    # after checking the graph state. Emitting here causes duplicate/empty interrupts.
     interrupt_value = chunk.get("__interrupt__")
     if interrupt_value:
-        try:
-            interrupts = interrupt_value if isinstance(interrupt_value, list) else [interrupt_value]
-            for intr in interrupts:
-                action_requests = []
-                if isinstance(intr, dict):
-                    payload = intr.get("value", intr)
-                elif hasattr(intr, "value"):
-                    payload = intr.value
-                else:
-                    payload = {}
-                if isinstance(payload, dict):
-                    action_requests = payload.get("action_requests", [])
-                events.append({
-                    "type": SSE_HITL_INTERRUPT,
-                    "data": {
-                        "action_requests": action_requests,
-                        "review_configs": payload.get("review_configs", []) if isinstance(payload, dict) else [],
-                    },
-                })
-                logger.info("HITL interrupt emitted for tools: %s", [r.get('name') for r in action_requests])
-        except Exception:
-            logger.warning("Could not parse __interrupt__ payload", exc_info=True)
+        # Don't emit interrupt event here — let post-check in agent_streaming_service handle it
+        pass
 
     return events if events else None
 
