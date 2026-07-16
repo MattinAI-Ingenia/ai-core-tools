@@ -92,7 +92,10 @@ class MiddlewareService:
         try:
             middleware.middleware_type = MiddlewareType(data.middleware_type)
         except ValueError:
-            middleware.middleware_type = MiddlewareType.MONITORING
+            valid_types = [t.value for t in MiddlewareType]
+            raise ValueError(
+                f"Invalid middleware_type '{data.middleware_type}'. Must be one of: {valid_types}"
+            )
 
         if middleware_id == 0:
             middleware = MiddlewareRepository.create(db, middleware)

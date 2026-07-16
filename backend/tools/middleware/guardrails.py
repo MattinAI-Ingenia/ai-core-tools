@@ -8,6 +8,12 @@ response generation.
 Output guardrails are enforced in ``after_model`` — injected as a SystemMessage
 after the LLM's response so the rules are visible in the next model call and
 act as a persistent self-check reminder across multi-turn conversations.
+
+NOTE: this is a best-effort mitigation, not a hard control. Enforcement is
+entirely prompt-based — the LLM can still be jailbroken into ignoring these
+instructions. There is no deterministic guarantee that malicious input is
+blocked or that PII/toxic output never leaks; do not rely on this middleware
+alone for compliance-grade guarantees.
 """
 from langchain.agents.middleware import AgentMiddleware
 from langchain.messages import SystemMessage
@@ -139,6 +145,10 @@ class GuardrailsMiddleware(AgentMiddleware):
       are enforced in subsequent model calls.
 
     No extra LLM calls are made; enforcement is entirely prompt-based.
+
+    Best-effort mitigation, not a hard control: since this relies solely on
+    the LLM following instructions, a sufficiently adversarial prompt can
+    still bypass these rules. Do not treat this as a deterministic guarantee.
     """
 
     def __init__(self, config: dict) -> None:

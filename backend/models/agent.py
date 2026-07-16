@@ -136,7 +136,8 @@ class Agent(Base):
     # Middleware relationship
     middleware_associations = relationship('AgentMiddleware',
                                           primaryjoin=(agent_id == AgentMiddleware.agent_id),
-                                          back_populates='agent')
+                                          back_populates='agent',
+                                          order_by=AgentMiddleware.order)
 
     # Marketplace profile (1:1)
     marketplace_profile = relationship(

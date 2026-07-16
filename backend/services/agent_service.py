@@ -469,19 +469,24 @@ class AgentService:
         # Get existing middleware associations
         existing = {assoc.middleware_id: assoc for assoc in db.query(AgentMiddleware).filter(AgentMiddleware.agent_id == agent_id).all()}
 
-        # Validate middleware IDs
-        requested = {int(mid) for mid in middleware_ids if mid}
-        valid_ids = MiddlewareRepository.get_valid_middleware_ids_for_app(db, requested, agent.app_id)
+        # Validate middleware IDs, preserving the caller's requested order
+        # (order determines application order in the LangChain middleware chain).
+        requested_ordered = list(dict.fromkeys(int(mid) for mid in middleware_ids if mid))
+        valid_ids = MiddlewareRepository.get_valid_middleware_ids_for_app(db, set(requested_ordered), agent.app_id)
+        ordered_valid_ids = [mid for mid in requested_ordered if mid in valid_ids]
 
         # Remove stale
         for mid in existing:
             if mid not in valid_ids:
                 db.delete(existing[mid])
 
-        # Add new
-        for mid in valid_ids:
-            if mid not in existing:
-                assoc = AgentMiddleware(agent_id=agent_id, middleware_id=mid)
+        # Add new / reorder existing
+        for position, mid in enumerate(ordered_valid_ids):
+            if mid in existing:
+                existing[mid].order = position
+                db.add(existing[mid])
+            else:
+                assoc = AgentMiddleware(agent_id=agent_id, middleware_id=mid, order=position)
                 db.add(assoc)
 
         # Auto-enable memory when a human_in_the_loop middleware is associated,

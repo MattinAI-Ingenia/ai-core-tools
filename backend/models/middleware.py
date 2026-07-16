@@ -46,6 +46,8 @@ class AgentMiddleware(Base):
     __tablename__ = 'agent_middlewares'
     agent_id = Column(Integer, ForeignKey('Agent.agent_id'), primary_key=True)
     middleware_id = Column(Integer, ForeignKey('Middleware.middleware_id'), primary_key=True)
+    # Determines application order in the LangChain middleware chain (ascending).
+    order = Column(Integer, nullable=False, default=0, server_default='0')
     agent = relationship('Agent', foreign_keys=[agent_id], back_populates='middleware_associations')
     middleware = relationship('Middleware', foreign_keys=[middleware_id], back_populates='agent_associations')
 

@@ -95,6 +95,11 @@ function ChatInterface({
   // so the transition to the final committed message is seamless.
   const [holdStreamingContent, setHoldStreamingContent] = useState(false);
   const showStreaming = isStreaming || holdStreamingContent || hitlInterrupt !== null;
+  const [hitlEditedArgs, setHitlEditedArgs] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    setHitlEditedArgs({});
+  }, [hitlInterrupt]);
 
   // ─── Scroll helpers ──────────────────────────────────────────────────────────
 
@@ -239,6 +244,7 @@ function ChatInterface({
     async (decisions: Array<{ type: string; edited_action?: { name: string; args: Record<string, unknown> }; message?: string }>) => {
       let finalResponse: string | Record<string, unknown> = '';
       let finalConversationId: number | null = currentConversationId;
+      let hitlPaused = false;
 
       await apiService.resumeAgentChat(appId, agentId, decisions, {
         conversationId: currentConversationId,
@@ -261,9 +267,11 @@ function ChatInterface({
             const doneData = event.data as {
               response?: string | Record<string, unknown>;
               conversation_id?: number;
+              hitl_paused?: boolean;
             };
             finalResponse = doneData.response ?? '';
             if (doneData.conversation_id) finalConversationId = doneData.conversation_id;
+            hitlPaused = doneData.hitl_paused ?? false;
           }
         },
       });
@@ -271,6 +279,7 @@ function ChatInterface({
       return {
         response: finalResponse,
         conversationId: finalConversationId,
+        hitlPaused,
       };
     },
     [appId, agentId, currentConversationId, setHitlInterrupt, setHoldStreamingContent],
@@ -475,6 +484,39 @@ function ChatInterface({
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       handleSendMessage();
+    }
+  };
+
+  const handleHitlDecision = async (
+    decisions: Array<{ type: string; edited_action?: { name: string; args: Record<string, unknown> }; message?: string }>
+  ) => {
+    clearHitlInterrupt();
+    setHoldStreamingContent(true);
+    try {
+      const result = await resumeWithDecisions(decisions);
+      const responseContent = typeof result.response === 'object'
+        ? JSON.stringify(result.response, null, 2)
+        : String(result.response || '');
+      // Only add message if response is not empty and not a HITL pause placeholder
+      if (responseContent.trim() && !result.hitlPaused) {
+        const agentMsgId = (Date.now() + 1).toString();
+        lastStreamedMsgIdRef.current = agentMsgId;
+        setMessages((prev) => [...prev, {
+          id: agentMsgId,
+          type: 'agent' as const,
+          content: responseContent,
+          timestamp: new Date(),
+        }]);
+      }
+      setHoldStreamingContent(false);
+    } catch (err) {
+      setHoldStreamingContent(false);
+      setMessages((prev) => [...prev, {
+        id: (Date.now() + 1).toString(),
+        type: 'error' as const,
+        content: err instanceof Error ? err.message : 'Resume failed',
+        timestamp: new Date(),
+      }]);
     }
   };
 
@@ -790,8 +832,8 @@ function ChatInterface({
                             <textarea
                               className="w-full text-xs text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-700 rounded p-2 font-mono border-2 border-amber-300 dark:border-amber-600 resize-none focus:outline-none focus:ring-2 focus:ring-amber-500"
                               rows={Math.min(8, Math.max(3, JSON.stringify(req.args, null, 2).split('\n').length))}
-                              defaultValue={JSON.stringify(req.args, null, 2)}
-                              data-tool-args={idx}
+                              value={hitlEditedArgs[idx] ?? JSON.stringify(req.args, null, 2)}
+                              onChange={(e) => setHitlEditedArgs((prev) => ({ ...prev, [idx]: e.target.value }))}
                               spellCheck="false"
                             />
                           </div>
@@ -799,14 +841,13 @@ function ChatInterface({
                         <div className="flex gap-2 pt-1">
                           <button
                             type="button"
-                            onClick={async () => {
+                            onClick={() => {
                               const decisions = hitlInterrupt.actionRequests.map((req, idx) => {
-                                const textareas = document.querySelectorAll('textarea[data-tool-args]');
                                 let editedArgs = req.args;
-                                if (textareas.length > idx) {
-                                  const textarea = textareas[idx] as HTMLTextAreaElement;
+                                const rawValue = hitlEditedArgs[idx];
+                                if (rawValue !== undefined) {
                                   try {
-                                    editedArgs = JSON.parse(textarea.value);
+                                    editedArgs = JSON.parse(rawValue);
                                   } catch {
                                     // Keep original if invalid JSON
                                   }
@@ -824,35 +865,7 @@ function ChatInterface({
                                 }
                                 return { type: 'approve' as const };
                               });
-                              clearHitlInterrupt();
-                              setHoldStreamingContent(true);
-                              try {
-                                const result = await resumeWithDecisions(decisions);
-                                const responseContent = typeof result.response === 'object'
-                                  ? JSON.stringify(result.response, null, 2)
-                                  : String(result.response || '');
-                                // Only add message if response is not empty and not a HITL pause message
-                                const isHitlPause = responseContent.includes('awaiting human approval') || responseContent.includes('Execution paused');
-                                if (responseContent.trim() && !isHitlPause) {
-                                  const agentMsgId = (Date.now() + 1).toString();
-                                  lastStreamedMsgIdRef.current = agentMsgId;
-                                  setMessages((prev) => [...prev, {
-                                    id: agentMsgId,
-                                    type: 'agent' as const,
-                                    content: responseContent,
-                                    timestamp: new Date(),
-                                  }]);
-                                }
-                                setHoldStreamingContent(false);
-                              } catch (err) {
-                                setHoldStreamingContent(false);
-                                setMessages((prev) => [...prev, {
-                                  id: (Date.now() + 1).toString(),
-                                  type: 'error' as const,
-                                  content: err instanceof Error ? err.message : 'Resume failed',
-                                  timestamp: new Date(),
-                                }]);
-                              }
+                              handleHitlDecision(decisions);
                             }}
                             className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
                           >
@@ -860,40 +873,12 @@ function ChatInterface({
                           </button>
                           <button
                             type="button"
-                            onClick={async () => {
+                            onClick={() => {
                               const decisions = hitlInterrupt.actionRequests.map((req) => ({
                                 type: 'reject' as const,
                                 message: `User rejected tool call: ${req.name}`,
                               }));
-                              clearHitlInterrupt();
-                              setHoldStreamingContent(true);
-                              try {
-                                const result = await resumeWithDecisions(decisions);
-                                const responseContent = typeof result.response === 'object'
-                                  ? JSON.stringify(result.response, null, 2)
-                                  : String(result.response || '');
-                                // Only add message if response is not empty and not a HITL pause message
-                                const isHitlPause = responseContent.includes('awaiting human approval') || responseContent.includes('Execution paused');
-                                if (responseContent.trim() && !isHitlPause) {
-                                  const agentMsgId = (Date.now() + 1).toString();
-                                  lastStreamedMsgIdRef.current = agentMsgId;
-                                  setMessages((prev) => [...prev, {
-                                    id: agentMsgId,
-                                    type: 'agent' as const,
-                                    content: responseContent,
-                                    timestamp: new Date(),
-                                  }]);
-                                }
-                                setHoldStreamingContent(false);
-                              } catch (err) {
-                                setHoldStreamingContent(false);
-                                setMessages((prev) => [...prev, {
-                                  id: (Date.now() + 1).toString(),
-                                  type: 'error' as const,
-                                  content: err instanceof Error ? err.message : 'Resume failed',
-                                  timestamp: new Date(),
-                                }]);
-                              }
+                              handleHitlDecision(decisions);
                             }}
                             className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors"
                           >

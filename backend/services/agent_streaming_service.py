@@ -299,6 +299,7 @@ class AgentStreamingService:
                         "response": "⏸️ Execution paused — awaiting human approval.",
                         "conversation_id": ctx.effective_conv_id,
                         "files": [],
+                        "hitl_paused": True,
                     },
                 )
             else:
@@ -347,11 +348,8 @@ class AgentStreamingService:
             yield format_sse_event("error", {"message": "Connection error, please retry."})
         except Exception as exc:
             # Check if this is a GraphInterrupt from HumanInTheLoop middleware
-            from langgraph.types import Interrupt
-            exc_type = type(exc).__name__
-            if exc_type == "GraphInterrupt" or (
-                hasattr(exc, "interrupts") or "interrupt" in exc_type.lower()
-            ):
+            from langgraph.errors import GraphInterrupt
+            if isinstance(exc, GraphInterrupt):
                 interrupts = getattr(exc, "interrupts", [])
                 logger.info(
                     "GraphInterrupt caught — HITL middleware paused execution. "
@@ -379,6 +377,7 @@ class AgentStreamingService:
                         "response": "⏸️ Execution paused — awaiting human approval.",
                         "conversation_id": ctx.effective_conv_id if ctx else None,
                         "files": [],
+                        "hitl_paused": True,
                     },
                 )
             else:
@@ -513,6 +512,7 @@ class AgentStreamingService:
                         "response": "⏸️ Execution paused — awaiting human approval.",
                         "conversation_id": ctx.effective_conv_id,
                         "files": [],
+                        "hitl_paused": True,
                     },
                 )
             else:
