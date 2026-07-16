@@ -485,24 +485,24 @@ class AgentStreamingService:
             has_pending_interrupt = False
             try:
                 graph_state = await agent_chain.aget_state(config)
-                if hasattr(graph_state, 'tasks'):
-                    for task in graph_state.tasks or []:
-                        if hasattr(task, 'interrupts') and task.interrupts:
-                            has_pending_interrupt = True
-                            for intr in task.interrupts:
-                                payload = intr.value if hasattr(intr, 'value') else intr
+                for task in getattr(graph_state, 'tasks', []):
+                    if hasattr(task, 'interrupts') and task.interrupts:
+                        has_pending_interrupt = True
+                        for intr in task.interrupts:
+                            payload = intr.value if hasattr(intr, 'value') else intr
+                            if isinstance(payload, dict):
+                                action_requests = payload.get("action_requests", [])
+                                review_configs = payload.get("review_configs", [])
+                            else:
                                 action_requests = []
                                 review_configs = []
-                                if isinstance(payload, dict):
-                                    action_requests = payload.get("action_requests", [])
-                                    review_configs = payload.get("review_configs", [])
-                                yield format_sse_event(
-                                    "hitl_interrupt",
-                                    {
-                                        "action_requests": action_requests,
-                                        "review_configs": review_configs,
-                                    },
-                                )
+                            yield format_sse_event(
+                                "hitl_interrupt",
+                                {
+                                    "action_requests": action_requests,
+                                    "review_configs": review_configs,
+                                },
+                            )
             except Exception as state_err:
                 logger.warning("Could not check graph state after resume: %s", state_err)
 

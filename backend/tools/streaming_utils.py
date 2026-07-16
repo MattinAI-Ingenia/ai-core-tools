@@ -341,16 +341,8 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                     )
 
     # --- __interrupt__: HumanInTheLoop middleware paused execution ---
-    # This check MUST be outside the for-loop above because when LangGraph
-    # emits an interrupt the chunk is {"__interrupt__": [Interrupt(...)]}.
-    # The list value is not a dict, so the `continue` inside the loop skips it.
-    # NOTE: We skip emitting this event because the actual interrupt with proper
-    # action_requests will be detected and emitted in agent_streaming_service.py
-    # after checking the graph state. Emitting here causes duplicate/empty interrupts.
-    interrupt_value = chunk.get("__interrupt__")
-    if interrupt_value:
-        # Don't emit interrupt event here — let post-check in agent_streaming_service handle it
-        pass
+    # Not handled here; the actual interrupt with proper action_requests is
+    # detected and emitted in agent_streaming_service.py after checking graph state.
 
     return events if events else None
 
