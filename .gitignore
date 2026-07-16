@@ -70,7 +70,3 @@ prompts/
 **/.claude/agent-memory/
 .claude/settings.local.json
 
-# Spec-kit
-.github/agents/speckit.*
-prompts/
-.specify/
