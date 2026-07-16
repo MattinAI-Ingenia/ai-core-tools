@@ -1,6 +1,7 @@
 from typing import Optional, List
 from sqlalchemy.orm import Session, joinedload
 from models.middleware import Middleware, AgentMiddleware, MiddlewareMCP
+from models.mcp_config import MCPConfig
 
 
 class MiddlewareRepository:
@@ -69,6 +70,19 @@ class MiddlewareRepository:
         ).all()
 
         return {m.middleware_id for m in valid}
+
+    @staticmethod
+    def get_valid_mcp_config_ids_for_app(db: Session, config_ids: List[int], app_id: int) -> List[int]:
+        """Get MCPConfig IDs that exist and belong to the specified app"""
+        if not config_ids:
+            return []
+
+        valid = db.query(MCPConfig.config_id).filter(
+            MCPConfig.config_id.in_(config_ids),
+            MCPConfig.app_id == app_id
+        ).all()
+
+        return [c.config_id for c in valid]
 
     @staticmethod
     def update_mcp_associations(db: Session, middleware_id: int, config_ids: List[int]) -> None:

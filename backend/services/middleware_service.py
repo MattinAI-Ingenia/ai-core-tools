@@ -99,7 +99,8 @@ class MiddlewareService:
         else:
             middleware = MiddlewareRepository.update(db, middleware)
 
-        MiddlewareRepository.update_mcp_associations(db, middleware.middleware_id, data.mcp_config_ids)
+        valid_config_ids = MiddlewareRepository.get_valid_mcp_config_ids_for_app(db, data.mcp_config_ids, app_id)
+        MiddlewareRepository.update_mcp_associations(db, middleware.middleware_id, valid_config_ids)
         db.commit()
         return middleware
 
