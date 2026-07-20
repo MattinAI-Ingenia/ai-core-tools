@@ -703,6 +703,7 @@ async def list_system_ai_services(
     """List all platform-level AI Services (OMNIADMIN only, available in all deployment modes)."""
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import mask_api_key
+    from tools.aws_bedrock_utils import parse_extra_config
     services = AIServiceRepository.get_system_services(db)
     return [
         AIServiceDetailSchema(
@@ -714,6 +715,8 @@ async def list_system_ai_services(
             base_url=svc.endpoint or "",
             supports_video=svc.supports_video or False,
             created_at=svc.create_date,
+            aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
+            aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
         )
         for svc in services
     ]
@@ -728,10 +731,12 @@ async def get_system_ai_service(
     """Get a single platform-level AI Service by ID (OMNIADMIN only)."""
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import mask_api_key
+    from tools.aws_bedrock_utils import parse_extra_config
 
     svc = AIServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
         raise HTTPException(status_code=404, detail=SYSTEM_AI_SERVICE_NOT_FOUND)
+    extra_cfg = parse_extra_config(svc.extra_config)
     return AIServiceDetailSchema(
         service_id=svc.service_id,
         name=svc.name,
@@ -741,6 +746,8 @@ async def get_system_ai_service(
         base_url=svc.endpoint or "",
         supports_video=svc.supports_video or False,
         created_at=svc.create_date,
+        aws_access_key_id=extra_cfg.get("aws_access_key_id"),
+        aws_region=extra_cfg.get("aws_region"),
     )
 
 
@@ -754,6 +761,7 @@ async def create_system_ai_service(
     from models.ai_service import AIService
     from repositories.ai_service_repository import AIServiceRepository
     from services.ai_service_service import AIServiceService
+    from tools.aws_bedrock_utils import build_extra_config
     from datetime import datetime
 
     svc = AIService()
@@ -764,6 +772,7 @@ async def create_system_ai_service(
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
     svc.supports_video = body.supports_video
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc.create_date = datetime.now()
     svc = AIServiceRepository.create(db, svc)
     return AIServiceService._to_list_item(svc, is_system=True)
@@ -780,6 +789,7 @@ async def update_system_ai_service(
     from repositories.ai_service_repository import AIServiceRepository
     from services.ai_service_service import AIServiceService
     from utils.secret_utils import is_masked_key
+    from tools.aws_bedrock_utils import build_extra_config
 
     svc = AIServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
@@ -792,6 +802,7 @@ async def update_system_ai_service(
         svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
     svc.supports_video = body.supports_video
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc = AIServiceRepository.update(db, svc)
     return AIServiceService._to_list_item(svc, is_system=True)
 
@@ -819,6 +830,7 @@ async def list_system_embedding_services(
     """List all platform-level Embedding Services (OMNIADMIN only)."""
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from utils.secret_utils import mask_api_key
+    from tools.aws_bedrock_utils import parse_extra_config
     services = EmbeddingServiceRepository.get_system_services(db)
     return [
         EmbeddingServiceDetailSchema(
@@ -830,6 +842,8 @@ async def list_system_embedding_services(
             base_url=svc.endpoint or "",
             api_version=svc.api_version,
             created_at=svc.create_date,
+            aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
+            aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
         )
         for svc in services
     ]
@@ -845,6 +859,7 @@ async def create_system_embedding_service(
     from models.embedding_service import EmbeddingService
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from services.embedding_service_service import EmbeddingServiceService
+    from tools.aws_bedrock_utils import build_extra_config
     from datetime import datetime
 
     svc = EmbeddingService()
@@ -855,6 +870,7 @@ async def create_system_embedding_service(
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
     svc.api_version = body.api_version
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc.create_date = datetime.now()
     svc = EmbeddingServiceRepository.create(db, svc)
     return EmbeddingServiceService._to_list_item(svc, is_system=True)
@@ -871,6 +887,7 @@ async def update_system_embedding_service(
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from services.embedding_service_service import EmbeddingServiceService
     from utils.secret_utils import is_masked_key
+    from tools.aws_bedrock_utils import build_extra_config
 
     svc = EmbeddingServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
@@ -883,6 +900,7 @@ async def update_system_embedding_service(
         svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
     svc.api_version = body.api_version
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc = EmbeddingServiceRepository.update(db, svc)
     return EmbeddingServiceService._to_list_item(svc, is_system=True)
 
@@ -1013,6 +1031,7 @@ async def test_system_ai_service_connection_with_config(
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import is_masked_key
     from core.export_constants import PLACEHOLDER_API_KEY
+    from tools.aws_bedrock_utils import build_extra_config
 
     try:
         api_key = config.api_key or ""
@@ -1032,6 +1051,10 @@ async def test_system_ai_service_connection_with_config(
             "api_key": api_key,
             "endpoint": config.base_url,
             "api_version": getattr(config, "api_version", None),
+            "extra_config": build_extra_config(
+                getattr(config, "aws_access_key_id", None),
+                getattr(config, "aws_region", None),
+            ),
         }
         result = AIServiceService.test_connection_with_config(service_config)
         if isinstance(result, dict) and len(str(result.get("response", ""))) > 500:
@@ -1272,6 +1295,7 @@ async def test_system_embedding_service_connection_with_config(
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from utils.secret_utils import is_masked_key
     from core.export_constants import PLACEHOLDER_API_KEY
+    from tools.aws_bedrock_utils import build_extra_config
 
     try:
         api_key = config.api_key or ""
@@ -1290,6 +1314,10 @@ async def test_system_embedding_service_connection_with_config(
             "api_key": api_key,
             "endpoint": config.base_url,
             "api_version": config.api_version,
+            "extra_config": build_extra_config(
+                getattr(config, "aws_access_key_id", None),
+                getattr(config, "aws_region", None),
+            ),
         }
         return EmbeddingServiceService.test_connection_with_config(service_config)
     except HTTPException:
