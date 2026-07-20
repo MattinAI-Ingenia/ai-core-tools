@@ -152,6 +152,19 @@ async def marketplace_agent_detail(
     return detail
 
 
+@marketplace_router.get(
+    "/agents/{agent_id}/conversation-starters",
+    summary="Get agent conversation starters",
+    response_model=List[ConversationStarterSchema],
+)
+async def get_agent_conversation_starters(
+    agent_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    \"\"\"Retrieve the conversation starters for a publiée marketplace agent.\"\"\"
+    starters = MarketplaceService.get_agent_conversation_starters(db, agent_id)
+    return starters
+
 # ==================== RATINGS ====================
 
 

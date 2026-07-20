@@ -192,6 +192,10 @@ class ApiService {
     return response.json();
   }
 
+  async getAgentConversationStarters(agentId: number) {
+    return this.request(`/internal/marketplace/agents/${agentId}/conversation-starters`);
+  }
+
   async getApps() {
     return this.request('/internal/apps/');
   }

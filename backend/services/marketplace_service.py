@@ -397,8 +397,24 @@ class MarketplaceService:
 
         return MarketplaceProfileSchema.model_validate(profile)
 
-    # ------------------------------------------------------------------
-    # 6. Marketplace conversations (consumer list)
+    @staticmethod
+    def get_agent_conversation_starters(
+        db: Session,
+        agent_id: int,
+    ) -> List[ConversationStarter]:
+        \"\"\"
+        Retrieve the conversation starters for a specific agent.
+        \"\"\"
+        profile = (
+            db.query(AgentMarketplaceProfile)
+            .filter(AgentMarketplaceProfile.agent_id == agent_id)
+            .first()
+        )
+        if not profile:
+            return []
+        
+        return profile.conversation_starters
+    
     # ------------------------------------------------------------------
 
     @staticmethod

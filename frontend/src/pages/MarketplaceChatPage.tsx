@@ -177,13 +177,14 @@ export default function MarketplaceChatPage() {
         setConversationTitle(data.title);
 
         try {
-          const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
-          if (profile && profile.conversation_starters) {
-            setStarters(profile.conversation_starters.map(s => ({ id: s.id, prompt: s.prompt })));
+          const starters = await apiService.getAgentConversationStarters(data.agent_id);
+          if (starters && starters.length > 0) {
+            setStarters(starters.map((s: any) => ({ id: s.id, prompt: s.prompt })));
           }
         } catch {
           // Non-critical
         }
+
 
         if (data.messages && data.messages.length > 0) {
           const loaded: ChatMessage[] = data.messages.map(
