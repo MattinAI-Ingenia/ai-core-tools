@@ -31,6 +31,7 @@ from schemas.marketplace_schemas import (
     AgentRatingInputSchema,
     AgentRatingResponseSchema,
     UserRatingResponseSchema,
+    ConversationStarterSchema,
 )
 from schemas.conversation_schemas import ConversationWithHistoryResponse, MarketplaceConversationResponse
 from schemas.chat_schemas import ChatResponseSchema
@@ -161,7 +162,7 @@ async def get_agent_conversation_starters(
     agent_id: int,
     db: Annotated[Session, Depends(get_db)],
 ):
-    \"\"\"Retrieve the conversation starters for a publiée marketplace agent.\"\"\"
+    """Retrieve the conversation starters for a published marketplace agent."""
     starters = MarketplaceService.get_agent_conversation_starters(db, agent_id)
     return starters
 

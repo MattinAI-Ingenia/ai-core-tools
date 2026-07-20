@@ -428,6 +428,21 @@ function AgentFormPage() {
   const handleSaveMarketplaceProfile = useCallback(async () => {
     if (!appId || !agentId || Number.parseInt(agentId) === 0) return;
 
+    const profileToSave: MarketplaceProfileUpdate = {
+      display_name: marketplaceProfile.display_name,
+      short_description: marketplaceProfile.short_description,
+      long_description: marketplaceProfile.long_description,
+      category: marketplaceProfile.category,
+      tags: marketplaceProfile.tags,
+      icon_url: marketplaceProfile.icon_url,
+      cover_image_url: marketplaceProfile.cover_image_url,
+      conversation_starters: (
+        marketplaceProfile.conversation_starters ?? []
+      )
+        .map((starter) => starter.trim())
+        .filter((starter) => starter.length > 0),
+    };
+
     setSavingMarketplace(true);
     setMarketplaceSuccess(null);
     const saved = await mutate(
@@ -435,7 +450,7 @@ function AgentFormPage() {
         apiService.updateAgentMarketplaceProfile(
           Number.parseInt(appId),
           Number.parseInt(agentId),
-          marketplaceProfile,
+          profileToSave,
         ),
       {
         loading: MESSAGES.SAVING('marketplace profile'),

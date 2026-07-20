@@ -402,9 +402,9 @@ class MarketplaceService:
         db: Session,
         agent_id: int,
     ) -> List[ConversationStarter]:
-        \"\"\"
+        """
         Retrieve the conversation starters for a specific agent.
-        \"\"\"
+        """
         profile = (
             db.query(AgentMarketplaceProfile)
             .filter(AgentMarketplaceProfile.agent_id == agent_id)
