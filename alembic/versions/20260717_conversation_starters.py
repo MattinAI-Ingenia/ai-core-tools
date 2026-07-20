@@ -1,7 +1,7 @@
-"""add_conversation_starters
+"""conversation_starters
 
-Revision ID: 20260717_add_conversation_starters
-Revises: 
+Revision ID: 20260717_conversation_starters
+Revises: d3adbeef1234
 Create Date: 2026-07-17 09:45:00.000000
 
 """
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = '20260717_add_conversation_starters'
-down_revision = None # In a real project, this would be the last version ID. Since I don't have the latest, I'm creating a standalone or based on the most recent one. 
+revision = '20260717_conversation_starters'
+down_revision = 'd3adbeef1234' 
 internal_branch = None
 branches = []
 

@@ -498,17 +498,37 @@ export default function MarketplaceChatPage() {
                      dark:from-gray-900/50 dark:to-gray-800/30
                      scroll-smooth"
         >
-          {messages.length === 0 && !showStreaming && starters.length > 0 && (
-            <div className="flex flex-wrap justify-center gap-2 mb-6 px-2">
-              {starters.map((starter) => (
-                <button
-                  key={starter.id}
-                  onClick={() => handleStarterClick(starter.prompt)}
-                  className="px-4 py-2 bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-800/40 rounded-full text-sm text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-all duration-150 shadow-sm"
-                >
-                  {starter.prompt}
-                </button>
-              ))}
+          {messages.length === 0 && !showStreaming && (
+            <div className="flex flex-col items-center justify-center h-full py-12 text-center">
+              <div className="w-12 h-12 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
+                <MessageCircle
+                  className="w-6 h-6 text-indigo-500"
+                  aria-hidden="true"
+                />
+              </div>
+
+              <div className="mt-3">
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                  Start chatting with {agentName}
+                </p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  Type a message below to begin
+                </p>
+              </div>
+
+              {starters.length > 0 && (
+                <div className="mt-6 flex flex-wrap justify-center gap-2 px-2">
+                  {starters.map((starter) => (
+                    <button
+                      key={starter.id}
+                      onClick={() => handleStarterClick(starter.prompt)}
+                      className="px-4 py-2 bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-800/40 rounded-full text-sm text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-all duration-150 shadow-sm"
+                    >
+                      {starter.prompt}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -652,7 +672,7 @@ export default function MarketplaceChatPage() {
             <textarea
               ref={textareaRef}
               value={inputMessage}
-              onChange={handleInputChange}
+              onChange={handleStarterClick}
               onKeyDown={handleKeyDown}
               placeholder={`Message ${agentName}…`}
               disabled={isStreaming || isQuotaExceeded}

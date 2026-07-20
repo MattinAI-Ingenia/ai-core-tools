@@ -32,7 +32,7 @@ from schemas.marketplace_schemas import (
     AgentRatingResponseSchema,
     UserRatingResponseSchema,
 )
-from schemas.conversation_schemas import ConversationResponse, ConversationWithHistoryResponse
+from schemas.conversation_schemas import ConversationWithHistoryResponse, MarketplaceConversationResponse
 from schemas.chat_schemas import ChatResponseSchema
 from utils.logger import get_logger
 
@@ -200,7 +200,7 @@ async def get_my_rating(
 @marketplace_router.post(
     "/agents/{agent_id}/conversations",
     summary="Start marketplace conversation",
-    response_model=ConversationResponse,
+    response_model=MarketplaceConversationResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def start_marketplace_conversation(
@@ -281,6 +281,7 @@ async def get_marketplace_conversation(
         )
         return ConversationWithHistoryResponse(
             **conversation.to_dict(),
+            app_id=conversation.agent.app_id,
             messages=history or [],
         )
     except Exception as e:
