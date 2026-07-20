@@ -1659,8 +1659,8 @@ class SiloService:
     
     @staticmethod
     def search_silo_documents_router(
-        silo_id: int, 
-        query: str, 
+        silo_id: int,
+        query: str,
         filter_metadata: Optional[Dict[str, Any]] = None,
         limit: Optional[int] = None,
         search_type: str = "similarity",
@@ -1681,10 +1681,17 @@ class SiloService:
         
         # Perform the search with metadata filtering
         results = SiloService.find_docs_in_collection(
-            silo_id, 
-            query, 
+            silo_id,
+            query,
             filter_metadata=filter_metadata,
-            db=db
+            limit=limit,
+            search_type=search_type,
+            score_threshold=score_threshold,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            min_content_length=min_content_length,
+            max_content_length=max_content_length,
+            db=db,
         )
         
         # Convert results to response format
