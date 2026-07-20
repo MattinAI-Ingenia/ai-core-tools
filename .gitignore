@@ -61,6 +61,7 @@ reports/
 # Spec-kit
 .github/agents/speckit.*
 prompts/
+specs/
 .specify/
 
 # Claude Code agent system: ship the agents/commands/skills/hooks,
@@ -69,4 +70,3 @@ prompts/
 .claude/agent-memory/
 **/.claude/agent-memory/
 .claude/settings.local.json
-
