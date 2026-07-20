@@ -7,7 +7,9 @@ This document shows how different middlewares were tested in the **Mattin AI** a
 1. **Monitoring Middleware**
 2. **Human-in-the-Loop Middleware**
 3. **PII Detection / Redaction Middleware**
-4. **Summarization Middleware**
+4. **Model Call Limit Middleware**
+5. **Tool Call Limit Middleware** _(placeholder — pending manual run)_
+6. **Summarization Middleware**
 
 The test uses an agent configured to force specific behaviours and verify whether the middlewares correctly intercept tool calls, execution logs, and sensitive information.
 
@@ -287,9 +289,72 @@ Model call limits exceeded: run limit (1/1)
 
 The **Model Call Limit Middleware** works correctly because it enforces the per-run LLM cap and prevents the second model call required to finish a tool-based answer.
 
+### Additional cases for Model Call Limit (pending manual run)
+
+> _Placeholder — run these and replace with real output before treating them as verified._
+
+| Case | Expected result | Evidence |
+|---|---|---|
+| `max_calls` high enough (e.g. `10`) for the same tool flow | Run completes normally, confirming the limit isn't blocking valid runs | _TODO: paste log/response_ |
+| Pure Q&A prompt (no tool call) with `max_calls=1` | Succeeds, since only one LLM call is needed | _TODO: paste log/response_ |
+
 ---
 
-## 7. Summarization Middleware
+## 7. Tool Call Limit Middleware
+
+> _Placeholder — no prior evidence exists for this middleware (see
+> [`middleware-test-plan.md`](middleware-test-plan.md) §4). Run the cases below
+> against a live agent and replace the `_TODO_` markers with the actual
+> conversation/log output before treating this section as verified._
+
+### Configuration
+
+```text
+Max tool calls per run = 1
+```
+
+### Tested case
+
+A prompt that requires two sequential tool calls (e.g. the same tool called
+twice, or two different tools).
+
+```text
+_TODO: paste the user prompt used_
+```
+
+### Recreated conversation
+
+```text
+_TODO: paste the recreated conversation, same style as the HITL sections above_
+```
+
+### Generated log / error
+
+```text
+_TODO: paste the actual log line or the error surfaced to the user, expected
+shape: "Tool call limits exceeded: run limit (1/1)"_
+```
+
+### Expected result
+
+The first tool call is allowed; the run stops before the second tool call
+with a `Tool call limits exceeded: run limit (1/1)` error.
+
+### Additional cases for Tool Call Limit (pending manual run)
+
+| Case | Expected result | Evidence |
+|---|---|---|
+| `max_calls` high enough for the same two-tool-call flow | Completes normally | _TODO: paste log/response_ |
+| Combined with `model_call_limit` on the same agent | Whichever limit is hit first produces its own distinct error message, no mixing | _TODO: paste log/response_ |
+
+### Validation
+
+_TODO: fill in once the cases above have real evidence — mirror the wording
+style used for Model Call Limit §6._
+
+---
+
+## 8. Summarization Middleware
 
 ### Configuration
 
@@ -323,7 +388,7 @@ The **Summarization Middleware** works correctly because:
 
 ---
 
-## 8. Results Summary
+## 9. Results Summary
 
 | Middleware | Tested case | Result |
 |---|---|---|
@@ -332,11 +397,12 @@ The **Summarization Middleware** works correctly because:
 | HITL | Call to `anonymize_text` | ✅ Correct |
 | PII Detection | Email and IP redaction | ✅ Correct |
 | Model Call Limit (`run_limit=1`) | Tool flow with `anonymize_text` | ✅ Correct (blocked at second LLM call) |
+| Tool Call Limit (`run_limit=1`) | Two-sequential-tool-call flow | ⏳ Pending manual run (see §7) |
 | Summarization (`trigger=('tokens', 500)`) | Long conversation memory compaction | ✅ Correct (triggered and summary generated) |
 
 ---
 
-## 9. Conclusion
+## 10. Conclusion
 
 The tested middlewares work as expected:
 
@@ -344,6 +410,7 @@ The tested middlewares work as expected:
 - **HITL** intercepts tool calls and requires human approval.
 - **PII Detection** redacts sensitive data before it reaches the LLM and before it is persisted in the conversation.
 - **Model Call Limit** enforces per-run limits and can intentionally block tool-based flows when the cap is too low (e.g., `1`).
+- **Tool Call Limit** has no evidence yet — §7 is a placeholder pending a manual run (see [`middleware-test-plan.md`](middleware-test-plan.md) §4).
 - **Summarization** compacts long conversation history when token thresholds are exceeded, preserving recent context while reducing memory size.
 
 The architecture provides stronger control over agent behaviour, especially for sensitive operations such as tool execution or handling personal data.
