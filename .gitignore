@@ -58,6 +58,8 @@ nginx/
 develop/
 reports/
 
+docker/docker-compose.override.yml
+
 # Spec-kit
 .github/agents/speckit.*
 prompts/
