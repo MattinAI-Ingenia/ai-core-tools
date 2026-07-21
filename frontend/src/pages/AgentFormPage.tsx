@@ -482,6 +482,8 @@ function AgentFormPage() {
 
     if (!appId || !agentId) return;
 
+    handleSaveMarketplaceProfile(); // Save marketplace profile first
+
     const hasSilo = !!formData.silo_id;
     const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
 
@@ -1235,15 +1237,13 @@ function AgentFormPage() {
                   
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {agent.tools.map((tool) => (
-                      <button
+                      <label
                         key={tool.agent_id}
-                        type="button"
-                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
+                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full block ${
                           formData.tool_ids.includes(tool.agent_id)
                             ? 'border-blue-500 bg-blue-50'
                             : 'border-gray-200 bg-gray-50 hover:border-gray-300'
                         }`}
-                        onClick={() => handleToolToggle(tool.agent_id)}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center">
@@ -1253,13 +1253,19 @@ function AgentFormPage() {
                               onChange={() => handleToolToggle(tool.agent_id)}
                               className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                             />
-                            <span className="ml-3 text-sm font-medium text-gray-900">{tool.name}</span>
+                            <span className="ml-3 text-sm font-medium text-gray-900">
+                              {tool.name}
+                            </span>
                           </div>
-                          <div className={`w-2 h-2 rounded-full ${
-                            formData.tool_ids.includes(tool.agent_id) ? 'bg-blue-500' : 'bg-gray-300'
-                          }`} />
+                          <div 
+                            className={`w-2 h-2 rounded-full ${
+                            formData.tool_ids.includes(tool.agent_id)
+                              ? 'bg-blue-500'
+                              : 'bg-gray-300'
+                            }`}
+                          />
                         </div>
-                      </button>
+                      </label>
                     ))}
                   </div>
                   
@@ -1303,15 +1309,13 @@ function AgentFormPage() {
                       
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {agent.mcp_configs.map((mcp) => (
-                          <button
+                          <label
                             key={mcp.config_id}
-                            type="button"
                             className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
                               formData.mcp_config_ids.includes(mcp.config_id)
                                 ? 'border-purple-500 bg-purple-50'
                                 : 'border-gray-200 bg-gray-50 hover:border-gray-300'
                             }`}
-                            onClick={() => handleMCPToggle(mcp.config_id)}
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center">
@@ -1327,7 +1331,7 @@ function AgentFormPage() {
                                 formData.mcp_config_ids.includes(mcp.config_id) ? 'bg-purple-500' : 'bg-gray-300'
                               }`} />
                             </div>
-                          </button>
+                          </label>
                         ))}
                       </div>
                       
@@ -1378,15 +1382,13 @@ function AgentFormPage() {
                     <>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {agent.skills.map((skill) => (
-                          <button
+                          <label
                             key={skill.skill_id}
-                            type="button"
                             className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
                               formData.skill_ids.includes(skill.skill_id)
                                 ? 'border-purple-500 bg-purple-50'
                                 : 'border-gray-200 bg-gray-50 hover:border-gray-300'
                             }`}
-                            onClick={() => handleSkillToggle(skill.skill_id)}
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center">
@@ -1405,7 +1407,7 @@ function AgentFormPage() {
                             {skill.description && (
                               <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
                             )}
-                          </button>
+                          </label>
                         ))}
                       </div>
 
@@ -1583,20 +1585,7 @@ function AgentFormPage() {
                       />
                     )}
                   </div>
-                   <div className="flex items-center gap-4 mt-4">
-                     <button
-                       type="button"
-                       onClick={handleSaveMarketplaceProfile}
-                       className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                       disabled={savingMarketplace}
-                     >
-                       {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
-                     </button>
-                     {marketplaceSuccess && (
-                       <span className="text-sm text-green-600">{marketplaceSuccess}</span>
-                     )}
-                   </div>
-                   <div className="mt-8 pt-6 border-t border-gray-200">
+                   <div>
                      <label className="block text-sm font-medium text-gray-700 mb-3">Conversation Starters</label>
                      <p className="text-xs text-gray-500 mb-4">
                        Suggested opening messages for users. These only appear at the start of a new conversation.
@@ -1645,20 +1634,6 @@ function AgentFormPage() {
                        </button>
                      </div>
                    </div>
-                   <div className="flex items-center gap-4 mt-4">
-                     <button
-                       type="button"
-                       onClick={handleSaveMarketplaceProfile}
-                       className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                       disabled={savingMarketplace}
-                     >
-                       {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
-                     </button>
-                     {marketplaceSuccess && (
-                       <span className="text-sm text-green-600">{marketplaceSuccess}</span>
-                     )}
-                   </div>
-
                 </div>
               )}
               </>
