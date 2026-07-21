@@ -796,26 +796,25 @@ class LightRAGStore(VectorStoreInterface):
             logger.warning("Qdrant cleanup for '%s' failed: %s", collection_name, exc)
 
     def _cleanup_postgres(self, collection_name: str) -> None:
-        """Remove KV / doc-status rows scoped to *collection_name*."""
+        """Remove KV / vector / doc-status rows scoped to *collection_name*."""
         try:
             from sqlalchemy import text  # noqa: WPS433
 
-            # LightRAG PGKVStorage uses tables like ``kv_store_full_docs``,
-            # ``kv_store_text_chunks``, etc., each with a ``workspace``
-            # column.  Best-effort delete — tables might not exist yet.
-            kv_tables = [
-                "kv_store_full_docs",
-                "kv_store_text_chunks",
-                "kv_store_full_entities",
-                "kv_store_full_relations",
-                "kv_store_llm_response_cache",
-            ]
-            doc_status_table = "doc_status"
+            # LightRAG's Postgres backend names its tables ``LIGHTRAG_*`` (see
+            # NAMESPACE_TABLE_MAP), not ``kv_store_*``. It creates them with
+            # unquoted DDL, so Postgres folds the identifiers to lower case —
+            # we must delete using the lower-cased names (a quoted upper-case
+            # name would not match). KV + doc-status live in Postgres for every
+            # LightRAG silo; the vector tables (lightrag_vdb_*) only when
+            # lightrag_vector_db_type=PGVECTOR. Deleting them all is harmless
+            # otherwise. Best-effort — tables might not exist yet.
+            from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
 
-            for table in [*kv_tables, doc_status_table]:
+            tables = {t.lower() for t in NAMESPACE_TABLE_MAP.values()}
+            for table in tables:
                 try:
                     self.db.execute(
-                        text(f'DELETE FROM "{table}" WHERE workspace = :ws'),
+                        text(f'DELETE FROM {table} WHERE workspace = :ws'),
                         {"ws": collection_name},
                     )
                 except Exception:
@@ -951,13 +950,15 @@ class LightRAGStore(VectorStoreInterface):
                 "LightRAGStore.count_documents ignores content-length filters."
             )
 
-        # Query LightRAG's doc-status table for this workspace.
+        # Query LightRAG's doc-status table for this workspace. The Postgres
+        # backend names it ``LIGHTRAG_DOC_STATUS`` via unquoted DDL, so the
+        # real (lower-cased) table is ``lightrag_doc_status``.
         try:
             from sqlalchemy import text  # noqa: WPS433
 
             result = self.db.execute(
                 text(
-                    'SELECT COUNT(*) FROM "doc_status" WHERE workspace = :ws'
+                    'SELECT COUNT(*) FROM lightrag_doc_status WHERE workspace = :ws'
                 ),
                 {"ws": collection_name},
             )
