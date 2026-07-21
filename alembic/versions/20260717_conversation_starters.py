@@ -1,7 +1,7 @@
 """conversation_starters
 
 Revision ID: 20260717_conversation_starters
-Revises: d3adbeef1234
+Revises: bedrock001
 Create Date: 2026-07-17 09:45:00.000000
 
 """
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '20260717_conversation_starters'
-down_revision = 'd3adbeef1234' 
+down_revision = 'bedrock001' 
 internal_branch = None
 branches = []
 
