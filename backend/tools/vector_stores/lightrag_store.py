@@ -1,7 +1,7 @@
 """LightRAG implementation of the vector store interface.
 
 This module provides a LightRAG-backed implementation of
-:class:`VectorStoreInterface`, wrapping ``lightrag-hku==1.5.0rc3``'s embedded
+:class:`VectorStoreInterface`, wrapping ``lightrag-hku==1.5.5rc1``'s embedded
 Python API behind the same abstract interface used by PGVectorStore and
 QdrantStore.
 
@@ -9,7 +9,7 @@ All ``lightrag`` imports are **lazy** (inside methods) so this file is
 importable even when ``lightrag-hku`` is not installed.
 
 Note: Requires ``lightrag-hku`` and its storage extras:
-    pip install 'lightrag-hku[offline-storage]==1.5.0rc3'
+    pip install 'lightrag-hku[offline-storage]==1.5.5rc1'
 """
 
 from __future__ import annotations

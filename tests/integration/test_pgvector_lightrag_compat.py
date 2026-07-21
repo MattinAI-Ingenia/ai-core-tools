@@ -76,7 +76,7 @@ def test_lightrag_hku_version():
     import importlib.metadata as md
 
     version = md.version("lightrag-hku")
-    # We pin 1.5.0rc3 in the Dockerfile; accept any 1.5.x or newer.
+    # We pin 1.5.5rc1 in the Dockerfile; accept any 1.5.x or newer.
     parts = tuple(int(p) for p in version.replace("rc", ".").split(".")[:2])
     assert parts >= (1, 5), f"lightrag-hku is {version}, expected >=1.5.0"
 

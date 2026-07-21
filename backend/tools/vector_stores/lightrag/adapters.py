@@ -1,6 +1,6 @@
 """Adapter layer bridging our ``AIService`` / ``EmbeddingService`` to LightRAG.
 
-LightRAG (``lightrag-hku==1.5.0rc3``) expects:
+LightRAG (``lightrag-hku==1.5.5rc1``) expects:
 
 * ``llm_model_func``: ``async def(prompt, system_prompt=None,
   history_messages=None, **kwargs) -> str``  — base/fallback LLM callable.
@@ -63,7 +63,7 @@ _EMBEDDING_MAX_TOKENS_BY_MODEL: dict[str, int] = {
 
 _LIGHTRAG_INSTALL_HINT = (
     "lightrag-hku is not installed. Install the optional extra "
-    "(`pip install 'lightrag-hku[offline-storage]==1.5.0rc3'`) and set "
+    "(`pip install 'lightrag-hku[offline-storage]==1.5.5rc1'`) and set "
     "LIGHTRAG_ENABLED=true to enable the LightRAG integration."
 )
 
@@ -123,7 +123,7 @@ def build_role_llm_configs(
     because ``only_need_context=True`` is always used and LightRAG falls back
     to the base LLM for context assembly.
 
-    LightRAG 1.5.0rc3 expects role keys in **lowercase** and the keyword
+    LightRAG 1.5.5rc1 expects role keys in **lowercase** and the keyword
     role as singular ``"keyword"`` (not ``"keywords"``).
     """
     from lightrag.llm_roles import RoleLLMConfig  # noqa: WPS433
