@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Plus } from 'lucide-react';
 import { apiService } from '../services/api';
@@ -165,6 +165,8 @@ function AgentFormPage() {
   const [mcpUsage, setMcpUsage] = useState<AgentMCPUsage | null>(null);
   const [showMcpWarning, setShowMcpWarning] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('basic');
+
+  const starterRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   // Helper function to render the "No AI Services" warning banner
   const renderNoAIServicesWarning = (isOcrAgent: boolean) => {
@@ -1603,6 +1605,9 @@ function AgentFormPage() {
                        {marketplaceProfile.conversation_starters?.map((starter, idx) => (
                          <div key={idx} className="flex items-center gap-2">
                            <input
+                             ref={(el) => {
+                               starterRefs.current[idx] = el;
+                             }}
                              type="text"
                              value={starter}
                              onChange={(e) => {
@@ -1630,6 +1635,9 @@ function AgentFormPage() {
                          onClick={() => {
                            const newStarters = [...(marketplaceProfile.conversation_starters || []), ''];
                            handleMarketplaceProfileChange('conversation_starters', newStarters);
+                           requestAnimationFrame(() => {
+                             starterRefs.current[newStarters.length - 1]?.focus();
+                           });
                          }}
                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
                        >
