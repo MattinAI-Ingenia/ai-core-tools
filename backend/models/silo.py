@@ -67,6 +67,13 @@ class Silo(Base):
     lightrag_max_source_ids_per_entity = Column(Integer, nullable=True)
     lightrag_max_source_ids_per_relation = Column(Integer, nullable=True)
 
+    # Comma-separated entity-type categories for LightRAG's extraction prompt
+    # (addon_params['entity_types']). Set on creation only — same rationale as
+    # lightrag_language above. NULL falls back to the language-appropriate
+    # default (LightRAG's own English default, or this project's Spanish
+    # translation of it — see LightRAGStore._build_rag).
+    lightrag_entity_types = Column(Text, nullable=True)
+
     lightrag_graph_context_enabled = Column(Boolean, default=False, nullable=True)
     use_agent_as_query = Column(Boolean, default=False, nullable=False, server_default='false')
 

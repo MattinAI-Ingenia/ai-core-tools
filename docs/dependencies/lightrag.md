@@ -92,6 +92,7 @@ Cada silo LightRAG se configura de forma independiente. Comprobar en
 | `lightrag_entity_extract_max_gleaning` | Integer | iteraciones de *gleaning* (`silo.py:66`) |
 | `lightrag_max_source_ids_per_entity` | Integer | tope de source-ids por entidad (`silo.py:67`) |
 | `lightrag_max_source_ids_per_relation` | Integer | tope de source-ids por relación (`silo.py:68`) |
+| `lightrag_entity_types` | Text | categorías de entidad, separadas por comas → se traduce a `addon_params['entity_types_guidance']` (`silo.py:71`, ver §6) |
 | `lightrag_graph_context_enabled` | Boolean, def. `false` | expone el grafo como burbuja en el playground (`silo.py:70`) |
 | `use_agent_as_query` | Boolean, def. `false` | usa el LLM del agente para sintetizar (`silo.py:71`) |
 
@@ -246,7 +247,16 @@ _cleanup_postgres`, `lightrag_store.py:752-826`).
   `resolve_entity_extraction_prompt_profile(addon_params, ...)` (en `prompt.py`);
   el `entity_types_guidance` sale de `addon_params['entity_types_guidance']` si
   es un string no vacío, si no del default `PROMPTS["default_entity_types_guidance"]`.
-  **El repo no sobreescribe los tipos de entidad** — usa los defaults de LightRAG.
+  **LightRAG no acepta una lista plana** (`addon_params['entity_types']` no lo lee
+  nada del pipeline) — solo el string de `entity_types_guidance`.
+  El repo sobreescribe esto desde `silo.lightrag_entity_types` (texto separado por
+  comas en "Advanced settings") vía `_build_entity_types_guidance()`
+  (`lightrag_store.py:90-119`), que genera el mismo formato (frase + bullets, sin
+  descripciones por tipo) que usa el default de LightRAG. Si el campo está vacío:
+  con `lightrag_language == 'Spanish'` se inyecta una traducción propia de los 11
+  tipos por defecto de LightRAG (`_SPANISH_DEFAULT_ENTITY_TYPES`, ver §3, LightRAG
+  no localiza esto por sí mismo); en cualquier otro caso no se toca `addon_params`
+  y se usa el default nativo en inglés.
 - **Prompts** (`lightrag/prompt.py`, dict `PROMPTS`): delimitadores
   `PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"` (`prompt.py:12`) y
   `PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"` (`:13`);

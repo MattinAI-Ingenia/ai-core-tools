@@ -54,9 +54,11 @@ def _patched_build_rag(store, collection_name="silo_1"):
 
 
 def test_language_is_applied_to_addon_params_when_configured():
-    store = _build_store(lightrag_language="Spanish")
+    # English (not Spanish) so this test stays isolated from the
+    # Spanish-default-entity_types side effect covered separately below.
+    store = _build_store(lightrag_language="English")
     rag, _ = _patched_build_rag(store)
-    rag.addon_params.__setitem__.assert_called_once_with("language", "Spanish")
+    rag.addon_params.__setitem__.assert_called_once_with("language", "English")
 
 
 def test_addon_params_untouched_when_language_not_configured():
@@ -86,3 +88,36 @@ def test_advanced_settings_fall_back_to_global_default_when_not_configured():
     assert call_kwargs["entity_extract_max_gleaning"] == config.ENTITY_EXTRACT_MAX_GLEANING
     assert "max_source_ids_per_entity" not in call_kwargs
     assert "max_source_ids_per_relation" not in call_kwargs
+
+
+def test_entity_types_blank_and_english_does_not_override_addon_params():
+    store = _build_store(lightrag_language="English")
+    rag, _ = _patched_build_rag(store)
+    for call in rag.addon_params.__setitem__.call_args_list:
+        assert call.args[0] != "entity_types_guidance"
+
+
+def test_entity_types_blank_and_spanish_uses_spanish_default_guidance():
+    store = _build_store(lightrag_language="Spanish")
+    rag, _ = _patched_build_rag(store)
+    rag.addon_params.__setitem__.assert_any_call(
+        "entity_types_guidance",
+        "Classify each entity using one of the following types. "
+        "If no type fits, use `Other`.\n\n"
+        "- Persona\n- Criatura\n- Organización\n- Lugar\n- Evento\n"
+        "- Concepto\n- Método\n- Contenido\n- Datos\n- Artefacto\n- ObjetoNatural",
+    )
+
+
+def test_entity_types_explicit_text_is_parsed_and_used_regardless_of_language():
+    store = _build_store(
+        lightrag_language="English",
+        lightrag_entity_types="Person, Organization,, Person , Location ",
+    )
+    rag, _ = _patched_build_rag(store)
+    rag.addon_params.__setitem__.assert_any_call(
+        "entity_types_guidance",
+        "Classify each entity using one of the following types. "
+        "If no type fits, use `Other`.\n\n"
+        "- Person\n- Organization\n- Location",
+    )

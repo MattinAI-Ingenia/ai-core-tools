@@ -172,4 +172,5 @@ class VectorStoreFactory:
             lightrag_entity_extract_max_gleaning=kwargs.get('lightrag_entity_extract_max_gleaning'),
             lightrag_max_source_ids_per_entity=kwargs.get('lightrag_max_source_ids_per_entity'),
             lightrag_max_source_ids_per_relation=kwargs.get('lightrag_max_source_ids_per_relation'),
+            lightrag_entity_types=kwargs.get('lightrag_entity_types'),
         )

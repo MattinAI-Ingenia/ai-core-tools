@@ -74,6 +74,57 @@ _CHUNK_STRATEGY_OPTION = {
     "paragraph_semantic": "P",
 }
 
+# Spanish translation of LightRAG's own English default entity-type list
+# (Person, Creature, Organization, Location, Event, Concept, Method, Content,
+# Data, Artifact, NaturalObject). Used only when a silo's language is Spanish
+# and no explicit lightrag_entity_types was configured — LightRAG does not
+# localize this list itself, so this project maintains the translation.
+# Keep in sync with the frontend copy in
+# frontend/src/components/forms/LightRAGAdvancedSettings.tsx.
+_SPANISH_DEFAULT_ENTITY_TYPES = [
+    "Persona", "Criatura", "Organización", "Lugar", "Evento",
+    "Concepto", "Método", "Contenido", "Datos", "Artefacto", "ObjetoNatural",
+]
+
+
+def _parse_entity_types(raw: Optional[str]) -> List[str]:
+    """Split a comma-separated entity-types string into a clean list.
+
+    Trims whitespace, drops empty items, and drops case-insensitive
+    duplicates (keeping the first occurrence).
+    """
+    if not raw:
+        return []
+    seen: set[str] = set()
+    result: List[str] = []
+    for item in raw.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _build_entity_types_guidance(entity_types: List[str]) -> str:
+    """Render a type list into LightRAG's ``entity_types_guidance`` shape.
+
+    LightRAG 1.5.5rc1 does not accept a bare type list — its extraction
+    prompt only reads ``addon_params['entity_types_guidance']``, a
+    multi-line instruction string (see ``lightrag/prompt.py``'s
+    ``default_entity_types_guidance``). This mirrors that shape (header
+    sentence + one bullet per type) without per-type descriptions, since
+    this project only collects type names from the user, not descriptions.
+    """
+    bullets = "\n".join(f"- {entity_type}" for entity_type in entity_types)
+    return (
+        "Classify each entity using one of the following types. "
+        "If no type fits, use `Other`.\n\n" + bullets
+    )
+
 
 def _source_label_from_metadata(metadata: dict) -> str:
     """Build a human-readable source label for a chunk from its document metadata.
@@ -494,6 +545,7 @@ class LightRAGStore(VectorStoreInterface):
         lightrag_entity_extract_max_gleaning: Optional[int] = None,
         lightrag_max_source_ids_per_entity: Optional[int] = None,
         lightrag_max_source_ids_per_relation: Optional[int] = None,
+        lightrag_entity_types: Optional[str] = None,
     ):
         self.db = db
         # ``ai_service`` is the legacy single-LLM parameter — it acts as the
@@ -514,6 +566,7 @@ class LightRAGStore(VectorStoreInterface):
         self.entity_extract_max_gleaning = lightrag_entity_extract_max_gleaning
         self.max_source_ids_per_entity = lightrag_max_source_ids_per_entity
         self.max_source_ids_per_relation = lightrag_max_source_ids_per_relation
+        self.entity_types = lightrag_entity_types
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
         self._rag_instances: Dict[str, Any] = {}
@@ -600,6 +653,22 @@ class LightRAGStore(VectorStoreInterface):
         # (query) — LightRAG has no per-role language override.
         if self.language:
             rag.addon_params["language"] = self.language
+
+        # entity_types resolution — LightRAG 1.5.5rc1 reads
+        # addon_params['entity_types_guidance'] (a guidance string), not a
+        # bare type list. LightRAG does not localize its own default
+        # guidance, so a Spanish silo left blank gets this project's Spanish
+        # translation instead; an English/unset silo left blank keeps
+        # LightRAG's own built-in English default guidance untouched.
+        explicit_entity_types = _parse_entity_types(self.entity_types)
+        if explicit_entity_types:
+            rag.addon_params["entity_types_guidance"] = _build_entity_types_guidance(
+                explicit_entity_types
+            )
+        elif self.language == "Spanish":
+            rag.addon_params["entity_types_guidance"] = _build_entity_types_guidance(
+                _SPANISH_DEFAULT_ENTITY_TYPES
+            )
         return rag
 
     async def _aget_rag_instance(self, collection_name: str):

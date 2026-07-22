@@ -189,6 +189,7 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
             lightrag_entity_extract_max_gleaning=getattr(silo, 'lightrag_entity_extract_max_gleaning', None),
             lightrag_max_source_ids_per_entity=getattr(silo, 'lightrag_max_source_ids_per_entity', None),
             lightrag_max_source_ids_per_relation=getattr(silo, 'lightrag_max_source_ids_per_relation', None),
+            lightrag_entity_types=getattr(silo, 'lightrag_entity_types', None),
         )
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
@@ -338,6 +339,27 @@ def _is_meaningful_chunk(text: str) -> bool:
     return True
 
 
+def _scale_k_per_100_chunks(k_per_100: int, silo: Any) -> int:
+    """Scale ``k_per_100`` (documents per 100 indexed chunks) by the silo's chunk count.
+
+    Opens its own short-lived session — ``resolve_search_params`` runs via
+    ``asyncio.to_thread``, so a blocking count query here is safe. No upper clamp:
+    a large knowledge base is meant to retrieve proportionally more.
+    """
+    session = SessionLocal()
+    try:
+        chunk_count = SiloService.count_docs_in_silo(silo.silo_id, session)
+    except Exception as exc:
+        logger.warning("resolve_search_params: could not count chunks for silo %s: %s", silo.silo_id, exc)
+        return k_per_100
+    finally:
+        session.close()
+
+    if chunk_count <= 0:
+        return k_per_100
+    return max(1, math.ceil(k_per_100 * chunk_count / 100))
+
+
 def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> tuple[dict, dict]:
     """Materialize RAG precedence: caller > agent > system.
 
@@ -366,8 +388,16 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
     # ---- Tuning params (caller > agent > server_default) ----
     resolved: dict = {}
 
-    # k: caller explicit value wins; otherwise use agent column (server_default 30)
-    resolved["k"] = caller["k"] if "k" in caller else (getattr(agent, "rag_k", None) or 30)
+    # k: caller explicit value wins; otherwise use agent column (server_default 30),
+    # scaled against the silo's chunk count when rag_k_mode='per_100_chunks'.
+    if "k" in caller:
+        resolved["k"] = caller["k"]
+    else:
+        agent_k = getattr(agent, "rag_k", None) or 30
+        k_mode = getattr(agent, "rag_k_mode", None) or "fixed"
+        resolved["k"] = (
+            _scale_k_per_100_chunks(agent_k, silo) if k_mode == "per_100_chunks" and silo is not None else agent_k
+        )
 
     # search_type: caller wins; fall back to agent column (server_default 'similarity')
     resolved["search_type"] = (
@@ -762,7 +792,8 @@ class SiloService:
                               'lightrag_chunk_overlap_token_size', 'lightrag_language',
                               'lightrag_entity_extract_max_gleaning',
                               'lightrag_max_source_ids_per_entity',
-                              'lightrag_max_source_ids_per_relation'):
+                              'lightrag_max_source_ids_per_relation',
+                              'lightrag_entity_types'):
                     if field in silo_data and silo_data[field] is not None:
                         setattr(silo, field, silo_data[field])
 
@@ -2104,6 +2135,7 @@ class SiloService:
                 lightrag_entity_extract_max_gleaning=getattr(silo, 'lightrag_entity_extract_max_gleaning', None),
                 lightrag_max_source_ids_per_entity=getattr(silo, 'lightrag_max_source_ids_per_entity', None),
                 lightrag_max_source_ids_per_relation=getattr(silo, 'lightrag_max_source_ids_per_relation', None),
+                lightrag_entity_types=getattr(silo, 'lightrag_entity_types', None),
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -2150,6 +2182,7 @@ class SiloService:
             'lightrag_entity_extract_max_gleaning': getattr(silo_data, 'lightrag_entity_extract_max_gleaning', None),
             'lightrag_max_source_ids_per_entity': getattr(silo_data, 'lightrag_max_source_ids_per_entity', None),
             'lightrag_max_source_ids_per_relation': getattr(silo_data, 'lightrag_max_source_ids_per_relation', None),
+            'lightrag_entity_types': getattr(silo_data, 'lightrag_entity_types', None),
         }
         
         # Create or update using the existing service

@@ -8,7 +8,7 @@ import {
   type LightRAGRole,
 } from '../../utils/lightragModelSpecs';
 import { LightRAGModelHints } from './LightRAGModelHints';
-import { LightRAGAdvancedSettings } from './LightRAGAdvancedSettings';
+import { LightRAGAdvancedSettings, sanitizeEntityTypesList } from './LightRAGAdvancedSettings';
 
 interface VectorDbOption {
   code: string;
@@ -40,6 +40,7 @@ interface Silo {
   lightrag_entity_extract_max_gleaning?: number;
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
+  lightrag_entity_types?: string;
   ai_services?: AIServiceOption[];
 }
 
@@ -71,6 +72,7 @@ interface SiloFormData {
   lightrag_entity_extract_max_gleaning?: number;
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
+  lightrag_entity_types?: string;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -102,6 +104,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     lightrag_entity_extract_max_gleaning: 0,
     lightrag_max_source_ids_per_entity: 1000,
     lightrag_max_source_ids_per_relation: 1000,
+    lightrag_entity_types: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,6 +164,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       lightrag_entity_extract_max_gleaning: silo?.lightrag_entity_extract_max_gleaning ?? 0,
       lightrag_max_source_ids_per_entity: silo?.lightrag_max_source_ids_per_entity || 1000,
       lightrag_max_source_ids_per_relation: silo?.lightrag_max_source_ids_per_relation || 1000,
+      lightrag_entity_types: silo?.lightrag_entity_types || '',
     }));
   }, [silo]);
 
@@ -266,6 +270,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       const normalized: SiloFormData = {
         ...formData,
         indexing_service_id: formData.extract_service_id || formData.indexing_service_id,
+        lightrag_entity_types: sanitizeEntityTypesList(formData.lightrag_entity_types),
       };
       const payload = isEditing
         ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi,
@@ -273,6 +278,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
               lightrag_entity_extract_max_gleaning: _gleaning,
               lightrag_max_source_ids_per_entity: _maxEnt,
               lightrag_max_source_ids_per_relation: _maxRel,
+              lightrag_entity_types: _entityTypes,
               vlm_service_id: _vsi, ...rest }) => rest)(normalized)
         : { ...normalized, vector_db_type: normalized.vector_db_type!.toUpperCase() };
       await onSubmit(payload);

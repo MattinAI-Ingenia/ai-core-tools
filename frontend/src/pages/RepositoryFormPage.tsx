@@ -10,7 +10,7 @@ import {
   type LightRAGRole,
 } from '../utils/lightragModelSpecs';
 import { LightRAGModelHints } from '../components/forms/LightRAGModelHints';
-import { LightRAGAdvancedSettings } from '../components/forms/LightRAGAdvancedSettings';
+import { LightRAGAdvancedSettings, sanitizeEntityTypesList } from '../components/forms/LightRAGAdvancedSettings';
 
 interface RepositoryFormData {
   name: string;
@@ -30,6 +30,7 @@ interface RepositoryFormData {
   lightrag_entity_extract_max_gleaning?: number;
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
+  lightrag_entity_types?: string;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -85,6 +86,7 @@ const RepositoryFormPage: React.FC = () => {
     lightrag_entity_extract_max_gleaning: 0,
     lightrag_max_source_ids_per_entity: 1000,
     lightrag_max_source_ids_per_relation: 1000,
+    lightrag_entity_types: '',
   });
 
   const isNewRepository = repositoryId === '0';
@@ -239,6 +241,7 @@ const RepositoryFormPage: React.FC = () => {
       lightrag_entity_extract_max_gleaning: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_entity_extract_max_gleaning : undefined,
       lightrag_max_source_ids_per_entity: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_max_source_ids_per_entity : undefined,
       lightrag_max_source_ids_per_relation: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_max_source_ids_per_relation : undefined,
+      lightrag_entity_types: normalizedVectorDbType === 'LIGHTRAG' ? sanitizeEntityTypesList(formData.lightrag_entity_types) : undefined,
     };
 
     setError(null);

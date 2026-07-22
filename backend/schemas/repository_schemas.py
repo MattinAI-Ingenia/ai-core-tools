@@ -76,6 +76,7 @@ class CreateRepositorySchema(BaseModel):
     lightrag_entity_extract_max_gleaning: Optional[int] = None
     lightrag_max_source_ids_per_entity: Optional[int] = None
     lightrag_max_source_ids_per_relation: Optional[int] = None
+    lightrag_entity_types: Optional[str] = None
 
 
 class UpdateRepositorySchema(BaseModel):

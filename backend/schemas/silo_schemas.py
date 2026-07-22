@@ -44,6 +44,7 @@ class SiloDetailSchema(BaseModel):
     lightrag_entity_extract_max_gleaning: Optional[int] = None
     lightrag_max_source_ids_per_entity: Optional[int] = None
     lightrag_max_source_ids_per_relation: Optional[int] = None
+    lightrag_entity_types: Optional[str] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -77,12 +78,14 @@ class CreateSiloSchema(BaseModel):
     lightrag_entity_extract_max_gleaning: Optional[int] = None
     lightrag_max_source_ids_per_entity: Optional[int] = None
     lightrag_max_source_ids_per_relation: Optional[int] = None
+    lightrag_entity_types: Optional[str] = None
 
 
 class UpdateSiloSchema(BaseModel):
     """Schema for updating an existing silo. vector_db_type, embedding_service_id,
-    extract/vlm/indexing_service_id, chunking, and lightrag_language are immutable
-    after creation. keywords_service_id is query-time only and stays editable."""
+    extract/vlm/indexing_service_id, chunking, lightrag_language, and
+    lightrag_entity_types are immutable after creation. keywords_service_id is
+    query-time only and stays editable."""
     name: str
     description: Optional[str] = None
     type: Optional[str] = None
