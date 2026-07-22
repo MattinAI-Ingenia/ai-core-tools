@@ -11,7 +11,7 @@ import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
 import type { TabItem } from '../components/ui/Tabs';
 import RagConfigSection, { SCORE_THRESHOLD_REQUIRED_MSG } from '../components/forms/RagConfigSection';
-import type { RagConfigValue, RagFixedFilter, RagSearchType } from '../components/forms/RagConfigSection';
+import type { RagConfigValue, RagFixedFilter, RagKMode, RagSearchType } from '../components/forms/RagConfigSection';
 import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
 import type { AgentMCPUsage } from '../core/types';
 import type { MarketplaceVisibility, MarketplaceProfileUpdate } from '../types/marketplace';
@@ -49,6 +49,7 @@ interface Agent {
   text_system_prompt?: string;
   // RAG retrieval config
   rag_k?: number;
+  rag_k_mode?: RagKMode;
   rag_search_type?: RagSearchType;
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
@@ -91,6 +92,7 @@ interface AgentFormData {
   text_system_prompt?: string;
   // RAG retrieval config
   rag_k: number;
+  rag_k_mode: RagKMode;
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
@@ -224,6 +226,7 @@ function AgentFormPage() {
     lightrag_query_mode: null,
     middleware_ids: [],
     rag_k: 10,
+    rag_k_mode: 'fixed',
     rag_search_type: 'similarity',
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
@@ -324,6 +327,7 @@ function AgentFormPage() {
         text_system_prompt: response.text_system_prompt || '',
         // RAG retrieval config
         rag_k: response.rag_k ?? 10,
+        rag_k_mode: response.rag_k_mode ?? 'fixed',
         rag_search_type: response.rag_search_type ?? 'similarity',
         rag_score_threshold: response.rag_score_threshold ?? null,
         rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
@@ -611,6 +615,7 @@ function AgentFormPage() {
       text_system_prompt: formData.text_system_prompt,
       // RAG retrieval config (full-replace; only meaningful with a silo)
       rag_k: formData.rag_k,
+      rag_k_mode: formData.rag_k_mode,
       rag_search_type: formData.rag_search_type,
       rag_score_threshold: usesThreshold ? formData.rag_score_threshold : null,
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
@@ -968,59 +973,7 @@ function AgentFormPage() {
                         </select>
                       </div>
 
-                      {/* LightRAG Query Mode — only for LightRAG silos.
-                          Generic RAG tuning (search_type / k / threshold / filters)
-                          lives in the RagConfigSection below. */}
-                      {formData.silo_id && selectedSiloIsLightRAG && (
-                        <div className="border-t border-gray-200 pt-6">
-                          <div className="flex items-center mb-6">
-                            <div className="w-10 h-10 bg-green-100 rounded-xl flex items-center justify-center mr-4">
-                              <Search className="w-5 h-5 text-green-600" />
-                            </div>
-                            <div className="flex-1">
-                              <h3 className="text-lg font-semibold text-gray-900">LightRAG Retrieval</h3>
-                              <p className="text-sm text-gray-600 mt-1">Choose how this agent queries the LightRAG knowledge graph</p>
-                            </div>
-                          </div>
-
-                          <div className="space-y-6">
-                            <div>
-                              <label htmlFor="lightrag_query_mode" className="block text-sm font-medium text-gray-700 mb-2">
-                                LightRAG Query Mode
-                              </label>
-                              <select
-                                id="lightrag_query_mode"
-                                value={formData.lightrag_query_mode ?? 'skill-routed'}
-                                onChange={(e) => handleInputChange('lightrag_query_mode', e.target.value)}
-                                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
-                              >
-                                {(agent?.lightrag_query_modes ?? ['skill-routed', 'local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map(mode => (
-                                  <option key={mode} value={mode}>
-                                    {mode === 'skill-routed'
-                                      ? 'Skill-Routed (auto)'
-                                      : mode === 'hybrid'
-                                        ? `${mode} (default fallback)`
-                                        : mode}
-                                  </option>
-                                ))}
-                              </select>
-                              <p className="text-xs text-gray-500 mt-1">
-                                skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries · hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
-                              </p>
-                              {(formData.lightrag_query_mode ?? 'skill-routed') === 'skill-routed' && (
-                                <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2">
-                                  <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
-                                  <p className="text-xs text-purple-800">
-                                    <span className="font-semibold">LightRAG Query Router</span> — the agent will automatically
-                                    select the best retrieval strategy (local / global / hybrid / mix / naive) per question.
-                                    A routing skill will be added to this agent on save.
-                                  </p>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                      {/* LightRAG query mode is now integrated into the RagConfigSection card below. */}
 
                       <div>
                         <label htmlFor="temperature" className="block text-sm font-medium text-gray-700 mb-2">
@@ -1063,6 +1016,7 @@ function AgentFormPage() {
                     <RagConfigSection
                       value={{
                         rag_k: formData.rag_k,
+                        rag_k_mode: formData.rag_k_mode,
                         rag_search_type: formData.rag_search_type,
                         rag_score_threshold: formData.rag_score_threshold,
                         rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
@@ -1073,6 +1027,10 @@ function AgentFormPage() {
                       }
                       metadataFields={siloMetadataFields}
                       loadingMetadata={loadingSiloMetadata}
+                      isLightRAG={selectedSiloIsLightRAG}
+                      lightragQueryMode={formData.lightrag_query_mode}
+                      lightragQueryModes={agent?.lightrag_query_modes}
+                      onLightragQueryModeChange={(mode) => handleInputChange('lightrag_query_mode', mode)}
                     />
                   )}
 

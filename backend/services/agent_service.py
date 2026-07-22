@@ -290,6 +290,7 @@ class AgentService:
             ),
             # RAG retrieval config (step_008)
             rag_k=getattr(agent, 'rag_k', None) if isinstance(getattr(agent, 'rag_k', None), (int, type(None))) else None,
+            rag_k_mode=getattr(agent, 'rag_k_mode', None) if isinstance(getattr(agent, 'rag_k_mode', None), (str, type(None))) else None,
             rag_search_type=getattr(agent, 'rag_search_type', None) if isinstance(getattr(agent, 'rag_search_type', None), (str, type(None))) else None,
             rag_score_threshold=getattr(agent, 'rag_score_threshold', None) if isinstance(getattr(agent, 'rag_score_threshold', None), (float, int, type(None))) else None,
             rag_max_retrieval_calls=getattr(agent, 'rag_max_retrieval_calls', None) if isinstance(getattr(agent, 'rag_max_retrieval_calls', None), (int, type(None))) else None,
@@ -487,6 +488,11 @@ class AgentService:
 
         if data.get('rag_search_type') is not None:
             agent.rag_search_type = data['rag_search_type']
+
+        if data.get('rag_k_mode') is not None:
+            agent.rag_k_mode = data['rag_k_mode']
+        elif is_new:
+            agent.rag_k_mode = 'fixed'
 
         # score_threshold and fixed_filters: clear-able via explicit None/empty
         if 'rag_score_threshold' in data:

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Target, Trash2 } from 'lucide-react';
+import { Info, Target, Trash2 } from 'lucide-react';
 import type { MetadataOperator, SearchFilterMetadataField } from '../playground/SearchFilters';
 
 export type RagSearchType = 'similarity' | 'mmr' | 'similarity_score_threshold';
+export type RagKMode = 'fixed' | 'per_100_chunks';
 
 export interface RagFixedFilter {
   field: string;
@@ -13,6 +14,7 @@ export interface RagFixedFilter {
 
 export interface RagConfigValue {
   rag_k: number;
+  rag_k_mode: RagKMode;
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
@@ -24,7 +26,22 @@ interface RagConfigSectionProps {
   onChange: (patch: Partial<RagConfigValue>) => void;
   metadataFields: SearchFilterMetadataField[];
   loadingMetadata?: boolean;
+  // LightRAG silos don't support search_type/threshold/filters — see backend/tools/vector_stores/lightrag_store.py.
+  // Instead they get their own query-mode knob, integrated into this same card.
+  isLightRAG?: boolean;
+  lightragQueryMode?: string | null;
+  lightragQueryModes?: string[];
+  onLightragQueryModeChange?: (mode: string) => void;
 }
+
+const RAG_K_MODES: Array<{ value: RagKMode; label: string }> = [
+  { value: 'fixed', label: 'Fixed K' },
+  { value: 'per_100_chunks', label: 'K per 100 chunks' },
+];
+
+// Not a hard limit — just a heads-up that very high k increases latency/cost. Mirrors the
+// backend's soft warning in RagConfigFieldsMixin.validate_rag_k.
+const RAG_K_SOFT_MAX = 100;
 
 // Mirrors backend SYSTEM_METADATA_FIELDS — always filterable regardless of metadata_definition.
 const SYSTEM_FIELDS = ['name', 'file_type', 'url', 'page'];
@@ -57,6 +74,13 @@ function clampInt(raw: string, min: number, max: number, fallback: number): numb
   return Math.min(max, Math.max(min, n));
 }
 
+/** Floor only — no recommended maximum for rag_k, it's a soft warning instead (see RAG_K_SOFT_MAX). */
+function clampMin(raw: string, min: number, fallback: number): number {
+  const n = Number.parseInt(raw, 10);
+  if (Number.isNaN(n)) return fallback;
+  return Math.max(min, n);
+}
+
 /** Render a stored filter value for editing: $in arrays become a comma-separated string. */
 function filterValueToInput(value: unknown): string {
   if (Array.isArray(value)) return value.join(', ');
@@ -77,7 +101,16 @@ function inputToFilterValue(op: MetadataOperator, raw: string): unknown {
  * the caller renders this conditionally. Values are persisted on the Agent and resolved
  * at execution time (caller > agent > system).
  */
-function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = false }: Readonly<RagConfigSectionProps>) {
+function RagConfigSection({
+  value,
+  onChange,
+  metadataFields,
+  loadingMetadata = false,
+  isLightRAG = false,
+  lightragQueryMode,
+  lightragQueryModes,
+  onLightragQueryModeChange,
+}: Readonly<RagConfigSectionProps>) {
   const fieldOptions = [...SYSTEM_FIELDS, ...metadataFields.map((f) => f.name)];
   const filters = value.rag_fixed_filters;
   const thresholdMissing =
@@ -145,19 +178,40 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div>
-          <label htmlFor="rag_k" className="block text-sm font-medium text-gray-700 mb-2">
-            Documents to retrieve (k)
+          <label htmlFor="rag_k_mode" className="block text-sm font-medium text-gray-700 mb-2">
+            Documents to retrieve
           </label>
+          <select
+            id="rag_k_mode"
+            value={value.rag_k_mode}
+            onChange={(e) => onChange({ rag_k_mode: e.target.value as RagKMode })}
+            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 mb-3"
+          >
+            {RAG_K_MODES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
           <input
             id="rag_k"
             type="number"
             min={1}
-            max={100}
             value={value.rag_k}
-            onChange={(e) => onChange({ rag_k: clampInt(e.target.value, 1, 100, value.rag_k) })}
+            onChange={(e) => onChange({ rag_k: clampMin(e.target.value, 1, value.rag_k) })}
             className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
           />
-          <p className="text-xs text-gray-500 mt-1">Number of chunks fetched per search (1–100).</p>
+          <p className="text-xs text-gray-500 mt-1">
+            {value.rag_k_mode === 'per_100_chunks'
+              ? 'Chunks fetched per 100 chunks indexed in the silo — scales with knowledge-base size.'
+              : 'Number of chunks fetched per search.'}
+          </p>
+          {value.rag_k > RAG_K_SOFT_MAX && (
+            <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
+              <Info className="w-3.5 h-3.5 shrink-0" />
+              High values increase latency and cost.
+            </p>
+          )}
         </div>
 
         <div>
@@ -181,62 +235,101 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
           <p className="text-xs text-gray-500 mt-1">Caps how often the agent can search in one turn (1–20). Empty = unlimited.</p>
         </div>
 
-        <div>
-          <label htmlFor="rag_search_type" className="block text-sm font-medium text-gray-700 mb-2">
-            Search strategy
-          </label>
-          <select
-            id="rag_search_type"
-            value={value.rag_search_type}
-            onChange={(e) => onChange({ rag_search_type: e.target.value as RagSearchType })}
-            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-          >
-            {SEARCH_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {value.rag_search_type === 'similarity_score_threshold' && (
-          <div>
-            <label htmlFor="rag_score_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-              Score threshold
-              <span className="text-red-500 ml-1" aria-hidden="true">*</span>
-              <span className="sr-only"> (required)</span>
+        {/* search_type/score_threshold/fixed_filters are ignored by LightRAGStore — it only reads
+            k and lightrag_query_mode. Show the LightRAG query mode picker instead. */}
+        {isLightRAG ? (
+          <div className="md:col-span-2">
+            <label htmlFor="lightrag_query_mode" className="block text-sm font-medium text-gray-700 mb-2">
+              LightRAG Query Mode
             </label>
-            <input
-              id="rag_score_threshold"
-              type="text"
-              inputMode="decimal"
-              required
-              value={thresholdText}
-              placeholder="0.75"
-              aria-invalid={thresholdMissing}
-              aria-describedby="rag_score_threshold_help"
-              onChange={(e) => handleThresholdChange(e.target.value)}
-              onBlur={handleThresholdBlur}
-              className={`w-full px-4 py-3 border rounded-xl focus:ring-2 transition-all duration-200 ${
-                thresholdMissing
-                  ? 'border-red-300 focus:ring-red-500 focus:border-red-500'
-                  : 'border-gray-300 focus:ring-blue-500 focus:border-blue-500'
-              }`}
-            />
-            {thresholdMissing ? (
-              <p id="rag_score_threshold_help" role="alert" className="text-xs text-red-600 mt-1">
-                Required for the threshold strategy (0–1).
-              </p>
-            ) : (
-              <p id="rag_score_threshold_help" className="text-xs text-gray-500 mt-1">
-                Minimum relevance score, 0–1. Lower returns more, higher is stricter.
-              </p>
+            <select
+              id="lightrag_query_mode"
+              value={lightragQueryMode ?? 'skill-routed'}
+              onChange={(e) => onLightragQueryModeChange?.(e.target.value)}
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200"
+            >
+              {(lightragQueryModes ?? ['skill-routed', 'local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map((mode) => (
+                <option key={mode} value={mode}>
+                  {mode === 'skill-routed' ? 'Skill-Routed (auto)' : mode === 'hybrid' ? `${mode} (default fallback)` : mode}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries ·
+              hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
+            </p>
+            {(lightragQueryMode ?? 'skill-routed') === 'skill-routed' && (
+              <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2">
+                <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
+                <p className="text-xs text-purple-800">
+                  <span className="font-semibold">LightRAG Query Router</span> — the agent will automatically
+                  select the best retrieval strategy (local / global / hybrid / mix / naive) per question.
+                  A routing skill will be added to this agent on save.
+                </p>
+              </div>
             )}
           </div>
+        ) : (
+          <>
+            <div>
+              <label htmlFor="rag_search_type" className="block text-sm font-medium text-gray-700 mb-2">
+                Search strategy
+              </label>
+              <select
+                id="rag_search_type"
+                value={value.rag_search_type}
+                onChange={(e) => onChange({ rag_search_type: e.target.value as RagSearchType })}
+                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+              >
+                {SEARCH_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {value.rag_search_type === 'similarity_score_threshold' && (
+              <div>
+                <label htmlFor="rag_score_threshold" className="block text-sm font-medium text-gray-700 mb-2">
+                  Score threshold
+                  <span className="text-red-500 ml-1" aria-hidden="true">*</span>
+                  <span className="sr-only"> (required)</span>
+                </label>
+                <input
+                  id="rag_score_threshold"
+                  type="text"
+                  inputMode="decimal"
+                  required
+                  value={thresholdText}
+                  placeholder="0.75"
+                  aria-invalid={thresholdMissing}
+                  aria-describedby="rag_score_threshold_help"
+                  onChange={(e) => handleThresholdChange(e.target.value)}
+                  onBlur={handleThresholdBlur}
+                  className={`w-full px-4 py-3 border rounded-xl focus:ring-2 transition-all duration-200 ${
+                    thresholdMissing
+                      ? 'border-red-300 focus:ring-red-500 focus:border-red-500'
+                      : 'border-gray-300 focus:ring-blue-500 focus:border-blue-500'
+                  }`}
+                />
+                {thresholdMissing ? (
+                  <p id="rag_score_threshold_help" role="alert" className="text-xs text-red-600 mt-1">
+                    Required for the threshold strategy (0–1).
+                  </p>
+                ) : (
+                  <p id="rag_score_threshold_help" className="text-xs text-gray-500 mt-1">
+                    Minimum relevance score, 0–1. Lower returns more, higher is stricter.
+                  </p>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      {/* Fixed filters — always-applied scoping the caller cannot loosen */}
+      {/* Fixed filters — always-applied scoping the caller cannot loosen. Not supported by LightRAG. */}
+      {!isLightRAG && (
       <div className="mt-8">
         <div className="flex items-center justify-between mb-3">
           <div>
@@ -314,6 +407,7 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

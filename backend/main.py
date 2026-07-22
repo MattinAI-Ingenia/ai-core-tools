@@ -17,6 +17,7 @@
 # psycopg requires SelectorEventLoop on Windows (not ProactorEventLoop).
 import sys
 import asyncio
+import os
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -112,6 +113,17 @@ async def lifespan(app: FastAPI):
             _bootstrap_db = _SessionLocal()
             try:
                 await bootstrap_omniadmins(_bootstrap_db)
+
+                # Seed dev users from AICT_DEV_SEED_USERS env var (if set)
+                seed_users_spec = os.getenv("AICT_DEV_SEED_USERS", "").strip()
+                if seed_users_spec:
+                    try:
+                        from utils.seed_dev_users import resolve_users, seed_dev_users_async
+                        users_to_seed = resolve_users(seed_users_spec)
+                        result = await seed_dev_users_async(_bootstrap_db, users_to_seed, apply_password_fallback=True)
+                        logger.info(f"Dev users seeded: {result['total']} total ({len(result['created'])} created, {len(result['existing'])} existing)")
+                    except Exception as _seed_exc:
+                        logger.error("dev user seeding failed: %s", _seed_exc, exc_info=True)
             except Exception as _bootstrap_exc:
                 logger.error(
                     "omniadmin_bootstrap: unexpected error during startup bootstrap — %s",

@@ -394,6 +394,7 @@ async def create_or_update_agent(
         'text_system_prompt': agent_data.text_system_prompt,
         # RAG retrieval config (step_008)
         'rag_k': agent_data.rag_k,
+        'rag_k_mode': agent_data.rag_k_mode,
         'rag_search_type': agent_data.rag_search_type,
         'rag_score_threshold': agent_data.rag_score_threshold,
         'rag_max_retrieval_calls': agent_data.rag_max_retrieval_calls,

@@ -45,6 +45,7 @@ def _make_silo(
 
 def _make_agent(
     rag_k: int = 30,
+    rag_k_mode: str = "fixed",
     rag_search_type: str = "similarity",
     rag_score_threshold: float | None = None,
     rag_fixed_filters: list | None = None,
@@ -53,6 +54,7 @@ def _make_agent(
 ) -> Any:
     return types.SimpleNamespace(
         rag_k=rag_k,
+        rag_k_mode=rag_k_mode,
         rag_search_type=rag_search_type,
         rag_score_threshold=rag_score_threshold,
         rag_fixed_filters=rag_fixed_filters,
@@ -338,3 +340,100 @@ class TestFilterMerge:
 
         assert "file_type" in pf
         assert pf["file_type"]["$eq"] == ".pdf"
+
+
+# ---------------------------------------------------------------------------
+# rag_k_mode='per_100_chunks' — k scales with the silo's chunk count
+# ---------------------------------------------------------------------------
+
+class TestPerHundredChunksMode:
+    """Effective k = ceil(rag_k * chunk_count / 100), floored at 1, no upper clamp.
+
+    ``_scale_k_per_100_chunks`` opens its own session and calls
+    ``SiloService.count_docs_in_silo`` — both stubbed here so no DB is touched.
+    """
+
+    @staticmethod
+    def _stub_chunk_count(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
+        import services.silo_service as silo_service_module
+
+        monkeypatch.setattr(silo_service_module, "SessionLocal", lambda: types.SimpleNamespace(close=lambda: None))
+        monkeypatch.setattr(
+            silo_service_module.SiloService, "count_docs_in_silo", staticmethod(lambda silo_id, db: count)
+        )
+
+    @pytest.mark.parametrize(
+        ("rag_k", "chunk_count", "expected_k"),
+        [
+            (10, 250, 25),      # ceil(10 * 250 / 100) = ceil(25.0)  = 25 — exact multiple
+            (10, 251, 26),      # ceil(10 * 251 / 100) = ceil(25.1)  = 26 — rounds up
+            (5, 40, 2),         # ceil(5 * 40 / 100)   = ceil(2.0)   = 2
+            (5, 41, 3),         # ceil(5 * 41 / 100)   = ceil(2.05)  = 3
+            (1, 1, 1),          # tiny silo still retrieves at least 1
+            (10, 10_000, 1000), # no upper clamp — large silo scales past 100
+        ],
+    )
+    def test_scales_k_by_chunk_count(self, monkeypatch, rag_k, chunk_count, expected_k):
+        self._stub_chunk_count(monkeypatch, chunk_count)
+        silo = _make_silo()
+        agent = _make_agent(rag_k=rag_k, rag_k_mode="per_100_chunks", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["k"] == expected_k
+
+    def test_empty_silo_falls_back_to_raw_rag_k(self, monkeypatch):
+        """chunk_count <= 0 (nothing indexed yet) — nothing to scale against."""
+        self._stub_chunk_count(monkeypatch, 0)
+        silo = _make_silo()
+        agent = _make_agent(rag_k=30, rag_k_mode="per_100_chunks", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["k"] == 30
+
+    def test_fixed_mode_ignores_chunk_count(self, monkeypatch):
+        """rag_k_mode='fixed' (default) never triggers the chunk-count scaling."""
+        self._stub_chunk_count(monkeypatch, 999_999)
+        silo = _make_silo()
+        agent = _make_agent(rag_k=30, rag_k_mode="fixed", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["k"] == 30
+
+    def test_caller_k_overrides_scaling(self, monkeypatch):
+        """Caller-supplied k always wins outright — it is never scaled."""
+        self._stub_chunk_count(monkeypatch, 1000)
+        silo = _make_silo()
+        agent = _make_agent(rag_k=10, rag_k_mode="per_100_chunks", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"k": 7})
+
+        assert sp["k"] == 7
+
+    def test_no_silo_uses_raw_rag_k(self):
+        """No silo → nothing to count against; falls back to the raw configured value."""
+        agent = _make_agent(rag_k=10, rag_k_mode="per_100_chunks", silo=None)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["k"] == 10
+
+    def test_count_failure_falls_back_to_raw_rag_k(self, monkeypatch):
+        """The chunk count query must never break retrieval — errors degrade to raw rag_k."""
+        import services.silo_service as silo_service_module
+
+        monkeypatch.setattr(silo_service_module, "SessionLocal", lambda: types.SimpleNamespace(close=lambda: None))
+
+        def _boom(silo_id, db):
+            raise RuntimeError("vector store unreachable")
+
+        monkeypatch.setattr(silo_service_module.SiloService, "count_docs_in_silo", staticmethod(_boom))
+
+        silo = _make_silo()
+        agent = _make_agent(rag_k=10, rag_k_mode="per_100_chunks", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["k"] == 10

@@ -2,6 +2,9 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 
@@ -10,8 +13,16 @@ from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THR
 # LightRAG query mode — the only LightRAG-specific per-agent retrieval knob.
 LightRAGQueryMode = Literal["local", "global", "hybrid", "mix", "naive", "bypass", "skill-routed"]
 
+# rag_k_mode: 'fixed' takes rag_k literally; 'per_100_chunks' treats rag_k as a rate
+# (documents per 100 chunks indexed) scaled at query time by the silo's chunk count.
+RagKMode = Literal["fixed", "per_100_chunks"]
+
 
 _VALID_RAG_SEARCH_TYPES = {"similarity", "mmr", "similarity_score_threshold"}
+
+# Not a hard cap — large silos with rag_k_mode='per_100_chunks' legitimately scale past this.
+# Just logged so an unusually high value doesn't go unnoticed.
+_RAG_K_SOFT_MAX = 100
 
 
 class RagConfigFieldsMixin(BaseModel):
@@ -23,6 +34,7 @@ class RagConfigFieldsMixin(BaseModel):
     ``resolve_search_params``.
     """
     rag_k: Optional[int] = None
+    rag_k_mode: Optional[RagKMode] = None
     rag_search_type: Optional[str] = None
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
@@ -31,8 +43,10 @@ class RagConfigFieldsMixin(BaseModel):
     @field_validator("rag_k")
     @classmethod
     def validate_rag_k(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and not (1 <= v <= 100):
-            raise ValueError("rag_k must be between 1 and 100")
+        if v is not None and v < 1:
+            raise ValueError("rag_k must be at least 1")
+        if v is not None and v > _RAG_K_SOFT_MAX:
+            logger.warning("rag_k=%s exceeds the recommended maximum of %s", v, _RAG_K_SOFT_MAX)
         return v
 
     @field_validator("rag_search_type")
@@ -173,6 +187,7 @@ class AgentDetailSchema(BaseModel):
     lightrag_query_modes: List[str] = ["skill-routed", "local", "global", "hybrid", "mix", "naive", "bypass"]
     # RAG retrieval config (step_008)
     rag_k: Optional[int] = None
+    rag_k_mode: Optional[str] = None
     rag_search_type: Optional[str] = None
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
@@ -261,6 +276,7 @@ class PublicAgentDetailSchema(BaseModel):
     text_system_prompt: Optional[str] = None
     # RAG retrieval config (step_008)
     rag_k: Optional[int] = None
+    rag_k_mode: Optional[str] = None
     rag_search_type: Optional[str] = None
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
