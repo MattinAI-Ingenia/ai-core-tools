@@ -59,6 +59,9 @@ nginx/
 develop/
 reports/
 
+# Docker local overrides (never commit, use .env for secrets)
+docker/docker-compose.override.yml
+
 # Claude Code agent system: ship the agents/commands/skills/hooks,
 # but keep per-run artifacts and personal settings out of git.
 .claude/specs/
