@@ -138,12 +138,12 @@ class ApiService {
     throw new ApiError(message, response.status);
   }
 
-  async request(
+  async request<T = unknown>(
     endpoint: string,
     options: RequestInit = {},
     _isRetryAfterRefresh = false,
     _requestOptions: { suppressAuthRedirect?: boolean } = {},
-  ): Promise<unknown> {
+  ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`;
     const authHeaders = this.buildAuthHeaders(
       typeof options.method === 'string' ? options.method : 'GET',
@@ -188,7 +188,7 @@ class ApiService {
       await this.handleResponseError(response);
     }
 
-    if (response.status === 204) return null;
+    if (response.status === 204) return null as T;
     return response.json();
   }
 
@@ -1439,8 +1439,8 @@ class ApiService {
   async getFileDownloadUrl(appId: number, agentId: number, fileId: string, conversationId?: number | null): Promise<string> {
     const base = `/internal/apps/${appId}/agents/${agentId}/files/${fileId}/download`;
     const url = conversationId ? `${base}?conversation_id=${conversationId}` : base;
-    const response = await this.request(url, { method: 'GET' });
-    return response.download_url as string;
+    const response = await this.request<{ download_url: string }>(url, { method: 'GET' });
+    return response.download_url;
   }
 
   async processOCR(appId: number, agentId: number, file: File) {
@@ -1611,8 +1611,7 @@ class ApiService {
   }
 
   async getVersion(): Promise<{ name: string; version: string }> {
-    const response = await this.request('/internal/version/');
-    return response;
+    return this.request('/internal/version/');
   }
 
   async getFolders(appId: number, repositoryId: number) {
@@ -1865,11 +1864,11 @@ class ApiService {
   }
 
   async getMarketplaceFileDownloadUrl(conversationId: number, fileId: string): Promise<string> {
-    const response = await this.request(
+    const response = await this.request<{ download_url: string }>(
       `/internal/marketplace/conversations/${conversationId}/files/${fileId}/download`,
       { method: 'GET' },
     );
-    return response.download_url as string;
+    return response.download_url;
   }
 
   async getMarketplaceQuotaUsage(): Promise<MarketplaceQuotaUsage> {
