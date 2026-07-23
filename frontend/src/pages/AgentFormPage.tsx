@@ -239,8 +239,6 @@ function AgentFormPage() {
     cover_image_url: null,
     conversation_starters: [],
   });
-  const [savingMarketplace, setSavingMarketplace] = useState(false);
-  const [marketplaceSuccess, setMarketplaceSuccess] = useState<string | null>(null);
 
   // Load agent data when component mounts
   useEffect(() => {
@@ -422,7 +420,6 @@ function AgentFormPage() {
   const handleMarketplaceProfileChange = useCallback(
     (field: keyof MarketplaceProfileUpdate, value: string | string[] | null) => {
       setMarketplaceProfile(prev => ({ ...prev, [field]: value }));
-      setMarketplaceSuccess(null);
     },
     [],
   );
@@ -445,8 +442,6 @@ function AgentFormPage() {
         .filter((starter) => starter.length > 0),
     };
 
-    setSavingMarketplace(true);
-    setMarketplaceSuccess(null);
     const saved = await mutate(
       () =>
         apiService.updateAgentMarketplaceProfile(
@@ -460,7 +455,6 @@ function AgentFormPage() {
         error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('marketplace profile')),
       },
     );
-    setSavingMarketplace(false);
 
     if (saved === undefined) return;
 
