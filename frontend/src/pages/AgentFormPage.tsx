@@ -20,7 +20,7 @@ import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
 interface Agent {
   agent_id: number;
   name: string;
-  description: string;
+  description?: string;
   system_prompt: string;
   prompt_template: string;
   type: string;
