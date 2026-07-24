@@ -15,6 +15,7 @@ interface OCRInterfaceProps {
       name: string;
       type: string;
       description: string;
+      optional?: boolean;
     }>;
   };
   onError?: (message: string) => void;
