@@ -617,6 +617,10 @@ class ApiService {
     return response.json();
   }
 
+  async getAgentConversationStarters(agentId: number): Promise<MarketplaceProfile['conversation_starters']> {
+    return this.request(`/internal/marketplace/agents/${agentId}/conversation-starters`);
+  }
+
   async getApps(): Promise<App[]> {
     return this.request('/internal/apps/');
   }
