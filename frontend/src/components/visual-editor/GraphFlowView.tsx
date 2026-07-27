@@ -1,4 +1,4 @@
-import { ReactFlow, MiniMap, Controls, Background, BackgroundVariant, type OnNodesChange } from '@xyflow/react';
+import { ReactFlow, MiniMap, Controls, Background, BackgroundVariant, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { AlertTriangle, Loader2, RefreshCw, Workflow } from 'lucide-react';
 import { APP_GRAPH_NODE_TYPES, type AppFlowNode } from './EntityNodeCard';
@@ -10,6 +10,7 @@ export interface GraphFlowViewProps {
   readonly loading: boolean;
   readonly error: string | null;
   readonly onNodesChange?: OnNodesChange<AppFlowNode>;
+  readonly onNodeDragStop?: OnNodeDrag<AppFlowNode>;
   readonly onRetry?: () => void;
   readonly className?: string;
 }
@@ -26,6 +27,7 @@ export function GraphFlowView({
   loading,
   error,
   onNodesChange,
+  onNodeDragStop,
   onRetry,
   className = '',
 }: GraphFlowViewProps) {
@@ -91,6 +93,7 @@ export function GraphFlowView({
         nodes={nodes as AppFlowNode[]}
         edges={edges as AppFlowEdge[]}
         onNodesChange={onNodesChange}
+        onNodeDragStop={onNodeDragStop}
         nodeTypes={APP_GRAPH_NODE_TYPES}
         nodesConnectable={false}
         elementsSelectable
