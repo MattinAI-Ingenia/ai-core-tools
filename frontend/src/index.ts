@@ -99,6 +99,7 @@ export { default as DomainsPage } from './pages/DomainsPage';
 export { default as DomainFormPage } from './pages/DomainFormPage';
 export { default as DomainDetailPage } from './pages/DomainDetailPage';
 export { default as AgentPlaygroundPage } from './pages/AgentPlaygroundPage';
+export { default as VisualEditorPage } from './pages/VisualEditorPage';
 export { default as AIServicesPage } from './pages/settings/AIServicesPage';
 export { default as APIKeysPage } from './pages/settings/APIKeysPage';
 export { default as CollaborationPage } from './pages/settings/CollaborationPage';

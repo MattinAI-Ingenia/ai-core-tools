@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 import type { GraphNodeKind } from '../../hooks/useAppGraph';
 import { NODE_KIND_VISUALS } from './nodeKindConfig';
@@ -15,6 +15,15 @@ export interface AppFlowNodeData extends Record<string, unknown> {
   readonly collapsed?: boolean;
   /** Agent nodes only: toggles `collapsed` for this agent. */
   readonly onToggleCollapse?: () => void;
+  /**
+   * Every node kind: navigates to this entity's editor when set. Left
+   * `undefined` when the host (e.g. a plain fixture/test) doesn't wire up
+   * navigation - the button below simply isn't rendered in that case. Kept
+   * as a callback so this pure, router-agnostic module never imports
+   * react-router itself; the page/wrapper that DOES know about routes
+   * decides what "edit" means for each entity kind.
+   */
+  readonly onEdit?: () => void;
 }
 
 export type AppFlowNode = Node<AppFlowNodeData, GraphNodeKind>;
@@ -74,6 +83,17 @@ function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly
           ) : (
             <ChevronDown className="h-4 w-4" aria-hidden="true" />
           )}
+        </button>
+      )}
+
+      {data.onEdit && (
+        <button
+          type="button"
+          onClick={data.onEdit}
+          aria-label={`Edit ${data.label}`}
+          className="nodrag nopan absolute right-1.5 top-1.5 rounded-md bg-white/80 p-1 text-gray-400 opacity-0 transition-opacity hover:bg-gray-100 hover:text-gray-600 focus:outline-none group-hover:opacity-100 focus-visible:opacity-100 focus-visible:text-gray-600 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 dark:bg-gray-900/80 dark:text-gray-500 dark:hover:bg-gray-700 dark:hover:text-gray-300 dark:focus-visible:text-gray-300 dark:focus-visible:ring-offset-gray-800"
+        >
+          <Pencil className="h-3 w-3" aria-hidden="true" />
         </button>
       )}
 
