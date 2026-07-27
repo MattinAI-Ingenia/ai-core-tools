@@ -1,7 +1,7 @@
 import { MarkerType, type Edge } from '@xyflow/react';
-import type { AppGraph, GraphEdgeKind } from '../../hooks/useAppGraph';
-import type { AppFlowNode } from './EntityNodeCard';
-import { computeGraphLayout } from './graphLayout';
+import type { GraphEdge, GraphEdgeKind, GraphNode } from '../../hooks/useAppGraph';
+import type { AppFlowNode, AppFlowNodeData } from './EntityNodeCard';
+import type { GraphPosition } from './graphLayout';
 import { describeGraphNode } from './graphNodeDetail';
 import { EDGE_KIND_VISUALS } from './edgeKindConfig';
 
@@ -16,25 +16,48 @@ export interface AppFlowEdgeData extends Record<string, unknown> {
 // `'default'` while the domain `kind` travels in `data`.
 export type AppFlowEdge = Edge<AppFlowEdgeData, 'default'>;
 
+export interface ToFlowNodesOptions {
+  /** Agent node ids currently collapsed (hiding their satellite resources). */
+  readonly collapsedAgentIds: ReadonlySet<string>;
+  /** Invoked with an agent node id when its collapse toggle is activated. */
+  readonly onToggleCollapse: (agentId: string) => void;
+}
+
 /**
- * Adapts the framework-neutral `AppGraph` (from `useAppGraph`) into
+ * Adapts the framework-neutral graph nodes/edges (from `useAppGraph`) into
  * `@xyflow/react` nodes/edges. This is the ONLY place in the visual editor
  * that imports both the graph hook's types and `@xyflow/react` - keeps
  * `useAppGraph` itself framework-neutral per sub-issue 1.
+ *
+ * `positions` is a precomputed `nodeId -> {x,y}` map (the deterministic
+ * default layout merged with any saved/dragged positions by the caller) -
+ * this function never computes layout itself, so filtering the graph down
+ * to its currently-visible subset (collapse/expand) never triggers a
+ * layout recompute.
  */
-export function toFlowNodes(graph: AppGraph): AppFlowNode[] {
-  const positions = computeGraphLayout(graph.nodes);
-
-  return graph.nodes.map((node) => {
+export function toFlowNodes(
+  nodes: readonly GraphNode[],
+  positions: ReadonlyMap<string, GraphPosition>,
+  { collapsedAgentIds, onToggleCollapse }: ToFlowNodesOptions,
+): AppFlowNode[] {
+  return nodes.map((node) => {
     const position = positions.get(node.id) ?? { x: 0, y: 0 };
+    const data: AppFlowNodeData = {
+      label: node.label,
+      detail: describeGraphNode(node),
+      ...(node.kind === 'agent'
+        ? {
+            collapsed: collapsedAgentIds.has(node.id),
+            onToggleCollapse: () => onToggleCollapse(node.id),
+          }
+        : {}),
+    };
+
     return {
       id: node.id,
       type: node.kind,
       position,
-      data: {
-        label: node.label,
-        detail: describeGraphNode(node),
-      },
+      data,
       // Read-only canvas: nodes may still be dragged for a nicer look, but
       // are never connectable/deletable from the UI.
       connectable: false,
@@ -43,8 +66,8 @@ export function toFlowNodes(graph: AppGraph): AppFlowNode[] {
   });
 }
 
-export function toFlowEdges(graph: AppGraph): AppFlowEdge[] {
-  return graph.edges.map((edge) => {
+export function toFlowEdges(edges: readonly GraphEdge[]): AppFlowEdge[] {
+  return edges.map((edge) => {
     const visual = EDGE_KIND_VISUALS[edge.kind];
     return {
       id: edge.id,
