@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
-import { applyNodeChanges, type OnNodesChange } from '@xyflow/react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { applyNodeChanges, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
 import { useAppGraph } from '../../hooks/useAppGraph';
 import { GraphFlowView } from './GraphFlowView';
 import { toFlowNodes, toFlowEdges } from './graphAdapter';
+import { computeGraphLayout, type GraphPosition } from './graphLayout';
+import { computeVisibleGraph } from './graphVisibility';
+import { useGraphLayoutStorage } from './useGraphLayoutStorage';
 import type { AppFlowNode } from './EntityNodeCard';
 
 export interface AppGraphCanvasProps {
@@ -12,41 +15,145 @@ export interface AppGraphCanvasProps {
 
 /**
  * Read-only React Flow canvas for an App's resource graph. Fetches the graph
- * via `useAppGraph` and adapts it to `@xyflow/react` nodes/edges; all actual
- * rendering lives in the pure `GraphFlowView` so that component stays easy
- * to unit test with plain fixtures.
+ * via `useAppGraph`, adapts it to `@xyflow/react` nodes/edges, and layers on
+ * top of that:
+ * - a deterministic agent-centric default layout (`computeGraphLayout`),
+ * - agent-centric collapse/expand of satellite resources (`computeVisibleGraph`),
+ * - `localStorage` persistence of dragged positions + collapsed agents
+ *   (`useGraphLayoutStorage`), scoped per app.
  *
- * No routing/page wiring and no drag-position persistence here - both are
- * later sub-issues. Dragging nodes only updates in-memory canvas state.
+ * All actual rendering lives in the pure `GraphFlowView` so that component
+ * stays easy to unit test with plain fixtures. Still read-only: no
+ * relationship editing, everything here is client-side view state.
  */
 export function AppGraphCanvas({ appId, className }: AppGraphCanvasProps) {
   const { nodes: graphNodes, edges: graphEdges, loading, error, refetch } = useAppGraph(appId);
+  const { load, save } = useGraphLayoutStorage(appId);
+
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState<ReadonlySet<string>>(() => new Set());
+
+  // Accumulates every node id's last-known position, INCLUDING ids that are
+  // currently hidden by a collapsed agent - so re-expanding an agent (or a
+  // later refetch) restores a drag that happened before the node was hidden,
+  // instead of snapping back to its default layout position. Seeded from
+  // `localStorage` on mount/app-change; a plain ref because it must survive
+  // renders without itself triggering one, and is only ever mutated inside
+  // event handlers/effects below, never during render.
+  const savedPositionsRef = useRef<Readonly<Record<string, GraphPosition>>>({});
+
+  // Hydrate from localStorage whenever the app changes (covers both the
+  // initial mount and navigating the canvas to a different app id). This
+  // never WRITES to storage, only reads - persistence itself only happens
+  // from the drag-stop/collapse-toggle handlers below, in response to an
+  // actual user action.
+  useEffect(() => {
+    const initial = load();
+    savedPositionsRef.current = initial.positions;
+    setCollapsedAgentIds(initial.collapsedAgentIds);
+  }, [load]);
+
+  // Deterministic default layout, computed over the FULL graph (not just
+  // the currently-visible subset) so collapsing/expanding an agent never
+  // shifts any other node's default position.
+  const defaultPositions = useMemo(
+    () => computeGraphLayout(graphNodes, graphEdges),
+    [graphNodes, graphEdges],
+  );
+
+  const visibleGraph = useMemo(
+    () => computeVisibleGraph(graphNodes, graphEdges, collapsedAgentIds),
+    [graphNodes, graphEdges, collapsedAgentIds],
+  );
+
+  // Local, draggable copy of the adapted (currently-visible) nodes. React
+  // Flow owns node position while the user drags; this is intentionally NOT
+  // derived via useMemo because it must survive re-renders that don't touch
+  // the graph data itself (e.g. React Flow's own dimension-measurement
+  // changes).
+  const [nodes, setNodes] = useState<AppFlowNode[]>([]);
+
+  // Mirrors `nodes` for the drag-stop/collapse-toggle handlers below, so
+  // THEIR identities stay stable while dragging (every mouse-move updates
+  // `nodes` state via `onNodesChange`) instead of depending on `nodes`
+  // directly, which would otherwise recreate them - and, transitively,
+  // `flowNodes` and the merge effect above - on every pointer move.
+  const nodesRef = useRef<readonly AppFlowNode[]>(nodes);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  /** Merges `currentNodes`' live positions into the accumulator and persists it. */
+  const persistLayout = useCallback(
+    (nextCollapsedAgentIds: ReadonlySet<string>, currentNodes: readonly AppFlowNode[]) => {
+      const mergedPositions: Record<string, GraphPosition> = { ...savedPositionsRef.current };
+      for (const node of currentNodes) {
+        mergedPositions[node.id] = node.position;
+      }
+      savedPositionsRef.current = mergedPositions;
+
+      const knownNodeIds = new Set(graphNodes.map((node) => node.id));
+      save({ positions: mergedPositions, collapsedAgentIds: nextCollapsedAgentIds }, knownNodeIds);
+    },
+    [graphNodes, save],
+  );
+
+  const handleToggleCollapse = useCallback(
+    (agentId: string) => {
+      const next = new Set(collapsedAgentIds);
+      if (next.has(agentId)) {
+        next.delete(agentId);
+      } else {
+        next.add(agentId);
+      }
+      setCollapsedAgentIds(next);
+      persistLayout(next, nodesRef.current);
+    },
+    [collapsedAgentIds, persistLayout],
+  );
 
   const flowNodes = useMemo(
-    () => toFlowNodes({ nodes: graphNodes, edges: graphEdges }),
-    [graphNodes, graphEdges],
+    () =>
+      toFlowNodes(visibleGraph.nodes, defaultPositions, {
+        collapsedAgentIds,
+        onToggleCollapse: handleToggleCollapse,
+      }),
+    [visibleGraph.nodes, defaultPositions, collapsedAgentIds, handleToggleCollapse],
   );
-  const flowEdges = useMemo(
-    () => toFlowEdges({ nodes: graphNodes, edges: graphEdges }),
-    [graphNodes, graphEdges],
-  );
+  const flowEdges = useMemo(() => toFlowEdges(visibleGraph.edges), [visibleGraph.edges]);
 
-  // Local, draggable copy of the adapted nodes. React Flow owns node
-  // position while the user drags; this is intentionally NOT derived via
-  // useMemo because it must survive re-renders that don't touch the graph
-  // data itself (e.g. React Flow's own dimension-measurement changes).
-  // It re-seeds from `flowNodes` only when the underlying graph data
-  // actually changes (new fetch/refetch) - a documented React Flow pattern
-  // for controlled canvases fed by async data, not simple derived UI state.
-  const [nodes, setNodes] = useState<AppFlowNode[]>(flowNodes);
-
+  // Re-seeds from `flowNodes` whenever the visible node set changes (new
+  // fetch/refetch OR a collapse/expand toggle) - but preserves the
+  // in-memory position of every node id already present in the current
+  // state (so a refetch never drops a drag), and falls back to the
+  // persisted position (if any) before the layout default for genuinely new
+  // ids, e.g. a resource just re-appearing after its owning agent expanded.
   useEffect(() => {
-    setNodes(flowNodes);
+    setNodes((current) => {
+      const currentById = new Map(current.map((node) => [node.id, node]));
+      return flowNodes.map((flowNode) => {
+        const existing = currentById.get(flowNode.id);
+        if (existing) {
+          return { ...flowNode, position: existing.position };
+        }
+        const saved = savedPositionsRef.current[flowNode.id];
+        return saved ? { ...flowNode, position: saved } : flowNode;
+      });
+    });
   }, [flowNodes]);
 
   const onNodesChange: OnNodesChange<AppFlowNode> = (changes) => {
     setNodes((current) => applyNodeChanges(changes, current));
   };
+
+  const handleNodeDragStop: OnNodeDrag<AppFlowNode> = useCallback(
+    (_event, draggedNode) => {
+      const updatedNodes = nodesRef.current.map((node) =>
+        node.id === draggedNode.id ? { ...node, position: draggedNode.position } : node,
+      );
+      persistLayout(collapsedAgentIds, updatedNodes);
+    },
+    [collapsedAgentIds, persistLayout],
+  );
 
   return (
     <GraphFlowView
@@ -55,6 +162,7 @@ export function AppGraphCanvas({ appId, className }: AppGraphCanvasProps) {
       loading={loading}
       error={error}
       onNodesChange={onNodesChange}
+      onNodeDragStop={handleNodeDragStop}
       onRetry={refetch}
       className={className}
     />

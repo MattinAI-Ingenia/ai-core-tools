@@ -1,4 +1,5 @@
 import type { ComponentType } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 import type { GraphNodeKind } from '../../hooks/useAppGraph';
 import { NODE_KIND_VISUALS } from './nodeKindConfig';
@@ -7,6 +8,13 @@ import { NODE_KIND_VISUALS } from './nodeKindConfig';
 export interface AppFlowNodeData extends Record<string, unknown> {
   readonly label: string;
   readonly detail?: string;
+  /**
+   * Agent nodes only: whether this agent's satellite resources are
+   * currently hidden. `undefined` for every non-agent node kind.
+   */
+  readonly collapsed?: boolean;
+  /** Agent nodes only: toggles `collapsed` for this agent. */
+  readonly onToggleCollapse?: () => void;
 }
 
 export type AppFlowNode = Node<AppFlowNodeData, GraphNodeKind>;
@@ -20,6 +28,7 @@ export type AppFlowNode = Node<AppFlowNodeData, GraphNodeKind>;
 function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly data: AppFlowNodeData }) {
   const visual = NODE_KIND_VISUALS[kind];
   const Icon = visual.icon;
+  const isCollapsibleAgent = kind === 'agent' && data.onToggleCollapse !== undefined;
 
   return (
     <div
@@ -51,6 +60,22 @@ function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly
           </p>
         )}
       </div>
+
+      {isCollapsibleAgent && (
+        <button
+          type="button"
+          onClick={data.onToggleCollapse}
+          aria-label={data.collapsed ? `Expand ${data.label}` : `Collapse ${data.label}`}
+          aria-expanded={!data.collapsed}
+          className="nodrag nopan shrink-0 rounded-md p-1 text-indigo-500 hover:bg-indigo-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:text-indigo-300 dark:hover:bg-indigo-900/40 dark:focus-visible:ring-offset-gray-900"
+        >
+          {data.collapsed ? (
+            <ChevronRight className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <ChevronDown className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+      )}
 
       <Handle
         type="source"
