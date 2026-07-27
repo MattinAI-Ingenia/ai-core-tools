@@ -21,6 +21,15 @@ export interface ToFlowNodesOptions {
   readonly collapsedAgentIds: ReadonlySet<string>;
   /** Invoked with an agent node id when its collapse toggle is activated. */
   readonly onToggleCollapse: (agentId: string) => void;
+  /**
+   * Invoked with the original (framework-neutral) graph node when a card's
+   * "Edit" affordance is activated. Optional - when omitted, no per-node
+   * edit button is rendered. Deliberately untyped w.r.t. routes: this
+   * module (and the canvas above it) never imports react-router, so the
+   * caller (a page/thin wrapper) owns the navigation decision per entity
+   * kind.
+   */
+  readonly onEditNode?: (node: GraphNode) => void;
 }
 
 /**
@@ -38,7 +47,7 @@ export interface ToFlowNodesOptions {
 export function toFlowNodes(
   nodes: readonly GraphNode[],
   positions: ReadonlyMap<string, GraphPosition>,
-  { collapsedAgentIds, onToggleCollapse }: ToFlowNodesOptions,
+  { collapsedAgentIds, onToggleCollapse, onEditNode }: ToFlowNodesOptions,
 ): AppFlowNode[] {
   return nodes.map((node) => {
     const position = positions.get(node.id) ?? { x: 0, y: 0 };
@@ -51,6 +60,7 @@ export function toFlowNodes(
             onToggleCollapse: () => onToggleCollapse(node.id),
           }
         : {}),
+      ...(onEditNode ? { onEdit: () => onEditNode(node) } : {}),
     };
 
     return {

@@ -39,6 +39,7 @@ import DomainsPage from '../pages/DomainsPage';
 import DomainFormPage from '../pages/DomainFormPage';
 import DomainDetailPage from '../pages/DomainDetailPage';
 import AgentPlaygroundPage from '../pages/AgentPlaygroundPage';
+import VisualEditorPage from '../pages/VisualEditorPage';
 import AboutPage from '../pages/AboutPage';
 import AIServicesPage from '../pages/settings/AIServicesPage';
 import APIKeysPage from '../pages/settings/APIKeysPage';
@@ -248,6 +249,12 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                 <Route path="/apps/:appId/agents/:agentId/playground" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <AgentPlaygroundPage />
+                  </EditorLayoutRoute>
+                } />
+
+                <Route path="/apps/:appId/visual-editor" element={
+                  <EditorLayoutRoute {...commonLayoutProps}>
+                      <VisualEditorPage />
                   </EditorLayoutRoute>
                 } />
 

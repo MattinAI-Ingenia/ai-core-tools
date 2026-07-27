@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { applyNodeChanges, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
-import { useAppGraph } from '../../hooks/useAppGraph';
+import { useAppGraph, type GraphNode } from '../../hooks/useAppGraph';
 import { GraphFlowView } from './GraphFlowView';
 import { toFlowNodes, toFlowEdges } from './graphAdapter';
 import { computeGraphLayout, type GraphPosition } from './graphLayout';
@@ -11,6 +11,14 @@ import type { AppFlowNode } from './EntityNodeCard';
 export interface AppGraphCanvasProps {
   readonly appId: string | number | undefined;
   readonly className?: string;
+  /**
+   * Invoked with the original graph node when a card's "Edit" button is
+   * activated. Optional - omit to render the canvas without any edit
+   * affordance. Deliberately generic (no react-router import here): the
+   * page hosting this canvas owns the actual navigation decision per
+   * entity kind.
+   */
+  readonly onEditNode?: (node: GraphNode) => void;
 }
 
 /**
@@ -26,7 +34,7 @@ export interface AppGraphCanvasProps {
  * stays easy to unit test with plain fixtures. Still read-only: no
  * relationship editing, everything here is client-side view state.
  */
-export function AppGraphCanvas({ appId, className }: AppGraphCanvasProps) {
+export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasProps) {
   const { nodes: graphNodes, edges: graphEdges, loading, error, refetch } = useAppGraph(appId);
   const { load, save } = useGraphLayoutStorage(appId);
 
@@ -116,8 +124,9 @@ export function AppGraphCanvas({ appId, className }: AppGraphCanvasProps) {
       toFlowNodes(visibleGraph.nodes, defaultPositions, {
         collapsedAgentIds,
         onToggleCollapse: handleToggleCollapse,
+        onEditNode,
       }),
-    [visibleGraph.nodes, defaultPositions, collapsedAgentIds, handleToggleCollapse],
+    [visibleGraph.nodes, defaultPositions, collapsedAgentIds, handleToggleCollapse, onEditNode],
   );
   const flowEdges = useMemo(() => toFlowEdges(visibleGraph.edges), [visibleGraph.edges]);
 
