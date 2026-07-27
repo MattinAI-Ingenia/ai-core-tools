@@ -21,7 +21,6 @@ from db.database import SessionLocal
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.documents import Document
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.tools import StructuredTool
 import asyncio
 import json
@@ -38,24 +37,6 @@ from tools.python_sandbox_tools import create_python_repl_tool
 logger = get_logger(__name__)
 
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
-
-
-class _CountingUsageMetadataCallbackHandler(UsageMetadataCallbackHandler):
-    """UsageMetadataCallbackHandler that also tracks the number of LLM invocations.
-
-    ``usage_metadata`` is keyed by model name and accumulates token counts across
-    calls, so ``len(usage_metadata)`` only reflects how many distinct models were
-    used — not how many times the LLM was actually invoked. ``call_count`` fixes
-    that for the "llm_calls" monitoring metric.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.call_count = 0
-
-    def on_llm_end(self, response, **kwargs) -> None:
-        self.call_count += 1
-        super().on_llm_end(response, **kwargs)
 
 
 def _extract_mcp_root_causes(exc: BaseException) -> str:
@@ -329,7 +310,6 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             f"trim_tokens_to_summarize={trim_tokens}"
         )
 
-    monitoring_handler = None
     if hasattr(agent, 'middleware_associations') and agent.middleware_associations:
         for assoc in agent.middleware_associations:
             if not assoc.middleware:
@@ -337,8 +317,12 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             mw_type = assoc.middleware.middleware_type.value
             mw_config = assoc.middleware.config or {}
             if mw_type == 'monitoring':
-                monitoring_handler = _CountingUsageMetadataCallbackHandler()
-                logger.info(f"MonitoringMiddleware (UsageMetadataCallbackHandler) enabled for agent {agent.agent_id}")
+                from tools.middleware.monitoring import MonitoringMiddleware
+                # Must match the checkpointer's thread_id so a HITL pause/resume
+                # (which rebuilds this chain from scratch) can find its
+                # pre-interrupt accumulated totals again.
+                thread_id = compute_thread_id(agent, session_id)
+                middleware.append(MonitoringMiddleware(agent_id=agent.agent_id, config=mw_config, thread_id=thread_id))
             elif mw_type == 'summarization':
                 # Only add if not already added via has_memory (avoid duplicates)
                 if not agent.has_memory:
@@ -564,9 +548,8 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     logger.info(f"Created agent with {len(tools)} tools")
     logger.info(f"Memory enabled: {agent.has_memory}")
     logger.info(f"Output parser: {agent.output_parser_id is not None}")
-    logger.info(f"Monitoring enabled: {monitoring_handler is not None}")
 
-    return agent_chain, mcp_client, monitoring_handler
+    return agent_chain, mcp_client
 
 
 _DEFAULT_RECURSION_LIMIT = 50
@@ -621,11 +604,19 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
     )
 
 
+def compute_thread_id(agent, session_id=None) -> str:
+    """Checkpointer thread_id for this agent/session — the single formula every
+    caller (config, MonitoringMiddleware) must agree on to stay correlated."""
+    if agent.has_memory and session_id:
+        return f"thread_{agent.agent_id}_{session_id}"
+    return f"thread_{agent.agent_id}"
+
+
 def prepare_agent_config(agent):
     """Helper function to prepare agent configuration."""
     config = {
         "configurable": {
-            "thread_id": f"thread_{agent.agent_id}"
+            "thread_id": compute_thread_id(agent)
         },
         "recursion_limit": AICT_AGENT_RECURSION_LIMIT,
     }
