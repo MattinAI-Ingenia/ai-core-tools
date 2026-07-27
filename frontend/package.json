@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "@types/node": "^24.1.0",
-    "@xyflow/react": "^12.0.0",
+    "@xyflow/react": "^12.11.2",
     "axios": "^1.10.0",
     "lucide-react": "^0.511.0",
     "ogl": "^1.0.11",
