@@ -154,6 +154,7 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
     });
     const [limitValue, setLimitValue] = useState<number | ''>('');
     const [summarizationModel, setSummarizationModel] = useState('agent_llm');
+    const [extraEntitiesText, setExtraEntitiesText] = useState('');
     const [triggerTokens, setTriggerTokens] = useState<number>(4000);
     const [keepMessages, setKeepMessages] = useState<number>(20);
     const [trimTokens, setTrimTokens] = useState<number>(4000);
@@ -202,6 +203,9 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
             }
             if (middleware.config?.trim_tokens) {
                 setTrimTokens(middleware.config.trim_tokens);
+            }
+            if (middleware.config?.llm_detector?.extra_entities) {
+                setExtraEntitiesText(middleware.config.llm_detector.extra_entities.join(', '));
             }
             if (middleware.middleware_type === 'human_in_the_loop' && middleware.config?.interrupt_on) {
                 const entries: HitlToolEntry[] = Object.entries(middleware.config.interrupt_on).map(
@@ -315,7 +319,15 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
             setTrimTokens(4000);
         }
         if (typeValue === 'pii') {
-            newConfig = { pii_types: ['email', 'credit_card', 'ip', 'mac_address', 'url'], strategy: 'redact', apply_to_input: true, apply_to_output: true, apply_to_tool_results: true };
+            newConfig = {
+                pii_types: ['email', 'credit_card', 'ip', 'mac_address', 'url'],
+                strategy: 'redact',
+                apply_to_input: true,
+                apply_to_output: true,
+                apply_to_tool_results: true,
+                llm_detector: { enabled: false, ai_service: 'agent_llm', extra_entities: [] },
+            };
+            setExtraEntitiesText('');
         }
         if (typeValue === 'human_in_the_loop') {
             newConfig = { interrupt_on: {} };
@@ -444,6 +456,18 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                     .filter(t => selectedToolNames.has(t.name) && t.agent_id !== undefined)
                     .map(t => t.agent_id as number);
                 submitData = { ...formData, config: { interrupt_on, tool_agent_ids }, mcp_config_ids };
+            }
+            if (formData.middleware_type === 'pii' && formData.config?.llm_detector?.enabled) {
+                submitData = {
+                    ...formData,
+                    config: {
+                        ...formData.config,
+                        llm_detector: {
+                            ...formData.config.llm_detector,
+                            extra_entities: extraEntitiesText.split(',').map((s: string) => s.trim()).filter(Boolean),
+                        },
+                    },
+                };
             }
             await onSubmit(submitData);
         } catch (err) {
@@ -840,6 +864,78 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                                 </label>
                             ))}
                         </div>
+                    </div>
+
+                    <div>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={formData.config?.llm_detector?.enabled ?? false}
+                                disabled={isSubmitting}
+                                onChange={(e) => setFormData(prev => ({
+                                    ...prev,
+                                    config: {
+                                        ...prev.config,
+                                        llm_detector: {
+                                            ...(prev.config?.llm_detector ?? { ai_service: 'agent_llm', extra_entities: [] }),
+                                            enabled: e.target.checked,
+                                        },
+                                    },
+                                }))}
+                                className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <span className="text-sm font-medium text-gray-700">
+                                Also run an LLM-based detector (in addition to the types above)
+                            </span>
+                        </label>
+
+                        {formData.config?.llm_detector?.enabled && (
+                            <div className="mt-3 space-y-3 pl-6">
+                                <div>
+                                    <label htmlFor="llm_detector_ai_service" className="block text-sm font-medium text-gray-700 mb-1">
+                                        AI Service
+                                    </label>
+                                    <select
+                                        id="llm_detector_ai_service"
+                                        value={formData.config?.llm_detector?.ai_service ?? 'agent_llm'}
+                                        disabled={isSubmitting}
+                                        onChange={(e) => setFormData(prev => ({
+                                            ...prev,
+                                            config: {
+                                                ...prev.config,
+                                                llm_detector: { ...(prev.config?.llm_detector ?? {}), ai_service: e.target.value },
+                                            },
+                                        }))}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                    >
+                                        <option value="agent_llm">Agent's LLM (default)</option>
+                                        {aiServices.map((svc) => (
+                                            <option key={svc.service_id} value={`ai_service:${svc.service_id}`}>
+                                                {svc.name} ({svc.provider} · {svc.model_name})
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label htmlFor="llm_detector_extra_entities" className="block text-sm font-medium text-gray-700 mb-1">
+                                        Extra entities <span className="text-gray-400 font-normal">(optional)</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        id="llm_detector_extra_entities"
+                                        value={extraEntitiesText}
+                                        disabled={isSubmitting}
+                                        onChange={(e) => setExtraEntitiesText(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        placeholder="person, last name, passport number"
+                                    />
+                                    <p className="mt-1 text-xs text-gray-500">
+                                        Comma-separated list of extra entity types to look for, e.g. person, last name, passport number.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
