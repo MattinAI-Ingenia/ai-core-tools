@@ -130,6 +130,69 @@ The user must be able to:
 
 The **Human-in-the-Loop Middleware** works correctly because it intercepts the call to `Greeting_Agent` before execution and requires explicit user approval.
 
+### Additional case: Edit before approval (Greeting Agent)
+
+> _Placeholder — run this against a live agent and replace the `_TODO_`
+> markers with the actual conversation/log output before treating this case
+> as verified._
+
+Unlike the approve/reject cases above, this exercises the HITL middleware's
+**edit** path: the tester changes the tool's arguments in the approval
+textarea before approving, and the tool must run with the edited arguments
+instead of the ones the model originally proposed.
+
+#### Edit scenario
+
+The user sends a greeting, triggering the same `Greeting_Agent` call as above. Before approving, the tester edits the `query` argument in the approval textarea from the original greeting to:
+
+```text
+Say hello in 5 different languages
+```
+
+#### Recreated conversation (edited)
+
+```text
+_TODO: paste the recreated conversation, same style as the sections above_
+```
+
+#### Approval required (edited)
+
+```text
+⚠️ Approval required
+
+🔧 Greeting_Agent
+
+{
+  "query": "Say hello in 5 different languages",
+  "args": null,
+  "kwargs": null
+}
+
+✓ Approve
+✗ Reject
+```
+
+#### Response after approval (edited)
+
+```text
+_TODO: paste the actual agent response — expected shape similar to a
+greeting rendered in 5 distinct languages_
+```
+
+#### Expected result (edited case)
+
+| Action | Result |
+|---|---|
+| Edit `query` then Approve | `Greeting_Agent` runs with the edited query, not the model's original one; the frontend detects the textarea diff and sends `type: 'edit'` with `edited_action` instead of `type: 'approve'` |
+
+#### Validation
+
+_TODO: fill in once run — confirm (1) the frontend detects the textarea edit
+and sends an `edit` decision rather than `approve`, (2) `Greeting_Agent`
+receives the edited `query` (the 5-language request), not the model's
+original greeting, and (3) the response actually contains a greeting in 5
+distinct languages._
+
 ---
 
 ## 4. Human-in-the-Loop Middleware - anonymize_text
@@ -446,6 +509,7 @@ The **Summarization Middleware** works correctly because:
 |---|---|---|
 | Monitoring | Logging tokens, model, and LLM calls | ✅ Correct |
 | HITL | Call to `Greeting_Agent` | ✅ Correct |
+| HITL | Edit `query` before approval (Greeting Agent, 5-language greeting) | ⏳ Pending manual run (see §3 additional case) |
 | HITL | Call to `anonymize_text` | ✅ Correct |
 | PII Detection | Email and IP redaction (regex) | ✅ Correct |
 | PII Detection | Last name and ID redaction (LLM detector) | ⏳ Pending manual run (see §5 additional case) |
