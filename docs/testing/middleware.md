@@ -355,9 +355,8 @@ The **Model Call Limit Middleware** works correctly because it enforces the per-
 
 ## 7. Tool Call Limit Middleware
 
-> _Placeholder — no prior evidence exists for this middleware (see
-> [`middleware-test-plan.md`](middleware-test-plan.md) §4). Run the cases below
-> against a live agent and replace the `_TODO_` markers with the actual
+> _Placeholder — no prior evidence exists for this middleware. Run the cases
+> below against a live agent and replace the `_TODO_` markers with the actual
 > conversation/log output before treating this section as verified._
 
 ### Configuration
@@ -464,7 +463,7 @@ The tested middlewares work as expected:
 - **HITL** intercepts tool calls and requires human approval.
 - **PII Detection** redacts sensitive data before it reaches the LLM and before it is persisted in the conversation.
 - **Model Call Limit** enforces per-run limits and can intentionally block tool-based flows when the cap is too low (e.g., `1`).
-- **Tool Call Limit** has no evidence yet — §7 is a placeholder pending a manual run (see [`middleware-test-plan.md`](middleware-test-plan.md) §4).
+- **Tool Call Limit** has no evidence yet — §7 is a placeholder pending a manual run.
 - **Summarization** compacts long conversation history when token thresholds are exceeded, preserving recent context while reducing memory size.
 
 The architecture provides stronger control over agent behaviour, especially for sensitive operations such as tool execution or handling personal data.
