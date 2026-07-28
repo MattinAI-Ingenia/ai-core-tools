@@ -5,6 +5,7 @@ from utils.schema_utils import sanitize_identifier, ensure_json_schema_types
 from langchain.agents.middleware.model_call_limit import ModelCallLimitMiddleware
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 from langchain.agents.middleware.pii import PIIMiddleware
+from tools.middleware.llm_pii import LLMPIIMiddleware
 from langchain.agents.middleware import HumanInTheLoopMiddleware, AgentMiddleware
 from models.agent import Agent
 from models.silo import Silo
@@ -421,6 +422,44 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                         return None
                 middleware.append(_PIILogMiddleware())
                 logger.info(f"PIIMiddleware enabled for agent {agent.agent_id} (types={pii_types}, strategy={strategy})")
+
+                llm_detector_cfg = mw_config.get('llm_detector') or {}
+                if llm_detector_cfg.get('enabled'):
+                    ai_service_value = llm_detector_cfg.get('ai_service', 'agent_llm')
+                    detector_llm = llm
+                    if ai_service_value and ai_service_value != 'agent_llm':
+                        try:
+                            service_id = int(ai_service_value.split(':', 1)[1])
+                            detector_llm = _build_summarization_llm_from_service(agent, service_id) or llm
+                        except (ValueError, IndexError):
+                            logger.warning(
+                                f"Invalid ai_service format '{ai_service_value}' for LLM PII detector "
+                                f"— using agent LLM"
+                            )
+
+                    pii_type_labels = {
+                        "email": "email addresses",
+                        "credit_card": "credit card numbers",
+                        "ip": "IP addresses",
+                        "mac_address": "MAC addresses",
+                        "url": "URLs",
+                    }
+                    llm_entities = [pii_type_labels.get(t, t) for t in pii_types] + list(
+                        llm_detector_cfg.get('extra_entities') or []
+                    )
+
+                    middleware.append(LLMPIIMiddleware(
+                        llm=detector_llm,
+                        entities=llm_entities,
+                        strategy=strategy,
+                        apply_to_input=apply_to_input,
+                        apply_to_output=apply_to_output,
+                        apply_to_tool_results=apply_to_tool_results,
+                    ))
+                    logger.info(
+                        f"LLMPIIMiddleware enabled for agent {agent.agent_id} "
+                        f"(ai_service={ai_service_value}, entities={llm_entities})"
+                    )
             elif mw_type == 'human_in_the_loop':
                 interrupt_on = mw_config.get('interrupt_on', {})
                 if interrupt_on:

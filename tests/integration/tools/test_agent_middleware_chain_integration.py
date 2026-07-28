@@ -71,6 +71,62 @@ class TestGuardrailsMiddlewareEndToEnd:
         assert any(isinstance(m, AIMessage) and m.content == "Hello from the test LLM" for m in messages)
 
 
+class TestLLMPIIMiddlewareEndToEnd:
+    @pytest.mark.asyncio
+    async def test_llm_pii_middleware_redacts_alongside_regex(self, db, fake_app, fake_agent):
+        """An LLM PII detector attached via config must run ADDITIVELY alongside
+        the regex PIIMiddleware instances, redacting what regex alone can't catch."""
+        from tools.middleware.llm_pii import _PIIDetectionResult, _PIIFinding
+
+        class _FakeStructuredDetector:
+            async def ainvoke(self, prompt):
+                return _PIIDetectionResult(findings=[_PIIFinding(type="person", value="John Smith")])
+
+        class _FakeDetectorLLM:
+            def with_structured_output(self, schema):
+                return _FakeStructuredDetector()
+
+        middleware = Middleware(
+            name="Test PII",
+            middleware_type=MiddlewareType.PII,
+            config={
+                "pii_types": ["email"],
+                "strategy": "redact",
+                "apply_to_input": True,
+                "apply_to_output": False,
+                "apply_to_tool_results": False,
+                "llm_detector": {
+                    "enabled": True,
+                    "ai_service": "ai_service:999",
+                    "extra_entities": ["person"],
+                },
+            },
+            app_id=fake_app.app_id,
+        )
+        db.add(middleware)
+        db.flush()
+        db.add(AgentMiddleware(agent_id=fake_agent.agent_id, middleware_id=middleware.middleware_id, order=0))
+        db.flush()
+        db.refresh(fake_agent)
+
+        fake_llm = FakeListChatModel(responses=["Hello from the test LLM"])
+        with (
+            patch("tools.agentTools.get_llm", return_value=fake_llm),
+            patch("tools.agentTools._build_summarization_llm_from_service", return_value=_FakeDetectorLLM()),
+        ):
+            agent_chain, _ = await create_agent(fake_agent)
+            result = await agent_chain.ainvoke(
+                {"messages": [HumanMessage(content="I'm John Smith, email me at test@example.com")]},
+                config={},
+            )
+
+        human_messages = [m for m in result["messages"] if isinstance(m, HumanMessage)]
+        assert len(human_messages) == 1
+        content = human_messages[0].content
+        assert "[REDACTED_PERSON]" in content  # from the LLM detector (extra_entities)
+        assert "[REDACTED_EMAIL]" in content    # from the regex detector (pii_types), unaffected
+
+
 class TestMonitoringMiddlewareEndToEnd:
     @pytest.mark.asyncio
     async def test_monitoring_middleware_logs_real_llm_call(self, db, fake_app, fake_agent):
