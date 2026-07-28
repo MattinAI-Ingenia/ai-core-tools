@@ -56,7 +56,6 @@ function SiloPlaygroundPage() {
     setShowAgentShortcut,
     appAgentsForSilo,
     compareMode,
-    setCompareMode,
     panelA,
     setPanelA,
     panelB,
@@ -73,6 +72,7 @@ function SiloPlaygroundPage() {
     handleOpenDeleteByFilter,
     handleDeleteByFilterConfirmed,
     handleReindex,
+    handleToggleCompareMode,
     searchPanel,
     deleteHistoryEntry,
     rerunHistoryEntry,
@@ -140,6 +140,20 @@ function SiloPlaygroundPage() {
     setter: Dispatch<SetStateAction<PanelState>>,
   ) {
     const panelMax = panel.results.length > 0 ? Math.max(...panel.results.map((r) => r.score ?? 0)) : 0;
+    const effectiveSearchMethod = panel.searchMethod ?? searchControls.searchMethod;
+    const effectiveStrategy = panel.strategy ?? searchControls.strategy;
+    const effectiveSearchType = panel.searchType ?? searchControls.searchType;
+    const effectiveScoreThreshold = panel.scoreThreshold ?? searchControls.scoreThreshold;
+    const effectiveFetchK = panel.fetchK ?? searchControls.fetchK;
+    const effectiveLambdaMult = panel.lambdaMult ?? searchControls.lambdaMult;
+    const panelOverrides = {
+      searchMethod: effectiveSearchMethod,
+      strategy: effectiveStrategy,
+      searchType: effectiveSearchType,
+      scoreThreshold: effectiveScoreThreshold,
+      fetchK: effectiveFetchK,
+      lambdaMult: effectiveLambdaMult,
+    };
     return (
       <div className="bg-white shadow rounded-lg p-4 flex flex-col gap-3">
         <div className="flex items-center gap-2">
@@ -156,14 +170,14 @@ function SiloPlaygroundPage() {
             type="text"
             value={panel.query}
             onChange={(e) => setter((p) => ({ ...p, query: e.target.value }))}
-            onKeyDown={(e) => { if (e.key === 'Enter') void searchPanel(panel.query, setter); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') void searchPanel(panel.query, setter, panelOverrides); }}
             placeholder="Enter query…"
             className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500"
             disabled={panel.isSearching}
           />
           <button
             type="button"
-            onClick={() => void searchPanel(panel.query, setter)}
+            onClick={() => void searchPanel(panel.query, setter, panelOverrides)}
             disabled={panel.isSearching}
             className="px-3 py-1.5 text-sm bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded flex items-center gap-1"
           >
@@ -173,6 +187,129 @@ function SiloPlaygroundPage() {
             Search
           </button>
         </div>
+
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label htmlFor={`panel-${label}-method-select`} className="block text-xs text-gray-500 mb-0.5">
+              Method
+            </label>
+            <select
+              id={`panel-${label}-method-select`}
+              value={effectiveSearchMethod}
+              onChange={(e) => setter((p) => ({ ...p, searchMethod: e.target.value as 'dense' | 'bm25' | 'hybrid' }))}
+              disabled={panel.isSearching}
+              className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+            >
+              <option value="dense">Dense</option>
+              <option value="bm25">BM25</option>
+              <option value="hybrid">Hybrid</option>
+            </select>
+          </div>
+          <div className="flex-1">
+            <label htmlFor={`panel-${label}-strategy-select`} className="block text-xs text-gray-500 mb-0.5">
+              Strategy
+            </label>
+            <select
+              id={`panel-${label}-strategy-select`}
+              value={effectiveStrategy}
+              onChange={(e) => setter((p) => ({ ...p, strategy: e.target.value as '' | 'rerank' }))}
+              disabled={panel.isSearching}
+              className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+            >
+              <option value="">None</option>
+              <option value="rerank">Rerank</option>
+            </select>
+          </div>
+        </div>
+
+        {(effectiveSearchMethod === 'dense' || effectiveSearchMethod === 'hybrid') && (
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label htmlFor={`panel-${label}-search-type-select`} className="block text-xs text-gray-500 mb-0.5">
+                Search Type
+              </label>
+              <select
+                id={`panel-${label}-search-type-select`}
+                value={effectiveSearchType}
+                onChange={(e) => setter((p) => ({ ...p, searchType: e.target.value as PanelState['searchType'] }))}
+                disabled={panel.isSearching}
+                className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+              >
+                <option value="similarity">Similarity</option>
+                <option value="similarity_score_threshold">Score Threshold</option>
+                <option value="mmr">MMR</option>
+              </select>
+            </div>
+            {effectiveSearchType === 'similarity_score_threshold' && (
+              <div className="flex-1">
+                <label htmlFor={`panel-${label}-score-threshold-input`} className="block text-xs text-gray-500 mb-0.5">
+                  Score Threshold
+                </label>
+                <input
+                  id={`panel-${label}-score-threshold-input`}
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={effectiveScoreThreshold}
+                  onChange={(e) => {
+                    const parsed = Number(e.target.value);
+                    if (!Number.isNaN(parsed)) {
+                      setter((p) => ({ ...p, scoreThreshold: Math.min(1, Math.max(0, parsed)) }));
+                    }
+                  }}
+                  disabled={panel.isSearching}
+                  className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+                />
+              </div>
+            )}
+            {effectiveSearchType === 'mmr' && (
+              <>
+                <div className="flex-1">
+                  <label htmlFor={`panel-${label}-fetch-k-input`} className="block text-xs text-gray-500 mb-0.5">
+                    Fetch K
+                  </label>
+                  <input
+                    id={`panel-${label}-fetch-k-input`}
+                    type="number"
+                    min={10}
+                    max={500}
+                    value={effectiveFetchK}
+                    onChange={(e) => {
+                      const parsed = Number(e.target.value);
+                      if (!Number.isNaN(parsed)) {
+                        setter((p) => ({ ...p, fetchK: Math.min(500, Math.max(10, parsed)) }));
+                      }
+                    }}
+                    disabled={panel.isSearching}
+                    className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label htmlFor={`panel-${label}-lambda-mult-input`} className="block text-xs text-gray-500 mb-0.5">
+                    Lambda (λ)
+                  </label>
+                  <input
+                    id={`panel-${label}-lambda-mult-input`}
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={effectiveLambdaMult}
+                    onChange={(e) => {
+                      const parsed = Number(e.target.value);
+                      if (!Number.isNaN(parsed)) {
+                        setter((p) => ({ ...p, lambdaMult: Math.min(1, Math.max(0, parsed)) }));
+                      }
+                    }}
+                    disabled={panel.isSearching}
+                    className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {panel.error && <p className="text-xs text-red-600">{panel.error}</p>}
 
@@ -389,7 +526,7 @@ function SiloPlaygroundPage() {
 
             <button
               type="button"
-              onClick={() => setCompareMode((v) => !v)}
+              onClick={handleToggleCompareMode}
               className={`flex items-center gap-1 text-xs border rounded px-2 py-1 ${
                 compareMode
                   ? 'border-yellow-500 text-yellow-700 bg-yellow-50'

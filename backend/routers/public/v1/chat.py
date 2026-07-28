@@ -51,19 +51,24 @@ def _parse_json_param(value: Optional[str], param_name: str):
 
 
 def _validate_search_params(parsed):
-    """Bound caller search params (DoS guard). Returns the original dict unchanged so
-    the caller>agent precedence and explicit-None semantics in resolve_search_params
-    are preserved; raises 422 on out-of-range values."""
+    """Bound caller search params (DoS guard). Returns a dict rebuilt from the validated
+    model — NOT the raw input — so any key not declared on RuntimeSearchParamsSchema
+    (e.g. search_method/strategy/top_n/similarity_threshold, which are agent-config-only
+    and must never be caller-overridable) is stripped before it can reach
+    resolve_search_params. ``exclude_unset`` preserves which of the declared fields the
+    caller actually sent (including explicit nulls), keeping the caller>agent precedence
+    and explicit-None semantics in resolve_search_params intact for those fields; raises
+    422 on out-of-range values."""
     if parsed is None:
         return None
     if not isinstance(parsed, dict):
         logger.warning("search_params is not a JSON object, ignoring")
         return None
     try:
-        RuntimeSearchParamsSchema(**parsed)
+        validated = RuntimeSearchParamsSchema(**parsed)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=f"Invalid search_params: {exc.errors()}")
-    return parsed
+    return validated.model_dump(exclude_unset=True)
 
 
 

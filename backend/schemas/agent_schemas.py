@@ -19,6 +19,10 @@ class RagConfigFieldsMixin(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
+    rag_search_method: Optional[str] = None
+    rag_strategy: Optional[str] = None
+    rag_rerank_top_n: Optional[int] = None
+    rag_rerank_similarity_threshold: Optional[float] = None
 
     @field_validator("rag_k")
     @classmethod
@@ -60,14 +64,50 @@ class RagConfigFieldsMixin(BaseModel):
             validated.append(clause.model_dump())
         return validated
 
+    @field_validator("rag_search_method")
+    @classmethod
+    def validate_rag_search_method(cls, v: Optional[str]) -> Optional[str]:
+        from tools.retrieval.search_methods.search_method_factory import SearchMethodFactory
+        if v is not None and v not in SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS:
+            raise ValueError(
+                f"rag_search_method must be one of {sorted(SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS)}"
+            )
+        return v
+
+    @field_validator("rag_strategy")
+    @classmethod
+    def validate_rag_strategy(cls, v: Optional[str]) -> Optional[str]:
+        from tools.retrieval.strategies.strategy_factory import StrategyFactory
+        if v is not None and v not in StrategyFactory.IMPLEMENTED_STRATEGIES:
+            raise ValueError(f"rag_strategy must be one of {sorted(StrategyFactory.IMPLEMENTED_STRATEGIES)}")
+        return v
+
+    @field_validator("rag_rerank_top_n")
+    @classmethod
+    def validate_rag_rerank_top_n(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1 <= v <= 50):
+            raise ValueError("rag_rerank_top_n must be between 1 and 50")
+        return v
+
+    @field_validator("rag_rerank_similarity_threshold")
+    @classmethod
+    def validate_rag_rerank_similarity_threshold(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError("rag_rerank_similarity_threshold must be between 0 and 1")
+        return v
+
 
 class RuntimeSearchParamsSchema(BaseModel):
     """Bounds for caller-supplied runtime search params on the public chat API.
 
     Acts as a validation gate only: a DoS guard so an API-key holder cannot force a
     huge retrieval (k/fetch_k) per turn. Tuning fields share the agent-config bounds;
-    `filter` values are whitelisted later in the retrieval pipeline. Unknown keys are
-    ignored here (they are dropped by ``resolve_search_params`` anyway).
+    `filter` values are whitelisted later in the retrieval pipeline. Fields not declared
+    here (e.g. search_method/strategy/top_n/similarity_threshold, which are agent-config
+    -only and never caller-overridable) MUST be stripped by the caller of this schema
+    (see ``_validate_search_params`` in ``routers/public/v1/chat.py``, which rebuilds its
+    return value from ``model_dump(exclude_unset=True)`` rather than the raw input dict)
+    before reaching ``resolve_search_params``.
     """
     k: Optional[int] = None
     search_type: Optional[str] = None
@@ -173,6 +213,10 @@ class AgentDetailSchema(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
+    rag_search_method: Optional[str] = None
+    rag_strategy: Optional[str] = None
+    rag_rerank_top_n: Optional[int] = None
+    rag_rerank_similarity_threshold: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -290,6 +334,10 @@ class PublicAgentDetailSchema(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
+    rag_search_method: Optional[str] = None
+    rag_strategy: Optional[str] = None
+    rag_rerank_top_n: Optional[int] = None
+    rag_rerank_similarity_threshold: Optional[float] = None
 
 
 class CreateAgentRequestSchema(RagConfigFieldsMixin):

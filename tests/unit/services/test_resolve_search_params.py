@@ -49,6 +49,10 @@ def _make_agent(
     rag_score_threshold: float | None = None,
     rag_fixed_filters: list | None = None,
     rag_max_retrieval_calls: int | None = None,
+    rag_search_method: str = "dense",
+    rag_strategy: str | None = None,
+    rag_rerank_top_n: int | None = None,
+    rag_rerank_similarity_threshold: float | None = None,
     silo: Any = None,
 ) -> Any:
     return types.SimpleNamespace(
@@ -57,6 +61,10 @@ def _make_agent(
         rag_score_threshold=rag_score_threshold,
         rag_fixed_filters=rag_fixed_filters,
         rag_max_retrieval_calls=rag_max_retrieval_calls,
+        rag_search_method=rag_search_method,
+        rag_strategy=rag_strategy,
+        rag_rerank_top_n=rag_rerank_top_n,
+        rag_rerank_similarity_threshold=rag_rerank_similarity_threshold,
         silo=silo,
     )
 
@@ -174,6 +182,135 @@ class TestAgentFallback:
         sp, _ = resolve_search_params(agent, {})
 
         assert "score_threshold" not in sp
+
+
+# ---------------------------------------------------------------------------
+# search_method / strategy / top_n / similarity_threshold — caller > agent >
+# system precedence (same style as k / search_type above).
+# ---------------------------------------------------------------------------
+
+class TestSearchMethodPrecedence:
+    def test_caller_search_method_overrides_agent(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_search_method="dense", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"search_method": "bm25"})
+
+        assert sp["search_method"] == "bm25"
+
+    def test_agent_search_method_used_when_caller_omits(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_search_method="bm25", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["search_method"] == "bm25"
+
+    def test_system_default_used_when_neither_caller_nor_agent_sets_it(self):
+        from tools.retrieval.search_methods.search_method_factory import DEFAULT_SEARCH_METHOD
+
+        silo = _make_silo()
+        agent = _make_agent(rag_search_method=None, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["search_method"] == DEFAULT_SEARCH_METHOD
+
+
+class TestStrategyPrecedence:
+    def test_caller_strategy_overrides_agent(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_strategy=None, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"strategy": "rerank"})
+
+        assert sp["strategy"] == "rerank"
+
+    def test_caller_strategy_none_clears_agent_value(self):
+        """Explicit None in caller for strategy clears the agent's configured
+        strategy and leaves no residual key."""
+        silo = _make_silo()
+        agent = _make_agent(rag_strategy="rerank", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"strategy": None})
+
+        assert "strategy" not in sp
+
+    def test_agent_strategy_used_when_caller_omits(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_strategy="rerank", silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["strategy"] == "rerank"
+
+    def test_strategy_absent_when_neither_caller_nor_agent_sets_it(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_strategy=None, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert "strategy" not in sp
+
+
+class TestRerankTopNPrecedence:
+    def test_caller_top_n_overrides_agent(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_top_n=5, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"top_n": 3})
+
+        assert sp["top_n"] == 3
+
+    def test_agent_top_n_used_when_caller_omits(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_top_n=8, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["top_n"] == 8
+
+    def test_top_n_absent_when_neither_caller_nor_agent_sets_it(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_top_n=None, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert "top_n" not in sp
+
+
+class TestRerankSimilarityThresholdPrecedence:
+    def test_caller_similarity_threshold_overrides_agent(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_similarity_threshold=0.7, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"similarity_threshold": 0.4})
+
+        assert sp["similarity_threshold"] == pytest.approx(0.4)
+
+    def test_caller_similarity_threshold_none_clears_agent_value(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_similarity_threshold=0.7, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {"similarity_threshold": None})
+
+        assert "similarity_threshold" not in sp
+
+    def test_agent_similarity_threshold_used_when_caller_omits(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_similarity_threshold=0.6, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["similarity_threshold"] == pytest.approx(0.6)
+
+    def test_similarity_threshold_absent_when_neither_caller_nor_agent_sets_it(self):
+        silo = _make_silo()
+        agent = _make_agent(rag_rerank_similarity_threshold=None, silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert "similarity_threshold" not in sp
 
 
 class TestThresholdFallback:

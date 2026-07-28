@@ -1179,6 +1179,10 @@ class ApiService {
       lambdaMult?: number;
       minContentLength?: number;
       maxContentLength?: number;
+      searchMethod?: string;
+      strategy?: string;
+      topN?: number;
+      similarityThreshold?: number;
     },
   ) {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/search`, {
@@ -1193,6 +1197,10 @@ class ApiService {
         ...(searchOptions?.lambdaMult !== undefined ? { lambda_mult: searchOptions.lambdaMult } : {}),
         ...(searchOptions?.minContentLength != null && { min_content_length: searchOptions.minContentLength }),
         ...(searchOptions?.maxContentLength != null && { max_content_length: searchOptions.maxContentLength }),
+        ...(searchOptions?.searchMethod !== undefined ? { search_method: searchOptions.searchMethod } : {}),
+        ...(searchOptions?.strategy ? { strategy: searchOptions.strategy } : {}),
+        ...(searchOptions?.topN !== undefined ? { top_n: searchOptions.topN } : {}),
+        ...(searchOptions?.similarityThreshold !== undefined ? { similarity_threshold: searchOptions.similarityThreshold } : {}),
       }),
     });
   }
@@ -1210,6 +1218,10 @@ class ApiService {
       lambdaMult?: number;
       minContentLength?: number;
       maxContentLength?: number;
+      searchMethod?: string;
+      strategy?: string;
+      topN?: number;
+      similarityThreshold?: number;
     },
   ): Promise<{ data: unknown; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
@@ -1227,6 +1239,10 @@ class ApiService {
       ...(searchOptions?.lambdaMult !== undefined ? { lambda_mult: searchOptions.lambdaMult } : {}),
       ...(searchOptions?.minContentLength != null && { min_content_length: searchOptions.minContentLength }),
       ...(searchOptions?.maxContentLength != null && { max_content_length: searchOptions.maxContentLength }),
+      ...(searchOptions?.searchMethod !== undefined ? { search_method: searchOptions.searchMethod } : {}),
+      ...(searchOptions?.strategy ? { strategy: searchOptions.strategy } : {}),
+      ...(searchOptions?.topN !== undefined ? { top_n: searchOptions.topN } : {}),
+      ...(searchOptions?.similarityThreshold !== undefined ? { similarity_threshold: searchOptions.similarityThreshold } : {}),
     });
     const headers = this.buildAuthHeaders('POST', false);
     const response = await fetch(url, { method: 'POST', body, credentials: 'include', headers });

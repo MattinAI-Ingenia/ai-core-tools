@@ -236,6 +236,32 @@ class VectorStoreInterface(ABC):
         pass
 
     @abstractmethod
+    def get_all_documents(
+        self,
+        collection_name: str,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """
+        Fetch the full set of documents stored in a collection.
+
+        Unlike search_similar_documents, this performs no similarity ranking and
+        requires no embeddings — it is meant for building in-memory lexical
+        indexes (e.g. BM25) over the whole corpus.
+
+        Args:
+            collection_name: Name of the collection/index.
+            filter_metadata: Optional backend-style metadata filter (the same
+                Mongo-style {field: {op: value}} shape produced by
+                tools.vector_stores.metadata_filters.to_backend_filter).
+            limit: Optional cap on the number of documents returned.
+
+        Returns:
+            List of langchain_core.documents.Document (page_content + metadata).
+        """
+        pass
+
+    @abstractmethod
     def get_distinct_metadata_values(
         self,
         collection_name: str,

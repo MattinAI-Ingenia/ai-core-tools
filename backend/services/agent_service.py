@@ -151,6 +151,10 @@ class AgentService:
             rag_score_threshold=getattr(agent, 'rag_score_threshold', None) if isinstance(getattr(agent, 'rag_score_threshold', None), (float, int, type(None))) else None,
             rag_max_retrieval_calls=getattr(agent, 'rag_max_retrieval_calls', None) if isinstance(getattr(agent, 'rag_max_retrieval_calls', None), (int, type(None))) else None,
             rag_fixed_filters=getattr(agent, 'rag_fixed_filters', None) if isinstance(getattr(agent, 'rag_fixed_filters', None), (list, type(None))) else None,
+            rag_search_method=getattr(agent, 'rag_search_method', None) if isinstance(getattr(agent, 'rag_search_method', None), (str, type(None))) else None,
+            rag_strategy=getattr(agent, 'rag_strategy', None) if isinstance(getattr(agent, 'rag_strategy', None), (str, type(None))) else None,
+            rag_rerank_top_n=getattr(agent, 'rag_rerank_top_n', None) if isinstance(getattr(agent, 'rag_rerank_top_n', None), (int, type(None))) else None,
+            rag_rerank_similarity_threshold=getattr(agent, 'rag_rerank_similarity_threshold', None) if isinstance(getattr(agent, 'rag_rerank_similarity_threshold', None), (float, int, type(None))) else None,
         )
 
     def _get_agent_for_detail(self, db: Session, agent_id: int):
@@ -361,11 +365,25 @@ class AgentService:
         if data.get('rag_search_type') is not None:
             agent.rag_search_type = data['rag_search_type']
 
+        if data.get('rag_search_method') is not None:
+            agent.rag_search_method = data['rag_search_method']
+        elif is_new:
+            agent.rag_search_method = 'dense'
+
         # score_threshold and fixed_filters: clear-able via explicit None/empty
         if 'rag_score_threshold' in data:
             agent.rag_score_threshold = data['rag_score_threshold']
         if 'rag_fixed_filters' in data:
             agent.rag_fixed_filters = data['rag_fixed_filters']
+
+        # strategy and rerank tuning: clear-able via explicit None, so a caller can
+        # deactivate the rerank strategy by sending rag_strategy=None explicitly.
+        if 'rag_strategy' in data:
+            agent.rag_strategy = data['rag_strategy']
+        if 'rag_rerank_top_n' in data:
+            agent.rag_rerank_top_n = data['rag_rerank_top_n']
+        if 'rag_rerank_similarity_threshold' in data:
+            agent.rag_rerank_similarity_threshold = data['rag_rerank_similarity_threshold']
 
     def update_agent_tools(self, db: Session, agent_id: int, tool_ids: list, form_data: dict = None):
         """Update agent tools associations"""

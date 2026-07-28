@@ -528,6 +528,48 @@ class QdrantStore(VectorStoreInterface):
                 return
             offset = next_offset
 
+    def get_all_documents(
+        self,
+        collection_name: str,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """
+        Fetch the full set of documents stored in a Qdrant collection.
+
+        Reuses ``_iter_filtered_points`` (the same scroll-based generator that
+        powers ``update_documents_metadata``) to page through every point
+        matching ``filter_metadata``, stopping early once ``limit`` documents
+        have been collected. No embeddings are generated.
+
+        Args:
+            collection_name: Name of the collection.
+            filter_metadata: Optional PGVector-style metadata filter, translated
+                to a native Qdrant filter the same way as the rest of this class.
+            limit: Optional cap on the number of documents returned.
+
+        Returns:
+            List of Document objects (page_content + metadata + `_id`).
+        """
+        qdrant_filter = self._build_qdrant_filter(filter_metadata) if filter_metadata else None
+
+        documents: List[Document] = []
+        for batch in self._iter_filtered_points(collection_name, qdrant_filter):
+            for point in batch:
+                payload = point.payload or {}
+                page_content = payload.get("page_content", "") if isinstance(payload, dict) else ""
+                metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+                documents.append(
+                    Document(
+                        page_content=page_content,
+                        metadata={**metadata, "_id": str(point.id)},
+                    )
+                )
+                if limit is not None and len(documents) >= limit:
+                    return documents
+
+        return documents
+
     def _apply_metadata_updates(
         self,
         collection_name: str,

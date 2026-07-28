@@ -78,6 +78,13 @@ class SiloSearchSchema(BaseModel):
     `score_threshold` — float 0-1, only meaningful when search_type="similarity_score_threshold".
     `fetch_k` — candidate pool size for MMR, only meaningful when search_type="mmr".
     `lambda_mult` — diversity factor 0-1 for MMR (1=max relevance, 0=max diversity). Default 0.5.
+    `search_method` — one of SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS ("dense", "bm25").
+        None/"dense" keeps the default similarity-search code path unchanged (same `_score`
+        in results); any other value routes the search through the RetrievalPipeline instead.
+    `strategy` — one of StrategyFactory.IMPLEMENTED_STRATEGIES ("rerank"). When set, the
+        search always routes through the RetrievalPipeline.
+    `top_n` — documents kept after reranking; only meaningful when strategy="rerank".
+    `similarity_threshold` — optional score floor for reranked candidates 0-1.
     """
     query: str
     limit: Optional[int] = None
@@ -88,6 +95,10 @@ class SiloSearchSchema(BaseModel):
     lambda_mult: Optional[float] = None
     min_content_length: Optional[int] = None   # inclusive lower bound on chunk character count
     max_content_length: Optional[int] = None   # inclusive upper bound on chunk character count
+    search_method: Optional[str] = None
+    strategy: Optional[str] = None
+    top_n: Optional[int] = None
+    similarity_threshold: Optional[float] = None
 
     @field_validator("search_type")
     @classmethod
@@ -95,6 +106,38 @@ class SiloSearchSchema(BaseModel):
         allowed = {"similarity", "similarity_score_threshold", "mmr"}
         if v not in allowed:
             raise ValueError(f"search_type must be one of {sorted(allowed)}, got '{v}'")
+        return v
+
+    @field_validator("search_method")
+    @classmethod
+    def validate_search_method(cls, v: Optional[str]) -> Optional[str]:
+        from tools.retrieval.search_methods.search_method_factory import SearchMethodFactory
+        if v is not None and v not in SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS:
+            raise ValueError(
+                f"search_method must be one of {sorted(SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS)}"
+            )
+        return v
+
+    @field_validator("strategy")
+    @classmethod
+    def validate_strategy(cls, v: Optional[str]) -> Optional[str]:
+        from tools.retrieval.strategies.strategy_factory import StrategyFactory
+        if v is not None and v not in StrategyFactory.IMPLEMENTED_STRATEGIES:
+            raise ValueError(f"strategy must be one of {sorted(StrategyFactory.IMPLEMENTED_STRATEGIES)}")
+        return v
+
+    @field_validator("top_n")
+    @classmethod
+    def validate_top_n(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1 <= v <= 50):
+            raise ValueError("top_n must be between 1 and 50")
+        return v
+
+    @field_validator("similarity_threshold")
+    @classmethod
+    def validate_similarity_threshold(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError("similarity_threshold must be between 0 and 1")
         return v
 
     @model_validator(mode="after")

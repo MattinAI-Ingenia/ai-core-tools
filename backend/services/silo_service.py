@@ -17,6 +17,7 @@ from tools.vector_stores.vector_store_interface import VectorStoreInterface
 from models.silo import SiloType
 from services.output_parser_service import OutputParserService
 from langchain_core.vectorstores.base import VectorStoreRetriever
+from langchain_core.retrievers import BaseRetriever
 from utils.error_handlers import (
     handle_database_errors, NotFoundError, ValidationError,
     validate_required_fields
@@ -56,6 +57,66 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
 
     resolved_type = _resolve_vector_db_type(silo, vector_db_type)
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
+
+
+def _build_pipeline_retriever(
+    vector_store: VectorStoreInterface,
+    collection_name: str,
+    embedding_service: Any,
+    merged_search_kwargs: dict,
+    use_async: bool = True,
+) -> BaseRetriever:
+    """Build a retriever via the RetrievalPipeline (dense/bm25 + optional rerank).
+
+    Pops ``search_type``, ``search_method``, ``strategy``, ``top_n`` and
+    ``similarity_threshold`` out of ``merged_search_kwargs`` — the remainder
+    (``k``, ``filter``, ``score_threshold``, ``fetch_k``, ``lambda_mult``, ...)
+    is passed through as the search method's own ``search_kwargs``.
+
+    Args:
+        vector_store: The resolved vector store backend for the silo.
+        collection_name: The silo's collection name (e.g. ``silo_42``).
+        embedding_service: The silo's embedding service ORM object.
+        merged_search_kwargs: Search kwargs dict; MUTATED (keys popped) — pass a
+            dict the caller doesn't need intact afterwards.
+        use_async: Whether the dense search method should build its retriever on
+            the async psycopg engine. Must be ``True`` for callers that invoke the
+            retriever via ``.ainvoke()`` (e.g. the LangGraph agent path — the
+            default, unchanged) and ``False`` for callers that call ``.invoke()``
+            synchronously (e.g. the Silo Playground) — an async-mode retriever
+            raises "This method must be called without async_mode" when invoked
+            synchronously.
+
+    Returns:
+        The final composed retriever.
+    """
+    retriever_search_type = merged_search_kwargs.pop("search_type", "similarity")
+    search_method_name = merged_search_kwargs.pop("search_method", None)
+    strategy_name = merged_search_kwargs.pop("strategy", None)
+
+    # Component-specific params (e.g. rerank's top_n/similarity_threshold) travel
+    # separately from the search-method's own search_kwargs (k/filter/...).
+    component_params = {}
+    for component_key in ("top_n", "similarity_threshold"):
+        if component_key in merged_search_kwargs:
+            component_params[component_key] = merged_search_kwargs.pop(component_key)
+
+    from tools.retrieval.retrieval_context import RetrievalContext
+    from tools.retrieval.retrieval_pipeline import RetrievalPipeline
+    from tools.retrieval.search_methods.search_method_factory import DEFAULT_SEARCH_METHOD
+
+    ctx = RetrievalContext(
+        vector_store=vector_store,
+        collection_name=collection_name,
+        embedding_service=embedding_service,
+        search_kwargs=merged_search_kwargs,
+        params={"search_type": retriever_search_type, "use_async": use_async, **component_params},
+    )
+
+    search_method_names = [search_method_name or DEFAULT_SEARCH_METHOD]
+    transformer_names = [strategy_name] if strategy_name else []
+
+    return RetrievalPipeline.build(ctx, search_method_names, transformer_names)
 
 
 # Patterns produced by PDF loaders when they encounter fonts with non-standard
@@ -178,8 +239,10 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
     Args:
         agent: Agent ORM instance (or SimpleNamespace in tests).  Must expose
             ``rag_k``, ``rag_search_type``, ``rag_score_threshold``,
-            ``rag_fixed_filters``, ``rag_max_retrieval_calls`` and
-            optionally ``.silo`` (for metadata_definition + vector_db_type).
+            ``rag_fixed_filters``, ``rag_max_retrieval_calls``,
+            ``rag_search_method``, ``rag_strategy``, ``rag_rerank_top_n``,
+            ``rag_rerank_similarity_threshold`` and optionally ``.silo`` (for
+            metadata_definition + vector_db_type).
         caller_search_params: Optional search-param dict supplied by the call
             site (e.g. the public API chat endpoint).
     """
@@ -212,6 +275,40 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
         resolved["fetch_k"] = caller["fetch_k"]
     if "lambda_mult" in caller:
         resolved["lambda_mult"] = caller["lambda_mult"]
+
+    # search_method: caller wins; fall back to agent column (server_default 'dense')
+    from tools.retrieval.search_methods.search_method_factory import DEFAULT_SEARCH_METHOD
+
+    resolved["search_method"] = (
+        caller.get("search_method") or getattr(agent, "rag_search_method", None) or DEFAULT_SEARCH_METHOD
+    )
+
+    # strategy: caller wins (explicit None clears). Only a concrete value is stored,
+    # so absent key falls back to the agent's configured strategy (None == no strategy).
+    if "strategy" in caller:
+        if caller["strategy"] is not None:
+            resolved["strategy"] = caller["strategy"]
+    else:
+        agent_strategy = getattr(agent, "rag_strategy", None)
+        if agent_strategy:
+            resolved["strategy"] = agent_strategy
+
+    # top_n: caller pass-through, otherwise fall back to agent column
+    if "top_n" in caller:
+        resolved["top_n"] = caller["top_n"]
+    else:
+        agent_top_n = getattr(agent, "rag_rerank_top_n", None)
+        if agent_top_n is not None:
+            resolved["top_n"] = agent_top_n
+
+    # similarity_threshold: caller wins (explicit None clears), otherwise agent column
+    if "similarity_threshold" in caller:
+        if caller["similarity_threshold"] is not None:
+            resolved["similarity_threshold"] = caller["similarity_threshold"]
+    else:
+        agent_sim_threshold = getattr(agent, "rag_rerank_similarity_threshold", None)
+        if agent_sim_threshold is not None:
+            resolved["similarity_threshold"] = agent_sim_threshold
 
     # Threshold search without a threshold silently degrades to plain similarity — normalize
     # and warn instead of a silent no-op (legacy agents, or a caller that cleared the value).
@@ -334,7 +431,10 @@ class SiloService:
             
             if search_params:
                 # Known retriever parameters that should not be wrapped in 'filter'
-                known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type'}
+                known_params = {
+                    'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type',
+                    'search_method', 'strategy', 'top_n', 'similarity_threshold',
+                }
                 
                 # Separate known params from filter fields
                 filter_fields = {}
@@ -361,18 +461,8 @@ class SiloService:
                 
                 logger.debug(f"Merged search_kwargs: {merged_search_kwargs}")
             
-            # Extract search_type before passing search_kwargs — it must be a top-level
-            # kwarg to `as_retriever`, not nested inside search_kwargs.
-            retriever_search_type = merged_search_kwargs.pop("search_type", "similarity")
-
-            # Use async engine with psycopg (not asyncpg) for async operations
-            # psycopg supports async natively and handles multiple SQL statements properly
-            return _get_vector_store(silo).get_retriever(
-                collection_name,
-                silo.embedding_service,
-                merged_search_kwargs,
-                search_type=retriever_search_type,
-                use_async=True  # Use async psycopg engine for LangGraph compatibility
+            return _build_pipeline_retriever(
+                _get_vector_store(silo), collection_name, silo.embedding_service, merged_search_kwargs
             )
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
@@ -1373,34 +1463,80 @@ class SiloService:
         min_content_length: Optional[int] = None,
         max_content_length: Optional[int] = None,
         db: Session = None,
+        search_method: Optional[str] = None,
+        strategy: Optional[str] = None,
+        top_n: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
     ) -> List[Document]:
+        """Search a silo's collection for documents matching *query*.
+
+        By default (``search_method`` is ``None``/``"dense"`` and ``strategy`` is
+        ``None``) this uses the exact same dense-similarity code path as before —
+        ``vector_store.search_similar_documents`` — including the ``_score`` it
+        stamps into each ``Document.metadata``. Only when a non-dense
+        ``search_method`` (e.g. ``"bm25"``) or a ``strategy`` (e.g. ``"rerank"``)
+        is explicitly requested does this route through the ``RetrievalPipeline``
+        instead (no ``_score`` is set in that case).
+
+        Args:
+            filter_metadata: Backend-ready ``{field: {op: value}}`` filter dict
+                (same shape used for both code paths — never translated here).
+        """
         # Get silo within the session to ensure relationships are loaded
         silo = SiloRepository.get_by_id(silo_id, db)
         if not silo or not SiloService.check_silo_collection_exists(silo_id, db):
             return []
-        
+
         collection_name = COLLECTION_PREFIX + str(silo_id)
-        
+
         # Get embedding service within the same session
         embedding_service = None
         if silo.embedding_service_id:
             embedding_service = SiloRepository.get_embedding_service_by_id(silo.embedding_service_id, db)
-        
+
         results_limit = limit if limit and limit > 0 else DEFAULT_SEARCH_LIMIT
         if results_limit > MAX_SEARCH_LIMIT:
             results_limit = MAX_SEARCH_LIMIT
 
-        docs = _get_vector_store(silo).search_similar_documents(
-            collection_name,
-            query,
-            embedding_service=embedding_service,
-            filter_metadata=filter_metadata or {},
-            k=results_limit,
-            search_type=search_type,
-            score_threshold=score_threshold,
-            fetch_k=fetch_k,
-            lambda_mult=lambda_mult,
-        )
+        uses_pipeline = bool(strategy) or bool(search_method and search_method != "dense")
+
+        if not uses_pipeline:
+            docs = _get_vector_store(silo).search_similar_documents(
+                collection_name,
+                query,
+                embedding_service=embedding_service,
+                filter_metadata=filter_metadata or {},
+                k=results_limit,
+                search_type=search_type,
+                score_threshold=score_threshold,
+                fetch_k=fetch_k,
+                lambda_mult=lambda_mult,
+            )
+        else:
+            merged_kwargs: dict = {"k": results_limit, "filter": filter_metadata or {}, "search_type": search_type}
+            if score_threshold is not None:
+                merged_kwargs["score_threshold"] = score_threshold
+            if fetch_k is not None:
+                merged_kwargs["fetch_k"] = fetch_k
+            if lambda_mult is not None:
+                merged_kwargs["lambda_mult"] = lambda_mult
+            if search_method:
+                merged_kwargs["search_method"] = search_method
+            if strategy:
+                merged_kwargs["strategy"] = strategy
+            if top_n is not None:
+                merged_kwargs["top_n"] = top_n
+            if similarity_threshold is not None:
+                merged_kwargs["similarity_threshold"] = similarity_threshold
+
+            # use_async=False: this call site invokes the retriever synchronously
+            # (.invoke() below), unlike the LangGraph agent path.
+            retriever = _build_pipeline_retriever(
+                _get_vector_store(silo), collection_name, embedding_service, merged_kwargs,
+                use_async=False,
+            )
+            docs = retriever.invoke(query)[:results_limit]
+
         if min_content_length is not None or max_content_length is not None:
             docs = [
                 d for d in docs
@@ -1422,17 +1558,21 @@ class SiloService:
         min_content_length: Optional[int] = None,
         max_content_length: Optional[int] = None,
         db: Session = None,
+        search_method: Optional[str] = None,
+        strategy: Optional[str] = None,
+        top_n: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
     ) -> List[Document]:
         """
         Search for documents in a silo using semantic search
-        
+
         Args:
             silo_id: ID of the silo to search in
             query: Search query text
             filter_metadata: Optional metadata filters
             limit: Maximum number of results to return
             db: Database session
-            
+
         Returns:
             List of Document objects with page_content and metadata
         """
@@ -1449,6 +1589,10 @@ class SiloService:
             min_content_length=min_content_length,
             max_content_length=max_content_length,
             db=db,
+            search_method=search_method,
+            strategy=strategy,
+            top_n=top_n,
+            similarity_threshold=similarity_threshold,
         )
 
     @staticmethod
@@ -1672,15 +1816,24 @@ class SiloService:
         min_content_length: Optional[int] = None,
         max_content_length: Optional[int] = None,
         db: Session = None,
+        search_method: Optional[str] = None,
+        strategy: Optional[str] = None,
+        top_n: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Search for documents in a silo using semantic search with optional metadata filtering
+        Search for documents in a silo using semantic search with optional metadata filtering.
+
+        ``search_method``/``strategy``/``top_n``/``similarity_threshold`` route the search
+        through the RetrievalPipeline (dense/bm25 + optional rerank) when explicitly
+        requested; the default dense-similarity path (and its ``_score`` metadata) is
+        unchanged when they are omitted. See ``find_docs_in_collection`` for details.
         """
         # Get silo to validate it exists
         silo = SiloService.get_silo(silo_id, db)
         if not silo:
             return None
-        
+
         # Perform the search with metadata filtering
         results = SiloService.find_docs_in_collection(
             silo_id,
@@ -1694,6 +1847,10 @@ class SiloService:
             min_content_length=min_content_length,
             max_content_length=max_content_length,
             db=db,
+            search_method=search_method,
+            strategy=strategy,
+            top_n=top_n,
+            similarity_threshold=similarity_threshold,
         )
         
         # Convert results to response format

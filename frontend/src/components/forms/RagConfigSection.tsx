@@ -1,33 +1,24 @@
 import { useEffect, useState } from 'react';
-import { Target, Trash2 } from 'lucide-react';
-import type { MetadataOperator, SearchFilterMetadataField } from '../playground/SearchFilters';
+import { Target } from 'lucide-react';
 
 export type RagSearchType = 'similarity' | 'mmr' | 'similarity_score_threshold';
-
-export interface RagFixedFilter {
-  field: string;
-  op: MetadataOperator;
-  value: unknown;
-  _key?: string;
-}
+export type RagSearchMethod = 'dense' | 'bm25' | 'hybrid';
 
 export interface RagConfigValue {
   rag_k: number;
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
-  rag_fixed_filters: RagFixedFilter[];
+  rag_search_method: RagSearchMethod;
+  rag_strategy: 'rerank' | null;
+  rag_rerank_top_n: number | null;
+  rag_rerank_similarity_threshold: number | null;
 }
 
 interface RagConfigSectionProps {
   value: RagConfigValue;
   onChange: (patch: Partial<RagConfigValue>) => void;
-  metadataFields: SearchFilterMetadataField[];
-  loadingMetadata?: boolean;
 }
-
-// Mirrors backend SYSTEM_METADATA_FIELDS — always filterable regardless of metadata_definition.
-const SYSTEM_FIELDS = ['name', 'file_type', 'url', 'page'];
 
 const SEARCH_TYPES: Array<{ value: RagSearchType; label: string }> = [
   { value: 'similarity', label: 'Similarity (default)' },
@@ -35,17 +26,16 @@ const SEARCH_TYPES: Array<{ value: RagSearchType; label: string }> = [
   { value: 'similarity_score_threshold', label: 'Similarity + score threshold' },
 ];
 
-const OPERATORS: Array<{ value: MetadataOperator; label: string }> = [
-  { value: '$eq', label: 'equals' },
-  { value: '$ne', label: 'not equals' },
-  { value: '$gt', label: 'greater than' },
-  { value: '$gte', label: 'greater or equal' },
-  { value: '$lt', label: 'less than' },
-  { value: '$lte', label: 'less or equal' },
-  { value: '$in', label: 'in (comma-separated)' },
+const SEARCH_METHODS: Array<{ value: RagSearchMethod; label: string }> = [
+  { value: 'dense', label: 'Dense (embeddings similarity)' },
+  { value: 'bm25', label: 'BM25 (lexical / keyword)' },
+  { value: 'hybrid', label: 'Hybrid (dense + lexical)' },
 ];
 
-const MAX_FIXED_FILTERS = 10;
+const STRATEGIES: Array<{ value: '' | 'rerank'; label: string }> = [
+  { value: '', label: 'None' },
+  { value: 'rerank', label: 'Rerank (embeddings-based)' },
+];
 
 // Shared between the inline field error and the form-level submit guard.
 export const SCORE_THRESHOLD_REQUIRED_MSG =
@@ -57,31 +47,18 @@ function clampInt(raw: string, min: number, max: number, fallback: number): numb
   return Math.min(max, Math.max(min, n));
 }
 
-/** Render a stored filter value for editing: $in arrays become a comma-separated string. */
-function filterValueToInput(value: unknown): string {
-  if (Array.isArray(value)) return value.join(', ');
-  if (value === null || value === undefined) return '';
-  return String(value);
-}
-
-/** Convert the edited string back to the stored shape ($in → list, others → scalar string). */
-function inputToFilterValue(op: MetadataOperator, raw: string): unknown {
-  if (op === '$in') {
-    return raw.split(',').map((v) => v.trim()).filter(Boolean);
-  }
-  return raw;
-}
-
 /**
- * Per-agent RAG retrieval configuration. Only meaningful when the agent has a silo;
- * the caller renders this conditionally. Values are persisted on the Agent and resolved
- * at execution time (caller > agent > system).
+ * Per-agent RAG retrieval configuration. Always rendered — the tuning knobs (k, search
+ * method/type, strategy) can be pre-configured before a silo is assigned. Values are
+ * persisted on the Agent and resolved at execution time (caller > agent > system).
  */
-function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = false }: Readonly<RagConfigSectionProps>) {
-  const fieldOptions = [...SYSTEM_FIELDS, ...metadataFields.map((f) => f.name)];
-  const filters = value.rag_fixed_filters;
+function RagConfigSection({ value, onChange }: Readonly<RagConfigSectionProps>) {
+  // Search Type only governs the dense component of retrieval (similarity/mmr/threshold);
+  // BM25 ignores it entirely, so it's hidden rather than shown as a dead control.
+  const searchTypeApplies = value.rag_search_method === 'dense' || value.rag_search_method === 'hybrid';
+
   const thresholdMissing =
-    value.rag_search_type === 'similarity_score_threshold' && value.rag_score_threshold == null;
+    searchTypeApplies && value.rag_search_type === 'similarity_score_threshold' && value.rag_score_threshold == null;
 
   // Local text buffer for the decimal threshold: lets the user type "0,6"/"0." freely
   // (comma normalized to dot) without the controlled-number-input swallowing keystrokes.
@@ -111,24 +88,34 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
     setThresholdText(String(clamped));
   };
 
-  const updateFilter = (index: number, patch: Partial<RagFixedFilter>) => {
-    onChange({
-      rag_fixed_filters: filters.map((f, i) => (i === index ? { ...f, ...patch } : f)),
-    });
+  // Local text buffer for the decimal rerank similarity threshold, mirroring rag_score_threshold's
+  // comma-decimal handling above.
+  const [rerankThresholdText, setRerankThresholdText] = useState(
+    value.rag_rerank_similarity_threshold == null ? '' : String(value.rag_rerank_similarity_threshold),
+  );
+
+  useEffect(() => {
+    const parsed =
+      rerankThresholdText.trim() === '' ? null : Number.parseFloat(rerankThresholdText.replace(',', '.'));
+    const normalized = Number.isFinite(parsed as number) ? parsed : null;
+    if ((value.rag_rerank_similarity_threshold ?? null) !== normalized) {
+      setRerankThresholdText(
+        value.rag_rerank_similarity_threshold == null ? '' : String(value.rag_rerank_similarity_threshold),
+      );
+    }
+  }, [value.rag_rerank_similarity_threshold]);
+
+  const handleRerankThresholdChange = (raw: string) => {
+    setRerankThresholdText(raw);
+    const n = Number.parseFloat(raw.replace(',', '.'));
+    onChange({ rag_rerank_similarity_threshold: Number.isFinite(n) ? n : null });
   };
 
-  const addFilter = () => {
-    if (filters.length >= MAX_FIXED_FILTERS) return;
-    onChange({
-      rag_fixed_filters: [
-        ...filters,
-        { _key: Math.random().toString(36).slice(2), field: fieldOptions[0] ?? '', op: '$eq', value: '' },
-      ],
-    });
-  };
-
-  const removeFilter = (index: number) => {
-    onChange({ rag_fixed_filters: filters.filter((_, i) => i !== index) });
+  const handleRerankThresholdBlur = () => {
+    if (value.rag_rerank_similarity_threshold == null) return;
+    const clamped = Math.min(1, Math.max(0, value.rag_rerank_similarity_threshold));
+    if (clamped !== value.rag_rerank_similarity_threshold) onChange({ rag_rerank_similarity_threshold: clamped });
+    setRerankThresholdText(String(clamped));
   };
 
   return (
@@ -182,24 +169,45 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
         </div>
 
         <div>
-          <label htmlFor="rag_search_type" className="block text-sm font-medium text-gray-700 mb-2">
-            Search strategy
+          <label htmlFor="rag_search_method" className="block text-sm font-medium text-gray-700 mb-2">
+            Search Method
           </label>
           <select
-            id="rag_search_type"
-            value={value.rag_search_type}
-            onChange={(e) => onChange({ rag_search_type: e.target.value as RagSearchType })}
+            id="rag_search_method"
+            value={value.rag_search_method}
+            onChange={(e) => onChange({ rag_search_method: e.target.value as RagSearchMethod })}
             className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
           >
-            {SEARCH_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
+            {SEARCH_METHODS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
               </option>
             ))}
           </select>
+          <p className="text-xs text-gray-500 mt-1">How the knowledge base is searched: dense vector similarity, lexical keyword matching, or both combined.</p>
         </div>
 
-        {value.rag_search_type === 'similarity_score_threshold' && (
+        {searchTypeApplies && (
+          <div>
+            <label htmlFor="rag_search_type" className="block text-sm font-medium text-gray-700 mb-2">
+              Search Type
+            </label>
+            <select
+              id="rag_search_type"
+              value={value.rag_search_type}
+              onChange={(e) => onChange({ rag_search_type: e.target.value as RagSearchType })}
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+            >
+              {SEARCH_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {searchTypeApplies && value.rag_search_type === 'similarity_score_threshold' && (
           <div>
             <label htmlFor="rag_score_threshold" className="block text-sm font-medium text-gray-700 mb-2">
               Score threshold
@@ -234,84 +242,69 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
             )}
           </div>
         )}
-      </div>
 
-      {/* Fixed filters — always-applied scoping the caller cannot loosen */}
-      <div className="mt-8">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <h4 className="text-sm font-semibold text-gray-900">Fixed metadata filters</h4>
-            <p className="text-xs text-gray-500">Applied to every search. Leave empty to search the whole knowledge base.</p>
-          </div>
-          <button
-            type="button"
-            onClick={addFilter}
-            disabled={filters.length >= MAX_FIXED_FILTERS}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm rounded-lg transition-colors"
+        <div>
+          <label htmlFor="rag_strategy" className="block text-sm font-medium text-gray-700 mb-2">
+            Strategy
+          </label>
+          <select
+            id="rag_strategy"
+            value={value.rag_strategy ?? ''}
+            onChange={(e) => onChange({ rag_strategy: e.target.value === '' ? null : (e.target.value as 'rerank') })}
+            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
           >
-            Add filter
-          </button>
+            {STRATEGIES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-gray-500 mt-1">Optional post-retrieval reordering applied to the search results.</p>
         </div>
 
-        {loadingMetadata && <p className="text-sm text-gray-500">Loading metadata fields…</p>}
+        {value.rag_strategy === 'rerank' && (
+          <>
+            <div>
+              <label htmlFor="rag_rerank_top_n" className="block text-sm font-medium text-gray-700 mb-2">
+                Rerank top N
+              </label>
+              <input
+                id="rag_rerank_top_n"
+                type="number"
+                min={1}
+                max={50}
+                value={value.rag_rerank_top_n ?? ''}
+                placeholder="5"
+                onChange={(e) =>
+                  onChange({
+                    rag_rerank_top_n: e.target.value ? clampInt(e.target.value, 1, 50, 5) : null,
+                  })
+                }
+                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+              />
+              <p className="text-xs text-gray-500 mt-1">Documents kept after reranking (1–50). Empty uses the server default.</p>
+            </div>
 
-        {filters.length > 0 && (
-          <div className="space-y-2">
-            {filters.map((filter, index) => (
-              <div key={filter._key ?? `${filter.field}-${index}`} className="grid grid-cols-12 gap-2 items-start">
-                <select
-                  aria-label={`Filter field, row ${index + 1}`}
-                  value={filter.field}
-                  onChange={(e) => updateFilter(index, { field: e.target.value })}
-                  className="col-span-4 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {!fieldOptions.includes(filter.field) && filter.field && (
-                    <option value={filter.field}>{filter.field}</option>
-                  )}
-                  {fieldOptions.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  aria-label={`Filter operator, row ${index + 1}`}
-                  value={filter.op}
-                  onChange={(e) => {
-                    const op = e.target.value as MetadataOperator;
-                    updateFilter(index, { op, value: inputToFilterValue(op, filterValueToInput(filter.value)) });
-                  }}
-                  className="col-span-3 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {OPERATORS.map((op) => (
-                    <option key={op.value} value={op.value}>
-                      {op.label}
-                    </option>
-                  ))}
-                </select>
-
-                <input
-                  type="text"
-                  aria-label={`Filter value, row ${index + 1}`}
-                  value={filterValueToInput(filter.value)}
-                  placeholder={filter.op === '$in' ? 'a, b, c' : 'value'}
-                  onChange={(e) => updateFilter(index, { value: inputToFilterValue(filter.op, e.target.value) })}
-                  className="col-span-4 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-
-                <button
-                  type="button"
-                  onClick={() => removeFilter(index)}
-                  title="Remove filter"
-                  aria-label={`Remove filter, row ${index + 1}`}
-                  className="col-span-1 flex justify-center text-red-600 hover:text-red-800 transition-colors p-2 rounded focus:outline-none focus:ring-2 focus:ring-red-500"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
-          </div>
+            <div>
+              <label htmlFor="rag_rerank_similarity_threshold" className="block text-sm font-medium text-gray-700 mb-2">
+                Rerank similarity threshold
+              </label>
+              <input
+                id="rag_rerank_similarity_threshold"
+                type="text"
+                inputMode="decimal"
+                value={rerankThresholdText}
+                placeholder="0.75"
+                aria-describedby="rag_rerank_similarity_threshold_help"
+                onChange={(e) => handleRerankThresholdChange(e.target.value)}
+                onBlur={handleRerankThresholdBlur}
+                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+              />
+              <p id="rag_rerank_similarity_threshold_help" className="text-xs text-gray-500 mt-1">
+                Optional minimum similarity score, 0–1, applied after reranking.
+              </p>
+            </div>
+          </>
         )}
       </div>
     </div>

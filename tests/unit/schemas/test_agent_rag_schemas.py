@@ -26,6 +26,10 @@ from pydantic import ValidationError
 
 _REQUIRED_CREATE_UPDATE = {
     "name": "test",
+    # CreateUpdateAgentSchema requires an embedding service for media/document
+    # processing (unrelated to RAG config) — supply a dummy id so these RAG
+    # field-validator tests don't fail on that unrelated required field.
+    "media_embedding_service_id": 1,
 }
 
 _REQUIRED_CREATE_PUBLIC = {
@@ -210,6 +214,107 @@ class TestRagFixedFilters:
         ]
         obj = schema_fn(rag_fixed_filters=filters)
         assert len(obj.rag_fixed_filters) == 2
+
+
+# ---------------------------------------------------------------------------
+# rag_search_method
+# ---------------------------------------------------------------------------
+
+class TestRagSearchMethod:
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    @pytest.mark.parametrize("valid_method", ["dense", "bm25"])
+    def test_valid_search_method_passes(self, schema_fn, valid_method):
+        schema_fn(rag_search_method=valid_method)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_none_search_method_passes(self, schema_fn):
+        schema_fn(rag_search_method=None)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_invalid_search_method_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_search_method"):
+            schema_fn(rag_search_method="sparse")
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_empty_string_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_search_method"):
+            schema_fn(rag_search_method="")
+
+
+# ---------------------------------------------------------------------------
+# rag_strategy
+# ---------------------------------------------------------------------------
+
+class TestRagStrategy:
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_valid_strategy_passes(self, schema_fn):
+        schema_fn(rag_strategy="rerank")
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_none_strategy_passes(self, schema_fn):
+        schema_fn(rag_strategy=None)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_invalid_strategy_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_strategy"):
+            schema_fn(rag_strategy="hybrid")
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_empty_string_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_strategy"):
+            schema_fn(rag_strategy="")
+
+
+# ---------------------------------------------------------------------------
+# rag_rerank_top_n
+# ---------------------------------------------------------------------------
+
+class TestRagRerankTopN:
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_valid_top_n_passes(self, schema_fn):
+        schema_fn(rag_rerank_top_n=1)
+        schema_fn(rag_rerank_top_n=5)
+        schema_fn(rag_rerank_top_n=50)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_none_passes(self, schema_fn):
+        schema_fn(rag_rerank_top_n=None)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_zero_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_rerank_top_n"):
+            schema_fn(rag_rerank_top_n=0)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_above_max_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_rerank_top_n"):
+            schema_fn(rag_rerank_top_n=51)
+
+
+# ---------------------------------------------------------------------------
+# rag_rerank_similarity_threshold
+# ---------------------------------------------------------------------------
+
+class TestRagRerankSimilarityThreshold:
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_valid_threshold_passes(self, schema_fn):
+        schema_fn(rag_rerank_similarity_threshold=0.0)
+        schema_fn(rag_rerank_similarity_threshold=0.5)
+        schema_fn(rag_rerank_similarity_threshold=1.0)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_none_passes(self, schema_fn):
+        schema_fn(rag_rerank_similarity_threshold=None)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_below_zero_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_rerank_similarity_threshold"):
+            schema_fn(rag_rerank_similarity_threshold=-0.01)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_above_one_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_rerank_similarity_threshold"):
+            schema_fn(rag_rerank_similarity_threshold=1.01)
 
 
 # ---------------------------------------------------------------------------

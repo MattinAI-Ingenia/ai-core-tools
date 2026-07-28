@@ -84,6 +84,10 @@ class Agent(Base):
     rag_score_threshold = Column(Float, nullable=True)  # only used when rag_search_type='similarity_score_threshold'
     rag_fixed_filters = Column(JSON, nullable=True)     # list of {field, op, value} filter clauses applied on every retrieval
     rag_max_retrieval_calls = Column(Integer, nullable=True)  # NULL = legacy unbounded behaviour
+    rag_search_method = Column(String(45), default='dense', nullable=False, server_default='dense')  # dense | bm25 (SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS)
+    rag_strategy = Column(String(45), nullable=True)  # None = no post-retrieval strategy; 'rerank' (StrategyFactory.IMPLEMENTED_STRATEGIES)
+    rag_rerank_top_n = Column(Integer, nullable=True)  # documents kept after reranking; only used when rag_strategy='rerank'
+    rag_rerank_similarity_threshold = Column(Float, nullable=True)  # optional score floor for reranked candidates; only used when rag_strategy='rerank'
 
     # Memory management via LangChain SummarizationMiddleware (when has_memory=True)
     memory_max_messages = Column(Integer, default=20, nullable=False)  # SummarizationMiddleware.keep=("messages", N) — messages to preserve after summarization

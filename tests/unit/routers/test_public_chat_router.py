@@ -109,6 +109,47 @@ class TestParseJsonParam:
 
 
 # ---------------------------------------------------------------------------
+# TestValidateSearchParams
+# ---------------------------------------------------------------------------
+
+class TestValidateSearchParams:
+    """rag_search_method/rag_strategy/rag_rerank_* are agent-config-only and must
+    never be settable by a public-API caller (see resolve_search_params precedence
+    in services/silo_service.py) — regression coverage for that boundary."""
+
+    def test_none_passthrough(self):
+        assert chat_module._validate_search_params(None) is None
+
+    def test_non_dict_returns_none(self):
+        assert chat_module._validate_search_params(["not", "a", "dict"]) is None
+
+    def test_declared_fields_pass_through(self):
+        result = chat_module._validate_search_params({"k": 5, "search_type": "mmr"})
+        assert result == {"k": 5, "search_type": "mmr"}
+
+    def test_explicit_none_on_declared_field_is_preserved(self):
+        result = chat_module._validate_search_params({"score_threshold": None})
+        assert result == {"score_threshold": None}
+
+    def test_undeclared_rag_pipeline_keys_are_stripped(self):
+        result = chat_module._validate_search_params({
+            "k": 5,
+            "search_method": "bm25",
+            "strategy": "rerank",
+            "top_n": 999999,
+            "similarity_threshold": -50,
+        })
+        assert result == {"k": 5}
+        for leaked_key in ("search_method", "strategy", "top_n", "similarity_threshold"):
+            assert leaked_key not in result
+
+    def test_out_of_range_value_raises_422(self):
+        with pytest.raises(HTTPException) as exc_info:
+            chat_module._validate_search_params({"k": 999})
+        assert exc_info.value.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # TestCallAgent
 # ---------------------------------------------------------------------------
 

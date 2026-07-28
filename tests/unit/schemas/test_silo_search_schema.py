@@ -87,6 +87,85 @@ def test_zero_min_content_length_is_valid():
 
 
 # ---------------------------------------------------------------------------
+# search_method / strategy / top_n / similarity_threshold (RetrievalPipeline)
+# ---------------------------------------------------------------------------
+
+def test_search_method_defaults_to_none():
+    s = SiloSearchSchema(query="test")
+    assert s.search_method is None
+
+
+def test_valid_search_method_dense():
+    s = SiloSearchSchema(query="test", search_method="dense")
+    assert s.search_method == "dense"
+
+
+def test_valid_search_method_bm25():
+    s = SiloSearchSchema(query="test", search_method="bm25")
+    assert s.search_method == "bm25"
+
+
+def test_invalid_search_method_raises():
+    with pytest.raises(ValidationError, match="search_method"):
+        SiloSearchSchema(query="test", search_method="sparse")
+
+
+def test_strategy_defaults_to_none():
+    s = SiloSearchSchema(query="test")
+    assert s.strategy is None
+
+
+def test_valid_strategy_rerank():
+    s = SiloSearchSchema(query="test", strategy="rerank")
+    assert s.strategy == "rerank"
+
+
+def test_invalid_strategy_raises():
+    with pytest.raises(ValidationError, match="strategy"):
+        SiloSearchSchema(query="test", strategy="hybrid")
+
+
+def test_top_n_defaults_to_none():
+    s = SiloSearchSchema(query="test")
+    assert s.top_n is None
+
+
+def test_valid_top_n_passes():
+    s = SiloSearchSchema(query="test", top_n=5)
+    assert s.top_n == 5
+
+
+def test_top_n_below_min_raises():
+    with pytest.raises(ValidationError, match="top_n"):
+        SiloSearchSchema(query="test", top_n=0)
+
+
+def test_top_n_above_max_raises():
+    with pytest.raises(ValidationError, match="top_n"):
+        SiloSearchSchema(query="test", top_n=51)
+
+
+def test_similarity_threshold_defaults_to_none():
+    s = SiloSearchSchema(query="test")
+    assert s.similarity_threshold is None
+
+
+def test_valid_similarity_threshold_passes():
+    s = SiloSearchSchema(query="test", similarity_threshold=0.5)
+    assert s.similarity_threshold == 0.5
+
+
+def test_similarity_threshold_below_min_raises():
+    with pytest.raises(ValidationError, match="similarity_threshold"):
+        SiloSearchSchema(query="test", similarity_threshold=-0.1)
+
+
+def test_similarity_threshold_above_max_raises():
+    with pytest.raises(ValidationError, match="similarity_threshold"):
+        SiloSearchSchema(query="test", similarity_threshold=1.1)
+
+
+# ---------------------------------------------------------------------------
 # SiloCountRequestSchema
 # ---------------------------------------------------------------------------
 

@@ -10,8 +10,7 @@ import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
 import type { TabItem } from '../components/ui/Tabs';
 import RagConfigSection, { SCORE_THRESHOLD_REQUIRED_MSG } from '../components/forms/RagConfigSection';
-import type { RagConfigValue, RagFixedFilter, RagSearchType } from '../components/forms/RagConfigSection';
-import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
+import type { RagConfigValue, RagSearchMethod, RagSearchType } from '../components/forms/RagConfigSection';
 import type { AgentMCPUsage } from '../core/types';
 import type { MarketplaceVisibility, MarketplaceProfileUpdate } from '../types/marketplace';
 import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
@@ -49,7 +48,10 @@ interface Agent {
   rag_search_type?: RagSearchType;
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
-  rag_fixed_filters?: RagFixedFilter[];
+  rag_search_method?: RagSearchMethod;
+  rag_strategy?: 'rerank' | null;
+  rag_rerank_top_n?: number | null;
+  rag_rerank_similarity_threshold?: number | null;
   // Media processing configuration (playground media upload)
   transcription_service_id?: number;
   video_ai_service_id?: number;
@@ -95,7 +97,10 @@ interface AgentFormData {
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
-  rag_fixed_filters: RagFixedFilter[];
+  rag_search_method: RagSearchMethod;
+  rag_strategy: 'rerank' | null;
+  rag_rerank_top_n: number | null;
+  rag_rerank_similarity_threshold: number | null;
   // Media processing configuration (playground media upload)
   transcription_service_id?: number;
   video_ai_service_id?: number;
@@ -234,15 +239,16 @@ function AgentFormPage() {
     rag_search_type: 'similarity',
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
-    rag_fixed_filters: [],
+    rag_search_method: 'dense',
+    rag_strategy: null,
+    rag_rerank_top_n: null,
+    rag_rerank_similarity_threshold: null,
     media_embedding_service_id: undefined,
     media_chunk_min_duration: 30,
     media_chunk_max_duration: 120,
     media_chunk_overlap: 5
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
-  const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
-  const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
   const [embeddingServices, setEmbeddingServices] = useState<Array<{ service_id: number; name: string }>>([]);
 
   // Marketplace state
@@ -294,31 +300,6 @@ function AgentFormPage() {
     };
   }, [appId]);
 
-  // Load the selected silo's metadata fields to power the fixed-filter editor.
-  useEffect(() => {
-    const siloId = formData.silo_id;
-    if (!appId || !siloId) {
-      setSiloMetadataFields([]);
-      return;
-    }
-    let cancelled = false;
-    setLoadingSiloMetadata(true);
-    apiService
-      .getSilo(Number.parseInt(appId), siloId)
-      .then((silo) => {
-        if (!cancelled) setSiloMetadataFields(silo?.metadata_fields ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setSiloMetadataFields([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingSiloMetadata(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [appId, formData.silo_id]);
-
   async function loadAgentData() {
     if (!appId || !agentId) return;
 
@@ -358,10 +339,10 @@ function AgentFormPage() {
         rag_search_type: response.rag_search_type ?? 'similarity',
         rag_score_threshold: response.rag_score_threshold ?? null,
         rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
-        rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
-          ...f,
-          _key: Math.random().toString(36).slice(2),
-        })),
+        rag_search_method: response.rag_search_method ?? 'dense',
+        rag_strategy: response.rag_strategy ?? null,
+        rag_rerank_top_n: response.rag_rerank_top_n ?? null,
+        rag_rerank_similarity_threshold: response.rag_rerank_similarity_threshold ?? null,
         // Media processing configuration
         transcription_service_id: response.transcription_service_id || undefined,
         video_ai_service_id: response.video_ai_service_id || undefined,
@@ -515,8 +496,10 @@ function AgentFormPage() {
 
     if (!appId || !agentId) return;
 
-    const hasSilo = !!formData.silo_id;
-    const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
+    // rag_search_type governs the dense component of retrieval — BM25 ignores it, so the
+    // threshold requirement/field is moot (and hidden) once bm25 (without hybrid) is selected.
+    const usesThreshold =
+      formData.rag_search_method !== 'bm25' && formData.rag_search_type === 'similarity_score_threshold';
 
     // Mirror the backend invariant: a threshold strategy needs a threshold value.
     if (usesThreshold && formData.rag_score_threshold == null) {
@@ -532,12 +515,6 @@ function AgentFormPage() {
       setError('Select a media embedding service in Media Processing before saving.');
       return;
     }
-
-    // Drop incomplete filter rows and the editor-only _key; clear the threshold unless the
-    // threshold strategy is selected so we never persist a dead value.
-    const cleanedFilters: RagFixedFilter[] = formData.rag_fixed_filters
-      .filter((f) => f.field && (Array.isArray(f.value) ? f.value.length > 0 : String(f.value ?? '').trim() !== ''))
-      .map(({ _key, ...rest }) => rest);
 
     const submitData = {
       name: formData.name,
@@ -568,7 +545,11 @@ function AgentFormPage() {
       rag_search_type: formData.rag_search_type,
       rag_score_threshold: usesThreshold ? formData.rag_score_threshold : null,
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
-      rag_fixed_filters: hasSilo ? cleanedFilters : [],
+      rag_search_method: formData.rag_search_method,
+      rag_strategy: formData.rag_strategy,
+      rag_rerank_top_n: formData.rag_strategy === 'rerank' ? formData.rag_rerank_top_n : null,
+      rag_rerank_similarity_threshold:
+        formData.rag_strategy === 'rerank' ? formData.rag_rerank_similarity_threshold : null,
       // Media processing configuration
       transcription_service_id: formData.transcription_service_id,
       video_ai_service_id: formData.video_ai_service_id,
@@ -966,23 +947,23 @@ function AgentFormPage() {
                     </div>
                   </div>
 
-                  {/* RAG retrieval config — only meaningful when a silo is selected */}
-                  {formData.silo_id && (
-                    <RagConfigSection
-                      value={{
-                        rag_k: formData.rag_k,
-                        rag_search_type: formData.rag_search_type,
-                        rag_score_threshold: formData.rag_score_threshold,
-                        rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
-                        rag_fixed_filters: formData.rag_fixed_filters,
-                      }}
-                      onChange={(patch: Partial<RagConfigValue>) =>
-                        setFormData((prev) => ({ ...prev, ...patch }))
-                      }
-                      metadataFields={siloMetadataFields}
-                      loadingMetadata={loadingSiloMetadata}
-                    />
-                  )}
+                  {/* RAG retrieval config — always visible; tuning knobs can be
+                      pre-configured before a silo is assigned. */}
+                  <RagConfigSection
+                    value={{
+                      rag_k: formData.rag_k,
+                      rag_search_type: formData.rag_search_type,
+                      rag_score_threshold: formData.rag_score_threshold,
+                      rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+                      rag_search_method: formData.rag_search_method,
+                      rag_strategy: formData.rag_strategy,
+                      rag_rerank_top_n: formData.rag_rerank_top_n,
+                      rag_rerank_similarity_threshold: formData.rag_rerank_similarity_threshold,
+                    }}
+                    onChange={(patch: Partial<RagConfigValue>) =>
+                      setFormData((prev) => ({ ...prev, ...patch }))
+                    }
+                  />
 
                   {/* Agent Capabilities Card */}
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">

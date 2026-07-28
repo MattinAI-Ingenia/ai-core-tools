@@ -397,6 +397,10 @@ async def create_or_update_agent(
         'rag_score_threshold': agent_data.rag_score_threshold,
         'rag_max_retrieval_calls': agent_data.rag_max_retrieval_calls,
         'rag_fixed_filters': agent_data.rag_fixed_filters,
+        'rag_search_method': agent_data.rag_search_method,
+        'rag_strategy': agent_data.rag_strategy,
+        'rag_rerank_top_n': agent_data.rag_rerank_top_n,
+        'rag_rerank_similarity_threshold': agent_data.rag_rerank_similarity_threshold,
         # Media processing configuration (playground media upload)
         'transcription_service_id': agent_data.transcription_service_id,
         'video_ai_service_id': agent_data.video_ai_service_id,

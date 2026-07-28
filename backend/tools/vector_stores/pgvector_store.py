@@ -444,6 +444,56 @@ class PGVectorStore(VectorStoreInterface):
             logger.error("PGVector update_documents_metadata error: %s", exc)
             raise
 
+    def get_all_documents(
+        self,
+        collection_name: str,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """
+        Fetch the full set of documents stored in a PGVector collection.
+
+        Performs a direct SELECT over ``langchain_pg_embedding`` scoped to the
+        collection (via the same engine used by search/delete), applying
+        ``filter_metadata`` with the same JSONB WHERE translation as the rest
+        of this class. No embeddings are generated.
+
+        Args:
+            collection_name: Name of the collection.
+            filter_metadata: Optional PGVector-style metadata filter.
+            limit: Optional cap on the number of rows returned.
+
+        Returns:
+            List of Document objects (page_content + metadata + `_id`).
+        """
+        params: Dict[str, Any] = {"name": collection_name}
+        where_extra = self._build_filter_sql(filter_metadata, params) if filter_metadata else ""
+
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = " LIMIT :limit"
+            params["limit"] = limit
+
+        sql = text(
+            "SELECT e.id, e.document, e.cmetadata FROM langchain_pg_embedding AS e "
+            "WHERE e.collection_id = (SELECT uuid FROM langchain_pg_collection WHERE name = :name)"
+            f"{where_extra}{limit_clause}"
+        )
+
+        try:
+            with self.engine.connect() as connection:
+                rows = connection.execute(sql, params).fetchall()
+                return [
+                    Document(
+                        page_content=row[1] or "",
+                        metadata={**(row[2] or {}), "_id": str(row[0])},
+                    )
+                    for row in rows
+                ]
+        except Exception as exc:
+            logger.error("PGVector get_all_documents error: %s", exc)
+            raise
+
     def get_distinct_metadata_values(
         self,
         collection_name: str,

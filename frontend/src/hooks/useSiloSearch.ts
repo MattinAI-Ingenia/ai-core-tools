@@ -35,6 +35,12 @@ export interface PanelState {
   isSearching: boolean;
   error: string | null;
   clientMs: number | null;
+  searchMethod?: 'dense' | 'bm25' | 'hybrid';
+  strategy?: '' | 'rerank';
+  searchType?: SearchControlsValue['searchType'];
+  scoreThreshold?: number;
+  fetchK?: number;
+  lambdaMult?: number;
 }
 
 export interface SiloSearchState {
@@ -120,7 +126,19 @@ export interface SiloSearchState {
   handleOpenDeleteByFilter: () => Promise<void>;
   handleDeleteByFilterConfirmed: () => Promise<void>;
   handleReindex: (resourceId: string) => Promise<void>;
-  searchPanel: (panelQuery: string, setter: Dispatch<SetStateAction<PanelState>>) => Promise<void>;
+  handleToggleCompareMode: () => void;
+  searchPanel: (
+    panelQuery: string,
+    setter: Dispatch<SetStateAction<PanelState>>,
+    panelOverrides?: {
+      searchMethod?: 'dense' | 'bm25' | 'hybrid';
+      strategy?: '' | 'rerank';
+      searchType?: SearchControlsValue['searchType'];
+      scoreThreshold?: number;
+      fetchK?: number;
+      lambdaMult?: number;
+    },
+  ) => Promise<void>;
   deleteHistoryEntry: (index: number) => void;
   rerunHistoryEntry: (entry: QueryHistoryEntry) => void;
   handleNavigateToAgent: (agentId: number) => void;
@@ -293,6 +311,10 @@ export function useSiloSearch(
           lambdaMult: searchControls.searchType === 'mmr' ? searchControls.lambdaMult : undefined,
           minContentLength: minContentLength ?? undefined,
           maxContentLength: maxContentLength ?? undefined,
+          searchMethod: searchControls.searchMethod,
+          strategy: searchControls.strategy || undefined,
+          topN: searchControls.strategy === 'rerank' ? searchControls.topN : undefined,
+          similarityThreshold: searchControls.strategy === 'rerank' ? (searchControls.similarityThreshold ?? undefined) : undefined,
         },
       );
       const clientMs = Math.round(performance.now() - t0);
@@ -447,8 +469,22 @@ export function useSiloSearch(
   async function searchPanel(
     panelQuery: string,
     setter: Dispatch<SetStateAction<PanelState>>,
+    panelOverrides?: {
+      searchMethod?: 'dense' | 'bm25' | 'hybrid';
+      strategy?: '' | 'rerank';
+      searchType?: SearchControlsValue['searchType'];
+      scoreThreshold?: number;
+      fetchK?: number;
+      lambdaMult?: number;
+    },
   ) {
     if (!appId || !siloId) return;
+    const resolvedSearchMethod = panelOverrides?.searchMethod ?? searchControls.searchMethod;
+    const resolvedStrategy = panelOverrides?.strategy ?? searchControls.strategy;
+    const resolvedSearchType = panelOverrides?.searchType ?? searchControls.searchType;
+    const resolvedScoreThreshold = panelOverrides?.scoreThreshold ?? searchControls.scoreThreshold;
+    const resolvedFetchK = panelOverrides?.fetchK ?? searchControls.fetchK;
+    const resolvedLambdaMult = panelOverrides?.lambdaMult ?? searchControls.lambdaMult;
     setter((p) => ({ ...p, isSearching: true, error: null }));
     try {
       const t0 = performance.now();
@@ -459,12 +495,16 @@ export function useSiloSearch(
         searchControls.limit,
         filterMetadata,
         {
-          searchType: searchControls.searchType,
-          scoreThreshold: searchControls.searchType === 'similarity_score_threshold' ? searchControls.scoreThreshold : undefined,
-          fetchK: searchControls.searchType === 'mmr' ? searchControls.fetchK : undefined,
-          lambdaMult: searchControls.searchType === 'mmr' ? searchControls.lambdaMult : undefined,
+          searchType: resolvedSearchType,
+          scoreThreshold: resolvedSearchType === 'similarity_score_threshold' ? resolvedScoreThreshold : undefined,
+          fetchK: resolvedSearchType === 'mmr' ? resolvedFetchK : undefined,
+          lambdaMult: resolvedSearchType === 'mmr' ? resolvedLambdaMult : undefined,
           minContentLength: minContentLength ?? undefined,
           maxContentLength: maxContentLength ?? undefined,
+          searchMethod: resolvedSearchMethod,
+          strategy: resolvedStrategy || undefined,
+          topN: resolvedStrategy === 'rerank' ? searchControls.topN : undefined,
+          similarityThreshold: resolvedStrategy === 'rerank' ? (searchControls.similarityThreshold ?? undefined) : undefined,
         },
       );
       const clientMs = Math.round(performance.now() - t0);
@@ -472,10 +512,31 @@ export function useSiloSearch(
         ...r,
         id: r.metadata?._id as string | undefined,
       }));
-      setter({ query: panelQuery, results: resultsWithIds, isSearching: false, error: null, clientMs });
+      setter((p) => ({
+        ...p,
+        query: panelQuery,
+        results: resultsWithIds,
+        isSearching: false,
+        error: null,
+        clientMs,
+      }));
     } catch (err) {
       setter((p) => ({ ...p, isSearching: false, error: err instanceof Error ? err.message : 'Search failed' }));
     }
+  }
+
+  // Toggling into compare mode for the first time (both panels still pristine) pre-fills
+  // panel A/B with dense/bm25 respectively and copies the current query, so the user sees
+  // a dense-vs-bm25 comparison immediately instead of two empty panels.
+  function handleToggleCompareMode() {
+    setCompareMode((prev) => {
+      const next = !prev;
+      if (next && panelA.query === '' && panelB.query === '') {
+        setPanelA((p) => ({ ...p, query: searchQuery, searchMethod: 'dense' }));
+        setPanelB((p) => ({ ...p, query: searchQuery, searchMethod: 'bm25' }));
+      }
+      return next;
+    });
   }
 
   function handleNavigateToAgent(agentId: number) {
@@ -566,6 +627,7 @@ export function useSiloSearch(
     handleOpenDeleteByFilter,
     handleDeleteByFilterConfirmed,
     handleReindex,
+    handleToggleCompareMode,
     searchPanel,
     deleteHistoryEntry,
     rerunHistoryEntry,
