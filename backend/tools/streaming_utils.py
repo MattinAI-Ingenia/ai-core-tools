@@ -137,7 +137,7 @@ def get_thinking_message(tool_name: str, is_agent_tool: bool = False) -> str:
 # `SummarizationMiddleware`) from the agent's user-facing tokens. We must
 # suppress these chunks; otherwise the summary text leaks into the chat
 # stream every time the conversation crosses the summarization threshold.
-_INTERNAL_LC_SOURCES: frozenset[str] = frozenset({"summarization"})
+_INTERNAL_LC_SOURCES: frozenset[str] = frozenset({"summarization", "pii"})
 
 
 def _get_lc_source(metadata: Any) -> str | None:

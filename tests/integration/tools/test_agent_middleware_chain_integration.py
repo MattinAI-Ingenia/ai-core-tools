@@ -79,7 +79,7 @@ class TestLLMPIIMiddlewareEndToEnd:
         from tools.middleware.llm_pii import _PIIDetectionResult, _PIIFinding
 
         class _FakeStructuredDetector:
-            async def ainvoke(self, prompt):
+            async def ainvoke(self, prompt, config=None):
                 return _PIIDetectionResult(findings=[_PIIFinding(type="person", value="John Smith")])
 
         class _FakeDetectorLLM:

@@ -91,7 +91,11 @@ class LLMPIIMiddleware(AgentMiddleware):
         if not content or not self.entities:
             return []
         prompt = _DETECTION_PROMPT_TEMPLATE.format(entities=", ".join(self.entities), content=content)
-        result = await self._structured_llm.ainvoke(prompt)
+        # Tag this call as middleware-internal, same convention LangChain's own
+        # SummarizationMiddleware uses, so tools/streaming_utils.py suppresses
+        # it from the user-facing SSE token stream instead of leaking the raw
+        # structured-output JSON into the chat response.
+        result = await self._structured_llm.ainvoke(prompt, config={"metadata": {"lc_source": "pii"}})
         return _build_matches(content, result.findings)
 
     async def _process_content(self, content: str) -> tuple[str, list[PIIMatch]]:

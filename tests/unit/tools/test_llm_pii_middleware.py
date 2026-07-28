@@ -10,17 +10,21 @@ from tools.middleware.llm_pii import LLMPIIMiddleware, _PIIDetectionResult, _PII
 class _FakeStructuredLLM:
     def __init__(self, findings):
         self._findings = findings
+        self.last_config = None
 
-    async def ainvoke(self, prompt):
+    async def ainvoke(self, prompt, config=None):
+        self.last_config = config
         return _PIIDetectionResult(findings=self._findings)
 
 
 class _FakeLLM:
     def __init__(self, findings):
         self._findings = findings
+        self.structured_llm = None
 
     def with_structured_output(self, schema):
-        return _FakeStructuredLLM(self._findings)
+        self.structured_llm = _FakeStructuredLLM(self._findings)
+        return self.structured_llm
 
 
 class _FakeRuntime:
@@ -101,6 +105,21 @@ async def test_apply_to_tool_results_redacts_tool_message():
 
     assert result is not None
     assert "10.0.0.5" not in result["messages"][1].content
+
+
+@pytest.mark.asyncio
+async def test_detector_call_tagged_with_lc_source_pii():
+    # The streaming layer (tools/streaming_utils.py) only suppresses
+    # middleware-internal LLM calls that are tagged via
+    # config={"metadata": {"lc_source": ...}} — untagged calls leak their raw
+    # output into the user-facing SSE token stream. Regression test for that.
+    llm = _FakeLLM([_PIIFinding(type="person", value="John Smith")])
+    mw = LLMPIIMiddleware(llm=llm, entities=["person"], strategy="redact")
+    state = {"messages": [HumanMessage(content="My name is John Smith.")]}
+
+    await mw.abefore_model(state, _FakeRuntime())
+
+    assert llm.structured_llm.last_config == {"metadata": {"lc_source": "pii"}}
 
 
 @pytest.mark.asyncio
