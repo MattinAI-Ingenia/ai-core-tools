@@ -25,6 +25,17 @@ class MiddlewareRepository:
         ).first()
 
     @staticmethod
+    def name_exists(db: Session, app_id: int, name: str, exclude_middleware_id: int = 0) -> bool:
+        """Check whether another middleware in this app already has this name."""
+        query = db.query(Middleware).filter(
+            Middleware.app_id == app_id,
+            Middleware.name == name,
+        )
+        if exclude_middleware_id:
+            query = query.filter(Middleware.middleware_id != exclude_middleware_id)
+        return db.query(query.exists()).scalar()
+
+    @staticmethod
     def create(db: Session, middleware: Middleware) -> Middleware:
         """Create a new middleware"""
         db.add(middleware)

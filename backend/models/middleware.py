@@ -1,5 +1,5 @@
 import enum
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Enum, JSON
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Enum, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from db.database import Base
 from datetime import datetime
@@ -36,6 +36,11 @@ class Middleware(Base):
     app = relationship('App', back_populates='middlewares')
     agent_associations = relationship('AgentMiddleware', back_populates='middleware')
     mcp_associations = relationship('MiddlewareMCP', back_populates='middleware', cascade='all, delete-orphan')
+
+    # Name must be unique per app so agents can't accidentally attach two identically-named middlewares.
+    __table_args__ = (
+        UniqueConstraint('app_id', 'name', name='uq_middleware_app_name'),
+    )
 
     def get_associated_agents(self):
         """Retrieve all agents associated with this Middleware."""

@@ -84,6 +84,9 @@ class MiddlewareService:
             if not middleware:
                 return None
 
+        if MiddlewareRepository.name_exists(db, app_id, data.name, exclude_middleware_id=middleware_id):
+            raise ValueError(f"A middleware named '{data.name}' already exists in this app")
+
         middleware.name = data.name
         middleware.description = data.description
         middleware.config = data.config
