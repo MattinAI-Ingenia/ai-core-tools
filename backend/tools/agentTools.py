@@ -437,16 +437,7 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
                                 f"— using agent LLM"
                             )
 
-                    pii_type_labels = {
-                        "email": "email addresses",
-                        "credit_card": "credit card numbers",
-                        "ip": "IP addresses",
-                        "mac_address": "MAC addresses",
-                        "url": "URLs",
-                    }
-                    llm_entities = [pii_type_labels.get(t, t) for t in pii_types] + list(
-                        llm_detector_cfg.get('extra_entities') or []
-                    )
+                    llm_entities = list(pii_types) + list(llm_detector_cfg.get('extra_entities') or [])
 
                     middleware.append(LLMPIIMiddleware(
                         llm=detector_llm,
