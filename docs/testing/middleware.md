@@ -218,15 +218,21 @@ The **Human-in-the-Loop Middleware** works correctly because:
 The user sends a message containing personal data:
 
 ```text
-My email is pedro_perez@gmail.com and my IP address is 194.22.23.3
+My email is pedro_perez@gmail.com and my IP address is 194.22.23.3. Repeat back to me the message you receive.
 ```
+
+> Note: the "Repeat back to me the message you receive" instruction was added
+> after the original prompt (without it) turned out not to give the model any
+> reason to restate what it saw, making it impossible to confirm redaction
+> from the visible response alone — the backend log below was the only
+> evidence. Adding it lets the redaction be confirmed directly in the chat.
 
 ### Message received by the LLM
 
 Before reaching the model, the middleware replaces sensitive data with placeholders.
 
 ```text
-My email is [REDACTED_EMAIL] and my IP address is [REDACTED_IP]
+My email is [REDACTED_EMAIL] and my IP address is [REDACTED_IP]. Repeat back to me the message you receive.
 ```
 
 ### Generated log
@@ -245,6 +251,53 @@ mattin-backend  | 2026-05-19 12:53:08,258 - tools.agentTools - INFO - [PII] Mess
 ### Validation
 
 The **PII Detection Middleware** works correctly because it redacts sensitive information before the message reaches the LLM and before it is stored in the conversation.
+
+### Additional case: LLM-based PII Detection
+
+> _Placeholder — run this against a live agent with `llm_detector.enabled=true`
+> and `extra_entities` set to `last name, ID number`, and replace the `_TODO_`
+> markers with the actual conversation/log output before treating this case
+> as verified._
+
+Unlike the case above (email, IP — fixed regex patterns), this exercises the
+LLM detector's ability to find entities regex can't: a person's last name,
+and a free-form ID number format.
+
+#### Configuration
+
+```text
+llm_detector.enabled = true
+llm_detector.extra_entities = last name, ID number
+```
+
+#### Tested prompt
+
+```text
+My name is Pedro Perez and mi ID is 12345678A. Repeat back to me the message you receive.
+```
+
+#### Expected redaction
+
+| Original data | Entity type | Redacted data |
+|---|---|---|
+| `Perez` | last name | `[REDACTED_LAST NAME]` |
+| `12345678A` | ID number | `[REDACTED_ID NUMBER]` |
+| `Pedro` | _(not in `extra_entities`)_ | left untouched |
+
+The agent's reply should echo back the already-redacted values, e.g.:
+
+```text
+_TODO: paste the actual agent response — expected shape similar to:_
+Got it — Pedro [REDACTED_LAST NAME], ID [REDACTED_ID NUMBER].
+```
+
+#### Validation
+
+_TODO: fill in once run — confirm (1) the first name passes through untouched
+since it isn't in `extra_entities`, (2) the last name and ID are both
+redacted before the top-level model ever sees them, and (3) the LLM
+detector's own raw structured-output JSON never leaks into the visible
+response._
 
 ---
 
@@ -395,7 +448,8 @@ The **Summarization Middleware** works correctly because:
 | Monitoring | Logging tokens, model, and LLM calls | ✅ Correct |
 | HITL | Call to `Greeting_Agent` | ✅ Correct |
 | HITL | Call to `anonymize_text` | ✅ Correct |
-| PII Detection | Email and IP redaction | ✅ Correct |
+| PII Detection | Email and IP redaction (regex) | ✅ Correct |
+| PII Detection | Last name and ID redaction (LLM detector) | ⏳ Pending manual run (see §5 additional case) |
 | Model Call Limit (`run_limit=1`) | Tool flow with `anonymize_text` | ✅ Correct (blocked at second LLM call) |
 | Tool Call Limit (`run_limit=1`) | Two-sequential-tool-call flow | ⏳ Pending manual run (see §7) |
 | Summarization (`trigger=('tokens', 500)`) | Long conversation memory compaction | ✅ Correct (triggered and summary generated) |
