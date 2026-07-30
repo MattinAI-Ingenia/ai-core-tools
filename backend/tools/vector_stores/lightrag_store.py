@@ -619,6 +619,19 @@ class LightRAGStore(VectorStoreInterface):
         # Forward the silo's chunking/source-id-cap config to LightRAG.
         # Omit each key when unset so LightRAG keeps its own defaults.
         extra_kwargs: Dict[str, Any] = {}
+
+        # Force JSON-structured extraction unconditionally — LightRAG's own
+        # default (env var ENTITY_EXTRACTION_USE_JSON, false unless set) causes
+        # silent, severe data loss with the delimited-text format on several
+        # LLMs (open-source and cloud alike): runaway/repetitive generation
+        # that never reaches the completion marker, and record-prefix/newline
+        # collapse on repetitive content that the parser can't recover from.
+        # JSON mode can't have either failure by construction (schema-validated
+        # objects, not free text). See docs/testing/lightrag_extraction_benchmark_corpus.md.
+        # Passed as a kwarg (not the env var) so no deployment can silently
+        # regress to the broken default.
+        extra_kwargs["entity_extraction_use_json"] = True
+
         if self._chunk_token_size:
             extra_kwargs["chunk_token_size"] = self._chunk_token_size
         if self._chunk_overlap_token_size is not None:

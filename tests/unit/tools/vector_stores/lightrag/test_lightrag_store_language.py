@@ -80,6 +80,17 @@ def test_advanced_settings_forwarded_to_lightrag_constructor_when_configured():
     assert call_kwargs["max_source_ids_per_relation"] == 7
 
 
+def test_entity_extraction_use_json_is_always_forced_on(monkeypatch):
+    """Delimited-text mode causes silent data loss (see
+    docs/testing/lightrag_extraction_benchmark_corpus.md) — this must stay on
+    regardless of the ENTITY_EXTRACTION_USE_JSON env var LightRAG itself reads.
+    """
+    monkeypatch.delenv("ENTITY_EXTRACTION_USE_JSON", raising=False)
+    store = _build_store()
+    _, mock_lightrag_cls = _patched_build_rag(store)
+    assert mock_lightrag_cls.call_args.kwargs["entity_extraction_use_json"] is True
+
+
 def test_advanced_settings_fall_back_to_global_default_when_not_configured():
     import config
     store = _build_store()

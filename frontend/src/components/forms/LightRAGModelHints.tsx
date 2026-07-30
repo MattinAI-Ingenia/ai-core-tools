@@ -3,6 +3,10 @@ import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 
 // Latest recommended models per provider, per role. Updated June 2026.
 // ponytail: update inline as providers ship.
+// Open-source picks are backed by a real extraction/keyword benchmark on
+// this repo's own LightRAG prompts — see
+// docs/testing/lightrag_extraction_benchmark_corpus.md and
+// docs/dependencies/lightrag.md#911-recomendación-de-modelos-por-rol.
 const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>> = {
   extract: [
     { provider: 'OpenAI', model: 'GPT-5.4 mini' },

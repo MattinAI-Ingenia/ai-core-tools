@@ -427,6 +427,61 @@ reusa `create_llm_from_service` (`tools/aiServiceTools.py`) con
 `_INTERNAL_LC_SOURCES` no filtre el JSON de keywords al stream de chat
 (`adapters.py:200-201`).
 
+#### 9.1.1 Recomendación de modelos por rol
+
+Benchmark comparativo (cloud vs. open-source, `extract` y `keyword`, corpus
+de 4 manuales completos + benchmark de calidad): ver
+[`docs/testing/lightrag_extraction_benchmark_corpus.md`](../testing/lightrag_extraction_benchmark_corpus.md).
+
+**Dónde lo ve el usuario**: al crear/editar un Silo o Repository, el
+desplegable de `extract_service`/`keywords_service` muestra estas
+recomendaciones directamente en el formulario — componente
+`LightRAGModelHints` (`frontend/src/components/forms/LightRAGModelHints.tsx`,
+usado desde `SiloForm.tsx` y `RepositoryFormPage.tsx`), fila "Open-source" de
+cada rol. Este benchmark es la evidencia que respalda esas dos filas
+concretas; el resto de filas (OpenAI, Anthropic, Mistral, Google) no se ha
+verificado con este mismo método.
+
+Recomendación resultante, en producción vía `LIGHTRAG_EXTRACT_MODEL` /
+`LIGHTRAG_KEYWORD_MODEL` (o el `AIService` del silo correspondiente):
+
+- **`extract`**: **Qwen3-30B-A3B-Instruct** — el más exhaustivo de los
+  probados sobre las 61 chunks del corpus, sin diferencias de exactitud
+  factual frente a alternativas cloud. Requiere `--json` (ver 9.1.2) sin
+  excepción — en modo delimitado es directamente inutilizable. Tiene
+  variación real entre pasadas idénticas (mismo prompt, `temperature=0`);
+  no tratar sus totales como una cifra fija si se usa para dimensionar un
+  SLA de indexación.
+- **`keyword`**: **Qwen3-4B-Instruct** — único modelo sin ningún defecto en
+  el benchmark de 7 preguntas (frente a la alucinación puntual de
+  Qwen3-30B-A3B y la verbosidad sistemática de gpt-5.4-nano), con respuestas
+  idénticas a las de Qwen3-30B-A3B en varias preguntas — el modelo mayor no
+  aporta calidad adicional en esta tarea concreta. Con solo 4B parámetros
+  cabe holgadamente en la misma GPU que el modelo de `extract`, a diferencia
+  de alternativas de 24B+ que compiten por VRAM.
+
+Ambos se sirven con vLLM (`--served-model-name` **debe** coincidir
+exactamente con el valor de `LIGHTRAG_EXTRACT_MODEL`/`LIGHTRAG_KEYWORD_MODEL`
+— usar el nombre servido, no la ruta de HuggingFace del repo del modelo;
+confundir ambos da un 404 silencioso solo detectable en tiempo de ejecución).
+
+#### 9.1.2 `entity_extraction_use_json`: forzado en código, no en `.env`
+
+El repo **fuerza `entity_extraction_use_json=True`** como kwarg explícito al
+construir `LightRAG(...)` en `LightRAGStore._build_rag`
+(`lightrag_store.py:621-630`), **independientemente** de la variable de
+entorno `ENTITY_EXTRACTION_USE_JSON` que lee el propio default de LightRAG
+(`false` si no está puesta). Motivo: en modo texto delimitado (el default
+nativo de LightRAG) se documentaron dos fallos de pérdida silenciosa de
+datos — Qwen3-30B-A3B generando cientos de relaciones inventadas sin
+terminar nunca, y gpt-5.4-nano colapsando el formato de registro en contenido
+repetitivo, perdiendo entidades y relaciones reales sin ningún error visible
+(detalle completo en el benchmark enlazado arriba). El modo JSON, al validar
+la estructura por esquema, no puede tener ninguno de los dos fallos por
+construcción. Al pasarlo como kwarg de constructor en vez de depender de la
+variable de entorno, ningún despliegue (dev, cliente, CI) puede regresar
+accidentalmente al modo roto por un `.env` incompleto.
+
 ### 9.2 Embeddings
 
 `build_embedding_func` (`adapters.py:302`) construye un `EmbeddingFunc`
