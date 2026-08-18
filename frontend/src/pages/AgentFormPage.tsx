@@ -633,7 +633,7 @@ function AgentFormPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                    Nombre *
+                    Name *
                   </label>
                   <input
                     type="text"
@@ -642,7 +642,7 @@ function AgentFormPage() {
                     onChange={(e) => handleInputChange('name', e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                     required
-                    placeholder="Nombre..."
+                    placeholder="Name..."
                   />
                 </div>
 
@@ -663,7 +663,7 @@ function AgentFormPage() {
 
                 <div className="md:col-span-2">
                   <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
-                    Descripción
+                    Description
                   </label>
                   <input
                     type="text"
@@ -671,7 +671,7 @@ function AgentFormPage() {
                     value={formData.description}
                     onChange={(e) => handleInputChange('description', e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    placeholder="Descripción..."
+                    placeholder="Description..."
                   />
                 </div>
               </div>
@@ -727,7 +727,7 @@ function AgentFormPage() {
                       </div>
                       <div className="flex-1">
                         <h3 className="text-lg font-semibold text-gray-900">Memory Management</h3>
-                        <p className="text-sm text-gray-600 mt-1">Configura la estrategia de gestión de memoria del agente</p>
+                        <p className="text-sm text-gray-600 mt-1">Configure the agent's memory management strategy</p>
                       </div>
                     </div>
 
@@ -735,10 +735,10 @@ function AgentFormPage() {
                       <div className="flex items-start">
                         <Info className="w-5 h-5 text-indigo-500 mr-3 shrink-0" />
                         <div>
-                          <p className="text-sm text-indigo-800 font-medium">Estrategia Híbrida Automática</p>
+                          <p className="text-sm text-indigo-800 font-medium">Automatic Hybrid Strategy</p>
                           <p className="text-xs text-indigo-700 mt-1">
-                            El agente aplica automáticamente una estrategia híbrida que elimina mensajes de herramientas, 
-                            recorta el historial y gestiona los límites de tokens para optimizar el rendimiento y los costos.
+                            The agent automatically applies a hybrid strategy that removes tool messages, trims the history,
+                            and manages token limits to optimize performance and costs.
                           </p>
                         </div>
                       </div>
@@ -747,7 +747,7 @@ function AgentFormPage() {
                     <div className="space-y-6">
                       <div>
                         <label htmlFor="memory_max_messages" className="block text-sm font-medium text-gray-700 mb-2">
-                          Máximo de Mensajes
+                          Maximum Messages
                         </label>
                         <input
                           type="number"
@@ -759,13 +759,13 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número máximo de mensajes a mantener en el historial de conversación (recomendado: 20)
+                          Maximum number of messages to keep in the conversation history (recommended: 20)
                         </p>
                       </div>
 
                       <div>
                         <label htmlFor="memory_max_tokens" className="block text-sm font-medium text-gray-700 mb-2">
-                          Límite de Tokens
+                          Token Limit
                         </label>
                         <input
                           type="number"
@@ -778,13 +778,13 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número máximo de tokens para el historial de conversación (recomendado: 4000)
+                          Maximum number of tokens for the conversation history (recommended: 4000)
                         </p>
                       </div>
 
                       <div>
                         <label htmlFor="memory_summarize_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-                          Umbral de Resumen
+                          Summarization Threshold
                         </label>
                         <input
                           type="number"
@@ -796,16 +796,16 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número de mensajes antiguos a partir del cual se considera resumir (futura implementación, recomendado: 10)
+                          Number of old messages at which summarization is considered (future implementation, recommended: 10)
                         </p>
                       </div>
                     </div>
 
                     <div className="mt-6 p-4 bg-gray-50 rounded-xl">
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Configuración Actual:</h4>
+                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Current Configuration:</h4>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
                         <div>
-                          <span className="text-gray-600">Mensajes:</span>
+                          <span className="text-gray-600">Messages:</span>
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_max_messages}</span>
                         </div>
                         <div>
@@ -813,7 +813,7 @@ function AgentFormPage() {
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_max_tokens.toLocaleString()}</span>
                         </div>
                         <div>
-                          <span className="text-gray-600">Umbral:</span>
+                          <span className="text-gray-600">Threshold:</span>
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_summarize_threshold}</span>
                         </div>
                       </div>
