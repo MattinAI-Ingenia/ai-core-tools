@@ -1303,6 +1303,9 @@ class SiloService:
                 base_metadata["folder_path"] = ""
                 base_metadata["ref"] = os.path.join(str(resource_with_relations.repository_id), resource_with_relations.uri)
 
+            if resource_with_relations.extra_metadata:
+                base_metadata = {**resource_with_relations.extra_metadata, **base_metadata}
+
             # LightRAG chunks internally by token size, so feed it whole
             # pages/files; other backends still need pre-split chunks.
             _is_lightrag = getattr(resource_with_relations.repository.silo, 'vector_db_type', None) == 'LIGHTRAG'

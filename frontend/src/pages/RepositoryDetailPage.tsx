@@ -10,7 +10,12 @@ import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
 import IngestionProgressBar from '../components/ui/IngestionProgressBar';
+import CostEstimateModal, { formatEstimateValue } from '../components/ui/CostEstimateModal';
 import ResourceMetrics from '../components/repository/ResourceMetrics';
+import { CsvImportStepper } from '../components/import/CsvImportStepper';
+import { CsvImportBanner } from '../components/import/CsvImportBanner';
+import { CsvImportReviewModal } from '../components/import/CsvImportReviewModal';
+import { useCsvImportPolling } from '../hooks/useCsvImportPolling';
 
 interface Resource {
   resource_id: number;
@@ -50,7 +55,7 @@ interface RepositoryDetail {
   video_ai_service_id?: number | null;
 }
 
-interface CostEstimationResult {
+export interface CostEstimationResult {
   total_chunks: number;
   chunk_token_size: number;
   estimated_llm_calls: number;
@@ -121,28 +126,6 @@ function UploadButtonIcon({ uploading, indexing }: { readonly uploading: boolean
   return <FolderOpen className="w-4 h-4" />;
 }
 
-function formatEstimateValue(value: number | null | undefined) {
-  if (value == null) return 'Unavailable';
-  return new Intl.NumberFormat().format(value);
-}
-
-// Round a predicted estimate up to 2 significant figures so it reads as a clean
-// upper bound (e.g. 22,448 → 23,000) instead of false precision. Rounds up so
-// the displayed value never undershoots the computed estimate.
-function roundEstimateUp(value: number | null | undefined): number | null | undefined {
-  if (value == null || !Number.isFinite(value) || value <= 0) return value;
-  const magnitude = 10 ** (Math.floor(Math.log10(value)) - 1);
-  return Math.ceil(value / magnitude) * magnitude;
-}
-
-function formatSeconds(seconds: number | null | undefined): string {
-  if (seconds == null) return '?';
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.round(seconds % 60);
-  if (mins > 0) return `${mins}m ${secs}s`;
-  return `${secs}s`;
-}
-
 function getAllFolderPaths(
   folders: Array<{ folder_id: number; name: string; subfolders?: Array<{ folder_id: number; name: string; subfolders?: unknown[] }> }>,
   parentPath: string = ''
@@ -178,13 +161,21 @@ const RepositoryDetailPage: React.FC = () => {
   const [uploadEstimate, setUploadEstimate] = useState<CostEstimationResult | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [resourceToDelete, setResourceToDelete] = useState<Resource | null>(null);
+  const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [resourceToMove, setResourceToMove] = useState<Resource | null>(null);
   const [moveToFolderId, setMoveToFolderId] = useState<number | null>(null);
+  const [showCsvImportModal, setShowCsvImportModal] = useState(false);
+  const [showImportReviewModal, setShowImportReviewModal] = useState(false);
+  const { job: activeImportJob, setJob: setActiveImportJob } = useCsvImportPolling(
+    Number.parseInt(appId!), Number.parseInt(repositoryId!),
+  );
 
   // Ingestion progress tracking
   const [ingestionSessionId, setIngestionSessionId] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
+  const hasCheckedInitialIngestion = useRef(false);
 
   const [reindexingId, setReindexingId] = useState<number | null>(null);
   const [reindexNotice, setReindexNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -232,14 +223,18 @@ const RepositoryDetailPage: React.FC = () => {
     }
   }, [appId, repositoryId]);
 
-  // On page load (and when repository data refreshes), query the backend to
-  // check whether an indexing session is already running.  This covers:
-  // 1. LightRAG / any vector store – same IngestionProgressManager path.
-  // 2. The user navigating to the page while a background index is in progress.
-  // When a session is found we set ingestionSessionId so the progress bar picks
-  // it up via SSE; we also set isIndexing so the upload button is disabled.
+  // On page load only, query the backend to check whether an indexing session
+  // is already running (e.g. the user navigating to the page while a
+  // background index started elsewhere is in progress). Actions started from
+  // this page (manual upload, CSV import confirm) already know their own
+  // session_id and call setIngestionSessionId directly — this effect must NOT
+  // re-run when that local state changes, or it races the background thread
+  // that registers the session (IngestionProgressManager.create_session runs
+  // after the thread starts, not before this component receives the id) and
+  // can wrongly null out a session we just started.
   useEffect(() => {
-    if (!repository || !appId || !repositoryId) return;
+    if (!repository || !appId || !repositoryId || hasCheckedInitialIngestion.current) return;
+    hasCheckedInitialIngestion.current = true;
 
     let mounted = true;
     (async () => {
@@ -249,12 +244,9 @@ const RepositoryDetailPage: React.FC = () => {
           Number.parseInt(repositoryId!),
         );
         if (!mounted) return;
-        setIsIndexing(status.is_indexing);
-        if (status.is_indexing && status.active_session_id && status.active_session_id !== ingestionSessionId) {
+        if (status.is_indexing && status.active_session_id) {
+          setIsIndexing(true);
           setIngestionSessionId(status.active_session_id);
-        }
-        if (!status.is_indexing) {
-          setIngestionSessionId(null);
         }
       } catch (err) {
         console.error('Error fetching ingestion status:', err);
@@ -264,7 +256,7 @@ const RepositoryDetailPage: React.FC = () => {
     return () => {
       mounted = false;
     };
-  }, [repository, ingestionSessionId, appId, repositoryId]);
+  }, [repository, appId, repositoryId]);
 
   // Polling fallback for resource status updates.  When any resource is still
   // pending or indexing we refresh the repository data every 3 s so that
@@ -708,6 +700,20 @@ const RepositoryDetailPage: React.FC = () => {
     }
   };
 
+  const confirmDeleteAllResources = async () => {
+    setDeletingAll(true);
+    try {
+      await apiService.deleteAllResources(Number.parseInt(appId!), Number.parseInt(repositoryId!));
+      await loadRepository();
+      setShowDeleteAllModal(false);
+    } catch (err) {
+      console.error('Error deleting all resources:', err);
+      setError('Failed to delete all files');
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   const confirmMoveResource = async () => {
     if (!resourceToMove) return;
 
@@ -882,12 +888,53 @@ const RepositoryDetailPage: React.FC = () => {
               >
                 <Video className="w-4 h-4" /> Upload Media
               </button>
+
+              <button
+                onClick={() => setShowCsvImportModal(true)}
+                disabled={uploading}
+                className="bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
+              >
+                Import from CSV
+              </button>
+
+              {!isLightRAG && (
+                <button
+                  onClick={() => setShowDeleteAllModal(true)}
+                  disabled={uploading || repository.resources.length === 0}
+                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  <Trash2 className="w-4 h-4" /> Delete All Files
+                </button>
+              )}
             </>
           )}
         </div>
       </div>
 
       {!canEdit && <ReadOnlyBanner userRole={userRole} minRole={AppRole.EDITOR} />}
+
+      <CsvImportStepper
+        appId={Number.parseInt(appId!)}
+        repositoryId={Number.parseInt(repositoryId!)}
+        isOpen={showCsvImportModal}
+        onClose={() => setShowCsvImportModal(false)}
+        onImportStarted={(job) => setActiveImportJob(job)}
+      />
+      {activeImportJob && (
+        <CsvImportBanner job={activeImportJob} onReview={() => setShowImportReviewModal(true)} />
+      )}
+      {activeImportJob && (
+        <CsvImportReviewModal
+          appId={Number.parseInt(appId!)}
+          repositoryId={Number.parseInt(repositoryId!)}
+          isLightRagRepository={isLightRAG}
+          job={activeImportJob}
+          isOpen={showImportReviewModal}
+          onClose={() => setShowImportReviewModal(false)}
+          onJobUpdated={(updated) => { setActiveImportJob(updated); if (!updated) setShowImportReviewModal(false); }}
+          onIngestionStarted={(sessionId) => { setIngestionSessionId(sessionId); setIsIndexing(true); }}
+        />
+      )}
 
       {/* Hidden file input */}
       <input
@@ -1157,130 +1204,21 @@ const RepositoryDetailPage: React.FC = () => {
 
       </div>
 
-      <Modal
+      <CostEstimateModal
         isOpen={showEstimateModal}
         onClose={resetPendingUploadEstimate}
-        title="Confirm LightRAG Ingestion"
-        size="large"
-      >
-        <div className="space-y-5">
-          <div>
-            <p className="text-gray-700">
-              Uploading these files will immediately start LightRAG indexing. Review the estimated ingestion cost before continuing.
-            </p>
-            <p className="text-sm text-gray-500 mt-2">
-              {pendingUploadFiles.length} file(s) selected
-              {selectedFolderPath ? ` for ${selectedFolderPath}` : ' for repository root'}.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Chunks</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(roundEstimateUp(uploadEstimate?.total_chunks))}</p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Chunk Size</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(uploadEstimate?.chunk_token_size)} tokens</p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">LLM Tokens</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">
-                {formatEstimateValue(
-                  roundEstimateUp(
-                    (uploadEstimate?.estimated_input_tokens ?? 0) + (uploadEstimate?.estimated_output_tokens ?? 0)
-                  )
-                )}
-              </p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Tokens</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">
-                {formatEstimateValue(roundEstimateUp(uploadEstimate?.estimated_embedding_tokens))}
-              </p>
-            </div>
-          </div>
-
-          <p className="text-xs text-gray-500">
-            These are estimates. Actual cost depends on the number of entities extracted per chunk and may vary.
-          </p>
-
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-            <p>
-              Indexing model: <span className="font-medium">{uploadEstimate?.model_name || 'Unavailable'}</span>
-            </p>
-            <p className="mt-1">
-              Embedding model: <span className="font-medium">{uploadEstimate?.embedding_model_name || 'Unavailable'}</span>
-            </p>
-            {(uploadEstimate?.estimated_indexing_time_min != null || uploadEstimate?.estimated_indexing_time_avg != null) && (
-              <p className="mt-1">
-                Estimated indexing time:{' '}
-                <span className="font-medium">
-                  {uploadEstimate?.estimated_indexing_time_min != null
-                    ? `${formatSeconds(uploadEstimate.estimated_indexing_time_min)} – ${formatSeconds(uploadEstimate.estimated_indexing_time_max)}`
-                    : formatSeconds(uploadEstimate?.estimated_indexing_time_avg)}
-                </span>
-              </p>
-            )}
-            {(uploadEstimate?.estimated_cost_min != null || uploadEstimate?.estimated_cost_max != null) ? (
-              <p className="mt-1">
-                Estimated cost (LLM + embeddings):{' '}
-                <span className="font-medium">
-                  {uploadEstimate?.estimated_cost_min != null && uploadEstimate?.estimated_cost_max != null
-                    ? `${uploadEstimate.estimated_cost_min} – ${uploadEstimate.estimated_cost_max} ${uploadEstimate?.currency ?? 'USD'}`
-                    : `${uploadEstimate?.estimated_cost_min ?? uploadEstimate?.estimated_cost_max} ${uploadEstimate?.currency ?? 'USD'}`}
-                </span>
-              </p>
-            ) : (
-              <p className="mt-1">
-                Estimated cost: <span className="font-medium">Unavailable</span>
-              </p>
-            )}
-          </div>
-
-          <div className="sticky top-0 z-10 -mx-6 bg-white/95 px-6 py-3 backdrop-blur-sm border-y border-gray-200">
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={resetPendingUploadEstimate}
-                disabled={uploading}
-                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmEstimatedUpload}
-                disabled={uploading}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
-              >
-                {uploading ? 'Uploading...' : 'Confirm ingestion'}
-              </button>
-            </div>
-          </div>
-
-          {uploadEstimate?.warnings?.length ? (
-            <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
-              <h4 className="text-sm font-medium text-yellow-900">Warnings</h4>
-              <ul className="mt-2 space-y-1 text-sm text-yellow-800 list-disc list-inside">
-                {uploadEstimate.warnings.map((warning) => (
-                  <li key={warning}>{warning}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-
-          <div>
-            <h4 className="text-sm font-medium text-gray-900">Files to upload</h4>
-            <div className="mt-2 max-h-32 overflow-y-auto rounded-lg border border-gray-200">
-              {pendingUploadFiles.map((file) => (
-                <div key={`${file.name}-${file.size}-${file.lastModified}`} className="flex items-center justify-between border-b border-gray-100 px-3 py-2 text-sm last:border-b-0">
-                  <span className="truncate pr-4 text-gray-700">{file.name}</span>
-                  <span className="shrink-0 text-gray-500">{formatEstimateValue(file.size)} bytes</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </Modal>
+        onConfirm={confirmEstimatedUpload}
+        confirming={uploading}
+        confirmingLabel="Uploading..."
+        estimate={uploadEstimate}
+        description={`${pendingUploadFiles.length} file(s) selected${selectedFolderPath ? ` for ${selectedFolderPath}` : ' for repository root'}.`}
+        itemsHeading="Files to upload"
+        items={pendingUploadFiles.map((file) => ({
+          key: `${file.name}-${file.size}-${file.lastModified}`,
+          label: file.name,
+          meta: `${formatEstimateValue(file.size)} bytes`,
+        }))}
+      />
 
       {/* Delete Confirmation Modal */}
       <Modal
@@ -1310,6 +1248,36 @@ const RepositoryDetailPage: React.FC = () => {
               className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
             >
               Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete All Files Confirmation Modal */}
+      <Modal
+        isOpen={showDeleteAllModal}
+        onClose={() => setShowDeleteAllModal(false)}
+        title="Delete All Files"
+      >
+        <div className="p-6">
+          <p className="text-gray-700 mb-6">
+            Are you sure you want to delete all {repository.resources.length} files in this repository?
+            This action cannot be undone.
+          </p>
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setShowDeleteAllModal(false)}
+              disabled={deletingAll}
+              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmDeleteAllResources}
+              disabled={deletingAll}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50"
+            >
+              {deletingAll ? 'Deleting…' : 'Delete All'}
             </button>
           </div>
         </div>

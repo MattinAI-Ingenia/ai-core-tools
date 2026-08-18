@@ -1,0 +1,8 @@
+link,title,category,department
+https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf,Dummy Test Document,QA,Engineering
+https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf,Dummy Test Document,QA,Engineering
+https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf,Dummy Test Document v2,QA,Legal
+https://unec.edu.az/application/uploads/2014/12/pdf-sample.pdf,Sample PDF,Reference,Operations
+https://raw.githubusercontent.com/py-pdf/sample-files/main/001-trivial/minimal-document.pdf,Minimal Document,Reference,Operations
+https://esto-no-existe-123456.com/documento-inexistente.pdf,Broken Link Test,QA,Engineering
+,No Link Test,QA,Engineering

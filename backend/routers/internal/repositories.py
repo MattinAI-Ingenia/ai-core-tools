@@ -27,6 +27,13 @@ from routers.controls.role_authorization import require_min_role, AppRole
 from repositories.media_repository import MediaRepository
 from utils.error_handlers import ValidationError
 from schemas.silo_schemas import CostEstimationResponseSchema
+from services.import_job_service import ImportJobService, ConflictError
+from services.import_job_download import download_one_row
+from services.import_job_confirm import confirm_rows, estimate_rows
+from services.import_job_discard import discard_rows
+from schemas.import_job_schemas import (
+    CsvPreviewResponseSchema, ImportJobResponseSchema, ConfirmDiscardRowsSchema, ConfirmRowsResponseSchema,
+)
 
 # Import database dependency
 from db.database import get_db
@@ -420,6 +427,179 @@ async def estimate_upload_resources(
                 pass
 
 
+# ==================== CSV IMPORT ====================
+
+@repositories_router.post("/{repository_id}/csv-imports/preview",
+                         summary="Preview CSV headers for import",
+                         tags=["CSV Import"],
+                         response_model=CsvPreviewResponseSchema)
+async def preview_csv_import(
+    app_id: int,
+    repository_id: int,
+    file: Annotated[UploadFile, File(...)],
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    headers = ImportJobService.preview_headers(file.file)
+    return CsvPreviewResponseSchema(headers=headers)
+
+
+@repositories_router.post("/{repository_id}/csv-imports",
+                         summary="Start a CSV → PDF import",
+                         tags=["CSV Import"],
+                         response_model=ImportJobResponseSchema,
+                         status_code=status.HTTP_202_ACCEPTED)
+async def create_csv_import(
+    app_id: int,
+    repository_id: int,
+    file: Annotated[UploadFile, File(...)],
+    link_column: Annotated[str, Form(...)],
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    try:
+        job = ImportJobService.create_job(repository_id, file.file, link_column, db, source_filename=file.filename)
+    except ConflictError as e:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"message": "An import is already in progress for this repository", "job_id": e.job_id},
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return _import_job_response(job.id, db)
+
+
+@repositories_router.get("/{repository_id}/csv-imports/active",
+                        summary="Get the active CSV import job, if any",
+                        tags=["CSV Import"],
+                        response_model=Optional[ImportJobResponseSchema])
+async def get_active_csv_import(
+    app_id: int,
+    repository_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    job = ImportJobService.get_active_job(repository_id, db)
+    if not job:
+        return None
+    return _import_job_response(job.id, db)
+
+
+@repositories_router.get("/{repository_id}/csv-imports/{import_job_id}",
+                        summary="Get a CSV import job with its rows",
+                        tags=["CSV Import"],
+                        response_model=ImportJobResponseSchema)
+async def get_csv_import(
+    app_id: int,
+    repository_id: int,
+    import_job_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    result = _import_job_response(import_job_id, db)
+    if not result:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Import job not found")
+    return result
+
+
+@repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/rows/{row_id}/retry",
+                         summary="Retry a failed CSV import row",
+                         tags=["CSV Import"],
+                         response_model=ImportJobResponseSchema)
+async def retry_csv_import_row(
+    app_id: int,
+    repository_id: int,
+    import_job_id: int,
+    row_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    await download_one_row(row_id)
+    result = _import_job_response(import_job_id, db)
+    if not result:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Import job not found")
+    return result
+
+
+@repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/estimate",
+                         summary="Estimate LightRAG indexing cost for selected CSV import rows",
+                         tags=["CSV Import"],
+                         response_model=CostEstimationResponseSchema)
+async def estimate_csv_import_rows(
+    app_id: int,
+    repository_id: int,
+    import_job_id: int,
+    body: ConfirmDiscardRowsSchema,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    try:
+        result = estimate_rows(import_job_id, body.row_ids, db)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return CostEstimationResponseSchema(**result)
+
+
+@repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/confirm",
+                         summary="Confirm selected CSV import rows into Resources",
+                         tags=["CSV Import"],
+                         response_model=ConfirmRowsResponseSchema)
+async def confirm_csv_import_rows(
+    app_id: int,
+    repository_id: int,
+    import_job_id: int,
+    body: ConfirmDiscardRowsSchema,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    result = confirm_rows(import_job_id, body.row_ids, db)
+    return ConfirmRowsResponseSchema(**result)
+
+
+@repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/discard",
+                         summary="Discard selected CSV import rows",
+                         tags=["CSV Import"])
+async def discard_csv_import_rows(
+    app_id: int,
+    repository_id: int,
+    import_job_id: int,
+    body: ConfirmDiscardRowsSchema,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    _validate_repository_app_ownership(repository_id, app_id, db)
+    discard_rows(import_job_id, body.row_ids, db)
+    return {"success": True}
+
+
+def _import_job_response(import_job_id: int, db: Session) -> Optional[ImportJobResponseSchema]:
+    data = ImportJobService.get_job_with_counts(import_job_id, db)
+    if not data:
+        return None
+    job = data['job']
+    return ImportJobResponseSchema(
+        id=job.id, repository_id=job.repository_id, status=job.status.value,
+        source_filename=job.source_filename, link_column=job.link_column,
+        created_at=job.created_at, last_activity_at=job.last_activity_at,
+        rows=data['rows'], counts=data['counts'],
+    )
+
+
 @repositories_router.post("/{repository_id}/resources/{resource_id}/move",
                          summary="Move resource to different folder",
                          tags=["Resources"])
@@ -476,6 +656,33 @@ async def delete_resource(
         db=db
     )
     
+    return result
+
+
+@repositories_router.delete("/{repository_id}/resources",
+                           summary="Delete all resources in a repository",
+                           tags=["Resources"])
+async def delete_all_resources(
+    app_id: int,
+    repository_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    """
+    Delete every resource (file) in a repository. The repository itself is kept.
+    """
+    user_id = int(auth_context.identity.id)
+
+    logger.info(f"Delete all resources endpoint called - app_id: {app_id}, repository_id: {repository_id}, user_id: {user_id}")
+
+    _validate_repository_app_ownership(repository_id, app_id, db)
+
+    result = ResourceService.delete_all_resources_from_repository(
+        repository_id=repository_id,
+        db=db
+    )
+
     return result
 
 

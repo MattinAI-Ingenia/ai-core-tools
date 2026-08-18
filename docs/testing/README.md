@@ -137,6 +137,7 @@ Read it bottom-up: the assertion error tells you what was different from what yo
 - [Writing Tests](writing-tests.md) — how to add new unit and integration tests
 - [Fixtures Reference](fixtures-reference.md) — all the shared helpers in `conftest.py`
 - [CI/CD](ci.md) — how tests run automatically on GitHub Actions
+- [CSV → PDF Import Manual QA](csv-pdf-import-manual-qa.md) — browser checklist for the CSV import feature
 
 ---
 

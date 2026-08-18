@@ -184,7 +184,7 @@ class ResourceService:
             return os.path.join(REPO_BASE_FOLDER, str(resource.repository_id), resource.uri)
     
     @staticmethod
-    def create_multiple_resources(files: List, repository_id: int, db: Session, custom_names: dict = None, folder_id: Optional[int] = None) -> Tuple[List[Resource], List[dict]]:
+    def create_multiple_resources(files: List, repository_id: int, db: Session, custom_names: dict = None, folder_id: Optional[int] = None, extra_metadata: dict = None) -> Tuple[List[Resource], List[dict]]:
         """
         Create multiple resources from uploaded files
         
@@ -206,7 +206,9 @@ class ResourceService:
         
         if custom_names is None:
             custom_names = {}
-        
+        if extra_metadata is None:
+            extra_metadata = {}
+
         # Validate folder_id if provided
         if folder_id is not None:
             logger.info(f"Validating folder access: folder_id={folder_id}, repository_id={repository_id}")
@@ -232,7 +234,10 @@ class ResourceService:
         
         for index, file in enumerate(files):
             custom_name = custom_names.get(index)
-            result = ResourceService._process_single_file(file, repository_id, target_path, custom_name, folder_id, db)
+            result = ResourceService._process_single_file(
+                file, repository_id, target_path, custom_name, folder_id, db,
+                extra_metadata=extra_metadata.get(index),
+            )
             if isinstance(result, Resource):
                 created_resources.append(result)
                 logger.info(f"Resource {result.name} prepared for indexing")
@@ -262,7 +267,7 @@ class ResourceService:
         return created_resources, failed_files, session_id
 
     @staticmethod
-    def _process_single_file(file, repository_id: int, target_path: str, custom_name: str = None, folder_id: Optional[int] = None, db: Session = None):
+    def _process_single_file(file, repository_id: int, target_path: str, custom_name: str = None, folder_id: Optional[int] = None, db: Session = None, extra_metadata: dict = None):
         """
         Process a single file upload
         
@@ -343,6 +348,7 @@ class ResourceService:
                     folder_id=folder_id,
                     type=file_extension,
                     status='pending',    # Will be updated to 'indexing', then 'ready' or 'error' by background thread
+                    extra_metadata=extra_metadata,
                 )
                 ResourceRepository.create(db, resource)
 
@@ -631,7 +637,35 @@ class ResourceService:
         
         logger.info(f"Resource {resource_id} deleted successfully")
         return {"message": "Resource deleted successfully"}
-    
+
+    @staticmethod
+    def delete_all_resources_from_repository(repository_id: int, db: Session) -> dict:
+        """
+        Delete every resource in a repository - business logic from router
+
+        Raises:
+            HTTPException: If the repository's silo is LightRAG (no per-file delete support)
+        """
+        repo = ResourceRepository.get_repository_by_id(db, repository_id)
+        silo = getattr(repo, "silo", None)
+        if silo is not None and (silo.vector_db_type or "").upper() == "LIGHTRAG":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="LightRAG silos do not support deleting individual files; "
+                       "delete the whole silo to remove its data.",
+            )
+
+        resources = ResourceRepository.get_by_repository_id(db, repository_id)
+        deleted_count = 0
+        for resource in resources:
+            if ResourceService.delete_resource(resource.resource_id, db):
+                deleted_count += 1
+            else:
+                logger.error(f"Resource {resource.resource_id} could not be deleted in bulk delete")
+
+        logger.info(f"Deleted {deleted_count}/{len(resources)} resources from repository {repository_id}")
+        return {"deleted_count": deleted_count, "failed_count": len(resources) - deleted_count}
+
     @staticmethod
     def download_resource_from_repository(
         app_id: int,

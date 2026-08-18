@@ -128,6 +128,44 @@ def _purge_tree_older_than(root: str, ttl_seconds: int, *, label: str) -> int:
         return 0
 
 
+IMPORT_JOB_TTL_DAYS = 14
+
+
+def _purge_abandoned_import_jobs() -> int:
+    """Delete ImportJobs with no confirm/discard/retry activity for
+    IMPORT_JOB_TTL_DAYS. Cascade deletes their still-open ImportJobRows;
+    staged PDFs are removed explicitly first since they live outside the DB."""
+    from datetime import datetime, timedelta
+    from db.database import SessionLocal
+    from models.import_job import ImportJob
+    from models.import_job_row import ImportJobRow
+
+    cutoff = datetime.utcnow() - timedelta(days=IMPORT_JOB_TTL_DAYS)
+    db = SessionLocal()
+    removed = 0
+    try:
+        jobs = db.query(ImportJob).filter(ImportJob.last_activity_at < cutoff).all()
+        for job in jobs:
+            rows = db.query(ImportJobRow).filter(ImportJobRow.import_job_id == job.id).all()
+            for row in rows:
+                if row.staged_path and os.path.exists(row.staged_path):
+                    try:
+                        os.remove(row.staged_path)
+                    except OSError:
+                        logger.warning(
+                            "file_cleanup_worker[import_job]: could not remove %s", row.staged_path,
+                        )
+            db.delete(job)
+            removed += 1
+        db.commit()
+    except Exception:
+        logger.error("file_cleanup_worker[import_job]: purge failed", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+    return removed
+
+
 def _run_one_sweep_sync() -> None:
     """Single pass over both ephemeral and persistent trees (blocking)."""
     cfg = _config()
@@ -153,10 +191,12 @@ def _run_one_sweep_sync() -> None:
         persistent_root, persistent_ttl_seconds, label="persistent",
     )
 
-    if ephemeral_removed or uploads_removed or persistent_removed:
+    imports_purged = _purge_abandoned_import_jobs()
+
+    if ephemeral_removed or uploads_removed or persistent_removed or imports_purged:
         logger.info(
-            "file_cleanup_worker: removed %d ephemeral, %d upload, %d persistent file(s)",
-            ephemeral_removed, uploads_removed, persistent_removed,
+            "file_cleanup_worker: removed %d ephemeral, %d upload, %d persistent file(s), %d abandoned import job(s)",
+            ephemeral_removed, uploads_removed, persistent_removed, imports_purged,
         )
 
 

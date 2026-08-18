@@ -32,6 +32,8 @@ import type {
   DomainUrlListResponse,
   DomainUrlActionResponse,
 } from '../types/crawl';
+import type { ImportJob, ConfirmImportRowsResult } from '../types/csvImport';
+import type { CostEstimationResult } from '../pages/RepositoryDetailPage';
 
 type ConflictMode = 'fail' | 'rename' | 'override';
 
@@ -1467,8 +1469,69 @@ class ApiService {
     });
   }
 
+  async previewCsvImport(appId: number, repositoryId: number, file: File): Promise<{ headers: string[] }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/preview`, {
+      method: 'POST',
+      body: formData,
+    }) as Promise<{ headers: string[] }>;
+  }
+
+  async createCsvImport(appId: number, repositoryId: number, file: File, linkColumn: string): Promise<ImportJob> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('link_column', linkColumn);
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/csv-imports`, {
+      method: 'POST',
+      body: formData,
+    }) as Promise<ImportJob>;
+  }
+
+  async getActiveCsvImport(appId: number, repositoryId: number): Promise<ImportJob | null> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/active`) as Promise<ImportJob | null>;
+  }
+
+  async getCsvImport(appId: number, repositoryId: number, importJobId: number): Promise<ImportJob> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/${importJobId}`) as Promise<ImportJob>;
+  }
+
+  async retryCsvImportRow(appId: number, repositoryId: number, importJobId: number, rowId: number): Promise<ImportJob> {
+    return this.request(
+      `/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/${importJobId}/rows/${rowId}/retry`,
+      { method: 'POST' },
+    ) as Promise<ImportJob>;
+  }
+
+  async estimateCsvImportRows(appId: number, repositoryId: number, importJobId: number, rowIds: number[]): Promise<CostEstimationResult> {
+    return this.request(
+      `/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/${importJobId}/estimate`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ row_ids: rowIds }) },
+    ) as Promise<CostEstimationResult>;
+  }
+
+  async confirmCsvImportRows(appId: number, repositoryId: number, importJobId: number, rowIds: number[]): Promise<ConfirmImportRowsResult> {
+    return this.request(
+      `/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/${importJobId}/confirm`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ row_ids: rowIds }) },
+    ) as Promise<ConfirmImportRowsResult>;
+  }
+
+  async discardCsvImportRows(appId: number, repositoryId: number, importJobId: number, rowIds: number[]): Promise<void> {
+    await this.request(
+      `/internal/apps/${appId}/repositories/${repositoryId}/csv-imports/${importJobId}/discard`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ row_ids: rowIds }) },
+    );
+  }
+
   async deleteResource(appId: number, repositoryId: number, resourceId: number) {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async deleteAllResources(appId: number, repositoryId: number): Promise<{ deleted_count: number; failed_count: number }> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources`, {
       method: 'DELETE',
     });
   }

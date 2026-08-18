@@ -380,6 +380,33 @@ def fake_domain(db, fake_app, fake_silo):
     return domain
 
 
+@pytest.fixture(scope="function")
+def repository(db, fake_app):
+    """A test Repository (with its own Silo) linked to fake_app."""
+    from models.silo import Silo
+    from models.repository import Repository
+
+    silo = Silo(
+        name="Test Repository Silo",
+        description="Silo for repository testing",
+        silo_type="REPO",
+        app_id=fake_app.app_id,
+    )
+    db.add(silo)
+    db.flush()
+
+    repo = Repository(
+        name="Test Repository",
+        type="REPO",
+        status="active",
+        app_id=fake_app.app_id,
+        silo_id=silo.silo_id,
+    )
+    db.add(repo)
+    db.flush()
+    return repo
+
+
 # ---------------------------------------------------------------------------
 # Auto-markers
 # ---------------------------------------------------------------------------

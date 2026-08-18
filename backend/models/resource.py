@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import relationship
 from db.database import Base
 from datetime import datetime
@@ -17,6 +17,7 @@ class Resource(Base):
     folder_id = Column(Integer,
                        ForeignKey('Folder.folder_id'),
                        nullable=True)
+    extra_metadata = Column(JSON, nullable=True)  # CSV-import metadata, merged into indexed chunk metadata
 
     repository = relationship('Repository',
                            back_populates='resources',
