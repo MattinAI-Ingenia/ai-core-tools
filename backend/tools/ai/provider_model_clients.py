@@ -23,6 +23,7 @@ from schemas.provider_models_schemas import (
 )
 from tools.ai.model_catalog import (
     PROVIDER_ANTHROPIC,
+    PROVIDER_CUSTOM,
     PROVIDER_GOOGLE,
     PROVIDER_MISTRAL,
     PROVIDER_OLLAMA,
@@ -138,14 +139,19 @@ def _list_openai_compatible(
     req: ListProviderModelsRequest,
     *,
     provider: str,
+    base_url: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
 ) -> List[ProviderModelInfo]:
     """Shared implementation for OpenAI and OpenAI-compatible Custom endpoints."""
     client_kwargs = {
         "api_key": req.api_key or "not-needed",  # vLLM and similar accept any string
         "timeout": _DEFAULT_TIMEOUT_SECONDS,
     }
-    if req.base_url:
-        client_kwargs["base_url"] = req.base_url
+    resolved_base_url = base_url if base_url is not None else req.base_url
+    if resolved_base_url:
+        client_kwargs["base_url"] = resolved_base_url
+    if extra_headers:
+        client_kwargs["default_headers"] = extra_headers
 
     try:
         client = OpenAI(**client_kwargs)
@@ -186,6 +192,23 @@ def list_openai_models(req: ListProviderModelsRequest) -> List[ProviderModelInfo
             "API key is required to list OpenAI models.",
         )
     return _list_openai_compatible(req, provider=PROVIDER_OPENAI)
+
+
+def list_custom_models(req: ListProviderModelsRequest) -> List[ProviderModelInfo]:
+    """OpenAI-compatible self-hosted endpoint (vLLM / SGLang / Ollama's /v1 API).
+
+    Mirrors :func:`tools.aiServiceTools._build_custom_llm`'s URL and auth
+    handling so listing hits the exact same ``/v1/models`` shape the runtime
+    calls at chat time — not Ollama's native ``/api/tags``, which vLLM and
+    SGLang don't implement.
+    """
+    base_url = (req.base_url or "").rstrip("/")
+    if base_url and not base_url.endswith("/v1"):
+        base_url += "/v1"
+    headers = build_ollama_auth_headers(req.api_key, req.base_url)
+    return _list_openai_compatible(
+        req, provider=PROVIDER_CUSTOM, base_url=base_url or None, extra_headers=headers or None,
+    )
 
 
 # ==================== ANTHROPIC ====================

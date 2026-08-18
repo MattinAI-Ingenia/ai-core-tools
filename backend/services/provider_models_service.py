@@ -50,11 +50,13 @@ _DISPATCH: Dict[str, str] = {
     PROVIDER_GOOGLE: "list_google_models",
     PROVIDER_OLLAMA: "list_ollama_models",
     PROVIDER_OPENROUTER: "list_openrouter_models",
-    # Custom is handled in-line: the AI Service runtime is ChatOllama, so
-    # listing reuses the Ollama tags endpoint. Embeddings under Custom
-    # use HuggingFace Inference which has no generic listing — those go
-    # through the manual_input branch in :meth:`list_models`.
-    PROVIDER_CUSTOM: "list_ollama_models",
+    # Custom AI Services run on ChatOpenAI against the endpoint's /v1 API
+    # (see tools.aiServiceTools._build_custom_llm) — listing must hit the
+    # same OpenAI-compatible /v1/models shape, not Ollama's native /api/tags,
+    # since self-hosted servers here are commonly vLLM/SGLang, not Ollama.
+    # Embeddings under Custom use HuggingFace Inference which has no generic
+    # listing — those go through the manual_input branch in :meth:`list_models`.
+    PROVIDER_CUSTOM: "list_custom_models",
 }
 
 

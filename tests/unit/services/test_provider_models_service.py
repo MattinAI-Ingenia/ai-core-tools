@@ -218,17 +218,22 @@ class TestErrorStatusMapping:
         assert PROVIDER_ERROR_STATUS[code] == status
 
 
-# ==================== CUSTOM = OLLAMA (AI SERVICES) ====================
+# ==================== CUSTOM = OPENAI-COMPATIBLE (AI SERVICES) ====================
 
 
-class TestCustomProviderRoutesToOllama:
-    @patch("tools.ai.provider_model_clients.list_ollama_models")
-    def test_custom_chat_uses_ollama_lister(self, mock_list):
+class TestCustomProviderRoutesToOpenAICompatible:
+    """Custom AI Services run on ChatOpenAI against the endpoint's /v1 API
+    (tools.aiServiceTools._build_custom_llm) — listing must use the same
+    /v1/models shape, not Ollama's native /api/tags, since self-hosted
+    servers configured here are commonly vLLM/SGLang, not Ollama."""
+
+    @patch("tools.ai.provider_model_clients.list_custom_models")
+    def test_custom_chat_uses_openai_compatible_lister(self, mock_list):
         mock_list.return_value = [_info("llama3.2:latest")]
         req = ListProviderModelsRequest(
             provider="Custom",
             api_key="",
-            base_url="http://localhost:11434",
+            base_url="http://localhost:8095",
             purpose="chat",
         )
         result = ProviderModelsService.list_models(req)
