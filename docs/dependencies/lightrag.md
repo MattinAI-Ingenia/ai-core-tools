@@ -67,6 +67,11 @@ alternativo + KV + doc-status). Ver §8.
 | `NEO4J_USERNAME` | `neo4j` | `backend/config.py:65` |
 | `NEO4J_PASSWORD` | `None` | `backend/config.py:66` |
 | `ENTITY_EXTRACT_MAX_GLEANING` | `0` | `backend/config.py:72-74` |
+| `LIGHTRAG_EXTRACT_MAX_TOKENS` | sin tope | tope de salida del rol `extract` (ver 9.1.3) |
+| `LIGHTRAG_EXTRACT_GUIDED_JSON` | `true` | manda el esquema como `response_format` (ver 9.1.3) |
+| `MAX_PARALLEL_INSERT` | `3` | documentos (= páginas) en paralelo; leída por LightRAG al importar |
+| `MAX_ASYNC_LLM` | `4` | llamadas LLM concurrentes por rol; leída por LightRAG al importar |
+| `EMBEDDING_FUNC_MAX_ASYNC` | `8` | llamadas de embedding concurrentes |
 | `SQLALCHEMY_DATABASE_URI` | — | usado como `config.DATABASE_URL` para PG KV/doc-status (`storage_config.py:96-99`) |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `http://localhost:6333` | `storage_config.py:109-110` |
 | `VECTOR_DB_TYPE` | `PGVECTOR` | usado por el silo, no por LightRAG directamente |
@@ -212,8 +217,17 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py:305-333`.
 - `apipeline_process_enqueue_documents` (`pipeline.py:943`): guard de un-solo-
   worker vía `pipeline_status["busy"]` bajo `pipeline_status_lock` (por-workspace,
   `kg/shared_storage.py`); trocea, ejecuta extracción de entidades por chunk,
-  actualiza estado. El repo poll-ea este `pipeline_status` cada 0.5s para el
-  progreso (`_ainsert_with_progress`, `lightrag_store.py:143-152`).
+  actualiza estado. Los documentos se procesan de 3 en 3
+  (`max_parallel_insert`, env `MAX_PARALLEL_INSERT`), y dentro de cada uno los
+  chunks de 4 en 4 (`llm_model_max_async`, env `MAX_ASYNC_LLM`).
+- **Progreso**: `_ainsert_with_progress` (`lightrag_store.py:179`) poll-ea cada
+  0.5s `rag.doc_status.get_status_counts()` y cuenta `processed + failed` menos
+  un baseline tomado antes de empezar (los documentos de recursos anteriores del
+  mismo silo ya están `processed`). **No** usa `pipeline_status["cur_batch"]`:
+  ese contador se incrementa cuando un documento *entra* al semáforo
+  (`pipeline.py:2155-2178`), no cuando termina, así que las primeras
+  `max_parallel_insert` páginas parecían instantáneas y el ETA salía sesgado a
+  la baja. `pipeline_status` no tiene ningún contador de completados.
 - `resolve_chunk_options` (`parser/routing.py:470`) lee `addon_params['chunker']`,
   recorta al sub-dict de la estrategia seleccionada por `process_options` y
   devuelve una copia profunda independiente.
@@ -476,11 +490,75 @@ nativo de LightRAG) se documentaron dos fallos de pérdida silenciosa de
 datos — Qwen3-30B-A3B generando cientos de relaciones inventadas sin
 terminar nunca, y gpt-5.4-nano colapsando el formato de registro en contenido
 repetitivo, perdiendo entidades y relaciones reales sin ningún error visible
-(detalle completo en el benchmark enlazado arriba). El modo JSON, al validar
-la estructura por esquema, no puede tener ninguno de los dos fallos por
-construcción. Al pasarlo como kwarg de constructor en vez de depender de la
-variable de entorno, ningún despliegue (dev, cliente, CI) puede regresar
-accidentalmente al modo roto por un `.env` incompleto.
+(detalle completo en el benchmark enlazado arriba). Al pasarlo como kwarg de
+constructor en vez de depender de la variable de entorno, ningún despliegue
+(dev, cliente, CI) puede regresar accidentalmente al modo roto por un `.env`
+incompleto.
+
+> ⚠️ **Corrección** (versión anterior de este documento): se afirmaba que el
+> modo JSON de LightRAG «al validar la estructura por esquema, no puede tener
+> ninguno de los dos fallos por construcción». **Es falso.** El flag
+> `entity_extraction_use_json` solo cambia el *prompt* (pide un objeto JSON) y
+> el *parser* (`_process_json_extraction_result`, `operate.py:722`, que usa
+> `json_repair`). No hay validación por esquema en el momento de generar, y
+> nada acota la longitud de la salida. Evidencia: un log de vLLM con este modo
+> activo muestra `guided_decoding=None` y una sola página de bibliografía
+> generando ~16.000 tokens durante casi 3 minutos. Lo que el modo JSON sí
+> aporta es que un fallo de formato es **visible** (el parser no encuentra
+> registros) en vez de silencioso como en el modo delimitado.
+
+#### 9.1.3 JSON forzado en el servidor (`response_format`) y tope de salida
+
+Dos mecanismos independientes cubren los dos problemas que el modo JSON por sí
+solo no resuelve. Ambos se aplican **únicamente al rol `extract`**:
+
+| Qué | Dónde | Default |
+|---|---|---|
+| Esquema JSON enviado como `response_format` | `adapters.py` (`_EXTRACTION_JSON_SCHEMA`) | activo (`LIGHTRAG_EXTRACT_GUIDED_JSON=true`) |
+| Tope de tokens de salida | `config.LIGHTRAG_EXTRACT_MAX_TOKENS` | sin tope |
+
+**`response_format`**: el esquema replica exactamente el contrato que lee el
+parser de LightRAG (`entities[{name,type,description}]`,
+`relationships[{source,target,keywords,description}]`), así que el servidor
+restringe la decodificación a algo que LightRAG sabe leer. Solo se manda a
+proveedores con el parámetro `json_schema` de estilo OpenAI
+(`_GUIDED_JSON_PROVIDERS`: `Custom`, `OpenAI`, `Azure`, `OpenRouter`);
+Anthropic/Mistral/Google usan otros mecanismos y se quedan con el JSON de
+prompt en vez de romper con un parámetro desconocido.
+
+**Detalle crítico**: el func del rol `extract` **no se usa solo para extraer**
+— `_handle_entity_relation_summary` (`operate.py:436`) lo reutiliza para
+resumir descripciones de entidades en **texto plano** al fusionar. Forzarle el
+esquema corrompería todas las descripciones del grafo. LightRAG consume
+`_priority` antes de llamar (`utils.py:2080`), así que la llamada no trae
+ningún marcador explícito y el único discriminante disponible es el prompt.
+
+`_derive_json_extraction_marker` (`adapters.py`) **no hardcodea** esa frase: la
+deriva de la librería instalada en tiempo de construcción — coge la línea más
+larga de `PROMPTS["entity_extraction_json_system_prompt"]` que no contenga
+llaves (las llaves son placeholders o literales JSON escapados que no
+sobreviven al templating) y que **no** aparezca en
+`PROMPTS["summarize_entity_descriptions"]`. Así, si upstream reescribe el
+prompt, el marcador se mueve con él en vez de dejar de coincidir en silencio.
+
+Dos garantías de seguridad:
+
+1. **Falla hacia el lado inofensivo.** Si no se puede derivar ninguna frase
+   única (prompt ausente, o todas las candidatas colisionan con el prompt de
+   resumen), `_resolve_json_marker` devuelve `None` y no se manda esquema a
+   nadie: se vuelve al JSON de prompt, nunca a resúmenes corrompidos.
+2. **La decisión se loguea.** `"LightRAG guided JSON on (marker: ...)"` o
+   `"... off: <motivo>"` al construir la instancia, así que una degradación es
+   visible en el log del backend en vez de invisible.
+
+Verificado en vivo contra Qwen3-30B-A3B en vLLM, con el mismo func de rol:
+llamada de extracción → JSON que pasa `json.loads` estricto; llamada de
+resumen → texto plano en el idioma pedido, sin rastro de JSON.
+
+**Tope de salida**: sin `max_tokens`, un servidor OpenAI-compatible como vLLM
+usa «lo que queda de ventana» (~30k tokens). Cortar no pierde el trabajo hecho:
+el parser usa `json_repair`, que cierra las estructuras abiertas y conserva
+todos los registros completos anteriores al corte (verificado).
 
 ### 9.2 Embeddings
 
@@ -566,6 +644,7 @@ descarga a un hilo worker si ya hay un loop corriendo.
 | Afirmación | Comando / archivo |
 |---|---|
 | Versión que corre = `1.5.5rc1` | `docker compose run --rm backend python -c "import importlib.metadata as m; print(m.version('lightrag-hku'))"` |
+| **Al subir versión**: el JSON guiado sigue activo | Buscar en el log del backend `LightRAG guided JSON`: debe decir `on (marker: ...)`. Un `off:` indica que el marcador ya no se puede derivar (ver 9.1.3) |
 | Versión fijada = `1.5.5rc1` | `backend/Dockerfile:75` |
 | Servicio = `backend` | `docker/docker-compose.yaml:42` |
 | Feature flag | `backend/config.py:63` + `adapters.py:80` |

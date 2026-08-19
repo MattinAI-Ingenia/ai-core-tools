@@ -258,3 +258,95 @@ def test_estimate_cost_with_gleaning():
     # 6 calls * (avg_chunk_tokens 650 + 3800 overhead) = 26700 input tokens
     assert result["estimated_input_tokens"] == 26700
     assert result["warnings"] == []
+
+# ---------------------------------------------------------------------------
+# Self-hosted providers
+# ---------------------------------------------------------------------------
+
+
+def _priced(monkeypatch, *, llm=(1.0, 2.0), emb=0.02):
+    """Patch the pricing catalog so the cost formula is deterministic."""
+    from services import pricing_service
+
+    monkeypatch.setattr(pricing_service.PricingService, "get_llm_pricing",
+                        staticmethod(lambda db, model: llm))
+    monkeypatch.setattr(pricing_service.PricingService, "get_embedding_pricing",
+                        staticmethod(lambda db, model: emb))
+    monkeypatch.setattr("services.silo_service._ensure_pricing_catalog",
+                        lambda db: None)
+
+
+def test_self_hosted_llm_still_charges_for_embeddings(monkeypatch):
+    """A local vLLM/Ollama extraction model must not void the whole estimate.
+
+    The embeddings are still billed by OpenAI, so the estimate is the embedding
+    cost alone instead of the previous "Unavailable".
+    """
+    silo = _make_lightrag_silo(chunk_size=1200)
+    silo.indexing_service.provider = "Custom"
+    silo.embedding_service.provider = "OpenAI"
+    _priced(monkeypatch)
+    db = MagicMock()
+
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+        result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 4800}], db)
+
+    # 3200 embedding tokens * 0.02 / 1e6, LLM side counted as 0.
+    expected = round(3200 * 0.02 / 1_000_000, 4)
+    assert result["estimated_cost_min"] == expected
+    assert result["estimated_cost_max"] == expected
+    assert result["warnings"] == []
+
+
+def test_self_hosted_embedding_still_charges_for_llm(monkeypatch):
+    silo = _make_lightrag_silo(chunk_size=1200)
+    silo.indexing_service.provider = "OpenAI"
+    silo.embedding_service.provider = "Ollama"
+    _priced(monkeypatch)
+    db = MagicMock()
+
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+        result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 4800}], db)
+
+    # input 5000 * 1.0 + output (1000..3000) * 2.0, embeddings counted as 0.
+    assert result["estimated_cost_min"] == round((5000 * 1.0 + 1000 * 2.0) / 1_000_000, 4)
+    assert result["estimated_cost_max"] == round((5000 * 1.0 + 3000 * 2.0) / 1_000_000, 4)
+    assert result["warnings"] == []
+
+
+def test_both_self_hosted_reports_unavailable(monkeypatch):
+    """Nothing is billed per token, and GPU/power cost is not knowable here.
+
+    Reporting 0.00 would read as "free", so the estimate stays None and the
+    reason is surfaced as a warning.
+    """
+    silo = _make_lightrag_silo(chunk_size=1200)
+    silo.indexing_service.provider = "Custom"
+    silo.embedding_service.provider = "Custom"
+    _priced(monkeypatch)
+    db = MagicMock()
+
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+        result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 4800}], db)
+
+    assert result["estimated_cost_min"] is None
+    assert result["estimated_cost_max"] is None
+    assert any("self-hosted" in w for w in result["warnings"]), result["warnings"]
+    # Token counts are still reported — only the money is unknown.
+    assert result["estimated_embedding_tokens"] == 3200
+
+
+def test_unpriced_cloud_model_stays_unavailable(monkeypatch):
+    """An unknown cloud model is not the same as a self-hosted one: it IS billed,
+    we just do not know the rate, so guessing 0 would understate the cost."""
+    silo = _make_lightrag_silo(chunk_size=1200)
+    silo.indexing_service.provider = "OpenAI"
+    silo.embedding_service.provider = "OpenAI"
+    _priced(monkeypatch, llm=None)
+    db = MagicMock()
+
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+        result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 4800}], db)
+
+    assert result["estimated_cost_min"] is None
+    assert any("No pricing found" in w for w in result["warnings"]), result["warnings"]

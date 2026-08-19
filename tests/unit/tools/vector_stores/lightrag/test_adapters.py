@@ -151,6 +151,286 @@ class TestBuildLlmModelFunc:
         with pytest.raises(ValueError):
             adapters.build_llm_model_func(None)  # type: ignore[arg-type]
 
+    async def test_max_tokens_is_forwarded_when_set(self):
+        """Uncapped, vLLM defaults max_tokens to the rest of the context window."""
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=8192)
+            await llm_func("hi")
+
+        assert fake_llm.ainvoke.await_args.kwargs["max_tokens"] == 8192
+
+    async def test_guided_json_only_on_extraction_calls(self):
+        """The extract role is reused for plain-text summaries when merging.
+
+        Constraining those to the entity/relationship schema would corrupt every
+        entity description, so the schema rides only on calls whose system
+        prompt is LightRAG's JSON extraction prompt.
+        """
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(
+                ai_service, json_marker="Return one valid JSON object"
+            )
+
+            # Extraction: system prompt carries LightRAG's JSON marker.
+            await llm_func(
+                "chunk text",
+                system_prompt="...Return one valid JSON object with entities...",
+            )
+            extraction_kwargs = fake_llm.ainvoke.await_args.kwargs
+
+            # Summary (operate.py:436): same role func, no system prompt.
+            await llm_func("Summarize these descriptions")
+            summary_kwargs = fake_llm.ainvoke.await_args.kwargs
+
+        schema = extraction_kwargs["response_format"]["json_schema"]["schema"]
+        assert set(schema["properties"]) == {"entities", "relationships"}
+        assert "response_format" not in summary_kwargs
+
+    async def test_no_marker_sends_no_schema(self):
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, json_marker=None)
+            await llm_func("x", system_prompt="Return one valid JSON object ...")
+
+        assert "response_format" not in fake_llm.ainvoke.await_args.kwargs
+
+    async def test_max_tokens_is_omitted_when_unset(self):
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            await llm_func("hi")
+
+        assert "max_tokens" not in fake_llm.ainvoke.await_args.kwargs
+
+
+class TestLengthLimitSalvage:
+    """A capped, schema-constrained call that hits the limit must not lose the chunk.
+
+    With response_format set, the OpenAI SDK raises LengthFinishReasonError instead
+    of returning truncated text — measured in the benchmark as 2 of 17 chunks lost
+    on a technical manual. The partial JSON travels inside the exception.
+    """
+
+    def _length_error(self, content, tokens=(100, 64)):
+        class LengthFinishReasonError(Exception):
+            pass
+
+        usage = SimpleNamespace(prompt_tokens=tokens[0], completion_tokens=tokens[1],
+                                total_tokens=sum(tokens))
+        completion = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+            usage=usage,
+        )
+        exc = LengthFinishReasonError("length limit reached")
+        exc.completion = completion
+        return exc
+
+    async def test_partial_json_is_returned_instead_of_raising(self):
+        partial = '{"entities": [{"name": "Ada", "type": "Person", "description": "x"}, {"name'
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(side_effect=self._length_error(partial))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=64)
+            out = await llm_func("hi")
+
+        assert out == partial
+        # json_repair (what LightRAG uses) must recover the complete record.
+        import json_repair
+
+        assert json_repair.loads(out)["entities"][0]["name"] == "Ada"
+
+    async def test_other_errors_still_propagate(self):
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=64)
+            with pytest.raises(RuntimeError, match="connection reset"):
+                await llm_func("hi")
+
+    @pytest.mark.parametrize("empty", ["", "   \n"])
+    async def test_length_error_with_empty_partial_propagates(self, empty):
+        """Zero records produced → surface the failure, do not report success."""
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(side_effect=self._length_error(empty))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=64)
+            with pytest.raises(Exception, match="length limit"):
+                await llm_func("hi")
+
+    async def test_length_error_without_choices_propagates(self):
+        """Nothing to salvage → the error must not be swallowed silently."""
+        ai_service = _make_ai_service()
+        exc = self._length_error("")
+        exc.completion.choices = []
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(side_effect=exc)
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=64)
+            with pytest.raises(Exception, match="length limit"):
+                await llm_func("hi")
+
+
+# ---------------------------------------------------------------------------
+# _derive_json_extraction_marker
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveJsonExtractionMarker:
+    """The marker is read from the installed prompts, not hardcoded.
+
+    A hardcoded sentence stops matching the day upstream rewords it, silently
+    disabling guided JSON; deriving it means the reword is picked up instead.
+    """
+
+    def _stub_prompts(self, monkeypatch, extraction, summary):
+        stub = SimpleNamespace(
+            PROMPTS={
+                "entity_extraction_json_system_prompt": extraction,
+                "summarize_entity_descriptions": summary,
+            }
+        )
+        stub_pkg = MagicMock(name="lightrag-stub")
+        monkeypatch.setitem(sys.modules, "lightrag", stub_pkg)
+        monkeypatch.setitem(sys.modules, "lightrag.prompt", stub)
+
+    def test_picks_longest_line_absent_from_summary(self, monkeypatch):
+        self._stub_prompts(
+            monkeypatch,
+            extraction=(
+                "short\n"
+                "Summarise the descriptions below into one paragraph of text.\n"
+                "Return one valid JSON object with entities and relationships arrays.\n"
+            ),
+            summary="Summarise the descriptions below into one paragraph of text.\n",
+        )
+        marker = adapters._derive_json_extraction_marker()
+        assert marker == (
+            "Return one valid JSON object with entities and relationships arrays."
+        )
+
+    def test_skips_lines_with_placeholders_or_json_braces(self, monkeypatch):
+        self._stub_prompts(
+            monkeypatch,
+            extraction=(
+                "Output at most {max_total_records} records across the two arrays.\n"
+                '  "entities": [ { "name": "<entity_name>" } ]\n'
+                "Extract entities and relationships as one JSON object please.\n"
+            ),
+            summary="",
+        )
+        marker = adapters._derive_json_extraction_marker()
+        assert marker == (
+            "Extract entities and relationships as one JSON object please."
+        )
+
+    def test_returns_none_when_every_candidate_collides(self, monkeypatch):
+        """No unique sentence → no schema, rather than risking the summary calls."""
+        shared = "This very same long sentence appears in both prompts here.\n"
+        self._stub_prompts(monkeypatch, extraction=shared, summary=shared)
+        assert adapters._derive_json_extraction_marker() is None
+
+    def test_returns_none_when_prompt_key_is_gone(self, monkeypatch):
+        self._stub_prompts(monkeypatch, extraction="", summary="")
+        assert adapters._derive_json_extraction_marker() is None
+
+
+# ---------------------------------------------------------------------------
+# build_role_llm_configs
+# ---------------------------------------------------------------------------
+
+
+class TestBuildRoleLlmConfigs:
+    async def test_only_extract_role_gets_cap_and_schema(self, monkeypatch):
+        """Both knobs target indexing-time extraction, not query-time roles."""
+        import config as app_config
+
+        monkeypatch.setattr(app_config, "LIGHTRAG_EXTRACT_MAX_TOKENS", 8192)
+
+        stub_roles = SimpleNamespace(
+            RoleLLMConfig=lambda func, metadata=None, **_kw: SimpleNamespace(
+                func=func, metadata=metadata
+            )
+        )
+        marker = "Return one valid JSON object with both arrays and nothing else."
+        stub_prompt = SimpleNamespace(
+            PROMPTS={
+                "entity_extraction_json_system_prompt": marker + "\n",
+                "summarize_entity_descriptions": "Summarise these descriptions.\n",
+            }
+        )
+        stub_pkg = MagicMock(name="lightrag-stub")
+        monkeypatch.setitem(sys.modules, "lightrag", stub_pkg)
+        monkeypatch.setitem(sys.modules, "lightrag.llm_roles", stub_roles)
+        monkeypatch.setitem(sys.modules, "lightrag.prompt", stub_prompt)
+
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            configs = adapters.build_role_llm_configs(
+                extract_service=_make_ai_service(),
+                keywords_service=_make_ai_service(),
+            )
+            await configs['extract'].func("hi", system_prompt=marker)
+            extract_kwargs = fake_llm.ainvoke.await_args.kwargs
+            await configs['keyword'].func("hi", system_prompt=marker)
+            keyword_kwargs = fake_llm.ainvoke.await_args.kwargs
+
+        assert extract_kwargs["max_tokens"] == 8192
+        assert "max_tokens" not in keyword_kwargs
+        # The schema must ride on extraction only: the keyword role answers
+        # queries with a short list, and forcing the shape would break it.
+        assert "response_format" in extract_kwargs
+        assert "response_format" not in keyword_kwargs
+
 
 # ---------------------------------------------------------------------------
 # build_embedding_func

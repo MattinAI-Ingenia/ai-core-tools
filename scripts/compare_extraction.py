@@ -199,15 +199,47 @@ def is_reasoning_model(spec: str) -> bool:
     return bool(re.search(r"(gpt-5|:o[134])", spec.partition("@")[0]))
 
 
-def make_llm(spec: str, temperature: float, num_ctx: int, max_tokens: int, json_mode: bool):
+def production_json_schema() -> dict:
+    """El esquema que el backend manda de verdad, importado del propio adapter.
+
+    Así el benchmark mide producción en vez de una copia que puede desviarse.
+    """
+    from tools.vector_stores.lightrag.adapters import _EXTRACTION_JSON_SCHEMA
+
+    return _EXTRACTION_JSON_SCHEMA
+
+
+def make_llm(
+    spec: str,
+    temperature: float,
+    num_ctx: int,
+    max_tokens: int,
+    json_mode: bool,
+    response_format: str = "object",
+):
     from langchain.chat_models import init_chat_model
 
     spec, _, base_url = spec.partition("@")  # openai:Qwen/Qwen3-8B@http://vllm:8000/v1
-    kwargs = {} if is_reasoning_model(spec) else {"temperature": temperature, "max_tokens": max_tokens}
-    if json_mode and spec.split(":", 1)[0] == "openai":
-        # response_format nativo (OpenAI y vLLM lo entienden vía la misma API);
-        # otros providers usan solo el prompt JSON + json_repair, como hace LightRAG.
-        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+    kwargs = {} if is_reasoning_model(spec) else {"temperature": temperature}
+    # max_tokens=0 → no se manda: reproduce el comportamiento sin tope, donde un
+    # servidor OpenAI-compatible usa "lo que queda de ventana" (~30k en vLLM).
+    if max_tokens and not is_reasoning_model(spec):
+        kwargs["max_tokens"] = max_tokens
+    if json_mode and spec.split(":", 1)[0] == "openai" and response_format != "none":
+        # "object" = solo JSON valido (lo que medía el benchmark original).
+        # "schema" = el esquema de produccion, decodificacion restringida.
+        rf = (
+            {"type": "json_object"}
+            if response_format == "object"
+            else {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "lightrag_entity_extraction",
+                    "schema": production_json_schema(),
+                },
+            }
+        )
+        kwargs["model_kwargs"] = {"response_format": rf}
     if base_url:
         # No mandamos la clave cloud a un endpoint local aunque OPENAI_API_KEY esté puesta.
         kwargs |= {"base_url": base_url, "api_key": os.getenv("VLLM_API_KEY", "EMPTY")}
@@ -256,14 +288,28 @@ async def process_chunk(sem, llm, spec, i, chunk, system_prompt, user_template, 
         # Modelos de razonamiento rechazan `stop`; en modo JSON no hay
         # delimitador de fin que buscar.
         invoke_kwargs["stop"] = [values["completion_delimiter"]]
+    salvaged = False
     async with sem:
         start = time.perf_counter()
         try:
             resp = await llm.ainvoke([("system", system_prompt), ("human", user_prompt)], **invoke_kwargs)
         except Exception as exc:
-            row |= {"error": f"{type(exc).__name__}: {exc}"}
-            print(f"[{spec}] chunk {i} ERROR: {exc}", file=sys.stderr)
-            return row, None
+            # Con response_format, el SDK de OpenAI lanza LengthFinishReasonError en
+            # vez de devolver el texto cortado. Produccion rescata el parcial (ver
+            # adapters._salvage_length_limit), asi que el benchmark hace lo mismo o
+            # mediria un comportamiento que ya no existe.
+            resp = None
+            try:
+                from tools.vector_stores.lightrag.adapters import _salvage_length_limit
+
+                resp = _salvage_length_limit(exc)
+            except ImportError:
+                pass
+            if resp is None:
+                row |= {"error": f"{type(exc).__name__}: {exc}"}
+                print(f"[{spec}] chunk {i} ERROR: {exc}", file=sys.stderr)
+                return row, None
+            salvaged = True
         elapsed = time.perf_counter() - start
 
     content = resp.content if isinstance(resp.content, str) else str(resp.content)
@@ -285,7 +331,8 @@ async def process_chunk(sem, llm, spec, i, chunk, system_prompt, user_template, 
         "latency_s": round(elapsed, 2),
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
-        "truncated": truncated,
+        "truncated": truncated or salvaged,
+        "salvaged": salvaged,
         "error": "",
     }
     if truncated:
@@ -304,7 +351,7 @@ async def run_all(args, values, system_prompt, user_template, chunks):
     llms = {}
     for spec in args.model:
         try:
-            llms[spec] = make_llm(spec, args.temperature, args.num_ctx, args.max_tokens, args.json)
+            llms[spec] = make_llm(spec, args.temperature, args.num_ctx, args.max_tokens, args.json, args.response_format)
         except Exception as exc:
             print(f"[{spec}] no se pudo crear el modelo: {exc}", file=sys.stderr)
 
@@ -408,8 +455,9 @@ def main() -> None:
         "--max-tokens",
         type=int,
         default=4096,
-        help="Tope de salida por chunk. Si un modelo no respeta max_total_records "
-        "y no para, esto evita quemar minutos por chunk (ver columna `truncated`)",
+        help="Tope de salida por chunk; 0 = sin tope (el servidor usa lo que quede de "
+        "ventana). Si un modelo no respeta max_total_records y no para, esto evita "
+        "quemar minutos por chunk (ver columna `truncated`)",
     )
     p.add_argument(
         "--json",
@@ -417,6 +465,14 @@ def main() -> None:
         help="Modo ENTITY_EXTRACTION_USE_JSON de LightRAG: salida JSON en vez de texto "
         "delimitado. El propio LightRAG dice que mejora la calidad y compatibilidad "
         "con modelos pequeños/open-source — el repo no lo tiene activado por defecto.",
+    )
+    p.add_argument(
+        "--response-format",
+        choices=["none", "object", "schema"],
+        default="object",
+        help="Con --json, que se manda al servidor: 'none' = nada (solo el prompt lo "
+        "pide, como hacia LightRAG por defecto), 'object' = json_object (JSON valido, "
+        "sin esquema), 'schema' = el esquema de produccion (decodificacion restringida)",
     )
     p.add_argument(
         "--concurrency",
@@ -473,7 +529,7 @@ def _run_extract_role(args, PROMPTS) -> None:
         agg["latency_s"] += row.get("latency_s") or 0.0
         agg["output_tokens"] += row.get("output_tokens") or 0
 
-    fields = ["model", "chunk", "chars", "entities", "relations", "entity_types", "latency_s", "input_tokens", "output_tokens", "truncated", "error"]
+    fields = ["model", "chunk", "chars", "entities", "relations", "entity_types", "latency_s", "input_tokens", "output_tokens", "truncated", "salvaged", "error"]
     with (args.out / "summary.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()

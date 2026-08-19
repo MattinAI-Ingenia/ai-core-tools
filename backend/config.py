@@ -72,3 +72,26 @@ NEO4J_PASSWORD: Optional[str] = os.getenv('NEO4J_PASSWORD') or None
 ENTITY_EXTRACT_MAX_GLEANING: int = int(
     os.getenv('ENTITY_EXTRACT_MAX_GLEANING', os.getenv('entity_extract_max_gleaning', '0'))
 )
+# Output cap for the entity-extraction LLM (the `extract` role).
+# Without it, an OpenAI-compatible server such as vLLM defaults max_tokens to
+# "the rest of the context window" (~30k), and a model that starts inventing
+# relationships generates until it hits that ceiling — minutes for one page.
+# The extraction prompt asks for at most 100 records, which fits in ~4-6k
+# tokens, so a cap truncates only runaway generations. A truncated response is
+# not lost work: LightRAG parses it with json_repair, which closes the open
+# structures and keeps every complete record extracted before the cut.
+# Unset (default) keeps the provider's own behaviour.
+LIGHTRAG_EXTRACT_MAX_TOKENS: Optional[int] = (
+    int(os.environ['LIGHTRAG_EXTRACT_MAX_TOKENS'])
+    if os.getenv('LIGHTRAG_EXTRACT_MAX_TOKENS')
+    else None
+)
+
+# Send the extraction JSON schema to the LLM server as `response_format`, so
+# decoding is constrained instead of the prompt merely asking for JSON. Only
+# applied to providers with an OpenAI-compatible json_schema parameter (vLLM,
+# OpenAI, Azure, OpenRouter) and only to entity-extraction calls. Set to false
+# if your server rejects the parameter.
+LIGHTRAG_EXTRACT_GUIDED_JSON: bool = (
+    os.getenv('LIGHTRAG_EXTRACT_GUIDED_JSON', 'true').lower() == 'true'
+)

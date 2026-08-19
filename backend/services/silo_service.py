@@ -234,6 +234,11 @@ def _count_tokens(text: str) -> int:
         return len(text) // 4  # ponytail: fallback if tiktoken unavailable
 
 
+# Providers whose inference runs on our own hardware: no per-token price exists,
+# so they contribute 0 to a cost estimate (see estimate_indexing_cost).
+_SELF_HOSTED_PROVIDERS = frozenset({'Custom', 'Ollama'})
+
+
 def _chunks_from_tokens(doc_tokens: int, chunk_token_size: int, overlap_token_size: int) -> int:
     """Token-window chunk count for a document of *doc_tokens* tokens."""
     if doc_tokens <= 0:
@@ -244,16 +249,6 @@ def _chunks_from_tokens(doc_tokens: int, chunk_token_size: int, overlap_token_si
     if doc_tokens <= chunk_token_size:
         return 1
     return 1 + math.ceil((doc_tokens - chunk_token_size) / stride)
-
-
-def _num_token_chunks(text: str, chunk_token_size: int, overlap_token_size: int) -> int:
-    """Approximate how many token-chunks LightRAG will produce for *text*.
-
-    Counts tokens with the same tiktoken encoding LightRAG's chunker uses, then
-    mirrors its token-window splitting. Used for both progress chunk-counting
-    and cost estimation so the two stay consistent with the real run.
-    """
-    return _chunks_from_tokens(_count_tokens(text), chunk_token_size, overlap_token_size)
 
 
 def _collapse_spaced_letters(line: str) -> str:
@@ -1242,16 +1237,12 @@ class SiloService:
             )
             if not docs:
                 return 0
-            if not is_lightrag:
-                return len(docs)
-            # LightRAG chunks each page/file internally by token size — count
-            # those token-chunks so progress math matches the real run.
-            chunk_size = silo.lightrag_chunk_token_size or 1200
-            overlap = silo.lightrag_chunk_overlap_token_size or 0
-            return sum(
-                _num_token_chunks(getattr(d, 'page_content', ''), chunk_size, overlap)
-                for d in docs
-            )
+            # One unit = one item fed to the vector store: a pre-split chunk for
+            # the other backends, a whole page/file for LightRAG (split=False).
+            # This has to be the same unit the progress callback reports in, or
+            # the bar shows things like "3/14" for a 13-page PDF — LightRAG's
+            # own token-chunking is not observable per page beforehand.
+            return len(docs)
         except Exception:
             return 0
         finally:
@@ -2463,26 +2454,66 @@ class SiloService:
         from services.pricing_service import PricingService
         _ensure_pricing_catalog(db)
 
-        llm_price = PricingService.get_llm_pricing(db, model_name)
         currency = "USD"
-        emb_price = PricingService.get_embedding_pricing(db, embedding_model_name)
 
-        if llm_price is not None:
+        # Self-hosted inference (Ollama, or a Custom OpenAI-compatible endpoint
+        # such as vLLM) has no per-token price, so it counts as 0 and the other,
+        # genuinely billed side still yields a number — previously a self-hosted
+        # extraction model made the whole estimate null even when embeddings were
+        # billed by OpenAI. When BOTH sides are self-hosted there is nothing to
+        # add up, and the real cost (GPU time, power) is not something this
+        # estimate can know: it is reported as unavailable rather than "0.00",
+        # which would read as "free".
+        llm_self_hosted = getattr(extract_service, 'provider', None) in _SELF_HOSTED_PROVIDERS
+        emb_self_hosted = getattr(silo.embedding_service, 'provider', None) in _SELF_HOSTED_PROVIDERS
+
+        llm_price = None if llm_self_hosted else PricingService.get_llm_pricing(db, model_name)
+        emb_price = (
+            None if emb_self_hosted
+            else PricingService.get_embedding_pricing(db, embedding_model_name)
+        )
+
+        llm_cost_min = llm_cost_max = None
+        if llm_self_hosted:
+            llm_cost_min = llm_cost_max = 0.0
+        elif llm_price is not None:
             in_price, out_price = llm_price
-            emb_tokens = estimated_embedding_tokens
-            emb_cost = (emb_tokens * emb_price / 1_000_000) if emb_price is not None else 0.0
-
             llm_input_cost = estimated_input_tokens * in_price / 1_000_000
-            estimated_cost_min = round(
+            llm_cost_min = (
                 llm_input_cost
                 + (extraction_calls * _out_per_call_min) * out_price / 1_000_000
-                + emb_cost, 4
             )
-            estimated_cost_max = round(
+            llm_cost_max = (
                 llm_input_cost
                 + (extraction_calls * _out_per_call_max) * out_price / 1_000_000
-                + emb_cost, 4
             )
+        else:
+            warnings.append(
+                f"No pricing found for extraction model '{model_name}', so the "
+                f"cost estimate is unavailable."
+            )
+
+        emb_cost = None
+        if emb_self_hosted:
+            emb_cost = 0.0
+        elif emb_price is not None:
+            emb_cost = estimated_embedding_tokens * emb_price / 1_000_000
+        else:
+            warnings.append(
+                f"No pricing found for embedding model '{embedding_model_name}', "
+                f"so the cost estimate is unavailable."
+            )
+
+        if llm_self_hosted and emb_self_hosted:
+            warnings.append(
+                "Cost estimate unavailable: both the extraction model "
+                f"('{model_name}') and the embedding model "
+                f"('{embedding_model_name}') are self-hosted, so there is no "
+                "per-token price to add up."
+            )
+        elif llm_cost_min is not None and emb_cost is not None:
+            estimated_cost_min = round(llm_cost_min + emb_cost, 4)
+            estimated_cost_max = round(llm_cost_max + emb_cost, 4)
 
         # --- Time Estimates (seconds) ---
         # Account for worker concurrency. When we already have successful
