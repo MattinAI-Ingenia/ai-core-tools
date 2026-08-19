@@ -19,6 +19,22 @@ interface IndexingMetric {
     created_at: string | null;
 }
 
+/** >1h → HH:MM:SS, >1min → MM:SS, otherwise plain seconds with `decimals` precision. */
+function formatDuration(seconds: number, decimals: number): string {
+    if (seconds > 3600) {
+        const hrs = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    if (seconds > 60) {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${seconds.toFixed(decimals)}s`;
+}
+
 interface ResourceMetricsProps {
     appId: number;
     siloId: number;
@@ -124,7 +140,7 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
                 {metric.duration_seconds != null && (
                     <span title="Indexing duration">
                         <Clock className="w-3 h-3 inline mr-0.5" />
-                        {metric.duration_seconds.toFixed(1)}s
+                        {formatDuration(metric.duration_seconds, 1)}
                     </span>
                 )}
                 {metric.cost != null && (
@@ -180,7 +196,7 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
             {metric.duration_seconds != null && (
                 <div className="flex justify-between">
                     <span className="text-gray-500">Duration</span>
-                    <span>{metric.duration_seconds.toFixed(2)}s</span>
+                    <span>{formatDuration(metric.duration_seconds, 2)}</span>
                 </div>
             )}
             <div className="flex justify-between">

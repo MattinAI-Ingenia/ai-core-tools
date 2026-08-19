@@ -101,13 +101,37 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   }
 
   const formatTime = (seconds: number | null) => {
-    if (seconds === null || seconds === undefined) return '--:--';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+    if (seconds === null || seconds === undefined) return '--:--:--';
+    const total = Math.floor(seconds);
+    const hrs = Math.floor(total / 3600);
+    const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
   const formatPercent = (percent: number) => percent.toFixed(1);
+
+  // ETA and the projected total only refresh every 5s — every-tick updates on
+  // an estimate that itself only settles over tens of seconds just flickers
+  // without adding information. Elapsed time is exact, so it updates on every
+  // progress event untouched.
+  const [throttledEstimates, setThrottledEstimates] = React.useState<{
+    remaining: number | null;
+    total: number | null;
+  }>({ remaining: null, total: null });
+  const lastEstimateUpdateRef = React.useRef(0);
+
+  React.useEffect(() => {
+    if (!progress) return;
+    const now = Date.now();
+    if (lastEstimateUpdateRef.current === 0 || now - lastEstimateUpdateRef.current >= 5000) {
+      lastEstimateUpdateRef.current = now;
+      setThrottledEstimates({
+        remaining: progress.estimated_remaining_seconds,
+        total: progress.estimated_total_time_seconds,
+      });
+    }
+  }, [progress]);
 
   return (
     <div className="space-y-3 bg-white border border-gray-200 rounded-lg p-4">
@@ -157,18 +181,18 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
           <p className="text-gray-600 text-xs">Time</p>
           <p className="font-mono font-medium">
             {formatTime(progress.elapsed_seconds)}
-            {progress.estimated_remaining_seconds !== null &&
-              progress.estimated_remaining_seconds > 0 && (
+            {throttledEstimates.remaining !== null &&
+              throttledEstimates.remaining > 0 && (
                 <>
                   {' '}
-                  / {formatTime(progress.estimated_total_time_seconds)}
+                  / {formatTime(throttledEstimates.total)}
                 </>
               )}
           </p>
-          {progress.estimated_remaining_seconds !== null &&
-            progress.estimated_remaining_seconds > 0 && (
+          {throttledEstimates.remaining !== null &&
+            throttledEstimates.remaining > 0 && (
               <p className="text-blue-600 text-xs mt-1">
-                ETA: {formatTime(progress.estimated_remaining_seconds)}
+                ETA: {formatTime(throttledEstimates.remaining)}
               </p>
             )}
         </div>

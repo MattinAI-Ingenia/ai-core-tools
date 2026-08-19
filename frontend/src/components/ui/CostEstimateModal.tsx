@@ -107,7 +107,9 @@ export default function CostEstimateModal({
               Estimated cost (LLM + embeddings):{' '}
               <span className="font-medium">
                 {estimate?.estimated_cost_min != null && estimate?.estimated_cost_max != null
-                  ? `${estimate.estimated_cost_min} – ${estimate.estimated_cost_max} ${estimate?.currency ?? 'USD'}`
+                  ? estimate.estimated_cost_min === estimate.estimated_cost_max
+                    ? `${estimate.estimated_cost_min} ${estimate?.currency ?? 'USD'}`
+                    : `${estimate.estimated_cost_min} – ${estimate.estimated_cost_max} ${estimate?.currency ?? 'USD'}`
                   : `${estimate?.estimated_cost_min ?? estimate?.estimated_cost_max} ${estimate?.currency ?? 'USD'}`}
               </span>
             </p>
