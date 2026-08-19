@@ -270,6 +270,28 @@ class TestLengthLimitSalvage:
 
         assert json_repair.loads(out)["entities"][0]["name"] == "Ada"
 
+    async def test_salvaged_output_is_marked_truncated(self):
+        """LightRAG must not cache the partial: a re-index with a larger cap would
+        be served the cut JSON forever. The marker is what its cache guard reads."""
+        from lightrag.utils import is_truncated_response
+
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(side_effect=self._length_error('{"entities": [{"na'))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=64)
+            salvaged = await llm_func("hi")
+
+            fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+            complete = await llm_func("hi")
+
+        assert is_truncated_response(salvaged) is True
+        assert is_truncated_response(complete) is False
+
     async def test_other_errors_still_propagate(self):
         ai_service = _make_ai_service()
         fake_llm = MagicMock()

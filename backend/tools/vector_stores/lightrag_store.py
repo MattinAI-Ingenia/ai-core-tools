@@ -1,7 +1,7 @@
 """LightRAG implementation of the vector store interface.
 
 This module provides a LightRAG-backed implementation of
-:class:`VectorStoreInterface`, wrapping ``lightrag-hku==1.5.5rc1``'s embedded
+:class:`VectorStoreInterface`, wrapping ``lightrag-hku==1.5.6``'s embedded
 Python API behind the same abstract interface used by PGVectorStore and
 QdrantStore.
 
@@ -9,7 +9,7 @@ All ``lightrag`` imports are **lazy** (inside methods) so this file is
 importable even when ``lightrag-hku`` is not installed.
 
 Note: Requires ``lightrag-hku`` and its storage extras:
-    pip install 'lightrag-hku[offline-storage]==1.5.5rc1'
+    pip install 'lightrag-hku[offline-storage]==1.5.6'
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ def _parse_entity_types(raw: Optional[str]) -> List[str]:
 def _build_entity_types_guidance(entity_types: List[str]) -> str:
     """Render a type list into LightRAG's ``entity_types_guidance`` shape.
 
-    LightRAG 1.5.5rc1 does not accept a bare type list — its extraction
+    LightRAG 1.5.6 does not accept a bare type list — its extraction
     prompt only reads ``addon_params['entity_types_guidance']``, a
     multi-line instruction string (see ``lightrag/prompt.py``'s
     ``default_entity_types_guidance``). This mirrors that shape (header
@@ -716,7 +716,7 @@ class LightRAGStore(VectorStoreInterface):
         if self.language:
             rag.addon_params["language"] = self.language
 
-        # entity_types resolution — LightRAG 1.5.5rc1 reads
+        # entity_types resolution — LightRAG 1.5.6 reads
         # addon_params['entity_types_guidance'] (a guidance string), not a
         # bare type list. LightRAG does not localize its own default
         # guidance, so a Spanish silo left blank gets this project's Spanish

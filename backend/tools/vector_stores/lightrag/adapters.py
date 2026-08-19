@@ -1,6 +1,6 @@
 """Adapter layer bridging our ``AIService`` / ``EmbeddingService`` to LightRAG.
 
-LightRAG (``lightrag-hku==1.5.5rc1``) expects:
+LightRAG (``lightrag-hku==1.5.6``) expects:
 
 * ``llm_model_func``: ``async def(prompt, system_prompt=None,
   history_messages=None, **kwargs) -> str``  — base/fallback LLM callable.
@@ -64,7 +64,7 @@ _EMBEDDING_MAX_TOKENS_BY_MODEL: dict[str, int] = {
 
 _LIGHTRAG_INSTALL_HINT = (
     "lightrag-hku is not installed. Install the optional extra "
-    "(`pip install 'lightrag-hku[offline-storage]==1.5.5rc1'`) and set "
+    "(`pip install 'lightrag-hku[offline-storage]==1.5.6'`) and set "
     "LIGHTRAG_ENABLED=true to enable the LightRAG integration."
 )
 
@@ -105,7 +105,7 @@ def is_lightrag_available() -> bool:
 
 
 # JSON Schema mirroring the contract LightRAG's JSON extraction parser reads
-# (``_process_json_extraction_result``, ``lightrag/operate.py:722``): entity
+# (``_process_json_extraction_result``, ``lightrag/operate.py``): entity
 # objects keyed name/type/description, relationship objects keyed
 # source/target/keywords/description. Sent as ``response_format`` so the server
 # constrains decoding instead of merely being asked to produce JSON.
@@ -153,10 +153,10 @@ def _derive_json_extraction_marker() -> Optional[str]:
     """Return a sentence that appears **only** in LightRAG's JSON extraction prompt.
 
     The ``extract`` role func is not used for extraction alone:
-    ``_handle_entity_relation_summary`` (``lightrag/operate.py:436``) reuses it to
+    ``_handle_entity_relation_summary`` (``lightrag/operate.py``) reuses it to
     summarise entity descriptions as **plain text**, and constraining those to
     :data:`_EXTRACTION_JSON_SCHEMA` would corrupt every description in the graph.
-    LightRAG consumes ``_priority`` before calling (``utils.py:2080``), so the
+    LightRAG consumes ``_priority`` before calling (``lightrag/utils.py``), so the
     call carries no explicit marker and the prompt is the only discriminator.
 
     The sentence is read from the installed library instead of being hardcoded:
@@ -195,8 +195,11 @@ def _salvage_length_limit(exc: Exception):
     With ``response_format`` set, the OpenAI SDK does not hand back a truncated
     string: it raises ``LengthFinishReasonError``, which would lose the whole
     chunk. The partial JSON is carried inside the exception, and LightRAG parses
-    extraction output with ``json_repair`` (``operate.py:746``), so returning it
-    keeps every complete record produced before the cut instead of nothing.
+    extraction output with ``json_repair`` (``lightrag/operate.py``), so returning
+    it keeps every complete record produced before the cut instead of nothing.
+
+    The caller must wrap the salvaged text in ``TruncatedResponse`` so it never
+    reaches LightRAG's LLM cache.
 
     Returns a response-shaped stand-in, or ``None`` if *exc* is a different error
     (which must keep propagating).
@@ -278,7 +281,7 @@ def build_role_llm_configs(
     because ``only_need_context=True`` is always used and LightRAG falls back
     to the base LLM for context assembly.
 
-    LightRAG 1.5.5rc1 expects role keys in **lowercase** and the keyword
+    LightRAG 1.5.6 expects role keys in **lowercase** and the keyword
     role as singular ``"keyword"`` (not ``"keywords"``).
     """
     import config  # local import to avoid coupling at module import time
@@ -393,6 +396,7 @@ def build_llm_model_func(
                     "schema": _EXTRACTION_JSON_SCHEMA,
                 },
             }
+        truncated = False
         try:
             response = await llm.ainvoke(
                 messages,
@@ -403,6 +407,7 @@ def build_llm_model_func(
             response = _salvage_length_limit(exc)
             if response is None:
                 raise
+            truncated = True
             logger.warning(
                 "LightRAG extraction hit max_tokens=%s; keeping the %d characters "
                 "produced before the cut (json_repair recovers the complete records)",
@@ -457,6 +462,16 @@ def build_llm_model_func(
 
             acc.add_llm_usage(prompt=prompt_toks, completion=completion_toks, source=source)
 
+        if truncated:
+            # LightRAG skips the LLM cache write for a ``TruncatedResponse`` (a str
+            # subclass), so a later re-index with a larger cap re-asks the model
+            # instead of replaying the cut JSON. The marker only ever comes from
+            # LightRAG's own OpenAI binding, which this adapter replaces — without
+            # it the salvaged partial would be cached as if it were complete.
+            # ``str()`` would erase the marker, hence the separate return.
+            from lightrag.utils import TruncatedResponse  # noqa: WPS433
+
+            return TruncatedResponse(content)
         return str(content)
 
     return llm_model_func

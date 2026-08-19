@@ -72,7 +72,7 @@ RUN poetry config virtualenvs.create false && \
 # --force-reinstall (Poetry sobrescribia --upgrade sin esto), luego instalamos
 # lightrag-hku (que reutiliza el pgvector ya instalado).
 RUN pip install --force-reinstall --no-deps --upgrade "pgvector>=0.4.2,<1.0.0" && \
-    pip install --no-cache-dir "lightrag-hku[offline-storage]==1.5.5rc1"
+    pip install --no-cache-dir "lightrag-hku[offline-storage]==1.5.6"
 
 # ----------------------------------------------------------------------------
 # Stage 2: Production

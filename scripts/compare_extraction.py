@@ -95,7 +95,7 @@ def build_prompt_values(PROMPTS: dict, language: str, entity_types: str | None, 
         "tuple_delimiter": PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         "record_delimiter": PROMPTS.get("DEFAULT_RECORD_DELIMITER") or "\n",
         "completion_delimiter": PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
-        # Defaults de LightRAG 1.5.5rc1 (constants.py): tope de filas por respuesta.
+        # Defaults de LightRAG 1.5.6 (constants.py): tope de filas por respuesta.
         "max_total_records": 100,
         "max_entity_records": 40,
         "heading_context_block": "",  # sin heading_path, como al indexar texto plano
@@ -110,7 +110,7 @@ def build_prompt_values(PROMPTS: dict, language: str, entity_types: str | None, 
 
 
 def parse_records(text: str, tuple_delim: str, record_delim: str) -> tuple[list, list]:
-    """Parsea la salida delimitada de LightRAG 1.5.5rc1: un registro por línea/record_delim,
+    """Parsea la salida delimitada de LightRAG 1.5.6: un registro por línea/record_delim,
     sin paréntesis ni comillas (ese formato es de versiones anteriores de LightRAG):
     `entity<TD>name<TD>type<TD>description`
     `relation<TD>source<TD>target<TD>keywords<TD>description`
