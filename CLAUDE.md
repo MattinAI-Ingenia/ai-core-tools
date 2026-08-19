@@ -72,16 +72,15 @@ Test DB connection: `postgresql://test_user:test_pass@localhost:5433/test_db`. C
 Despliegue single-host con Caddy como reverse proxy. Mismo setup para dev local y servidores cliente — solo cambia el `.env`.
 
 ```bash
-cp docker/.env.example .env      # DESDE LA RAÍZ. Editar claves y AICT_OMNIADMINS
+cp .env.example .env             # DESDE LA RAÍZ. Editar claves y AICT_OMNIADMINS
 cd docker
 docker compose up -d --build
 docker compose logs -f backend
 docker compose down -v           # Parar y borrar volúmenes
 ```
 
-- **`docker/.env` es un symlink a `../.env`**: un único fichero de config en la
-  raíz. No hagas `cp .env.example .env` dentro de `docker/` — el cp sigue el
-  enlace y machaca el de la raíz.
+- **Un único `.env` en la raíz** para Docker y para dev local; `docker/.env` es
+  un symlink a él y `.env.example` es la única plantilla.
 - Una variable solo llega al contenedor si `docker-compose.yaml` la declara en el
   `environment:` de ese servicio. Ponerla solo en `.env` no basta.
 - Único puerto publicado al host: 80 (Caddy). Back/front/Postgres/Qdrant solo en red interna.

@@ -52,7 +52,7 @@ Caddy — no CORS, no port juggling. Two ways to obtain the images:
 # 1. Copy environment template into the repo-root .env
 #    (docker/.env is a symlink to it — never run this from inside docker/,
 #     the copy would follow the link and overwrite the root file)
-cp docker/.env.example .env
+cp .env.example .env
 
 # 2. Edit .env — fill in the required values (see "Configure your .env" below)
 
@@ -210,7 +210,7 @@ poetry install
 # Configure environment variables — the repo-root .env, the same file Docker uses
 # (python-dotenv resolves to it from any directory in the repo; a backend/.env
 # would never be read when running from the project root)
-cp docker/.env.example .env
+cp .env.example .env
 # Edit .env:
 #   - set SQLALCHEMY_DATABASE_URI to your local database (the Docker stack ignores
 #     this value: docker-compose.yaml hardcodes the container-side one)
@@ -287,21 +287,19 @@ This repository contains multiple `.env.example` files. They are not for the sam
 
 | Scenario | Template to copy | Resulting file | Used by |
 |----------|------------------|----------------|---------|
-| Docker Compose | `docker/.env.example` | `.env` (repo root) | `cd docker && docker compose ...` |
-| Local backend | `docker/.env.example` | `.env` (repo root) | `uvicorn backend.main:app --reload` |
+| Docker Compose | `.env.example` | `.env` (repo root) | `cd docker && docker compose ...` |
+| Local backend | `.env.example` | `.env` (repo root) | `uvicorn backend.main:app --reload` |
 | Local frontend | `frontend/.env.example` | `frontend/.env` | `cd frontend && npm run dev` |
 
 **Docker reads the repo-root `.env`.** `docker/.env` is a symlink to `../.env`, so
 there is a single file to maintain. Two consequences:
 
-- Copy the template from the repo root (`cp docker/.env.example .env`). Running
-  `cp .env.example .env` *inside* `docker/` follows the symlink and overwrites
-  the root file.
+- Copy the single template from the repo root: `cp .env.example .env`.
 - A variable only reaches a container if `docker-compose.yaml` declares it under
   that service's `environment:`. Adding it to `.env` alone is not enough — this
   silently swallowed `UVICORN_WORKERS` until it was wired up.
 
-The notes below refer to the Docker Compose setup, so the relevant template is `docker/.env.example`.
+There is a single template, `.env.example`, covering both.
 
 ### Required Variables
 
@@ -310,7 +308,7 @@ The notes below refer to the Docker Compose setup, so the relevant template is `
 | `DATABASE_PASSWORD` | PostgreSQL password used by the Docker stack | `change-me-please` |
 | `SECRET_KEY` | Session/JWT signing secret | `hex-string-generated-with-secrets.token_hex(32)` |
 
-For local Docker, `FRONTEND_URL`, `AICT_LOGIN`, and `LIGHTRAG_ENABLED` already come with working defaults in `docker/.env.example`. Change them only if your deployment needs something different.
+For local Docker, `FRONTEND_URL`, `AICT_LOGIN`, and `LIGHTRAG_ENABLED` already come with working defaults in `.env.example`. Change them only if your deployment needs something different.
 
 For local development without Docker, the FastAPI app reads the **same repo-root
 `.env`** (`load_dotenv()` walks up from the working directory), so there is one
