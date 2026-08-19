@@ -1,24 +1,44 @@
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 from models.resource import Resource
 from models.repository import Repository
 from typing import List, Optional
 
+# Surfaces what needs attention first: what's actively indexing, then what
+# failed, then completed files, with the not-yet-started queue at the very
+# end. Anything outside this map (i.e. 'ready') falls through to the else_.
+_STATUS_DISPLAY_RANK = case(
+    (Resource.status == 'indexing', 0),
+    (Resource.status == 'error', 1),
+    (Resource.status == 'pending', 3),
+    else_=2,
+)
+
 
 class ResourceRepository:
-    
+
     @staticmethod
     def get_by_repository_id(db: Session, repository_id: int) -> List[Resource]:
         """
         Get all resources by repository ID
-        
+
         Args:
             db: Database session
             repository_id: Repository ID
-            
+
         Returns:
             List of Resource instances
         """
-        return db.query(Resource).filter(Resource.repository_id == repository_id).all()
+        # resource_id is assigned in upload order, which is also the order the
+        # indexing queue processes them in (create_multiple_resources builds its
+        # batch list the same way) — so within each status group it doubles as
+        # indexing order without a dedicated "indexed_at" column.
+        return (
+            db.query(Resource)
+            .filter(Resource.repository_id == repository_id)
+            .order_by(_STATUS_DISPLAY_RANK, Resource.resource_id)
+            .all()
+        )
     
     @staticmethod
     def get_by_id(db: Session, resource_id: int) -> Optional[Resource]:
