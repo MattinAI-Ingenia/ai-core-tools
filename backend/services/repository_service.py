@@ -363,6 +363,8 @@ class RepositoryService:
                 "created_at": resource.create_date,
                 "folder_id": resource.folder_id,
                 "status": resource.status,
+                "progress_done": resource.progress_done,
+                "progress_total": resource.progress_total,
             })
         
         # Get embedding services for form data

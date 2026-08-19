@@ -2,9 +2,11 @@ from models.resource import Resource
 from repositories.resource_repository import ResourceRepository
 from services.folder_service import FolderService
 from typing import List, Tuple, Optional
+from datetime import datetime
 import os
 from services.silo_service import SiloService
 from utils.logger import get_logger
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status, UploadFile
 
@@ -229,6 +231,27 @@ class ResourceService:
         
         os.makedirs(target_path, exist_ok=True)
 
+        # Claim the silo before writing anything: LightRAG cannot have two
+        # ingestion runs on the same silo (its asyncio locks are per-event-loop).
+        # The lock is a PostgreSQL advisory lock, so it is honoured across all
+        # uvicorn workers — the previous in-memory guard was invisible to the
+        # other three. Held until the background thread finishes.
+        from services import silo_indexing_lock
+
+        _repo = ResourceRepository.get_repository_by_id(db, repository_id)
+        silo_id = _repo.silo_id if _repo and _repo.silo_id else 0
+        lock_conn = silo_indexing_lock.acquire(silo_id) if silo_id else None
+        if silo_id and lock_conn is None:
+            logger.warning(
+                "Rejected concurrent ingestion for silo %s (repository %s)",
+                silo_id, repository_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This silo already has an active ingestion in progress. "
+                       "Please wait for it to complete before uploading more files.",
+            )
+
         created_resources = []
         failed_files = []
         
@@ -245,16 +268,19 @@ class ResourceService:
                 failed_files.append(result)
 
         session_id = None
+        if not created_resources:
+            # Nothing to index: the lock would otherwise be held until the
+            # process dies, blocking the silo forever.
+            silo_indexing_lock.release(lock_conn, silo_id)
+            lock_conn = None
         if created_resources:
             try:
                 ResourceRepository.commit(db)
                 logger.info(f"Successfully saved {len(created_resources)} resources to database")
-                
-                # Fetch silo_id from repository
-                repo = ResourceRepository.get_repository_by_id(db, repository_id)
-                silo_id = repo.silo_id if repo else 0
-                
-                session_id = ResourceService._index_resources_background(created_resources, silo_id)
+
+                session_id = ResourceService._index_resources_background(
+                    created_resources, silo_id, lock_conn=lock_conn,
+                )
             except Exception as e:
                 logger.error(f"Error committing resources to database: {str(e)}")
                 ResourceRepository.rollback(db)
@@ -364,16 +390,22 @@ class ResourceService:
             return {'filename': file.filename, 'error': str(e)}
 
     @staticmethod
-    def _index_resources_background(resources: List[Resource], silo_id: int = 0) -> str:
+    def _index_resources_background(
+        resources: List[Resource], silo_id: int = 0, lock_conn=None
+    ) -> str:
         """Launch indexing in a background thread and return a session_id.
 
         Progress is tracked by real chunk count, not file count.
         The client connects to the SSE endpoint with this session_id to
         monitor the ingestion progress bar in real time.
+
+        ``lock_conn`` holds the silo's advisory lock (see
+        :mod:`services.silo_indexing_lock`). It is released when the thread
+        finishes — including on failure, or the silo would stay blocked until
+        the worker process dies.
         """
         import uuid
         import threading
-        from services.ingestion_progress_tracker import IngestionProgressManager
 
         session_id = str(uuid.uuid4())
 
@@ -382,6 +414,25 @@ class ResourceService:
             (r.resource_id, getattr(r, 'uri', str(r.resource_id)))
             for r in resources
         ]
+
+        # Stamp the batch synchronously, before the thread starts: the client
+        # connects to the SSE stream as soon as the upload response returns, and
+        # that stream reads progress from these rows.  Stamping inside the thread
+        # would leave a window where the batch looks finished.
+        batch_started_at = datetime.now()
+        from db.database import SessionLocal as _StampSession
+        from models.resource import Resource as _StampResource
+        _stamp_db = _StampSession()
+        try:
+            _stamp_db.query(_StampResource).filter(
+                _StampResource.resource_id.in_([rid for rid, _ in resource_snapshots])
+            ).update(
+                {'progress_started_at': batch_started_at, 'progress_done': 0, 'progress_total': None},
+                synchronize_session=False,
+            )
+            _stamp_db.commit()
+        finally:
+            _stamp_db.close()
 
         def _run():
             import asyncio
@@ -393,40 +444,31 @@ class ResourceService:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-            # Create the session immediately (before Phase 1) so the SSE client
-            # can connect right away instead of waiting for chunk counting to finish.
-            IngestionProgressManager.create_session(
-                session_id=session_id,
-                silo_id=silo_id,
-                total_chunks=len(resource_snapshots),  # placeholder; updated after Phase 1
-            )
-
             # Phase 1: extract docs per resource to get the real chunk count.
             # Extraction is CPU-only (no LLM calls), so this adds only seconds.
+            # The counts are also written to the rows so the progress bar can be
+            # served from the DB by any uvicorn worker (the in-memory session
+            # above only exists in this process).
             chunk_counts = {}
             for resource_id, _ in resource_snapshots:
                 _db = _SessionLocal()
-                resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                _db.close()
-                if resource_obj:
-                    chunk_counts[resource_id] = SiloService.count_resource_chunks(resource_obj)
+                try:
+                    resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                    if resource_obj:
+                        count = SiloService.count_resource_chunks(resource_obj)
+                        chunk_counts[resource_id] = count
+                        resource_obj.progress_total = count or None
+                        _db.commit()
+                finally:
+                    _db.close()
 
             total_chunks = sum(chunk_counts.values()) or len(resource_snapshots)
-            # Update with real chunk count so progress math is correct for Phase 2.
-            IngestionProgressManager.update_total_chunks(session_id, total_chunks)
-
             # Phase 2: index each resource, reporting progress by chunk count.
             cumulative = 0
             failed = 0
             try:
                 for resource_id, resource_name in resource_snapshots:
                     resource_chunks = chunk_counts.get(resource_id, 1)
-                    IngestionProgressManager.update_progress(
-                        session_id=session_id,
-                        processed=cumulative,
-                        failed=failed,
-                        chunk_name=resource_name,
-                    )
                     try:
                         _db = _SessionLocal()
                         resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
@@ -442,13 +484,25 @@ class ResourceService:
                             finally:
                                 _db_pre.close()
 
-                            offset = cumulative
-                            def _on_progress(n, _offset=offset, _failed=failed):
-                                IngestionProgressManager.update_progress(
-                                    session_id=session_id,
-                                    processed=_offset + n,
-                                    failed=_failed,
-                                )
+                            last_reported = [-1]
+                            def _on_progress(n, total=None, _rid=resource_id):
+                                # Progress lives on the row: every uvicorn worker
+                                # can serve it and it survives F5 and restarts.
+                                # The poller ticks every 0.5 s but only writes
+                                # when n moves.
+                                if n == last_reported[0]:
+                                    return
+                                last_reported[0] = n
+                                _db_p = _SessionLocal()
+                                try:
+                                    _db_p.query(ResourceModel).filter_by(resource_id=_rid).update(
+                                        {'progress_done': n, 'progress_total': total}
+                                    )
+                                    _db_p.commit()
+                                except Exception:
+                                    _db_p.rollback()  # progress is best-effort
+                                finally:
+                                    _db_p.close()
                             SiloService.index_resource(resource_obj, progress_callback=_on_progress)
                         # Mark resource as ready in DB
                         _db2 = _SessionLocal()
@@ -456,6 +510,10 @@ class ResourceService:
                             r = _db2.query(ResourceModel).filter_by(resource_id=resource_id).first()
                             if r:
                                 r.status = 'ready'
+                                # Keep done == total: the batch totals are summed
+                                # across finished files too, so the bar must not
+                                # lose them when a file completes.
+                                r.progress_done = r.progress_total
                                 _db2.commit()
                         finally:
                             _db2.close()
@@ -467,30 +525,104 @@ class ResourceService:
                             r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
                             if r:
                                 r.status = 'error'
+                                r.progress_done = r.progress_total
                                 _db3.commit()
                         finally:
                             _db3.close()
                         failed += resource_chunks
                         cumulative += resource_chunks
 
-                    IngestionProgressManager.update_progress(
-                        session_id=session_id,
-                        processed=cumulative,
-                        failed=failed,
-                        chunk_name=resource_name,
-                    )
             finally:
                 loop.close()
 
-            IngestionProgressManager.complete_session(session_id)
             logger.info(
                 "Background indexing done: %s/%s chunks, %s failed",
                 cumulative - failed, total_chunks, failed,
             )
 
-        thread = threading.Thread(target=_run, daemon=True, name=f"index-{session_id[:8]}")
+        def _run_and_unlock():
+            from services import silo_indexing_lock
+
+            try:
+                _run()
+            finally:
+                silo_indexing_lock.release(lock_conn, silo_id)
+
+        thread = threading.Thread(
+            target=_run_and_unlock, daemon=True, name=f"index-{session_id[:8]}"
+        )
         thread.start()
+
         return session_id
+
+    @staticmethod
+    def get_indexing_progress(db: Session, repository_id: int) -> Optional[dict]:
+        """Return the live indexing progress of a repository, read from the rows.
+
+        Derived from ``Resource.progress_*`` instead of the in-memory session
+        tracker: the indexing thread lives in one uvicorn worker while HTTP
+        requests are balanced across all of them, so anything in process memory
+        is invisible to roughly half the requests.  The rows are shared, so this
+        also survives a backend restart and a browser reload.
+
+        A batch is the set of rows sharing one ``progress_started_at`` stamp; the
+        newest batch that still has unfinished rows is the active one.  Finished
+        rows of that batch stay in the totals so the percentage never jumps back.
+
+        Returns ``None`` when nothing is indexing.
+        """
+        active_batch = (
+            db.query(func.max(Resource.progress_started_at))
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.status.in_(('pending', 'indexing')),
+            )
+            .scalar()
+        )
+        if active_batch is None:
+            return None
+
+        done, total, failed = (
+            db.query(
+                func.coalesce(func.sum(Resource.progress_done), 0),
+                func.coalesce(func.sum(Resource.progress_total), 0),
+                func.count(Resource.resource_id).filter(Resource.status == 'error'),
+            )
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.progress_started_at == active_batch,
+            )
+            .one()
+        )
+        current = (
+            db.query(Resource.uri)
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.progress_started_at == active_batch,
+                Resource.status == 'indexing',
+            )
+            .limit(1)
+            .scalar()
+        )
+
+        elapsed = (datetime.now() - active_batch).total_seconds()
+        percent = min(100.0, done * 100 / total) if total else 0.0
+        # Linear extrapolation from the batch start — same formula the in-memory
+        # tracker used.  Optimistic early on: the first pages run before entity
+        # merging piles up.
+        remaining = (total - done) * elapsed / done if done else None
+
+        return {
+            'session_id': active_batch.isoformat(),
+            'total_chunks': total,
+            'processed_chunks': done,
+            'failed_chunks': failed,
+            'progress_percent': percent,
+            'current_chunk_name': current or '',
+            'elapsed_seconds': round(elapsed, 1),
+            'estimated_remaining_seconds': round(remaining, 1) if remaining else None,
+            'estimated_total_time_seconds': round(elapsed + remaining, 1) if remaining else None,
+        }
 
     @staticmethod
     def _cleanup_files(resources: List[Resource], repository_path: str):
@@ -547,22 +679,9 @@ class ResourceService:
                 detail="Repository not found"
             )
 
-        # Guard: reject concurrent ingestion on the same silo — LightRAG asyncio
-        # locks are bound to a single event loop and cannot be shared across the
-        # independent background threads each upload batch spawns.
-        silo_id = repo.silo_id if repo.silo_id else 0
-        if silo_id:
-            from services.ingestion_progress_tracker import IngestionProgressManager
-            if IngestionProgressManager.has_active_session_for_silo(silo_id):
-                logger.warning(
-                    f"Rejected concurrent upload for silo {silo_id} "
-                    f"(repository {repository_id}): ingestion already in progress"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="This silo already has an active ingestion in progress. "
-                           "Please wait for it to complete before uploading more files.",
-                )
+        # Concurrent-ingestion rejection now lives in create_multiple_resources,
+        # which takes an advisory lock before writing anything (the previous
+        # in-memory check could not see runs started by other uvicorn workers).
 
         logger.info(f"Repository {repository_id} found, processing {len(files)} files")
 

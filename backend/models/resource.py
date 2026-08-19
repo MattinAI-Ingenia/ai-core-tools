@@ -18,6 +18,14 @@ class Resource(Base):
                        ForeignKey('Folder.folder_id'),
                        nullable=True)
     extra_metadata = Column(JSON, nullable=True)  # CSV-import metadata, merged into indexed chunk metadata
+    # Indexing progress, persisted so the UI survives F5 and backend restarts
+    # (the in-memory ingestion session does not).  Unit: LightRAG documents
+    # (one per PDF page).  NULL while the backend cannot report sub-file progress.
+    progress_done = Column(Integer, nullable=True)
+    progress_total = Column(Integer, nullable=True)
+    # Same value for every resource of one upload batch: identifies the batch and
+    # provides the start time the ETA is extrapolated from.
+    progress_started_at = Column(DateTime, nullable=True)
 
     repository = relationship('Repository',
                            back_populates='resources',

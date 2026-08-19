@@ -67,16 +67,8 @@ def confirm_rows(import_job_id: int, row_ids: list[int], db: Session) -> dict:
     # Same guard as manual upload (resource_service.upload_resources_to_repository):
     # LightRAG's asyncio locks are bound to a single event loop and cannot be
     # shared across the independent background threads each batch spawns.
-    repo = RepositoryRepository.get_by_id(db, job.repository_id)
-    silo_id = repo.silo_id if repo and repo.silo_id else 0
-    if silo_id:
-        from services.ingestion_progress_tracker import IngestionProgressManager
-        if IngestionProgressManager.has_active_session_for_silo(silo_id):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This silo already has an active ingestion in progress. "
-                       "Please wait for it to complete before confirming more documents.",
-            )
+    # The rejection is enforced by the advisory lock ResourceService takes in
+    # create_multiple_resources (called below), which is visible to every worker.
 
     rows = db.query(ImportJobRow).filter(
         ImportJobRow.import_job_id == import_job_id,

@@ -158,9 +158,9 @@ async def lifespan(app: FastAPI):
         from startup_tasks import initialize_pricing_catalog
         await initialize_pricing_catalog()
 
-        # Reset resources that were left in 'indexing' or 'pending' state by a
-        # previous crashed/killed process.  Without this they stay stuck forever
-        # because IngestionProgressManager is in-memory and starts empty.
+        # Reset resources left in 'indexing' or 'pending' by a crashed/killed
+        # process: their background thread is gone, so nothing would ever
+        # advance them again.
         from startup_tasks import reset_stuck_resources
         await reset_stuck_resources()
 

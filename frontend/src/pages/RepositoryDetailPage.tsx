@@ -26,6 +26,8 @@ interface Resource {
   folder_id?: number;
   folder_path?: string;
   status?: string;
+  progress_done?: number | null;
+  progress_total?: number | null;
 }
 
 interface RepositoryDetail {
@@ -1067,8 +1069,23 @@ const RepositoryDetailPage: React.FC = () => {
                                 </span>
                               )}
                               {resource.status === 'indexing' && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
-                                  <Loader className="w-3 h-3 animate-spin" /> Indexing
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
+                                  <Loader className="w-3 h-3 animate-spin shrink-0" />
+                                  {resource.progress_total ? (
+                                    <>
+                                      <span className="w-16 h-1.5 rounded-full bg-blue-200 overflow-hidden">
+                                        <span
+                                          className="block h-full bg-blue-600 transition-[width] duration-500"
+                                          style={{ width: `${Math.round((resource.progress_done ?? 0) * 100 / resource.progress_total)}%` }}
+                                        />
+                                      </span>
+                                      <span className="tabular-nums">
+                                        {resource.progress_done ?? 0}/{resource.progress_total}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    'Indexing'
+                                  )}
                                 </span>
                               )}
                               {resource.status === 'ready' && (

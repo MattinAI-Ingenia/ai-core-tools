@@ -978,25 +978,18 @@ async def get_ingestion_status(
     db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
 ):
-    """Return whether the silo associated with this repository is currently indexing.
+    """Return whether this repository is currently indexing.
 
     Response:
-    - ``is_indexing``: true while an ingestion session is running
-    - ``active_session_id``: session_id of the running session (or null)
+    - ``is_indexing``: true while any resource is pending or indexing
+    - ``active_session_id``: id of the running batch (or null)
     """
-    from services.ingestion_progress_tracker import IngestionProgressManager
-
     _validate_repository_app_ownership(repository_id, app_id, db)
-    repo = RepositoryService.get_repository(repository_id, db)
-    if not repo or not repo.silo_id:
-        return {"is_indexing": False, "active_session_id": None}
 
-    sessions = IngestionProgressManager.list_sessions_by_silo(repo.silo_id)
-    active = [s for s in sessions if s["processed_chunks"] < s["total_chunks"]]
-
+    progress = ResourceService.get_indexing_progress(db, repository_id)
     return {
-        "is_indexing": bool(active),
-        "active_session_id": active[0]["session_id"] if active else None,
+        "is_indexing": progress is not None,
+        "active_session_id": progress["session_id"] if progress else None,
     }
 
 
@@ -1018,64 +1011,53 @@ async def stream_ingestion_progress(
     Connect immediately after uploading files using the ``session_id``
     returned in the upload response.
 
+    Progress is read from the ``Resource`` rows, so any uvicorn worker can serve
+    this stream.  ``session_id`` is therefore only an identifier for the client's
+    stream — the payload always describes the repository's active batch.
+
     Events:
-    - ``message``: JSON ``IngestionProgress`` payload (emitted on every change)
-    - ``complete``: ingestion finished (no data)
+    - ``message``: JSON progress payload (emitted on every change)
+    - ``complete``: no resource of this repository is pending/indexing any more
     - ``error``: something went wrong (data contains error message)
     """
-    from services.ingestion_progress_tracker import IngestionProgressManager
-
     async def event_generator():
         max_wait = 3600
         elapsed = 0.0
-        last_processed = -1
+
+        def _read():
+            # End the read transaction each tick: this generator lives for as
+            # long as the indexing run, and an open transaction would sit as
+            # "idle in transaction", blocking DDL on Resource.
+            db.rollback()
+            return ResourceService.get_indexing_progress(db, repository_id)
 
         try:
             # Emit initial state immediately on connect — no 0.5 s wait.
             # This flushes the response buffer through any intermediate proxy,
             # causing isConnected to flip to true AND the progress bar to render
             # actual data right away instead of staying at "Connecting…".
-            initial = IngestionProgressManager.get_progress(session_id)
-            if initial is not None:
-                last_processed = initial.processed_chunks
-                if initial.processed_chunks >= initial.total_chunks:
-                    yield "event: complete\ndata: {}\n\n"
-                    return
-                yield f"data: {json.dumps(initial.to_dict())}\n\n"
+            initial = _read()
+            if initial is None:
+                yield "event: complete\ndata: {}\n\n"
+                return
+            yield f"data: {json.dumps(initial)}\n\n"
 
             while elapsed < max_wait:
                 await asyncio.sleep(0.5)
                 elapsed += 0.5
 
-                progress = IngestionProgressManager.get_progress(session_id)
+                progress = _read()
                 if progress is None:
-                    if elapsed > 10:
-                        yield "event: complete\ndata: {}\n\n"
-                        break
-                    continue
-
-                if progress.processed_chunks != last_processed:
-                    last_processed = progress.processed_chunks
-                    yield f"data: {json.dumps(progress.to_dict())}\n\n"
-
-                if progress.processed_chunks >= progress.total_chunks:
                     yield "event: complete\ndata: {}\n\n"
                     break
+
+                # Emit every tick, not only on chunk changes: the elapsed clock
+                # and ETA move even while a page is still being extracted.
+                yield f"data: {json.dumps(progress)}\n\n"
 
         except Exception as e:
             logger.error("SSE error for session %s: %s", session_id, e)
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-        finally:
-            # Keep active sessions in memory if the client disconnects so the
-            # frontend can reconnect (refresh/navigation) and keep the UI lock.
-            progress = IngestionProgressManager.get_progress(session_id)
-            if progress and progress.processed_chunks >= progress.total_chunks:
-                IngestionProgressManager.cleanup_session(session_id)
-            else:
-                logger.info(
-                    "Retaining ingestion session %s for potential reconnection",
-                    session_id,
-                )
 
     return StreamingResponse(
         event_generator(),

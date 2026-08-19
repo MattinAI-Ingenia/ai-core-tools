@@ -11,10 +11,9 @@ logger = get_logger(__name__)
 async def reset_stuck_resources() -> None:
     """Reset resources left in 'indexing' or 'pending' state by a previous crash.
 
-    IngestionProgressManager is in-memory and starts empty on every boot.
-    Any resource still marked 'indexing' or 'pending' after a restart will
-    never be updated by a background thread, so we mark them 'error' so
-    the user can see they need to re-upload / re-index.
+    The background thread that owns those rows died with the previous process,
+    so nothing will ever advance them again. Marking them 'error' is what tells
+    the user they need to re-upload / re-index.
     """
     try:
         from models.resource import Resource

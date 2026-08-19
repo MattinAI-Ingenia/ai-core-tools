@@ -1421,10 +1421,6 @@ class ApiService {
     });
   }
 
-  async getIngestionSessions(appId: number, siloId: number) {
-    return this.request(`/internal/apps/${appId}/silos/${siloId}/ingestion-sessions`);
-  }
-
   async getResourceIndexingMetrics(appId: number, siloId: number, resourceId: number) {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/resources/${resourceId}/indexing-metrics`);
   }

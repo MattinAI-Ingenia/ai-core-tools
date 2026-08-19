@@ -179,11 +179,22 @@ async def _ainsert(rag, texts, file_paths=None, process_options="F"):
 async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, process_options="F"):
     """Run the insert with optional sub-document progress reporting.
 
-    Polls pipeline_status every 0.5s while the insert runs.  Falls back
-    gracefully if the namespace isn't available.
+    Polls the workspace's doc_status counts every 0.5s while the insert runs.
 
     ``file_paths`` (one per text) is forwarded to LightRAG for citation so the
     retrieved chunks carry a human-readable source instead of "unknown_source".
+
+    ``progress_callback`` is called as ``(done, total)`` where both are counted
+    in LightRAG documents (one per page for PDFs) — the same unit, so the
+    caller can render a percentage without mixing it with its own estimates.
+
+    ``done`` counts documents that actually **finished**.  The obvious counter,
+    ``pipeline_status["cur_batch"]``, is incremented when a document *enters*
+    the ``max_parallel_insert`` semaphore (``lightrag/pipeline.py:2155-2178``),
+    so the first 3 pages complete "instantly" and the bar stays exactly
+    ``max_parallel_insert`` ahead of reality — which also biased the ETA, since
+    it is extrapolated from the first samples.  doc_status is the only source
+    of true completions: pipeline_status has no such counter.
     """
     if progress_callback is None:
         await _ainsert(rag, texts, file_paths=file_paths, process_options=process_options)
@@ -191,16 +202,26 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
 
     total = len(texts)
 
+    async def _finished_docs():
+        """Documents of this workspace in a terminal state, as one GROUP BY."""
+        counts = await rag.doc_status.get_status_counts()
+        return counts.get("processed", 0) + counts.get("failed", 0)
+
+    # Earlier resources indexed into the same silo are already 'processed', so
+    # only the delta belongs to this run.  Read before the insert starts: a
+    # cache hit can finish a document inside the first poll interval.
+    # doc_status is always PostgreSQL in this project (see storage_config.py).
+    try:
+        baseline = await _finished_docs()
+    except Exception:
+        baseline = 0
+
     async def _poll():
         while True:
             await asyncio.sleep(0.5)
             try:
-                from lightrag.kg.shared_storage import get_namespace_data
-                workspace = getattr(rag, 'workspace', None)
-                status = await get_namespace_data("pipeline_status", workspace=workspace)
-                cur = status.get("cur_batch", 0)
-                batches = max(1, status.get("batchs", 1))
-                progress_callback(min(total - 1, int(total * cur / batches)))
+                done = await _finished_docs() - baseline
+                progress_callback(max(0, min(total - 1, done)), total)
             except Exception:
                 pass  # polling is best-effort
 
@@ -211,7 +232,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
 
-    progress_callback(total)
+    progress_callback(total, total)
 
 
 def _run_async(coro):

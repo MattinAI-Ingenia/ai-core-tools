@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, List, Optional
 
 from tools.vector_stores.lightrag.token_accumulator import IndexingTokenAccumulator
@@ -103,6 +104,160 @@ def is_lightrag_available() -> bool:
 # ---------------------------------------------------------------------------
 
 
+# JSON Schema mirroring the contract LightRAG's JSON extraction parser reads
+# (``_process_json_extraction_result``, ``lightrag/operate.py:722``): entity
+# objects keyed name/type/description, relationship objects keyed
+# source/target/keywords/description. Sent as ``response_format`` so the server
+# constrains decoding instead of merely being asked to produce JSON.
+_EXTRACTION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["name", "type", "description"],
+                "additionalProperties": False,
+            },
+        },
+        "relationships": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "target": {"type": "string"},
+                    "keywords": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["source", "target", "keywords", "description"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["entities", "relationships"],
+    "additionalProperties": False,
+}
+
+# Providers whose API accepts OpenAI-style ``response_format={"type":
+# "json_schema"}``. Anthropic / Mistral / Google use different mechanisms, so
+# they keep prompt-only JSON instead of erroring on an unknown parameter.
+_GUIDED_JSON_PROVIDERS = frozenset({"Custom", "OpenAI", "Azure", "OpenRouter"})
+
+def _derive_json_extraction_marker() -> Optional[str]:
+    """Return a sentence that appears **only** in LightRAG's JSON extraction prompt.
+
+    The ``extract`` role func is not used for extraction alone:
+    ``_handle_entity_relation_summary`` (``lightrag/operate.py:436``) reuses it to
+    summarise entity descriptions as **plain text**, and constraining those to
+    :data:`_EXTRACTION_JSON_SCHEMA` would corrupt every description in the graph.
+    LightRAG consumes ``_priority`` before calling (``utils.py:2080``), so the
+    call carries no explicit marker and the prompt is the only discriminator.
+
+    The sentence is read from the installed library instead of being hardcoded:
+    upstream rewording then moves the marker with it, rather than silently
+    disabling guided JSON. Lines containing braces are skipped — they are
+    placeholders or escaped JSON literals that do not survive templating.
+
+    Returns ``None`` if the prompt is missing or every candidate also appears in
+    the summary prompt; guided JSON is then left off rather than applied blindly.
+    """
+    from lightrag.prompt import PROMPTS  # noqa: WPS433
+
+    template = PROMPTS.get("entity_extraction_json_system_prompt") or ""
+    summary = PROMPTS.get("summarize_entity_descriptions") or ""
+    if not template:
+        return None
+
+    candidates = [
+        stripped
+        for line in template.splitlines()
+        if "{" not in line and "}" not in line
+        for stripped in (line.strip(),)
+        if len(stripped) >= 40  # corta encabezados y frases sueltas
+    ]
+    # Longest first: the most distinctive sentence is the least likely to
+    # collide with another prompt.
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if candidate not in summary:
+            return candidate
+    return None
+
+
+def _salvage_length_limit(exc: Exception):
+    """Recover the partial completion when a capped, schema-constrained call hits the limit.
+
+    With ``response_format`` set, the OpenAI SDK does not hand back a truncated
+    string: it raises ``LengthFinishReasonError``, which would lose the whole
+    chunk. The partial JSON is carried inside the exception, and LightRAG parses
+    extraction output with ``json_repair`` (``operate.py:746``), so returning it
+    keeps every complete record produced before the cut instead of nothing.
+
+    Returns a response-shaped stand-in, or ``None`` if *exc* is a different error
+    (which must keep propagating).
+    """
+    if type(exc).__name__ != "LengthFinishReasonError":
+        return None
+    completion = getattr(exc, "completion", None)
+    if completion is None or not getattr(completion, "choices", None):
+        return None
+    content = getattr(completion.choices[0].message, "content", None) or ""
+    if not content.strip():
+        # Nothing was produced before the cut: swallowing the error here would
+        # report a successful extraction of zero records, hiding the failure.
+        return None
+    usage = getattr(completion, "usage", None)
+    usage_metadata = None
+    if usage is not None:
+        usage_metadata = {
+            "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+        }
+    # Mimics the LangChain message shape completely: consumers read
+    # `.response_metadata` directly (scripts/compare_extraction.py), not only
+    # through getattr with a default.
+    return SimpleNamespace(
+        content=content, usage_metadata=usage_metadata, response_metadata={}
+    )
+
+
+def _resolve_json_marker(service: "AIService") -> Optional[str]:
+    """Marker enabling schema-constrained extraction for *service*, or ``None``.
+
+    ``None`` means "send no schema" — LightRAG's prompt-level JSON still applies.
+    The decision is logged: a silent downgrade would otherwise only surface much
+    later, as runaway generation.
+    """
+    import config  # local import to avoid coupling at module import time
+
+    provider = getattr(service, "provider", None)
+    if not config.LIGHTRAG_EXTRACT_GUIDED_JSON:
+        logger.info("LightRAG guided JSON off: disabled by configuration")
+        return None
+    if provider not in _GUIDED_JSON_PROVIDERS:
+        logger.info(
+            "LightRAG guided JSON off: provider %s has no OpenAI-style json_schema",
+            provider,
+        )
+        return None
+
+    marker = _derive_json_extraction_marker()
+    if marker is None:
+        logger.warning(
+            "LightRAG guided JSON off: no sentence unique to the JSON extraction "
+            "prompt could be derived — falling back to prompt-only JSON"
+        )
+    else:
+        logger.info("LightRAG guided JSON on (marker: %.60s)", marker)
+    return marker
+
+
 def build_role_llm_configs(
     *,
     extract_service: AIService,
@@ -126,22 +281,40 @@ def build_role_llm_configs(
     LightRAG 1.5.5rc1 expects role keys in **lowercase** and the keyword
     role as singular ``"keyword"`` (not ``"keywords"``).
     """
+    import config  # local import to avoid coupling at module import time
     from lightrag.llm_roles import RoleLLMConfig  # noqa: WPS433
 
     if extract_service is None:
         raise ValueError("extract_service is required to build LightRAG role LLMs")
 
-    def _role_config(service: "AIService") -> "RoleLLMConfig":
+    def _role_config(
+        service: "AIService",
+        *,
+        max_tokens: Optional[int] = None,
+        json_marker: Optional[str] = None,
+    ) -> "RoleLLMConfig":
         return RoleLLMConfig(
-            func=build_llm_model_func(service, temperature=temperature),
+            func=build_llm_model_func(
+                service,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_marker=json_marker,
+            ),
             metadata={
                 "binding": getattr(service, "provider", None),
                 "model": getattr(service, "description", None),
             },
         )
 
+    # Only `extract` is capped: it is the role that generates long JSON records
+    # per chunk during indexing. `keyword` answers queries with a short list and
+    # `vlm` describes images, neither of which runs away.
     configs: dict[str, RoleLLMConfig] = {
-        'extract': _role_config(extract_service),
+        'extract': _role_config(
+            extract_service,
+            max_tokens=config.LIGHTRAG_EXTRACT_MAX_TOKENS,
+            json_marker=_resolve_json_marker(extract_service),
+        ),
     }
 
     # LightRAG uses "keyword" (singular), not "keywords".
@@ -161,6 +334,8 @@ def build_llm_model_func(
     ai_service: AIService,
     *,
     temperature: float = 0.0,
+    max_tokens: Optional[int] = None,
+    json_marker: Optional[str] = None,
 ) -> Callable[..., Awaitable[str]]:
     """Build a LightRAG-shaped ``llm_model_func`` from an :class:`AIService`.
 
@@ -173,6 +348,16 @@ def build_llm_model_func(
     History messages are passed through as already-formatted LangChain-style
     dicts (``{"role": "user"|"assistant"|"system", "content": "..."}``). When
     ``system_prompt`` is provided it is prepended as a system message.
+
+    ``max_tokens`` caps the completion length. Left unset, an OpenAI-compatible
+    server fills the remaining context window (~30k on vLLM), so a model that
+    starts inventing relationships runs for minutes before stopping.
+
+``json_marker``, when given, sends :data:`_EXTRACTION_JSON_SCHEMA` as
+    ``response_format`` on the calls whose ``system_prompt`` contains that
+    sentence, so the server constrains decoding to the schema. It is the
+    discriminator built by :func:`_resolve_json_marker`; passing ``None`` keeps
+    LightRAG's prompt-only JSON, where nothing prevents malformed output.
     """
     if ai_service is None:
         raise ValueError("ai_service is required to build an LLM adapter")
@@ -197,9 +382,32 @@ def build_llm_model_func(
 
         # lc_source tag → _INTERNAL_LC_SOURCES filter drops these tokens;
         # untagged, the keyword-extraction JSON leaks into the chat stream.
-        response = await llm.ainvoke(
-            messages, config={"metadata": {"lc_source": "lightrag"}}
-        )
+        invoke_kwargs: dict[str, Any] = {}
+        if max_tokens:
+            invoke_kwargs["max_tokens"] = max_tokens
+        if json_marker and system_prompt and json_marker in system_prompt:
+            invoke_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "lightrag_entity_extraction",
+                    "schema": _EXTRACTION_JSON_SCHEMA,
+                },
+            }
+        try:
+            response = await llm.ainvoke(
+                messages,
+                config={"metadata": {"lc_source": "lightrag"}},
+                **invoke_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 - re-raised unless salvageable
+            response = _salvage_length_limit(exc)
+            if response is None:
+                raise
+            logger.warning(
+                "LightRAG extraction hit max_tokens=%s; keeping the %d characters "
+                "produced before the cut (json_repair recovers the complete records)",
+                max_tokens, len(response.content),
+            )
         # LangChain chat models return an AIMessage; fall back to str() for
         # custom wrappers that might return a plain string.
         content = getattr(response, "content", response)

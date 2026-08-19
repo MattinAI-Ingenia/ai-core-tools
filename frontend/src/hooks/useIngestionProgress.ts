@@ -15,7 +15,6 @@ import { configService } from '../core/ConfigService';
 
 export interface IngestionProgressData {
   session_id: string;
-  silo_id: number;
   total_chunks: number;
   processed_chunks: number;
   failed_chunks: number;
