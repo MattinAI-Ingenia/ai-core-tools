@@ -72,13 +72,18 @@ Test DB connection: `postgresql://test_user:test_pass@localhost:5433/test_db`. C
 Despliegue single-host con Caddy como reverse proxy. Mismo setup para dev local y servidores cliente — solo cambia el `.env`.
 
 ```bash
+cp docker/.env.example .env      # DESDE LA RAÍZ. Editar claves y AICT_OMNIADMINS
 cd docker
-cp .env.example .env             # Editar claves y AICT_OMNIADMINS
 docker compose up -d --build
 docker compose logs -f backend
 docker compose down -v           # Parar y borrar volúmenes
 ```
 
+- **`docker/.env` es un symlink a `../.env`**: un único fichero de config en la
+  raíz. No hagas `cp .env.example .env` dentro de `docker/` — el cp sigue el
+  enlace y machaca el de la raíz.
+- Una variable solo llega al contenedor si `docker-compose.yaml` la declara en el
+  `environment:` de ese servicio. Ponerla solo en `.env` no basta.
 - Único puerto publicado al host: 80 (Caddy). Back/front/Postgres/Qdrant solo en red interna.
 - Acceso: `http://localhost/` en local, `http://<ip-servidor>/` en cliente.
 - Swagger: `/docs/internal` y `/docs/public` desde el mismo origen.
@@ -101,7 +106,7 @@ docker compose down -v           # Parar y borrar volúmenes
 ### Core Entities
 
 | Entity | Purpose |
-|--------|---------|
+| -------- | --------- |
 | **Agent** | Core AI agent. Configured with system prompt, LLM (AIService), optional RAG (Silo), memory settings, output parser, skills, and MCP tool configs. Agents with `is_tool=True` can be used as tools by other agents. |
 | **OCRAgent** | Agent subclass (STI via `type` column). Dual-LLM: vision model for scanned pages + text model for structuring output. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom). |
@@ -156,12 +161,14 @@ backend/
 ```
 
 **Patterns:**
+
 - Business logic in **services**, data access in **repositories**, routing in **routers**
 - DB sessions via dependency injection: `db: Session = Depends(get_db)`
 - Role-based access: `@require_min_role(AppRole.OWNER)`
 - Async/await for LangChain and I/O operations
 
 **Agent Execution** (`backend/services/agent_execution_service.py`):
+
 ```
 User message + optional files
   → Process file attachments (PDF extraction, image encoding)
@@ -185,6 +192,7 @@ frontend/src/
 ```
 
 **Patterns:**
+
 - All HTTP calls via `api.ts` — never direct `fetch()`
 - Global state via React Context (`useUser()`, `useTheme()`)
 - Route protection via `ProtectedRoute` and `AdminRoute` components
@@ -194,6 +202,7 @@ frontend/src/
 Frontend-only projects consuming `@lksnext/ai-core-tools-base`. All customization via `src/config/clientConfig.ts` (theme, branding, auth config, API URL, feature flags, custom routes). Never modify the base library for client-specific features.
 
 When base library changes:
+
 ```bash
 cd frontend && npm run build:lib
 cd ../clients/<client-name> && npm install
@@ -287,9 +296,10 @@ Local dev: port 5173 (Vite). Docker: port 3000.
 - `docs/dependencies/lightrag.md` — LightRAG integration details (querying, storage, limitations)
 - `docs/testing/` — Full testing guide
 - `.github/copilot-instructions.md` — Comprehensive domain reference and agent conventions
-- API Docs: http://localhost:8000/docs/internal and http://localhost:8000/docs/public
+- API Docs: <http://localhost:8000/docs/internal> and <http://localhost:8000/docs/public>
 
 ## Expected Beheavour
+
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
@@ -299,6 +309,7 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
 Before implementing:
+
 - State your assumptions explicitly. If uncertain, ask.
 - If multiple interpretations exist, present them - don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
@@ -321,12 +332,14 @@ Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, sim
 **Touch only what you must. Clean up only your own mess.**
 
 When editing existing code:
+
 - Don't "improve" adjacent code, comments, or formatting.
 - Don't refactor things that aren't broken.
 - Match existing style, even if you'd do it differently.
 - If you notice unrelated dead code, mention it - don't delete it.
 
 When your changes create orphans:
+
 - Remove imports/variables/functions that YOUR changes made unused.
 - Don't remove pre-existing dead code unless asked.
 
@@ -337,11 +350,13 @@ The test: Every changed line should trace directly to the user's request.
 **Define success criteria. Loop until verified.**
 
 Transform tasks into verifiable goals:
+
 - "Add validation" → "Write tests for invalid inputs, then make them pass"
 - "Fix the bug" → "Write a test that reproduces it, then make it pass"
 - "Refactor X" → "Ensure tests pass before and after"
 
 For multi-step tasks, state a brief plan:
+
 ```
 1. [Step] → verify: [check]
 2. [Step] → verify: [check]

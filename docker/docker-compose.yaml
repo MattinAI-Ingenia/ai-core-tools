@@ -85,10 +85,26 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
 
+      # Uvicorn worker pool. Documented in .env.example but never forwarded,
+      # so the Dockerfile CMD's own default (2) silently won.
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-true}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j}
+      # LightRAG indexing concurrency. Read by lightrag as dataclass field
+      # defaults at import time, so they must be set here (container env), not
+      # in Python. Defaults below match lightrag 1.5.5rc1's own defaults, so
+      # leaving them unset changes nothing.
+      MAX_PARALLEL_INSERT: ${MAX_PARALLEL_INSERT:-3}      # documents (= PDF pages) at once
+      MAX_ASYNC_LLM: ${MAX_ASYNC_LLM:-4}                  # concurrent LLM calls per role
+      EMBEDDING_FUNC_MAX_ASYNC: ${EMBEDDING_FUNC_MAX_ASYNC:-8}
+      # Output cap for the entity-extraction LLM. Unset = provider default,
+      # which on vLLM means the rest of the context window (~30k tokens).
+      LIGHTRAG_EXTRACT_MAX_TOKENS: ${LIGHTRAG_EXTRACT_MAX_TOKENS:-}
+      # Send the extraction JSON schema as response_format so the server
+      # constrains decoding. false = prompt-only JSON (LightRAG's own mode).
+      LIGHTRAG_EXTRACT_GUIDED_JSON: ${LIGHTRAG_EXTRACT_GUIDED_JSON:-true}
     volumes:
       - ../backend/data:/aict_backend/data
       - ../backend/logs:/aict_backend/logs

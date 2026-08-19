@@ -49,12 +49,14 @@ Caddy — no CORS, no port juggling. Two ways to obtain the images:
 - **Build locally** (includes your code changes) — for development
 
 ```bash
-cd docker
-
-# 1. Copy environment template
-cp .env.example .env
+# 1. Copy environment template into the repo-root .env
+#    (docker/.env is a symlink to it — never run this from inside docker/,
+#     the copy would follow the link and overwrite the root file)
+cp docker/.env.example .env
 
 # 2. Edit .env — fill in the required values (see "Configure your .env" below)
+
+cd docker
 
 # 3a. Pull prebuilt images (recommended)
 docker compose pull backend frontend
@@ -205,13 +207,16 @@ pip install poetry
 # Install dependencies with Poetry (from project root)
 poetry install
 
-# Configure environment variables
-cp backend/.env.example backend/.env
-# Edit backend/.env:
-#   - set SQLALCHEMY_DATABASE_URI to your local database
-#   - keep AICT_LOGIN=FAKE for local dev unless you are testing OIDC
+# Configure environment variables — the repo-root .env, the same file Docker uses
+# (python-dotenv resolves to it from any directory in the repo; a backend/.env
+# would never be read when running from the project root)
+cp docker/.env.example .env
+# Edit .env:
+#   - set SQLALCHEMY_DATABASE_URI to your local database (the Docker stack ignores
+#     this value: docker-compose.yaml hardcodes the container-side one)
+#   - AICT_LOGIN=LOCAL for admin-provisioned email+password, or OIDC to test Entra
 # Example:
-# SQLALCHEMY_DATABASE_URI=postgresql://mattin:mattin_secure_2024@localhost:5432/mattin_ai
+# SQLALCHEMY_DATABASE_URI=postgresql://mattin:mattin_secure_2024@localhost:5434/mattin_ai
 
 # Run migrations
 alembic upgrade head
@@ -282,12 +287,21 @@ This repository contains multiple `.env.example` files. They are not for the sam
 
 | Scenario | Template to copy | Resulting file | Used by |
 |----------|------------------|----------------|---------|
-| Docker Compose | `docker/.env.example` | `docker/.env` | `cd docker && docker compose ...` |
-| Local backend | `backend/.env.example` | `backend/.env` | `uvicorn backend.main:app --reload` |
+| Docker Compose | `docker/.env.example` | `.env` (repo root) | `cd docker && docker compose ...` |
+| Local backend | `docker/.env.example` | `.env` (repo root) | `uvicorn backend.main:app --reload` |
 | Local frontend | `frontend/.env.example` | `frontend/.env` | `cd frontend && npm run dev` |
-| Root `.env.example` | `.env.example` | `.env` | General/legacy repo-level reference used by some docs and scripts |
 
-The notes below refer to the Docker Compose setup, so the relevant file here is `docker/.env.example`.
+**Docker reads the repo-root `.env`.** `docker/.env` is a symlink to `../.env`, so
+there is a single file to maintain. Two consequences:
+
+- Copy the template from the repo root (`cp docker/.env.example .env`). Running
+  `cp .env.example .env` *inside* `docker/` follows the symlink and overwrites
+  the root file.
+- A variable only reaches a container if `docker-compose.yaml` declares it under
+  that service's `environment:`. Adding it to `.env` alone is not enough — this
+  silently swallowed `UVICORN_WORKERS` until it was wired up.
+
+The notes below refer to the Docker Compose setup, so the relevant template is `docker/.env.example`.
 
 ### Required Variables
 
@@ -298,8 +312,13 @@ The notes below refer to the Docker Compose setup, so the relevant file here is 
 
 For local Docker, `FRONTEND_URL`, `AICT_LOGIN`, and `LIGHTRAG_ENABLED` already come with working defaults in `docker/.env.example`. Change them only if your deployment needs something different.
 
-For local development without Docker, do not edit `docker/.env`. Use
-`backend/.env` for the FastAPI app and `frontend/.env` for the React app.
+For local development without Docker, the FastAPI app reads the **same repo-root
+`.env`** (`load_dotenv()` walks up from the working directory), so there is one
+backend configuration file for both modes. Only the React app has its own,
+`frontend/.env`, because Vite loads it from `frontend/`. Note that the container-side topology
+(`DATABASE_HOST`, `DATABASE_PORT`, `SQLALCHEMY_DATABASE_URI`) is hardcoded in
+`docker-compose.yaml`, so a `localhost` value in the root `.env` cannot leak into
+a container.
 
 ### Environment-Specific Variables
 
@@ -391,7 +410,7 @@ The project consists of several main components:
 
 ### API keys don't work
 
-1. Verify you edited the right file: `docker/.env` for Docker, `backend/.env` for local development (see the table in [Configuration](#configuration))
+1. Verify you edited the right file: the repo-root `.env` for both Docker (`docker/.env` is a symlink to it) and the local backend; `frontend/.env` for the React dev server (see the table in [Configuration](#configuration))
 2. Reload after changing it: `docker compose up -d` for Docker (a plain `restart` does not pick up new env values), or restart `uvicorn` locally
 3. Check that the key has no extra spaces or quotes
 
