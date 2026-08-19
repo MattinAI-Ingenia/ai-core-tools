@@ -99,6 +99,9 @@ services:
       MAX_PARALLEL_INSERT: ${MAX_PARALLEL_INSERT:-3}      # documents (= PDF pages) at once
       MAX_ASYNC_LLM: ${MAX_ASYNC_LLM:-4}                  # concurrent LLM calls per role
       EMBEDDING_FUNC_MAX_ASYNC: ${EMBEDDING_FUNC_MAX_ASYNC:-8}
+      # Per-LLM-call ceiling. Also how long a hung socket (laptop suspend,
+      # LLM host gone) takes to surface as a failure and abort the batch.
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-240}
       # Output cap for the entity-extraction LLM. Unset = provider default,
       # which on vLLM means the rest of the context window (~30k tokens).
       LIGHTRAG_EXTRACT_MAX_TOKENS: ${LIGHTRAG_EXTRACT_MAX_TOKENS:-}

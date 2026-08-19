@@ -13,6 +13,34 @@ from fastapi import HTTPException, status, UploadFile
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
 
+def _is_transient_llm_failure(exc: BaseException) -> bool:
+    """Whether *exc* means "the LLM endpoint is unreachable", not "this file is bad".
+
+    A dead endpoint fails every remaining resource in milliseconds, so a batch of
+    1000 files would march to 'error' without a single token being extracted.
+    Detecting it lets the batch stop and be resumed later instead.
+
+    Walks the ``__cause__``/``__context__`` chain: LangChain wraps provider
+    errors, so the connection error is rarely the outermost exception.
+
+    ``TimeoutError`` counts too, and it is the likely one after a laptop
+    suspend: LightRAG caps every role LLM call at ``LLM_TIMEOUT`` (240 s by
+    default) and re-raises the expiry as the builtin ``TimeoutError``
+    (``lightrag/utils.py:215``), not as the provider's own timeout class.
+    """
+    from openai import APIConnectionError, APITimeoutError  # noqa: WPS433
+
+    transient = (APIConnectionError, APITimeoutError, TimeoutError)
+    seen = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, transient):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class ResourceService:
 
     # Supported file extensions
@@ -531,6 +559,18 @@ class ResourceService:
                             _db3.close()
                         failed += resource_chunks
                         cumulative += resource_chunks
+                        if _is_transient_llm_failure(e):
+                            # The endpoint is down: every remaining resource would
+                            # fail in milliseconds. Stop and leave them 'pending'
+                            # so "resume indexing" can pick them up later.
+                            logger.warning(
+                                "Aborting batch after a transient LLM failure; "
+                                "%s resource(s) left pending",
+                                len(resource_snapshots) - resource_snapshots.index(
+                                    (resource_id, resource_name)
+                                ) - 1,
+                            )
+                            break
 
             finally:
                 loop.close()
@@ -554,6 +594,82 @@ class ResourceService:
         thread.start()
 
         return session_id
+
+    @staticmethod
+    def get_ingestion_liveness(db: Session, repository_id: int) -> dict:
+        """Whether a run is alive for this repository, and what could be resumed.
+
+        ``is_indexing`` comes from the silo's advisory lock, not from row
+        statuses: a batch killed mid-run leaves rows in 'pending'/'indexing'
+        forever, so statuses alone would report a dead run as live and the UI
+        would sit on a frozen progress bar with no way out.
+        """
+        from services import silo_indexing_lock
+
+        repo = ResourceRepository.get_repository_by_id(db, repository_id)
+        silo_id = repo.silo_id if repo and repo.silo_id else 0
+        alive = bool(silo_id) and silo_indexing_lock.is_locked(db.connection(), silo_id)
+        unfinished = (
+            db.query(func.count(Resource.resource_id))
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.status.in_(('pending', 'error', 'indexing')),
+            )
+            .scalar()
+        ) or 0
+        return {
+            "is_indexing": alive,
+            # Nothing to resume while a run is alive: it will get to them.
+            "resumable": 0 if alive else unfinished,
+        }
+
+    @staticmethod
+    def resume_indexing(db: Session, repository_id: int) -> Tuple[Optional[str], int]:
+        """Re-run indexing for every resource of *repository_id* not yet indexed.
+
+        Resuming needs no checkpoint of our own: LightRAG skips documents already
+        in ``PROCESSED`` and resets interrupted ones (``PROCESSING``/``PARSING``/
+        ``ANALYZING``/``FAILED``) back to ``PENDING``
+        (``lightrag/pipeline.py:1457-1470``), so a file that stopped at 70% picks
+        up at 70% instead of re-extracting what is already in the graph.
+
+        Returns ``(session_id, resources_queued)``; the session id is ``None``
+        when there was nothing left to index.
+
+        Raises HTTPException(409) if this silo is already being indexed.
+        """
+        pending = (
+            db.query(Resource)
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.status.in_(('pending', 'error', 'indexing')),
+            )
+            .all()
+        )
+        if not pending:
+            return None, 0
+
+        repo = ResourceRepository.get_repository_by_id(db, repository_id)
+        silo_id = repo.silo_id if repo and repo.silo_id else 0
+
+        from services import silo_indexing_lock
+
+        lock_conn = silo_indexing_lock.acquire(silo_id) if silo_id else None
+        if silo_id and lock_conn is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This silo already has an active ingestion in progress. "
+                       "Please wait for it to complete before resuming.",
+            )
+
+        logger.info(
+            "Resuming indexing of repository %s: %s resource(s)",
+            repository_id, len(pending),
+        )
+        session_id = ResourceService._index_resources_background(
+            pending, silo_id, lock_conn=lock_conn,
+        )
+        return session_id, len(pending)
 
     @staticmethod
     def get_indexing_progress(db: Session, repository_id: int) -> Optional[dict]:

@@ -216,12 +216,40 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     except Exception:
         baseline = 0
 
+    async def _real_total() -> int:
+        """How many documents this run will actually process.
+
+        On a resumed file most pages are already ``PROCESSED`` and LightRAG skips
+        them, so ``len(texts)`` overstates the work left and the bar would sit at
+        3/10 and snap to 100%. LightRAG publishes the real figure as
+        ``pipeline_status["docs"] = len(to_process_docs)`` (``pipeline.py:1085``).
+
+        Guarded because that value is per-workspace state: during the first ticks
+        the enqueue may not have run yet and it still holds the previous run's
+        number. Outside ``1..len(texts)`` it is ignored.
+        """
+        try:
+            from lightrag.kg.shared_storage import get_namespace_data
+
+            status = await get_namespace_data(
+                "pipeline_status", workspace=getattr(rag, "workspace", None)
+            )
+            docs = int(status.get("docs") or 0)
+        except Exception:
+            return total
+        return docs if 0 < docs <= total else total
+
+    # Last known real total, so the final 100% call uses the same denominator
+    # the bar has been showing instead of jumping back to len(texts).
+    run_total = [total]
+
     async def _poll():
         while True:
             await asyncio.sleep(0.5)
             try:
                 done = await _finished_docs() - baseline
-                progress_callback(max(0, min(total - 1, done)), total)
+                run_total[0] = await _real_total()
+                progress_callback(max(0, min(run_total[0] - 1, done)), run_total[0])
             except Exception:
                 pass  # polling is best-effort
 
@@ -232,7 +260,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
 
-    progress_callback(total, total)
+    progress_callback(run_total[0], run_total[0])
 
 
 def _run_async(coro):

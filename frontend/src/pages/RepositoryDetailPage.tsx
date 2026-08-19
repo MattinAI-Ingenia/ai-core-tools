@@ -177,6 +177,8 @@ const RepositoryDetailPage: React.FC = () => {
   // Ingestion progress tracking
   const [ingestionSessionId, setIngestionSessionId] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
+  const [resumable, setResumable] = useState(0);
+  const [resuming, setResuming] = useState(false);
   const hasCheckedInitialIngestion = useRef(false);
 
   const [reindexingId, setReindexingId] = useState<number | null>(null);
@@ -246,6 +248,7 @@ const RepositoryDetailPage: React.FC = () => {
           Number.parseInt(repositoryId!),
         );
         if (!mounted) return;
+        setResumable(status.resumable ?? 0);
         if (status.is_indexing && status.active_session_id) {
           setIsIndexing(true);
           setIngestionSessionId(status.active_session_id);
@@ -260,49 +263,27 @@ const RepositoryDetailPage: React.FC = () => {
     };
   }, [repository, appId, repositoryId]);
 
-  // Polling fallback for resource status updates.  When any resource is still
-  // pending or indexing we refresh the repository data every 3 s so that
-  // status badges update without requiring F5 — even if the SSE stream is
-  // delayed or missed.  This mirrors the media polling in ChatInterface.tsx.
+  // Poll while a run is alive OR while something is resumable, so the badges and
+  // the resume button stay current without an F5.  Liveness is the backend's
+  // answer, not our reading of the row statuses.
   useEffect(() => {
-    const hasActive = (repository?.resources ?? []).some(
-      (r) => r.status === 'indexing' || r.status === 'pending',
-    );
-
-    if (!hasActive && !isIndexing) return;
+    if (!isIndexing && resumable === 0) return;
 
     const intervalId = setInterval(async () => {
       try {
-        const data = await apiService.getRepository(
-          Number.parseInt(appId!),
-          Number.parseInt(repositoryId!),
-        );
+        const [data, status] = await Promise.all([
+          apiService.getRepository(Number.parseInt(appId!), Number.parseInt(repositoryId!)),
+          apiService.getIngestionStatus(Number.parseInt(appId!), Number.parseInt(repositoryId!)),
+        ]);
         setRepository(data);
-        const stillActive = (data.resources ?? []).some(
-          (r) => r.status === 'indexing' || r.status === 'pending',
-        );
-        if (!stillActive) {
-          setIsIndexing(false);
+        setResumable(status.resumable ?? 0);
+        setIsIndexing(status.is_indexing);
+        if (!status.is_indexing) {
           setIngestionSessionId(null);
-        } else {
-          // Reconcile session id while indexing is active. This covers stale
-          // local session ids that keep the bar stuck on "Connecting..."
-          // even though indexing is progressing on a different active session.
-          try {
-            const status = await apiService.getIngestionStatus(
-              Number.parseInt(appId!),
-              Number.parseInt(repositoryId!),
-            );
-            if (!status.is_indexing) {
-              setIsIndexing(false);
-              setIngestionSessionId(null);
-            } else if (status.active_session_id && status.active_session_id !== ingestionSessionId) {
-              setIngestionSessionId(status.active_session_id);
-              setIsIndexing(true);
-            }
-          } catch {
-            // best effort — if this fails, polling will keep running
-          }
+        } else if (status.active_session_id && status.active_session_id !== ingestionSessionId) {
+          // Covers a stale local session id that would leave the bar on
+          // "Connecting…" while indexing progresses under another one.
+          setIngestionSessionId(status.active_session_id);
         }
       } catch {
         // transient errors should not kill polling
@@ -310,7 +291,7 @@ const RepositoryDetailPage: React.FC = () => {
     }, 3000);
 
     return () => clearInterval(intervalId);
-  }, [repository, isIndexing, ingestionSessionId, appId, repositoryId]);
+  }, [isIndexing, resumable, ingestionSessionId, appId, repositoryId]);
 
   useEffect(() => {
     return () => {
@@ -627,15 +608,39 @@ const RepositoryDetailPage: React.FC = () => {
   // Filter media by selected folder
   const filteredMedia = filterByFolder(repository?.media, selectedFolderId);
 
-  // Keep uploads blocked while any resource is still pending or indexing.
-  const hasIndexingResources = (repository?.resources ?? []).some(
-    (resource) => resource.status === 'indexing' || resource.status === 'pending',
-  );
-  const indexingInProgress = isIndexing || hasIndexingResources;
+  // Liveness comes from the backend (the silo's advisory lock), never from row
+  // statuses: an interrupted run leaves resources in 'pending'/'indexing'
+  // forever, and deriving "busy" from that would block uploads for good and
+  // hide the resume button.
+  const indexingInProgress = isIndexing;
   const uploadDisabled = uploading || estimatingUpload || indexingInProgress;
 
   const isEmpty =
     filteredResources.length === 0 && filteredMedia.length === 0;
+
+  const handleResumeIngestion = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      const { session_id } = await apiService.resumeIngestion(
+        Number.parseInt(appId!),
+        Number.parseInt(repositoryId!),
+      );
+      if (session_id) {
+        setIngestionSessionId(session_id);
+        setIsIndexing(true);
+        setResumable(0);
+      }
+      await loadRepository(false);
+    } catch (err) {
+      setReindexNotice({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not resume the ingestion.',
+      });
+    } finally {
+      setResuming(false);
+    }
+  };
 
   const handleDownloadResource = async (resource: Resource) => {
     try {
@@ -880,6 +885,20 @@ const RepositoryDetailPage: React.FC = () => {
                 <UploadButtonIcon uploading={uploading || estimatingUpload} indexing={indexingInProgress} />
                 {indexingInProgress ? 'Indexing…' : 'Upload Files'}
               </button>
+
+              {resumable > 0 && !indexingInProgress && (
+                <button
+                  onClick={handleResumeIngestion}
+                  disabled={resuming}
+                  title="Pick up an ingestion that was interrupted. Pages already indexed are skipped."
+                  className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  {resuming
+                    ? <Loader className="w-4 h-4 animate-spin" />
+                    : <RefreshCw className="w-4 h-4" />}
+                  Resume indexing ({resumable})
+                </button>
+              )}
 
               <button
                 onClick={() => {

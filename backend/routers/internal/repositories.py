@@ -966,6 +966,33 @@ async def search_repository_documents(
         )
 
 
+@repositories_router.post(
+    "/{repository_id}/resume-indexing",
+    summary="Resume an interrupted ingestion",
+    tags=["Resources"],
+)
+async def resume_indexing(
+    app_id: int,
+    repository_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    """Re-index every resource of this repository that is not ``ready``.
+
+    For picking up after a backend restart or an LLM outage. Pages already
+    extracted are skipped by LightRAG, so this costs only the remaining work.
+
+    Response:
+    - ``session_id``: id of the started run, or null when nothing was pending
+    - ``resumed``: how many resources were queued
+    """
+    _validate_repository_app_ownership(repository_id, app_id, db)
+
+    session_id, resumed = ResourceService.resume_indexing(db, repository_id)
+    return {"session_id": session_id, "resumed": resumed}
+
+
 @repositories_router.get(
     "/{repository_id}/ingestion-status",
     summary="Check if repository silo has an active ingestion",
@@ -981,15 +1008,22 @@ async def get_ingestion_status(
     """Return whether this repository is currently indexing.
 
     Response:
-    - ``is_indexing``: true while any resource is pending or indexing
+    - ``is_indexing``: true only while a run is **alive** (the silo's advisory
+      lock is held) — not merely while rows are left unfinished
     - ``active_session_id``: id of the running batch (or null)
+    - ``resumable``: resources an interrupted run left behind, 0 while alive
     """
     _validate_repository_app_ownership(repository_id, app_id, db)
 
-    progress = ResourceService.get_indexing_progress(db, repository_id)
+    liveness = ResourceService.get_ingestion_liveness(db, repository_id)
+    progress = (
+        ResourceService.get_indexing_progress(db, repository_id)
+        if liveness["is_indexing"] else None
+    )
     return {
-        "is_indexing": progress is not None,
+        "is_indexing": liveness["is_indexing"],
         "active_session_id": progress["session_id"] if progress else None,
+        "resumable": liveness["resumable"],
     }
 
 
@@ -1029,6 +1063,10 @@ async def stream_ingestion_progress(
             # long as the indexing run, and an open transaction would sit as
             # "idle in transaction", blocking DDL on Resource.
             db.rollback()
+            # Gate on liveness, not on leftover rows: a killed run leaves them
+            # 'pending' forever and the stream would never end.
+            if not ResourceService.get_ingestion_liveness(db, repository_id)["is_indexing"]:
+                return None
             return ResourceService.get_indexing_progress(db, repository_id)
 
         try:

@@ -39,6 +39,16 @@ def test_holder_does_not_sit_in_a_transaction(db, released):
     assert silo_indexing_lock.acquire(4247) is None
 
 
+def test_is_locked_sees_the_lock_from_another_connection(db, released):
+    """The UI liveness signal: row statuses cannot tell a dead batch from a live one."""
+    assert silo_indexing_lock.is_locked(db, 4243) is False
+
+    session = silo_indexing_lock.acquire(4243)
+    released.append((session, 4243))
+
+    assert silo_indexing_lock.is_locked(db, 4243) is True
+
+
 def test_release_frees_the_silo(db):
     session = silo_indexing_lock.acquire(4244)
     assert session is not None

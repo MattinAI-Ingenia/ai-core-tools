@@ -1445,8 +1445,14 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/graph${query}`);
   }
 
-  async getIngestionStatus(appId: number, repositoryId: number): Promise<{ is_indexing: boolean; active_session_id: string | null }> {
+  async getIngestionStatus(appId: number, repositoryId: number): Promise<{ is_indexing: boolean; active_session_id: string | null; resumable: number }> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/ingestion-status`);
+  }
+
+  async resumeIngestion(appId: number, repositoryId: number): Promise<{ session_id: string | null; resumed: number }> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resume-indexing`, {
+      method: 'POST',
+    });
   }
 
   async estimateUploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {

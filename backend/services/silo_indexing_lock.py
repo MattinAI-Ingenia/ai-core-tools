@@ -73,3 +73,22 @@ def release(conn: Optional[Connection], silo_id: int) -> None:
         logger.warning("Could not unlock silo %s explicitly: %s", silo_id, exc)
     finally:
         conn.close()
+
+
+def is_locked(db: Connection, silo_id: int) -> bool:
+    """Whether a run is *alive* for *silo_id* (read-only check).
+
+    Row statuses cannot answer this: a batch killed mid-run leaves its resources
+    in 'pending'/'indexing' forever, indistinguishable from a live run. The lock
+    disappears when the holder's connection does, so it is the liveness signal
+    the UI needs to offer "resume" instead of a frozen progress bar.
+    """
+    return bool(
+        db.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+                "AND classid = :ns AND objid = :sid AND granted)"
+            ),
+            {"ns": _NAMESPACE, "sid": silo_id},
+        ).scalar()
+    )

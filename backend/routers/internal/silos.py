@@ -545,6 +545,19 @@ async def reindex_silo_resource(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Resource does not belong to this silo",
         )
+    # Same exclusion as an upload: two LightRAG runs on one workspace do
+    # read-modify-write on the same graph nodes, so concurrent merges silently
+    # lose descriptions and source-ids. LightRAG's own guard is per-process and
+    # would not see a run started by another uvicorn worker.
+    from services import silo_indexing_lock
+
+    lock_conn = silo_indexing_lock.acquire(silo_id)
+    if lock_conn is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This silo is being indexed right now. "
+                   "Please wait for it to finish before reindexing a file.",
+        )
     try:
         # Reindex is blocking I/O (DB + embedding HTTP + vector store); run it off the
         # event loop so it does not stall other requests on this worker.
@@ -555,6 +568,8 @@ async def reindex_silo_resource(
     except Exception as e:
         logger.error(f"Error reindexing resource {resource_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to reindex resource")
+    finally:
+        silo_indexing_lock.release(lock_conn, silo_id)
 
 
 @silos_router.delete("/{silo_id}/documents",

@@ -75,6 +75,44 @@ async def test_documents_from_earlier_resources_are_not_counted():
     assert mid == [1] * len(mid), f"expected the delta (1), got {mid}"
 
 
+async def test_total_follows_the_documents_this_run_will_process():
+    """On a resumed file LightRAG skips pages already PROCESSED.
+
+    Using len(texts) as the denominator would show 1/4 and snap to 100%; the real
+    figure is published as pipeline_status["docs"].
+    """
+    texts = ["p1", "p2", "p3", "p4"]
+    calls: list[tuple[int, int]] = []
+    rag = _rag([{"processed": 3}, {"processed": 4, "processing": 1}])
+
+    async def namespace(_name, workspace=None):
+        return {"docs": 1}  # only one page left to process
+
+    fake_kg = SimpleNamespace(get_namespace_data=namespace)
+    with patch.dict("sys.modules", {"lightrag.kg.shared_storage": fake_kg}):
+        await _run(rag, texts, calls)
+
+    assert all(total == 1 for _, total in calls), calls
+    assert calls[-1] == (1, 1)
+
+
+async def test_bogus_run_total_is_ignored():
+    """That value is per-workspace state: early ticks can still hold the
+    previous run's number, so anything outside 1..len(texts) is discarded."""
+    texts = ["p1", "p2"]
+    calls: list[tuple[int, int]] = []
+    rag = _rag([{}, {"processed": 1}])
+
+    async def namespace(_name, workspace=None):
+        return {"docs": 99}  # left over from a bigger run
+
+    fake_kg = SimpleNamespace(get_namespace_data=namespace)
+    with patch.dict("sys.modules", {"lightrag.kg.shared_storage": fake_kg}):
+        await _run(rag, texts, calls)
+
+    assert all(total == len(texts) for _, total in calls), calls
+
+
 async def test_failed_documents_count_as_finished():
     """A failed page must advance the bar, or it stalls until the run ends."""
     texts = ["p1", "p2"]
