@@ -24,6 +24,12 @@ class _StagedFileAdapter:
         shutil.move(self._staged_path, dest_path)
 
 
+def _pdf_filename(url: str) -> str:
+    """Last URL segment as a filename, guaranteed to end in ``.pdf`` exactly once."""
+    base = url.rsplit('/', 1)[-1] or 'document'
+    return base if base.lower().endswith('.pdf') else f"{base}.pdf"
+
+
 def maybe_close_job(job: ImportJob, db: Session) -> None:
     remaining = db.query(ImportJobRow).filter(
         ImportJobRow.import_job_id == job.id,
@@ -76,7 +82,7 @@ def confirm_rows(import_job_id: int, row_ids: list[int], db: Session) -> dict:
         ImportJobRow.status == ImportRowStatus.DOWNLOADED,
     ).all()
 
-    files = [_StagedFileAdapter(row.staged_path, f"{row.url.rsplit('/', 1)[-1] or 'document'}.pdf") for row in rows]
+    files = [_StagedFileAdapter(row.staged_path, _pdf_filename(row.url)) for row in rows]
     extra_metadata = {i: (row.row_metadata or {}) for i, row in enumerate(rows)}
 
     created_resources, failed_files, session_id = ResourceService.create_multiple_resources(
