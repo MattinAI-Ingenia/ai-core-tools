@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from sqlalchemy import asc, desc
+from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session
 
 from models.indexing_metric import IndexingMetric
+from models.resource import Resource
 
 
 class IndexingMetricRepository:
@@ -237,3 +238,21 @@ class IndexingMetricRepository:
             "total_llm_calls": llm_calls,
             "indexed_resources": indexed_resources,
         }
+
+    @staticmethod
+    def get_repository_duration_total(db: Session, repository_id: int) -> Optional[float]:
+        """Sum every recorded run's duration for every resource in a repository.
+
+        Same "every run, not just latest" reasoning as ``get_silo_totals``: a
+        resource that needed more than one run to reach 'ready' contributes
+        each run's time, not just its last one.
+
+        Returns ``None`` when nothing in this repository has been indexed yet.
+        """
+        total = (
+            db.query(func.sum(IndexingMetric.duration_seconds))
+            .join(Resource, Resource.resource_id == IndexingMetric.resource_id)
+            .filter(Resource.repository_id == repository_id)
+            .scalar()
+        )
+        return round(total, 1) if total is not None else None

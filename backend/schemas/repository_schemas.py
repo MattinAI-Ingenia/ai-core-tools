@@ -49,6 +49,7 @@ class RepositoryDetailSchema(BaseModel):
     extract_service_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None
+    total_indexing_duration_seconds: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 

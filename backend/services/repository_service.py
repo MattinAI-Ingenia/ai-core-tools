@@ -459,6 +459,11 @@ class RepositoryService:
         if repo.silo and getattr(repo.silo, 'lightrag_vector_db_type', None):
             lightrag_vector_db_type = repo.silo.lightrag_vector_db_type
 
+        from repositories.indexing_metric_repository import IndexingMetricRepository
+        total_indexing_duration_seconds = IndexingMetricRepository.get_repository_duration_total(
+            db, repository_id=repository_id,
+        )
+
         return RepositoryDetailSchema(
             repository_id=repo.repository_id,
             name=repo.name,
@@ -482,6 +487,7 @@ class RepositoryService:
             extract_service_id=extract_service_id,
             keywords_service_id=keywords_service_id,
             vlm_service_id=vlm_service_id,
+            total_indexing_duration_seconds=total_indexing_duration_seconds,
         )
 
     @staticmethod

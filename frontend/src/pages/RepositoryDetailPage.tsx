@@ -11,7 +11,7 @@ import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
 import IngestionProgressBar from '../components/ui/IngestionProgressBar';
 import CostEstimateModal, { formatEstimateValue } from '../components/ui/CostEstimateModal';
-import ResourceMetrics from '../components/repository/ResourceMetrics';
+import ResourceMetrics, { formatDuration } from '../components/repository/ResourceMetrics';
 import { CsvImportStepper } from '../components/import/CsvImportStepper';
 import { CsvImportBanner } from '../components/import/CsvImportBanner';
 import { CsvImportReviewModal } from '../components/import/CsvImportReviewModal';
@@ -37,6 +37,7 @@ interface RepositoryDetail {
   created_at: string;
   silo_id?: number | null;
   vector_db_type?: string | null;
+  total_indexing_duration_seconds?: number | null;
   resources: Resource[];
   folders: Array<{
     folder_id: number;
@@ -839,6 +840,9 @@ const RepositoryDetailPage: React.FC = () => {
           </div>
           <p className="text-gray-600">
             Created {formatDate(repository.created_at)} • {repository.resources.length} files
+            {!!repository.total_indexing_duration_seconds && (
+              <> • {formatDuration(repository.total_indexing_duration_seconds, 0)} total indexing time</>
+            )}
           </p>
           {(repository.transcription_service_id || repository.video_ai_service_id) && (
             <p className="text-sm text-gray-500 mt-1">

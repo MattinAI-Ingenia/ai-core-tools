@@ -177,3 +177,31 @@ def test_list_summed_by_silo_sums_each_resources_full_history(db, fake_app, fake
     assert len(rows) == 2  # one row per resource, not per run
     assert by_resource[resource.resource_id]["total_tokens"] == 6250
     assert by_resource[second_resource.resource_id]["total_tokens"] == 300
+
+
+# ---------------------------------------------------------------------------
+# Repository-wide total indexing duration (shown on the repository detail page)
+# ---------------------------------------------------------------------------
+
+
+def test_repository_duration_total_sums_across_all_resources_and_runs(db, fake_app, fake_silo, repo, resource, second_resource):
+    _record(
+        db, app_id=fake_app.app_id, silo_id=fake_silo.silo_id, resource_id=resource.resource_id,
+        duration_seconds=500.0,
+    )
+    _record(
+        db, app_id=fake_app.app_id, silo_id=fake_silo.silo_id, resource_id=resource.resource_id,
+        duration_seconds=10.0,
+    )
+    _record(
+        db, app_id=fake_app.app_id, silo_id=fake_silo.silo_id, resource_id=second_resource.resource_id,
+        duration_seconds=42.5,
+    )
+
+    total = IndexingMetricRepository.get_repository_duration_total(db, repository_id=repo.repository_id)
+
+    assert total == pytest.approx(552.5)
+
+
+def test_repository_duration_total_is_none_when_nothing_indexed(db, repo):
+    assert IndexingMetricRepository.get_repository_duration_total(db, repository_id=repo.repository_id) is None

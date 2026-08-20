@@ -20,7 +20,7 @@ interface IndexingMetric {
 }
 
 /** >1h → HH:MM:SS, >1min → MM:SS, otherwise plain seconds with `decimals` precision. */
-function formatDuration(seconds: number, decimals: number): string {
+export function formatDuration(seconds: number, decimals: number): string {
     if (seconds > 3600) {
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
