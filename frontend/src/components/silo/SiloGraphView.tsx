@@ -75,12 +75,12 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
-    const [sliderValue, setSliderValue] = useState(500);
-    const [sliderMax, setSliderMax] = useState(500);
-    const maxNodesRef = useRef(500);
+    const DEFAULT_MAX_NODES = 200;
+    const [sliderValue, setSliderValue] = useState(DEFAULT_MAX_NODES);
+    const [sliderMax, setSliderMax] = useState(DEFAULT_MAX_NODES);
+    const maxNodesRef = useRef(DEFAULT_MAX_NODES);
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const lastMouse = useRef({ x: 0, y: 0 });
-    const isFirstLoad = useRef(true);
 
     const fetchGraph = useCallback(
         async (searchQuery = '') => {
@@ -94,13 +94,10 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     search: searchQuery || undefined,
                 })) as SiloGraphData;
                 setGraphData(data);
+                // Sizes the slider's range to the graph's real size; the fetch
+                // itself stays capped at DEFAULT_MAX_NODES until the user drags it.
                 if (data.total_nodes > 0) {
                     setSliderMax(data.total_nodes);
-                    if (isFirstLoad.current) {
-                        isFirstLoad.current = false;
-                        maxNodesRef.current = data.total_nodes;
-                        setSliderValue(data.total_nodes);
-                    }
                 }
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
@@ -207,14 +204,15 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     <RefreshCw className="w-4 h-4" />
                 </button>
                 <span className="text-xs text-gray-400">
-                    {graphData?.node_count ?? 0} nodes · {graphData?.edge_count ?? 0} edges
+                    showing {graphData?.node_count ?? 0} of {graphData?.total_nodes ?? 0} nodes ·{' '}
+                    {graphData?.edge_count ?? 0} of {graphData?.total_edges ?? 0} edges
                     {graphData?.truncated && ' · (truncated)'}
                 </span>
             </div>
 
             {graphData?.truncated && (
                 <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
-                    Graph truncated to {graphData.node_count} nodes. Use search to filter.
+                    Graph truncated to {graphData.node_count} nodes / {graphData.edge_count} edges. Use search to filter.
                 </div>
             )}
 

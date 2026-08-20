@@ -757,6 +757,7 @@ def get_silo_graph(
     db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
     max_nodes: int = Query(default=200, ge=1, le=1000),
+    max_edges: int = Query(default=1000, ge=1, le=5000),
     max_depth: int = Query(default=2, ge=1, le=5),
     node_label: Optional[str] = Query(default=None),
     search: Optional[str] = Query(default=None),
@@ -781,6 +782,7 @@ def get_silo_graph(
         data = SiloGraphService.get_silo_graph(
             silo_id=silo_id,
             max_nodes=max_nodes,
+            max_edges=max_edges,
             max_depth=max_depth,
             node_label=node_label,
             search=search,
@@ -796,5 +798,7 @@ def get_silo_graph(
         edges=[GraphEdge(**e) for e in data["edges"]],
         node_count=data["node_count"],
         edge_count=data["edge_count"],
+        total_nodes=data["total_nodes"],
+        total_edges=data["total_edges"],
         truncated=data["truncated"],
     )
