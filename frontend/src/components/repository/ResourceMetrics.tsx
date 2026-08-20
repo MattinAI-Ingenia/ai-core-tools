@@ -19,18 +19,18 @@ interface IndexingMetric {
     created_at: string | null;
 }
 
-/** >1h → HH:MM:SS, >1min → MM:SS, otherwise plain seconds with `decimals` precision. */
+/** >1h → "1h 02m 03s", >1min → "5m 23s", otherwise plain seconds with `decimals` precision. */
 export function formatDuration(seconds: number, decimals: number): string {
     if (seconds > 3600) {
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
         const secs = Math.floor(seconds % 60);
-        return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        return `${hrs}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
     }
     if (seconds > 60) {
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
-        return `${mins}:${String(secs).padStart(2, '0')}`;
+        return `${mins}m ${String(secs).padStart(2, '0')}s`;
     }
     return `${seconds.toFixed(decimals)}s`;
 }

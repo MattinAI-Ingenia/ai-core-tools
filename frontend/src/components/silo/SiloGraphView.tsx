@@ -94,10 +94,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     search: searchQuery || undefined,
                 })) as SiloGraphData;
                 setGraphData(data);
-                // Sizes the slider's range to the graph's real size; the fetch
-                // itself stays capped at DEFAULT_MAX_NODES until the user drags it.
+                // Slider tops out at DEFAULT_MAX_NODES regardless of how big the
+                // graph really is — the renderer chokes well before that on a
+                // large silo, so there is no "show me everything" option.
                 if (data.total_nodes > 0) {
-                    setSliderMax(data.total_nodes);
+                    setSliderMax(Math.min(data.total_nodes, DEFAULT_MAX_NODES));
                 }
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
