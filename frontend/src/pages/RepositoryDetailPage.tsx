@@ -912,7 +912,8 @@ const RepositoryDetailPage: React.FC = () => {
 
               <button
                 onClick={() => setShowCsvImportModal(true)}
-                disabled={uploading}
+                disabled={uploading || indexingInProgress}
+                title={indexingInProgress ? 'Indexing in progress — please wait' : undefined}
                 className="bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
               >
                 Import from CSV

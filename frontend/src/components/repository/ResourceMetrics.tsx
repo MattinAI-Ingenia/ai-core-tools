@@ -35,6 +35,19 @@ function formatDuration(seconds: number, decimals: number): string {
     return `${seconds.toFixed(decimals)}s`;
 }
 
+/** A "successful" reindex that made zero LLM/embedding calls: LightRAG found
+ * this exact content already indexed under a different internal doc id (its
+ * own dedup rejecting the resubmission) and did no new work. Not a failure —
+ * but showing a bare "0.0s" with nothing else looks like one. */
+function isNoOpReindex(metric: IndexingMetric): boolean {
+    return (
+        metric.status === 'success' &&
+        metric.llm_calls === 0 &&
+        metric.total_tokens === 0 &&
+        !(metric.embedding_tokens ?? 0)
+    );
+}
+
 interface ResourceMetricsProps {
     appId: number;
     siloId: number;
@@ -126,6 +139,11 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
     if (variant === 'inline') {
         return (
             <span className="inline-flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 ml-2">
+                {isNoOpReindex(metric) && (
+                    <span title="LightRAG found this content already indexed under a different internal ID and skipped re-extracting it — not a failure, just no new work this run">
+                        already indexed, no new work
+                    </span>
+                )}
                 {metric.total_tokens > 0 && (
                     <span title={`LLM tokens: ${metric.prompt_tokens} in + ${metric.completion_tokens} out${metric.tokens_source === 'estimated' ? ' (estimated)' : ''}`}>
                         <Cpu className="w-3 h-3 inline mr-0.5" />
@@ -162,6 +180,12 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
     return (
         <div className="text-xs bg-gray-50 dark:bg-gray-800 rounded p-3 space-y-1.5 border border-gray-200 dark:border-gray-700">
             <div className="font-semibold text-gray-600 dark:text-gray-300 mb-1">Indexing Metrics</div>
+            {isNoOpReindex(metric) && (
+                <div className="text-gray-400 italic">
+                    Already indexed — LightRAG found this content under a different
+                    internal ID and made no new LLM/embedding calls.
+                </div>
+            )}
             <div className="flex justify-between">
                 <span className="text-gray-500">Status</span>
                 <span className={metric.status === 'success' ? 'text-green-600' : 'text-red-500'}>

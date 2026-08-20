@@ -52,6 +52,34 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     return () => clearTimeout(timer);
   }, [isComplete]);
 
+  // ETA and the projected total only refresh every 5s — every-tick updates on
+  // an estimate that itself only settles over tens of seconds just flickers
+  // without adding information. Elapsed time is exact, so it updates on every
+  // progress event untouched.
+  //
+  // Rules of Hooks: these must sit above every early `return` below (a hook
+  // skipped on some renders and not others is exactly what crashed this
+  // component in production — React throws "Rendered fewer hooks than
+  // expected" the moment `progress` flips from null to non-null and unmounts
+  // the whole tree, since there's no error boundary anywhere in the app).
+  const [throttledEstimates, setThrottledEstimates] = React.useState<{
+    remaining: number | null;
+    total: number | null;
+  }>({ remaining: null, total: null });
+  const lastEstimateUpdateRef = React.useRef(0);
+
+  React.useEffect(() => {
+    if (!progress) return;
+    const now = Date.now();
+    if (lastEstimateUpdateRef.current === 0 || now - lastEstimateUpdateRef.current >= 5000) {
+      lastEstimateUpdateRef.current = now;
+      setThrottledEstimates({
+        remaining: progress.estimated_remaining_seconds,
+        total: progress.estimated_total_time_seconds,
+      });
+    }
+  }, [progress]);
+
   if (!sessionId) {
     return null;
   }
@@ -110,28 +138,6 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   };
 
   const formatPercent = (percent: number) => percent.toFixed(1);
-
-  // ETA and the projected total only refresh every 5s — every-tick updates on
-  // an estimate that itself only settles over tens of seconds just flickers
-  // without adding information. Elapsed time is exact, so it updates on every
-  // progress event untouched.
-  const [throttledEstimates, setThrottledEstimates] = React.useState<{
-    remaining: number | null;
-    total: number | null;
-  }>({ remaining: null, total: null });
-  const lastEstimateUpdateRef = React.useRef(0);
-
-  React.useEffect(() => {
-    if (!progress) return;
-    const now = Date.now();
-    if (lastEstimateUpdateRef.current === 0 || now - lastEstimateUpdateRef.current >= 5000) {
-      lastEstimateUpdateRef.current = now;
-      setThrottledEstimates({
-        remaining: progress.estimated_remaining_seconds,
-        total: progress.estimated_total_time_seconds,
-      });
-    }
-  }, [progress]);
 
   return (
     <div className="space-y-3 bg-white border border-gray-200 rounded-lg p-4">
