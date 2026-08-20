@@ -50,6 +50,8 @@ interface ChatInterfaceProps {
   onMessageSent?: () => void;
   metadataFields?: SearchFilterMetadataField[];
   vectorDbType?: string;
+  /** The agent's linked silo, if any — lets citation chunks link back to their source PDF. */
+  siloId?: number;
 }
 
 function ChatInterface({
@@ -57,6 +59,7 @@ function ChatInterface({
   agentId,
   agentName,
   conversationId,
+  siloId,
   onConversationCreated,
   onConversationReset,
   onMessageSent,
@@ -1035,6 +1038,8 @@ function ChatInterface({
                             content={message.content}
                             resolveFileUrl={resolveFileUrl}
                             citationChunks={message.lightragGraph?.data?.chunks}
+                            appId={appId}
+                            siloId={siloId}
                           />
                         </div>
                         {msgTimestamps.length > 0 && videoBlobUrl && (
@@ -1046,7 +1051,7 @@ function ChatInterface({
                           />
                         )}
                         {message.lightragGraph && (
-                          <LightRAGGraphBubble graphData={message.lightragGraph} citedChunkIds={citedChunkIds} />
+                          <LightRAGGraphBubble graphData={message.lightragGraph} citedChunkIds={citedChunkIds} appId={appId} siloId={siloId} />
                         )}
                         <div className="mt-1">
                           <span className="text-xs text-gray-400 dark:text-gray-500">

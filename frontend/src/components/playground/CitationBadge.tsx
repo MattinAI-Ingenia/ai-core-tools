@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { LightRAGChunk } from '../../types/streaming';
+import OpenPdfButton from './OpenPdfButton';
 
 interface Props {
   index: number;             // 1-based source number the LLM cited (cite://N)
   chunk?: LightRAGChunk;     // resolved from message chunks[index - 1]
+  appId?: number;
+  siloId?: number;
 }
 
 const POPOVER_WIDTH = 384;   // w-96
@@ -19,7 +22,7 @@ const POPOVER_MAX_HEIGHT = 320;
  * kept the last call's chunks), it degrades to a plain, non-interactive marker
  * instead of a dead link.
  */
-export default function CitationBadge({ index, chunk }: Props) {
+export default function CitationBadge({ index, chunk, appId, siloId }: Props) {
   const [pos, setPos] = useState<{ top: number; left: number; placement: 'top' | 'bottom' } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -104,6 +107,7 @@ export default function CitationBadge({ index, chunk }: Props) {
             <div className="max-h-80 overflow-y-auto p-3">
               <p className="whitespace-pre-wrap leading-relaxed">{chunk.content ?? '(no content)'}</p>
             </div>
+            <OpenPdfButton appId={appId} siloId={siloId} resourceId={chunk.resource_id} page={chunk.page} />
           </div>
         </>,
         document.body,

@@ -62,6 +62,10 @@ export interface LightRAGChunk {
   id: string;
   content?: string;
   file_path?: string;
+  /** Present only when the chunk's id encodes its source (indexed after this
+   * feature shipped) — lets the UI open the source PDF at this page. */
+  resource_id?: number;
+  page?: number;
   [key: string]: unknown;
 }
 

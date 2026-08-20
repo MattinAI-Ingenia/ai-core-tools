@@ -802,3 +802,38 @@ def get_silo_graph(
         total_edges=data["total_edges"],
         truncated=data["truncated"],
     )
+
+
+@silos_router.get("/{silo_id}/resources/{resource_id}/file")
+def download_silo_resource(
+    app_id: int,
+    silo_id: int,
+    resource_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Serve a resource's file by resource_id alone, scoped to its silo.
+
+    For "open the source PDF" links off a retrieved chunk: the playground
+    knows a silo and a resource_id (parsed from the LightRAG chunk id — see
+    CHUNK_ID_RESOURCE_PAGE_RE), not which repository the resource lives in.
+    """
+    from fastapi.responses import FileResponse
+    from models.resource import Resource
+    from services.resource_service import ResourceService
+
+    _validate_silo_app_ownership(silo_id, app_id, db)
+
+    resource = db.query(Resource).filter(Resource.resource_id == resource_id).first()
+    if not resource or not resource.repository or resource.repository.silo_id != silo_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found in this silo")
+
+    file_path, _ = ResourceService.download_resource_from_repository(
+        app_id=app_id,
+        repository_id=resource.repository_id,
+        resource_id=resource_id,
+        user_id=auth_context.identity.id,
+        db=db,
+    )
+    return FileResponse(path=file_path, filename=resource.uri, media_type="application/pdf")

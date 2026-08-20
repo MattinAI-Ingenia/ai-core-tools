@@ -40,7 +40,7 @@ def _rag(status_counts_sequence):
 
 
 async def _run(rag, texts, calls, insert_seconds=1.2):
-    async def fake_insert(_rag, _texts, file_paths=None, process_options="F"):
+    async def fake_insert(_rag, _texts, file_paths=None, ids=None, process_options="F"):
         await asyncio.sleep(insert_seconds)
 
     with patch.object(lightrag_store, "_ainsert", fake_insert):

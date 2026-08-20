@@ -10,11 +10,14 @@ interface MessageContentProps {
   content: string | object;
   resolveFileUrl?: (fileId: string) => Promise<string>;
   citationChunks?: LightRAGChunk[];
+  /** For "open source PDF" links on citation chunks. */
+  appId?: number;
+  siloId?: number;
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 const ResolveFileUrlContext = createContext<((fileId: string) => Promise<string>) | undefined>(undefined);
-const CitationChunksContext = createContext<LightRAGChunk[] | undefined>(undefined);
+const CitationChunksContext = createContext<{ chunks?: LightRAGChunk[]; appId?: number; siloId?: number }>({});
 
 function isImageFilename(filename: string): boolean {
   const ext = filename.toLowerCase().lastIndexOf('.');
@@ -115,12 +118,12 @@ function MarkdownImage({ src, alt }: any) {
 
 function MarkdownLink({ children, href, ...props }: any) {
   const resolveFileUrl = useContext(ResolveFileUrlContext);
-  const citationChunks = useContext(CitationChunksContext);
+  const { chunks: citationChunks, appId, siloId } = useContext(CitationChunksContext);
   // Inline LightRAG citation: [N](cite://N) — render as a source badge, not a link.
   if (href?.startsWith('cite://')) {
     const index = parseInt(href.slice('cite://'.length), 10);
     if (Number.isFinite(index) && index > 0) {
-      return <CitationBadge index={index} chunk={citationChunks?.[index - 1]} />;
+      return <CitationBadge index={index} chunk={citationChunks?.[index - 1]} appId={appId} siloId={siloId} />;
     }
     return <>{children}</>;
   }
@@ -201,7 +204,7 @@ const markdownComponents: Record<string, React.ComponentType<any>> = {
   td: MarkdownTd,
 };
 
-const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl, citationChunks }) => {
+const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl, citationChunks, appId, siloId }) => {
   const renderedContent = useMemo(() => {
     if (typeof content === 'object' && content !== null) {
       return (
@@ -236,7 +239,7 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
 
   return (
     <ResolveFileUrlContext.Provider value={resolveFileUrl}>
-      <CitationChunksContext.Provider value={citationChunks}>
+      <CitationChunksContext.Provider value={{ chunks: citationChunks, appId, siloId }}>
         <div className="text-gray-800 dark:text-gray-200">
           {renderedContent}
         </div>

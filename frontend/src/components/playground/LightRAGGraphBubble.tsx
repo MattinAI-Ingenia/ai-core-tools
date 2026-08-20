@@ -4,12 +4,15 @@ import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
 import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship, LightRAGChunk } from '../../types/streaming';
+import OpenPdfButton from './OpenPdfButton';
 
 interface Props {
   graphData: LightRAGGraphData;
   /** Chunk ids the answer actually cited ([N](cite://N)). Entities/relationships
    *  extracted from one of these are highlighted green ("used"). */
   citedChunkIds?: string[];
+  appId?: number;
+  siloId?: number;
 }
 
 // LightRAG joins the chunk ids an entity/relationship was extracted from with
@@ -54,7 +57,7 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Se
     });
 }
 
-export default function LightRAGGraphBubble({ graphData, citedChunkIds }: Props) {
+export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, siloId }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [openChunk, setOpenChunk] = useState<number | null>(null);
@@ -278,6 +281,12 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds }: Props)
                 {chunks[openChunk].content ?? '(no content)'}
               </p>
             </div>
+            <OpenPdfButton
+              appId={appId}
+              siloId={siloId}
+              resourceId={chunks[openChunk].resource_id}
+              page={chunks[openChunk].page}
+            />
           </div>
         </>,
         document.body,

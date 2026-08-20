@@ -1445,6 +1445,18 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/graph${query}`);
   }
 
+  async getSiloResourceFile(appId: number, siloId: number, resourceId: number): Promise<Blob> {
+    const headers = this.buildAuthHeaders('GET', false);
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/resources/${resourceId}/file`,
+      { method: 'GET', credentials: 'include', headers },
+    );
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+    return response.blob();
+  }
+
   async getIngestionStatus(appId: number, repositoryId: number): Promise<{ is_indexing: boolean; active_session_id: string | null; resumable: number }> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/ingestion-status`);
   }

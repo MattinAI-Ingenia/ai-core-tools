@@ -152,7 +152,34 @@ def _source_label_from_metadata(metadata: dict) -> str:
     return label
 
 
-async def _ainsert(rag, texts, file_paths=None, process_options="F"):
+# Matches a chunk id LightRAG derives from an id _lightrag_doc_id returned
+# (f"{doc_id}-chunk-{n}"): resource id and page, straight out of the id
+# instead of re-parsing the human-readable file_path label.
+CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)-p(\d+)-chunk-\d+$")
+
+
+def _lightrag_doc_id(metadata: dict, content: str) -> str:
+    """Stable LightRAG document id for one page, so a chunk's own id can be
+    parsed straight back to (resource_id, page) — see CHUNK_ID_RESOURCE_PAGE_RE
+    — instead of guessing from the display-only file_path label.
+
+    Content-hash duplicate detection (lightrag/pipeline.py,
+    get_existing_doc_by_content_hash) is independent of the id we supply, so
+    this changes nothing about resume/dedup behaviour.
+
+    Falls back to LightRAG's own default (content hash) for content with no
+    resource/page — non-PDF sources such as crawled Domain pages.
+    """
+    resource_id = metadata.get("resource_id")
+    page = metadata.get("page")
+    if resource_id is not None and page is not None:
+        return f"res{resource_id}-p{page}"
+    from lightrag.utils import compute_mdhash_id  # noqa: WPS433
+
+    return compute_mdhash_id(content, prefix="doc-")
+
+
+async def _ainsert(rag, texts, file_paths=None, ids=None, process_options="F"):
     """Insert documents through LightRAG's modern (non-legacy) chunking router.
 
     The plain ``rag.ainsert`` enqueues without a chunking selector, which makes
@@ -169,6 +196,7 @@ async def _ainsert(rag, texts, file_paths=None, process_options="F"):
     )
     await rag.apipeline_enqueue_documents(
         texts,
+        ids=ids,
         file_paths=file_paths,
         process_options=process_options,
         chunk_options=chunk_opts,
@@ -176,7 +204,7 @@ async def _ainsert(rag, texts, file_paths=None, process_options="F"):
     await rag.apipeline_process_enqueue_documents()
 
 
-async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, process_options="F"):
+async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, ids=None, process_options="F"):
     """Run the insert with optional sub-document progress reporting.
 
     Polls the workspace's doc_status counts every 0.5s while the insert runs.
@@ -197,7 +225,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     of true completions: pipeline_status has no such counter.
     """
     if progress_callback is None:
-        await _ainsert(rag, texts, file_paths=file_paths, process_options=process_options)
+        await _ainsert(rag, texts, file_paths=file_paths, ids=ids, process_options=process_options)
         return
 
     total = len(texts)
@@ -255,7 +283,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
 
     poll_task = asyncio.create_task(_poll())
     try:
-        await _ainsert(rag, texts, file_paths=file_paths, process_options=process_options)
+        await _ainsert(rag, texts, file_paths=file_paths, ids=ids, process_options=process_options)
     finally:
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
@@ -537,11 +565,17 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
 
     chunks = []
     for c in data.get("chunks", []):
-        chunks.append({
-            "id": c.get("chunk_id") or c.get("id") or "",
+        chunk_id = c.get("chunk_id") or c.get("id") or ""
+        entry = {
+            "id": chunk_id,
             "content": c.get("content") or c.get("text") or "",
             "file_path": c.get("file_path", ""),
-        })
+        }
+        match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
+        if match:
+            entry["resource_id"] = int(match.group(1))
+            entry["page"] = int(match.group(2))
+        chunks.append(entry)
 
     return {
         "data": {
@@ -782,14 +816,16 @@ class LightRAGStore(VectorStoreInterface):
         )
 
         rag = self._get_rag_instance(collection_name)
-        # Keep texts and their source labels aligned (skip empty-content docs).
+        # Keep texts, source labels and ids aligned (skip empty-content docs).
         texts: List[str] = []
         file_paths: List[str] = []
+        ids: List[str] = []
         for doc in documents:
             if not doc.page_content:
                 continue
             texts.append(doc.page_content)
             file_paths.append(_source_label_from_metadata(doc.metadata or {}))
+            ids.append(_lightrag_doc_id(doc.metadata or {}, doc.page_content))
 
         if not texts:
             logger.debug("No non-empty texts to index; skipping.")
@@ -805,7 +841,7 @@ class LightRAGStore(VectorStoreInterface):
         ctx_token = set_active_accumulator(accumulator)
         t_start = time.perf_counter()
         try:
-            _run_async(_ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, process_options=self._chunk_process_option))
+            _run_async(_ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option))
         finally:
             reset_active_accumulator(ctx_token)
 

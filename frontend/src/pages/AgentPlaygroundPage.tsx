@@ -280,6 +280,7 @@ function AgentPlaygroundPage() {
                     onMessageSent={handleMessageSent}
                     metadataFields={agent.silo?.metadata_definition?.fields}
                     vectorDbType={agent.silo?.vector_db_type}
+                    siloId={agent.silo?.silo_id}
                   />
                 )}
               </>

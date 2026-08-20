@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.documents import Document
 
-from tools.vector_stores.lightrag_store import LightRAGStore, LightRAGRetriever
+from tools.vector_stores.lightrag_store import (
+    LightRAGStore,
+    LightRAGRetriever,
+    _lightrag_doc_id,
+    _normalize_lightrag_graph,
+)
 
 # pytest.ini does not enable pytest-asyncio's auto mode, so mark every
 # async test in this module explicitly.
@@ -231,3 +236,65 @@ def test_get_distinct_metadata_values_returns_empty(store):
     result = store.get_distinct_metadata_values("silo_1", "source")
 
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# _lightrag_doc_id / chunk-id → (resource_id, page) round trip
+#
+# The "open source PDF at this page" feature needs every chunk's own id to be
+# parseable back to which resource and page it came from — see
+# CHUNK_ID_RESOURCE_PAGE_RE. LightRAG derives a chunk's id from the document
+# id we supply (f"{doc_id}-chunk-{n}"), so this is set at index time.
+# ---------------------------------------------------------------------------
+
+
+def test_lightrag_doc_id_encodes_resource_and_page():
+    assert _lightrag_doc_id({"resource_id": 61, "page": 5}, "some text") == "res61-p5"
+
+
+def test_lightrag_doc_id_falls_back_to_content_hash_without_resource_or_page():
+    # Domain/web-crawled content has neither — must still get a valid,
+    # LightRAG-shaped id instead of erroring.
+    doc_id = _lightrag_doc_id({}, "crawled page text")
+    assert doc_id.startswith("doc-")
+    assert not doc_id.startswith("res")
+
+
+def test_index_documents_passes_resource_and_page_ids_to_ainsert(store, mock_rag):
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [
+        Document(page_content="page one", metadata={"resource_id": 61, "page": 1}),
+        Document(page_content="page two", metadata={"resource_id": 61, "page": 2}),
+    ]
+    with patch("tools.vector_stores.lightrag_store._ainsert_with_progress", new_callable=AsyncMock) as mock_insert:
+        store.index_documents("silo_1", docs)
+
+    assert mock_insert.call_args.kwargs["ids"] == ["res61-p1", "res61-p2"]
+
+
+# ---------------------------------------------------------------------------
+# _normalize_lightrag_graph: chunk resource_id/page extraction
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_extracts_resource_and_page_from_chunk_id():
+    raw = {"data": {"chunks": [{"chunk_id": "res61-p5-chunk-000", "content": "text", "file_path": "f.pdf (p. 5)"}]}}
+
+    result = _normalize_lightrag_graph(raw)
+
+    chunk = result["data"]["chunks"][0]
+    assert chunk["resource_id"] == 61
+    assert chunk["page"] == 5
+
+
+def test_normalize_omits_resource_and_page_for_content_hash_ids():
+    # Content indexed before this feature, or from a source with no page
+    # metadata — must not error, and must not fabricate a resource/page.
+    raw = {"data": {"chunks": [{"chunk_id": "doc-abc123-chunk-000", "content": "text", "file_path": "f.pdf"}]}}
+
+    result = _normalize_lightrag_graph(raw)
+
+    chunk = result["data"]["chunks"][0]
+    assert "resource_id" not in chunk
+    assert "page" not in chunk
