@@ -684,7 +684,12 @@ def get_resource_indexing_metrics(
     db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
 ):
-    """Return the latest indexing metric for a specific resource.
+    """Return the summed indexing metrics for a specific resource.
+
+    A resource can take more than one run to reach 'ready' (an interrupted
+    batch resumed later, a manual reindex after a partial failure); this
+    sums every run recorded for it instead of showing only the latest, which
+    silently dropped every earlier run's cost/time/tokens.
 
     Returns 204 No Content when no metric has been recorded yet.
     """
@@ -693,11 +698,11 @@ def get_resource_indexing_metrics(
 
     _validate_silo_app_ownership(silo_id, app_id, db)
 
-    metric = IndexingMetricRepository.get_latest_by_resource(db, resource_id=resource_id, silo_id=silo_id)
-    if metric is None:
+    summed = IndexingMetricRepository.get_summed_by_resource(db, resource_id=resource_id, silo_id=silo_id)
+    if summed is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    return IndexingMetricSchema.model_validate(metric)
+    return IndexingMetricSchema(**summed)
 
 
 @silos_router.get("/{silo_id}/indexing-metrics")
@@ -710,7 +715,13 @@ def get_silo_indexing_metrics(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """Return latest indexing metrics for all resources in a silo, with totals."""
+    """Return summed indexing metrics for all resources in a silo, with totals.
+
+    Each resource's entry sums every run recorded for it (see
+    ``get_resource_indexing_metrics``) instead of showing only its latest
+    run, which silently dropped every earlier run's cost/time/tokens both
+    per-resource and in the silo-wide totals below.
+    """
     from repositories.indexing_metric_repository import IndexingMetricRepository
     from schemas.indexing_metric_schemas import (
         IndexingMetricSchema,
@@ -720,19 +731,11 @@ def get_silo_indexing_metrics(
 
     _validate_silo_app_ownership(silo_id, app_id, db)
 
-    rows = IndexingMetricRepository.list_latest_by_silo(db, silo_id=silo_id, limit=limit, offset=offset)
+    summed_rows = IndexingMetricRepository.list_summed_by_silo(db, silo_id=silo_id, limit=limit, offset=offset)
     raw_totals = IndexingMetricRepository.get_silo_totals(db, silo_id=silo_id)
 
-    metrics = [IndexingMetricSchema.model_validate(r) for r in rows]
-    totals = SiloIndexingTotalsSchema(
-        total_prompt_tokens=raw_totals.get("total_prompt_tokens", 0) or 0,
-        total_completion_tokens=raw_totals.get("total_completion_tokens", 0) or 0,
-        total_tokens=raw_totals.get("total_tokens", 0) or 0,
-        total_cost=raw_totals.get("total_cost"),
-        currency=raw_totals.get("currency"),
-        total_llm_calls=raw_totals.get("total_llm_calls", 0) or 0,
-        indexed_resources=raw_totals.get("indexed_resources", 0) or 0,
-    )
+    metrics = [IndexingMetricSchema(**row) for row in summed_rows]
+    totals = SiloIndexingTotalsSchema(**raw_totals)
 
     return SiloIndexingMetricsResponseSchema(
         metrics=metrics,

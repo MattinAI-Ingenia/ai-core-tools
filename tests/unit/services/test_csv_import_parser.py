@@ -24,15 +24,18 @@ def test_dedupe_identical_url_and_metadata_merges():
     assert no_link_count == 0
 
 
-def test_same_url_different_metadata_stays_separate():
+def test_same_url_different_metadata_merges_keeping_first():
+    """Two rows sharing a link import the same PDF under the same filename
+    (derived from the URL) — keeping both would have the second overwrite
+    the first's file on disk. One shared PDF is one document; first metadata
+    wins."""
     csv_text = (
         "link,title\n"
         "http://a.com/x.pdf,A\n"
         "http://a.com/x.pdf,B\n"
     )
     rows, _ = parse_and_dedupe_csv(_csv(csv_text), link_column='link')
-    assert len(rows) == 2
-    assert {r.row_metadata['title'] for r in rows} == {'A', 'B'}
+    assert rows == [ParsedRow(url='http://a.com/x.pdf', row_metadata={'title': 'A'})]
 
 
 def test_empty_link_excluded_and_counted():

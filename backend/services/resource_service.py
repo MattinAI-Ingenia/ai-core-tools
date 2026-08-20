@@ -452,10 +452,20 @@ class ResourceService:
         from models.resource import Resource as _StampResource
         _stamp_db = _StampSession()
         try:
+            # status: 'pending' too — a resource queued from a previous run's
+            # 'error' would otherwise count toward failed_chunks (which counts
+            # by current status, see get_indexing_progress) before this run
+            # ever got to retry it. The processing loop below sets 'indexing'
+            # the moment it actually starts on each resource.
             _stamp_db.query(_StampResource).filter(
                 _StampResource.resource_id.in_([rid for rid, _ in resource_snapshots])
             ).update(
-                {'progress_started_at': batch_started_at, 'progress_done': 0, 'progress_total': None},
+                {
+                    'progress_started_at': batch_started_at,
+                    'progress_done': 0,
+                    'progress_total': None,
+                    'status': 'pending',
+                },
                 synchronize_session=False,
             )
             _stamp_db.commit()
@@ -638,12 +648,18 @@ class ResourceService:
 
         Raises HTTPException(409) if this silo is already being indexed.
         """
+        # Ordered by resource_id: without it Postgres returns these in an
+        # unspecified order, so which file resuming starts with — and which
+        # ones are still unfinished when the user stops again — looked random
+        # from one resume to the next instead of steadily working through
+        # the same queue.
         pending = (
             db.query(Resource)
             .filter(
                 Resource.repository_id == repository_id,
                 Resource.status.in_(('pending', 'error', 'indexing')),
             )
+            .order_by(Resource.resource_id)
             .all()
         )
         if not pending:

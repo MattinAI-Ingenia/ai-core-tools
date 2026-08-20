@@ -35,7 +35,12 @@ def parse_and_dedupe_csv(file_obj: BinaryIO, link_column: str) -> tuple[list[Par
             continue
 
         row_metadata = {col: record[col] for col in metadata_columns}
-        dedupe_key = (url, tuple(sorted(row_metadata.items())))
-        seen.setdefault(dedupe_key, ParsedRow(url=url, row_metadata=row_metadata))
+        # Dedupe by URL alone: the resource's filename is derived from the URL
+        # (see import_job_confirm._pdf_filename), so two rows sharing a link
+        # would import the same PDF twice under the same name — the second
+        # silently overwriting the first's file on disk. A shared PDF is one
+        # document even if the CSV lists it under different metadata; the
+        # first row's metadata wins.
+        seen.setdefault(url, ParsedRow(url=url, row_metadata=row_metadata))
 
     return list(seen.values()), no_link_count
