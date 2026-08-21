@@ -11,6 +11,7 @@ import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
 import IngestionProgressBar from '../components/ui/IngestionProgressBar';
 import CostEstimateModal, { formatEstimateValue } from '../components/ui/CostEstimateModal';
+import { EntityTypeInferenceModal } from '../components/forms/EntityTypeInferenceModal';
 import ResourceMetrics, { formatDuration } from '../components/repository/ResourceMetrics';
 import { CsvImportStepper } from '../components/import/CsvImportStepper';
 import { CsvImportBanner } from '../components/import/CsvImportBanner';
@@ -160,6 +161,10 @@ const RepositoryDetailPage: React.FC = () => {
   const [estimatingUpload, setEstimatingUpload] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showEstimateModal, setShowEstimateModal] = useState(false);
+  // LightRAG entity types gate the ingestion when the silo is set to infer them
+  // and none have been settled yet — they are immutable after the first index.
+  const [siloEntityTypes, setSiloEntityTypes] = useState<{ mode: string; types: string | null } | null>(null);
+  const [showEntityTypesModal, setShowEntityTypesModal] = useState(false);
   const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
   const [uploadEstimate, setUploadEstimate] = useState<CostEstimationResult | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -350,6 +355,47 @@ const RepositoryDetailPage: React.FC = () => {
       setError('Failed to load repository');
     } finally {
       if (isFirstLoad) setLoading(false);
+    }
+  };
+
+  // The silo's entity-type config is only needed when the estimate modal is up,
+  // so it is fetched then rather than on every page load.
+  useEffect(() => {
+    if (!showEstimateModal || !isLightRAG || !repository?.silo_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const silo = await apiService.getSilo(Number.parseInt(appId!), repository.silo_id!) as {
+          lightrag_entity_types_mode?: string; lightrag_entity_types?: string | null;
+        };
+        if (!cancelled) {
+          setSiloEntityTypes({
+            mode: silo.lightrag_entity_types_mode ?? 'manual',
+            types: silo.lightrag_entity_types ?? null,
+          });
+        }
+      } catch {
+        // Not fatal: without the config the gate simply does not appear.
+        if (!cancelled) setSiloEntityTypes(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [showEstimateModal, isLightRAG, repository?.silo_id, appId]);
+
+  const entityTypesSettled = !!siloEntityTypes?.types?.trim();
+  const entityTypesGateRequired = !!siloEntityTypes && siloEntityTypes.mode === 'infer';
+
+  const applyInferredEntityTypes = async (entityTypes: string) => {
+    if (!repository?.silo_id) return;
+    try {
+      await apiService.updateSilo(Number.parseInt(appId!), repository.silo_id, {
+        name: repository.name,
+        lightrag_entity_types: entityTypes,
+      });
+      setSiloEntityTypes({ mode: 'infer', types: entityTypes });
+      setShowEntityTypesModal(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the entity types.');
     }
   };
 
@@ -1259,7 +1305,23 @@ const RepositoryDetailPage: React.FC = () => {
           label: file.name,
           meta: `${formatEstimateValue(file.size)} bytes`,
         }))}
+        gate={entityTypesGateRequired ? {
+          required: true,
+          done: entityTypesSettled,
+          label: 'Define entity types',
+          doneLabel: 'Review entity types',
+          onOpen: () => setShowEntityTypesModal(true),
+        } : undefined}
       />
+
+      {showEntityTypesModal && repository?.silo_id != null && (
+        <EntityTypeInferenceModal
+          appId={Number.parseInt(appId!)}
+          siloId={repository.silo_id}
+          onConfirm={applyInferredEntityTypes}
+          onCancel={() => setShowEntityTypesModal(false)}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       <Modal

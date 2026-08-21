@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+import config
 import functools
 import math
 import os
@@ -617,6 +618,24 @@ class SiloService:
         return SiloRepository.get_by_app_id(app_id, db)
     
     @staticmethod
+    def is_lightrag_config_locked(silo_id: Optional[int], db: Session) -> bool:
+        """True once the silo's LightRAG extraction config must stop changing.
+
+        The immutable LightRAG fields (language, chunking, entity types) shape
+        how entities were extracted, so changing them mid-corpus would mix
+        incompatible extractions in one graph. That only becomes true once
+        something has actually been indexed — before the first successful run
+        the silo is still a blank slate, which is what lets "infer the entity
+        types from the documents" work at all.
+        """
+        if not silo_id:
+            return False
+        return db.query(IndexingMetric.metric_id).filter(
+            IndexingMetric.silo_id == silo_id,
+            IndexingMetric.status == 'success',
+        ).first() is not None
+
+    @staticmethod
     @handle_database_errors("create_or_update_silo")
     def create_or_update_silo(silo_data: dict, silo_type: Optional[SiloType] = None, db: Session = None) -> Silo:
         """
@@ -781,14 +800,18 @@ class SiloService:
             elif silo.indexing_service_id and not silo.extract_service_id:
                 silo.extract_service_id = silo.indexing_service_id
 
-            # Set LightRAG config columns on creation
-            if not silo_id:
+            # LightRAG extraction config stays editable until the first
+            # successful index — see is_lightrag_config_locked. That window is
+            # what lets the user upload the documents and then infer the entity
+            # types from them before anything is extracted.
+            if not SiloService.is_lightrag_config_locked(silo_id, db):
                 for field in ('lightrag_chunk_strategy', 'lightrag_chunk_token_size',
                               'lightrag_chunk_overlap_token_size', 'lightrag_language',
                               'lightrag_entity_extract_max_gleaning',
                               'lightrag_max_source_ids_per_entity',
                               'lightrag_max_source_ids_per_relation',
-                              'lightrag_entity_types'):
+                              'lightrag_entity_types',
+                              'lightrag_entity_types_mode'):
                     if field in silo_data and silo_data[field] is not None:
                         setattr(silo, field, silo_data[field])
 

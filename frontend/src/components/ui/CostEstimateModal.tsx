@@ -39,11 +39,28 @@ interface CostEstimateModalProps {
   description: string;
   itemsHeading: string;
   items: CostEstimateItem[];
+  /**
+   * Optional step that must happen before ingestion can be confirmed.
+   *
+   * Used for LightRAG entity types: they shape the whole graph and become
+   * immutable once anything is indexed, so on a silo set to infer them the
+   * ingestion is gated until a human has seen and confirmed the proposal.
+   * Omit it and the modal behaves exactly as before.
+   */
+  gate?: {
+    /** Blocks Confirm until `done`. */
+    required: boolean;
+    done: boolean;
+    label: string;
+    doneLabel: string;
+    onOpen: () => void;
+  };
 }
 
 export default function CostEstimateModal({
-  isOpen, onClose, onConfirm, confirming, confirmingLabel = 'Confirming…', estimate, description, itemsHeading, items,
+  isOpen, onClose, onConfirm, confirming, confirmingLabel = 'Confirming…', estimate, description, itemsHeading, items, gate,
 }: Readonly<CostEstimateModalProps>) {
+  const blocked = !!gate?.required && !gate.done;
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Confirm LightRAG Ingestion" size="large">
       <div className="space-y-5">
@@ -129,14 +146,33 @@ export default function CostEstimateModal({
             >
               Cancel
             </button>
+            {gate?.required && (
+              <button
+                onClick={gate.onOpen}
+                disabled={confirming}
+                className={`px-4 py-2 rounded-lg transition-colors disabled:opacity-50 ${
+                  gate.done
+                    ? 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    : 'bg-yellow-500 text-white hover:bg-yellow-600'
+                }`}
+              >
+                {gate.done ? gate.doneLabel : gate.label}
+              </button>
+            )}
             <button
               onClick={onConfirm}
-              disabled={confirming}
+              disabled={confirming || blocked}
+              title={blocked ? gate?.label : undefined}
               className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
             >
               {confirming ? confirmingLabel : 'Confirm ingestion'}
             </button>
           </div>
+          {blocked && (
+            <p className="mt-2 text-right text-sm text-amber-700">
+              Define the entity types before indexing — they cannot be changed afterwards.
+            </p>
+          )}
         </div>
 
         {estimate?.warnings?.length ? (

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Body, UploadFile, File, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request, Body, UploadFile, File, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Annotated, Optional
 from lks_idprovider import AuthContext
@@ -16,7 +16,8 @@ from models.silo import Silo
 from schemas.silo_schemas import (
     SiloListItemSchema, SiloDetailSchema, CreateUpdateSiloSchema,
     CreateSiloSchema, UpdateSiloSchema, SiloSearchSchema, SiloCountRequestSchema,
-    CostEstimationRequestSchema, CostEstimationResponseSchema
+    CostEstimationRequestSchema, CostEstimationResponseSchema,
+    InferEntityTypesRequest,
 )
 from schemas.import_schemas import ConflictMode, ImportResponseSchema
 from schemas.export_schemas import SiloExportFileSchema
@@ -837,3 +838,67 @@ def download_silo_resource(
         db=db,
     )
     return FileResponse(path=file_path, filename=resource.uri, media_type="application/pdf")
+
+
+# ---------------------------------------------------------------------------
+# LightRAG entity-type inference
+# ---------------------------------------------------------------------------
+
+
+@silos_router.post("/{silo_id}/lightrag/infer-entity-types", status_code=status.HTTP_202_ACCEPTED)
+async def infer_entity_types(
+    app_id: int,
+    silo_id: int,
+    background_tasks: BackgroundTasks,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+    body: InferEntityTypesRequest = Body(default=InferEntityTypesRequest()),
+):
+    """Kick off entity-type inference over the silo's uploaded documents.
+
+    Returns a job id to poll; the proposal is never saved here, because the
+    field is immutable after the first index and a human has to confirm it.
+    """
+    from db.database import SessionLocal
+    from services.entity_type_inference_service import EntityTypeInferenceService
+
+    _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if SiloService.is_lightrag_config_locked(silo_id, db):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This silo has already been indexed; entity types can no longer be changed.",
+        )
+
+    try:
+        job_id = EntityTypeInferenceService.start(silo_id, body.ai_service_id, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    # A session of its own: the request's is closed when this returns.
+    background_tasks.add_task(
+        EntityTypeInferenceService.run, job_id, silo_id, body.ai_service_id, SessionLocal()
+    )
+    return {"job_id": job_id, "status": "pending"}
+
+
+@silos_router.get("/{silo_id}/lightrag/infer-entity-types/{job_id}")
+async def infer_entity_types_status(
+    app_id: int,
+    silo_id: int,
+    job_id: str,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Poll an inference job: progress while running, the proposal when done."""
+    from services.entity_type_inference_service import EntityTypeInferenceService
+
+    _validate_silo_app_ownership(silo_id, app_id, db)
+
+    job = EntityTypeInferenceService.status(job_id)
+    # silo_id is checked so a job id cannot be read across silos.
+    if not job or job.get("silo_id") != silo_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job

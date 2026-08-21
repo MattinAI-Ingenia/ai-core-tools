@@ -1,6 +1,6 @@
 from schemas.media_schemas import MediaResponse
 from pydantic import BaseModel, ConfigDict
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 
@@ -78,6 +78,7 @@ class CreateRepositorySchema(BaseModel):
     lightrag_max_source_ids_per_entity: Optional[int] = None
     lightrag_max_source_ids_per_relation: Optional[int] = None
     lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
 
 
 class UpdateRepositorySchema(BaseModel):

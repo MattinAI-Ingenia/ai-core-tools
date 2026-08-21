@@ -45,6 +45,7 @@ class SiloDetailSchema(BaseModel):
     lightrag_max_source_ids_per_entity: Optional[int] = None
     lightrag_max_source_ids_per_relation: Optional[int] = None
     lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -79,6 +80,7 @@ class CreateSiloSchema(BaseModel):
     lightrag_max_source_ids_per_entity: Optional[int] = None
     lightrag_max_source_ids_per_relation: Optional[int] = None
     lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
 
 
 class UpdateSiloSchema(BaseModel):
@@ -256,3 +258,12 @@ class SiloSearchSchema(BaseModel):
         ):
             raise ValueError("min_content_length must be <= max_content_length")
         return self
+
+
+class InferEntityTypesRequest(BaseModel):
+    """Body for POST /silos/{id}/lightrag/infer-entity-types."""
+
+    # Not persisted anywhere: inference runs once and a smarter model is worth
+    # paying for on a choice that cannot be undone after indexing. Unset falls
+    # back to the silo's own extraction service.
+    ai_service_id: Optional[int] = None

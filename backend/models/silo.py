@@ -74,6 +74,15 @@ class Silo(Base):
     # translation of it — see LightRAGStore._build_rag).
     lightrag_entity_types = Column(Text, nullable=True)
 
+    # How lightrag_entity_types gets filled. 'infer' (default for new silos)
+    # proposes them from the documents' cover + table of contents before the
+    # first index; 'manual' is the historical behaviour (typed in, or NULL to
+    # fall back to the language defaults). server_default='manual' so silos
+    # created before this column keep behaving exactly as they did.
+    lightrag_entity_types_mode = Column(
+        String(20), nullable=False, default='infer', server_default='manual'
+    )
+
     use_agent_as_query = Column(Boolean, default=False, nullable=False, server_default='false')
 
     is_frozen = Column(Boolean, default=False, nullable=False)

@@ -9,6 +9,7 @@ export interface LightRAGAdvancedSettingsData {
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
   lightrag_entity_types?: string;
+  lightrag_entity_types_mode?: 'infer' | 'manual';
 }
 
 interface LightRAGAdvancedSettingsProps {
@@ -75,6 +76,10 @@ const inputClass = 'w-full px-3 py-2 border border-gray-300 rounded-lg focus:out
 export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, locked, forewarnImmutable }: Readonly<LightRAGAdvancedSettingsProps>) {
   const toInt = (value: string) => (value ? Number.parseInt(value, 10) : undefined);
   const showNote = locked || forewarnImmutable;
+  // Unset means 'infer' for a silo being created; a silo saved before this
+  // field existed carries 'manual' from the column's server_default, so its
+  // behaviour never changes underneath it.
+  const mode = formData.lightrag_entity_types_mode ?? 'infer';
 
   return (
     <details className="border-t border-gray-200 pt-6">
@@ -214,21 +219,60 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             </div>
           </div>
           <p className="mt-1 text-sm text-gray-500">
-            Max chunk-ids kept per entity/relation node in the graph (LightRAG default: 300).
+            Max chunk-ids kept per entity/relation node in the graph (LightRAG default: 200).
+            Full provenance is preserved regardless — the cap only trims the node's own list.
           </p>
           {showNote && <ImmutableNote />}
         </div>
 
         <div>
-          <label htmlFor="lightrag_entity_types" className="block text-sm font-medium text-gray-700 mb-2">
-            Entity types
-          </label>
+          <span className="block text-sm font-medium text-gray-700 mb-2">Entity types</span>
+          <div className="space-y-2 mb-3">
+            <label className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="radio"
+                name="lightrag_entity_types_mode"
+                className="mt-1"
+                checked={mode === 'infer'}
+                onChange={() => onFieldChange('lightrag_entity_types_mode', 'infer')}
+                disabled={disabled || locked}
+              />
+              <span>
+                Infer from the documents
+                <span className="block text-gray-500">
+                  Reads the cover page and table of contents of the uploaded documents
+                  and proposes the categories. You review and edit them before indexing.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="radio"
+                name="lightrag_entity_types_mode"
+                className="mt-1"
+                checked={mode === 'manual'}
+                onChange={() => onFieldChange('lightrag_entity_types_mode', 'manual')}
+                disabled={disabled || locked}
+              />
+              <span>
+                Write them myself
+                <span className="block text-gray-500">
+                  Type the categories below, or leave blank to use the
+                  language-appropriate defaults.
+                </span>
+              </span>
+            </label>
+          </div>
           <textarea
             id="lightrag_entity_types"
             rows={3}
             value={formData.lightrag_entity_types || ''}
             onChange={(e) => onFieldChange('lightrag_entity_types', e.target.value)}
-            placeholder={defaultEntityTypesPlaceholder(formData.lightrag_language)}
+            placeholder={
+              mode === 'infer'
+                ? 'Filled in when you infer them from the documents, before indexing.'
+                : defaultEntityTypesPlaceholder(formData.lightrag_language)
+            }
             className={`${inputClass} placeholder:text-gray-400`}
             disabled={disabled || locked}
           />
