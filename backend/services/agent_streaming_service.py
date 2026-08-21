@@ -34,6 +34,18 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+async def _has_pending_interrupt(agent_chain, config) -> bool:
+    """True when the graph is parked on a HITL interrupt awaiting a decision."""
+    try:
+        state = await agent_chain.aget_state(config)
+        return any(getattr(task, "interrupts", None) for task in getattr(state, "tasks", []))
+    except Exception as exc:
+        # ponytail: unreadable state falls back to "no interrupt" so the caller's
+        # existing recovery path stays reachable.
+        logger.warning("Could not read graph state for pending interrupts: %s", exc)
+        return False
+
+
 class AgentStreamingService:
     """Service for streaming agent responses via Server-Sent Events."""
 
@@ -228,6 +240,10 @@ class AgentStreamingService:
                         and ctx.fresh_agent.has_memory
                         and ctx.session_id_for_cache
                         and is_missing_tool_output_error(stream_exc)
+                        # A HITL pause leaves the same unanswered tool_call a corrupt
+                        # checkpoint does. Deleting it would silently discard the
+                        # pending approval and the whole thread's memory.
+                        and not await _has_pending_interrupt(agent_chain, config)
                     ):
                         logger.warning(
                             "Detected incomplete tool-call checkpoint for agent %s "
