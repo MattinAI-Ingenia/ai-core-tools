@@ -6,6 +6,7 @@ Provides cached lookups with fallback to hardcoded defaults.
 
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from models.pricing_catalog import PricingCatalog
 from utils.logger import get_logger
@@ -83,6 +84,7 @@ class PricingCacheManager:
                 )
 
             except Exception as e:
+                db.rollback()
                 results['failed'] += 1
                 results['details'].append(f"✗ {provider.provider_name}: {str(e)}")
                 logger.error(f"Failed to fetch pricing from {provider.provider_name}: {e}")
@@ -102,34 +104,34 @@ class PricingCacheManager:
         source: str = "unknown",
         currency: str = "USD",
     ) -> None:
-        """Insert or update pricing record in the database."""
-        existing = db.query(PricingCatalog).filter(
-            PricingCatalog.model_name == model_name
-        ).first()
+        """Insert or update pricing record in the database.
 
-        if existing:
-            # Update existing record
-            existing.input_price_per_1m = input_price_per_1m or existing.input_price_per_1m
-            existing.output_price_per_1m = output_price_per_1m or existing.output_price_per_1m
-            existing.embedding_price_per_1m = embedding_price_per_1m or existing.embedding_price_per_1m
-            existing.last_updated = datetime.utcnow()
-            existing.source = source
-            existing.currency = currency
-        else:
-            # Insert new record
-            new_record = PricingCatalog(
-                model_name=model_name,
-                provider=provider,
-                input_price_per_1m=input_price_per_1m,
-                output_price_per_1m=output_price_per_1m,
-                embedding_price_per_1m=embedding_price_per_1m,
-                last_updated=datetime.utcnow(),
-                source=source,
-                currency=currency,
-            )
-            db.add(new_record)
-
-        db.flush()
+        Uses a single atomic upsert (ON CONFLICT DO UPDATE) instead of
+        SELECT-then-INSERT — multiple uvicorn workers run this on startup
+        concurrently, and a check-then-insert races on the model_name PK.
+        """
+        stmt = pg_insert(PricingCatalog).values(
+            model_name=model_name,
+            provider=provider,
+            input_price_per_1m=input_price_per_1m,
+            output_price_per_1m=output_price_per_1m,
+            embedding_price_per_1m=embedding_price_per_1m,
+            last_updated=datetime.utcnow(),
+            source=source,
+            currency=currency,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[PricingCatalog.model_name],
+            set_={
+                "input_price_per_1m": stmt.excluded.input_price_per_1m if input_price_per_1m else PricingCatalog.input_price_per_1m,
+                "output_price_per_1m": stmt.excluded.output_price_per_1m if output_price_per_1m else PricingCatalog.output_price_per_1m,
+                "embedding_price_per_1m": stmt.excluded.embedding_price_per_1m if embedding_price_per_1m else PricingCatalog.embedding_price_per_1m,
+                "last_updated": stmt.excluded.last_updated,
+                "source": stmt.excluded.source,
+                "currency": stmt.excluded.currency,
+            },
+        )
+        db.execute(stmt)
 
     @staticmethod
     def get_llm_pricing(
