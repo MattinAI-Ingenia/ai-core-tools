@@ -41,6 +41,8 @@ def make_agent(
     agent.request_count = 0
     agent.is_frozen = is_frozen  # SaaS mode: must be explicitly False to avoid MagicMock truthiness
     agent.ai_service = None
+    agent.enable_code_interpreter = False
+    agent.skill_associations = []
     agent.prompt_template = MagicMock()
     agent.prompt_template.format.return_value = "formatted message"
     return agent
@@ -230,6 +232,58 @@ class TestSuccessfulExecution:
 
         assert result["metadata"]["files_processed"] == 0
 
+    @pytest.mark.asyncio
+    async def test_sandbox_marked_active_for_whole_turn(self, monkeypatch):
+        agent = make_agent(agent_id=1, has_memory=True)
+        svc, _ = make_service(agent=agent)
+        db = MagicMock()
+        conversation = MagicMock()
+        sandbox_handle = MagicMock()
+        sandbox_handle.sandbox_service_id = 99
+        ctx = make_context(
+            agent=agent,
+            conversation=conversation,
+            sandbox_handle=sandbox_handle,
+            sandbox_session_key="conv_1_123",
+        )
+        mock_sss = MagicMock()
+        mock_sss.begin_use.return_value = True
+        monkeypatch.setattr("config.SANDBOX_DEFAULT_TIMEOUT_S", 42, raising=False)
+
+        with (
+            patch.object(svc, "_prepare_turn", new=AsyncMock(return_value=ctx)),
+            patch.object(svc, "_execute_agent_async", new=AsyncMock(return_value="ok")),
+            patch.object(svc, "_finalize_turn", new=AsyncMock(return_value={
+                "response": "ok",
+                "agent_id": 1,
+                "conversation_id": 123,
+                "metadata": {},
+                "parsed_response": "ok",
+                "effective_conv_id": 123,
+                "files_data": [],
+            })),
+            patch("services.sandbox_session_service.sandbox_session_service", mock_sss),
+        ):
+            await svc.execute_agent_chat_with_file_refs(
+                agent_id=1,
+                message="hello",
+                db=db,
+            )
+
+        mock_sss.begin_use.assert_called_once_with(
+            "conv_1_123",
+            conversation=conversation,
+            db=db,
+            expected_seconds=42,
+            sandbox_service_id=99,
+        )
+        mock_sss.end_use.assert_called_once_with(
+            "conv_1_123",
+            conversation=conversation,
+            db=db,
+            sandbox_service_id=99,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Memory-enabled agents — tested via _prepare_turn
@@ -328,10 +382,11 @@ class TestFileSnapshotting:
         agent = make_agent(agent_id=1, has_memory=False)
         svc, _ = make_service(agent=agent)
 
-        # Create a working dir with a pre-existing file
+        # Create a published output dir with a pre-existing file
         working_dir = tmp_path / "conversations" / "42"
-        working_dir.mkdir(parents=True)
-        (working_dir / "old_report.pdf").write_text("stale")
+        output_dir = working_dir / "output"
+        output_dir.mkdir(parents=True)
+        (output_dir / "old_report.pdf").write_text("stale")
 
         mock_sync = AsyncMock(return_value=[])
 
@@ -343,8 +398,10 @@ class TestFileSnapshotting:
             patch("tools.agentTools.parse_agent_response", return_value="ok"),
             patch("services.agent_execution_service.get_app_config", return_value={"TMP_BASE_FOLDER": str(tmp_path)}),
             patch("services.agent_execution_service.FileManagementService") as mock_fms_cls,
-            patch("os.path.isdir", side_effect=lambda p: p == str(working_dir) or os.path.isdir(p)),
-            patch("os.listdir", side_effect=lambda p: ["old_report.pdf"] if p == str(working_dir) else os.listdir(p)),
+            patch(
+                "services.conversation_service.ConversationService.get_conversation",
+                return_value=MagicMock(),
+            ),
         ):
             mock_fms_cls.return_value.sync_output_files = mock_sync
 
@@ -388,7 +445,10 @@ class TestFileSnapshotting:
             patch("services.agent_execution_service.get_app_config", return_value={"TMP_BASE_FOLDER": str(tmp_path)}),
             patch("services.agent_execution_service.FileManagementService") as mock_fms_cls,
             patch("services.agent_execution_service._inject_file_markers", return_value="ok with files") as mock_inject,
-            patch("os.path.isdir", return_value=False),
+            patch(
+                "services.conversation_service.ConversationService.get_conversation",
+                return_value=MagicMock(),
+            ),
         ):
             mock_fms_cls.return_value.sync_output_files = mock_sync
 
@@ -400,3 +460,154 @@ class TestFileSnapshotting:
             )
 
             mock_inject.assert_called_once_with("ok", [mock_file_ref])
+
+
+# ---------------------------------------------------------------------------
+# Conversation ownership — validated for every agent regardless of has_memory
+# ---------------------------------------------------------------------------
+
+
+class TestConversationOwnershipValidation:
+    """A client-supplied conversation_id must always pass the same ownership
+    check, whether or not the target agent has memory enabled. Otherwise a
+    memory-less (including shared/marketplace) agent would key its sandbox
+    session and working directory off an unvalidated, attacker-controlled
+    conversation_id — see agent_execution_service._prepare_turn step 6.
+    """
+
+    @pytest.mark.asyncio
+    async def test_memoryless_agent_rejects_conversation_id_of_another_tenant(self):
+        """A conversation_id that fails ownership validation must be rejected
+        with 404, even for a memory-less agent, instead of silently flowing
+        through to key the sandbox/working directory.
+        """
+        agent = make_agent(agent_id=1, has_memory=False)
+        svc, _ = make_service(agent=agent)
+
+        with patch(
+            "services.conversation_service.ConversationService.get_conversation",
+            return_value=None,
+        ) as mock_get_conversation:
+            with pytest.raises(HTTPException) as exc_info:
+                await svc._prepare_turn(
+                    agent_id=1,
+                    message="hello",
+                    conversation_id=999,
+                    user_context={"user_id": 5, "app_id": 1},
+                    db=MagicMock(),
+                )
+
+        assert exc_info.value.status_code == 404
+        mock_get_conversation.assert_called_once()
+        call_kwargs = mock_get_conversation.call_args.kwargs
+        assert call_kwargs["conversation_id"] == 999
+        assert call_kwargs["user_context"] == {"user_id": 5, "app_id": 1}
+        assert call_kwargs["agent_id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_memoryless_agent_accepts_owned_conversation_id(self, tmp_path):
+        """A conversation_id that DOES pass ownership validation is accepted
+        for a memory-less agent (e.g. one explicitly created for file
+        grouping via the dedicated conversations endpoint).
+        """
+        agent = make_agent(agent_id=1, has_memory=False)
+        svc, _ = make_service(agent=agent)
+
+        owned_conversation = MagicMock()
+        owned_conversation.conversation_id = 999
+
+        with (
+            patch(
+                "services.conversation_service.ConversationService.get_conversation",
+                return_value=owned_conversation,
+            ),
+            patch(
+                "services.agent_execution_service.get_app_config",
+                return_value={"TMP_BASE_FOLDER": str(tmp_path)},
+            ),
+        ):
+            ctx = await svc._prepare_turn(
+                agent_id=1,
+                message="hello",
+                conversation_id=999,
+                user_context={"user_id": 5, "app_id": 1},
+                db=MagicMock(),
+            )
+
+        assert ctx.effective_conv_id == 999
+        # Memory-less agents never open a session, even with a validated conversation.
+        assert ctx.session is None
+
+
+# ---------------------------------------------------------------------------
+# reset_agent_conversation — sandbox destroy must not precede ownership check
+# ---------------------------------------------------------------------------
+
+
+class TestResetAgentConversationSandboxOwnership:
+    @pytest.mark.asyncio
+    async def test_rejects_reset_for_conversation_id_without_access(self):
+        """A client-supplied conversation_id that fails ownership validation
+        must be rejected with 404 BEFORE any sandbox is destroyed — an
+        attacker must not be able to tear down another user's live sandbox
+        just by guessing/iterating conversation ids."""
+        agent = make_agent(agent_id=1, has_memory=False)
+        agent.enable_code_interpreter = True
+        svc, _ = make_service(agent=agent)
+
+        mock_sss = MagicMock()
+
+        with (
+            patch.object(svc, "_validate_agent_access", new=AsyncMock()),
+            patch(
+                "services.conversation_service.ConversationService.get_conversation",
+                return_value=None,
+            ),
+            patch("services.sandbox_session_service.sandbox_session_service", mock_sss),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await svc.reset_agent_conversation(
+                    agent_id=1,
+                    user_context={"user_id": "u1", "conversation_id": 999},
+                    db=MagicMock(),
+                )
+
+        assert exc_info.value.status_code == 404
+        mock_sss.destroy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_destroys_sandbox_for_owned_conversation(self):
+        """A validated, owned conversation_id proceeds normally: sandbox
+        destroyed and DB state cleared."""
+        agent = make_agent(agent_id=1, has_memory=False)
+        agent.enable_code_interpreter = True
+        svc, _ = make_service(agent=agent)
+
+        owned_conversation = MagicMock()
+        owned_conversation.conversation_id = 42
+        mock_sss = MagicMock()
+        db = MagicMock()
+
+        with (
+            patch.object(svc, "_validate_agent_access", new=AsyncMock()),
+            patch(
+                "services.conversation_service.ConversationService.get_conversation",
+                return_value=owned_conversation,
+            ),
+            patch("services.sandbox_session_service.sandbox_session_service", mock_sss),
+            patch(
+                "services.file_management_service.FileManagementService.list_attached_files",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            result = await svc.reset_agent_conversation(
+                agent_id=1,
+                user_context={"user_id": "u1", "conversation_id": 42},
+                db=db,
+            )
+
+        assert result is True
+        mock_sss.destroy.assert_called_once()
+        assert owned_conversation.sandbox_session_id is None
+        assert owned_conversation.sandbox_state is None
+        db.commit.assert_called()

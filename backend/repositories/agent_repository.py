@@ -4,11 +4,13 @@ from models.agent import Agent, AgentMCP, AgentTool, AgentSkill
 from models.middleware import AgentMiddleware
 from models.ocr_agent import OCRAgent
 from models.ai_service import AIService
+from models.sandbox_service import SandboxService
 from models.silo import Silo
 from models.output_parser import OutputParser
 from models.mcp_config import MCPConfig
 from models.skill import Skill
 from repositories.ai_service_repository import AIServiceRepository
+from repositories.sandbox_service_repository import SandboxServiceRepository
 from repositories.silo_repository import SiloRepository
 from repositories.output_parser_repository import OutputParserRepository
 from repositories.mcp_config_repository import MCPConfigRepository
@@ -210,7 +212,21 @@ class AgentRepository:
             s.service_id: {"name": s.name, "model_name": s.description, "provider": s.provider}
             for s in ai_services
         }
-    
+
+    @staticmethod
+    def get_sandbox_services_by_app_id(db: Session, app_id: int) -> List[SandboxService]:
+        """Get all sandbox services for a specific app, including system (app_id=NULL) services."""
+        return SandboxServiceRepository.get_by_app_id(db, app_id) + SandboxServiceRepository.get_system_services(db)
+
+    @staticmethod
+    def get_sandbox_services_dict_by_app_id(db: Session, app_id: int) -> Dict[int, Dict[str, str]]:
+        """Get sandbox services as a dictionary for quick lookup"""
+        sandbox_services = AgentRepository.get_sandbox_services_by_app_id(db, app_id)
+        return {
+            s.service_id: {"name": s.name, "provider": s.provider}
+            for s in sandbox_services
+        }
+
     @staticmethod
     def get_silos_by_app_id(db: Session, app_id: int) -> List[Silo]:
         """Get all silos for a specific app"""
@@ -293,6 +309,13 @@ class AgentRepository:
             for s in ai_services
         ]
         
+        # Get sandbox services
+        sandbox_services = AgentRepository.get_sandbox_services_by_app_id(db, app_id)
+        sandbox_services_list = [
+            {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+            for s in sandbox_services
+        ]
+
         # Get silos
         silos = AgentRepository.get_silos_by_app_id(db, app_id)
         silos_list = [{"silo_id": s.silo_id, "name": s.name} for s in silos]
@@ -319,6 +342,7 @@ class AgentRepository:
 
         return {
             'ai_services': ai_services_list,
+            'sandbox_services': sandbox_services_list,
             'silos': silos_list,
             'output_parsers': output_parsers_list,
             'tools': tools_list,
