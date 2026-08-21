@@ -74,7 +74,6 @@ class Silo(Base):
     # translation of it — see LightRAGStore._build_rag).
     lightrag_entity_types = Column(Text, nullable=True)
 
-    lightrag_graph_context_enabled = Column(Boolean, default=False, nullable=True)
     use_agent_as_query = Column(Boolean, default=False, nullable=False, server_default='false')
 
     is_frozen = Column(Boolean, default=False, nullable=False)
