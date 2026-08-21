@@ -388,7 +388,7 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
     if "k" in caller:
         resolved["k"] = caller["k"]
     else:
-        agent_k = getattr(agent, "rag_k", None) or 30
+        agent_k = getattr(agent, "rag_k", None) or config.AGENT_DEFAULT_RAG_K
         k_mode = getattr(agent, "rag_k_mode", None) or "fixed"
         resolved["k"] = (
             _scale_k_per_100_chunks(agent_k, silo) if k_mode == "per_100_chunks" and silo is not None else agent_k
@@ -561,7 +561,7 @@ class SiloService:
             known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type', 'lightrag_query_mode'}
 
             # --- Layer 1: system defaults ---
-            merged_search_kwargs: dict = {'k': 30}
+            merged_search_kwargs: dict = {'k': config.AGENT_DEFAULT_RAG_K}
 
             # --- Layer 2: per-call search_params (highest priority) ---
             if search_params:

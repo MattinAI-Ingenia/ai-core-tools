@@ -353,9 +353,29 @@ class LightRAGRetriever(BaseRetriever):
     collection_name: str
     query_mode: str = "hybrid"
     top_k: int = 5
+    # None keeps LightRAG's own default (its dataclass field reads CHUNK_TOP_K /
+    # MAX_TOTAL_TOKENS from the environment at import time). Passed explicitly
+    # so a per-silo value doesn't depend on import ordering.
+    chunk_top_k: Optional[int] = None
+    max_total_tokens: Optional[int] = None
 
     class Config:  # noqa: D106
         arbitrary_types_allowed = True
+
+    def _query_param(self):
+        """Build the QueryParam for this retriever, omitting unset overrides."""
+        from lightrag.base import QueryParam  # noqa: WPS433
+
+        kwargs = {
+            "mode": self.query_mode,
+            "top_k": self.top_k,
+            "only_need_context": True,
+        }
+        if self.chunk_top_k is not None:
+            kwargs["chunk_top_k"] = self.chunk_top_k
+        if self.max_total_tokens is not None:
+            kwargs["max_total_tokens"] = self.max_total_tokens
+        return QueryParam(**kwargs)
 
     def _get_relevant_documents(
         self,
@@ -363,14 +383,8 @@ class LightRAGRetriever(BaseRetriever):
         *,
         run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        from lightrag.base import QueryParam  # noqa: WPS433
-
         rag = self.store._get_rag_instance(self.collection_name)
-        param = QueryParam(
-            mode=self.query_mode,
-            top_k=self.top_k,
-            only_need_context=True,
-        )
+        param = self._query_param()
         # aquery_llm returns a dict with both the context string
         # (llm_response.content) and the structured graph data (data.*).
         # The legacy aquery() wrapper discards raw_data, so we can't use it.
@@ -385,16 +399,10 @@ class LightRAGRetriever(BaseRetriever):
         *,
         run_manager: Optional[AsyncCallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        from lightrag.base import QueryParam  # noqa: WPS433
-
         # _aget_rag_instance initialises Neo4j in this event loop, ensuring
         # the driver and aquery() share the same loop on every call.
         rag = await self.store._aget_rag_instance(self.collection_name)
-        param = QueryParam(
-            mode=self.query_mode,
-            top_k=self.top_k,
-            only_need_context=True,
-        )
+        param = self._query_param()
         # aquery_llm returns both context (llm_response.content) and graph
         # data (data.*); the legacy aquery() wrapper discards raw_data.
         response = await rag.aquery_llm(query, param=param)
@@ -1057,6 +1065,8 @@ class LightRAGStore(VectorStoreInterface):
             collection_name=collection_name,
             query_mode=mode,
             top_k=top_k,
+            chunk_top_k=search_params.get("lightrag_chunk_top_k"),
+            max_total_tokens=search_params.get("lightrag_max_total_tokens"),
         )
 
     async def aretrieve_graph_context(

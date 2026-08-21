@@ -108,6 +108,14 @@ services:
       # Send the extraction JSON schema as response_format so the server
       # constrains decoding. false = prompt-only JSON (LightRAG's own mode).
       LIGHTRAG_EXTRACT_GUIDED_JSON: ${LIGHTRAG_EXTRACT_GUIDED_JSON:-true}
+      # LightRAG query budget. Same import-time dataclass-default mechanism as
+      # the concurrency vars above. Defaults match lightrag 1.5.6's own.
+      CHUNK_TOP_K: ${CHUNK_TOP_K:-20}                     # text chunks reaching the context
+      MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-30000}        # whole-context ceiling
+      # Graph entities/relations per retrieval; per-agent rag_k overrides it.
+      AGENT_DEFAULT_RAG_K: ${AGENT_DEFAULT_RAG_K:-30}
+      # Chunks pulled per entity/relation before the global CHUNK_TOP_K cut.
+      RELATED_CHUNK_NUMBER: ${RELATED_CHUNK_NUMBER:-5}
     volumes:
       - ../backend/data:/aict_backend/data
       - ../backend/logs:/aict_backend/logs

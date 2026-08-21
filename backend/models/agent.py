@@ -5,6 +5,7 @@ from sqlalchemy.orm import relationship
 from db.database import Base
 from datetime import datetime
 from models.middleware import AgentMiddleware
+from config import AGENT_DEFAULT_RAG_K
 
 
 class MarketplaceVisibility(enum.Enum):
@@ -85,7 +86,10 @@ class Agent(Base):
     # RAG retrieval config (step_007 / FR-7); rag_search_type values validated in schemas (step_008).
     # server_default=30 keeps existing agents on the historical retriever default; new agents get
     # k=10 / max_calls=4 from AgentService._update_normal_agent.
-    rag_k = Column(Integer, default=30, nullable=False, server_default='30')
+    # The Python-side default is AGENT_DEFAULT_RAG_K (env), so a deployment can
+    # raise it without a migration; server_default stays 30 for rows inserted
+    # outside the ORM.
+    rag_k = Column(Integer, default=AGENT_DEFAULT_RAG_K, nullable=False, server_default='30')
     rag_search_type = Column(String(45), default='similarity', nullable=False, server_default='similarity')
     rag_score_threshold = Column(Float, nullable=True)  # only used when rag_search_type='similarity_score_threshold'
     rag_fixed_filters = Column(JSON, nullable=True)     # list of {field, op, value} filter clauses applied on every retrieval

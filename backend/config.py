@@ -64,6 +64,10 @@ LIGHTRAG_ENABLED: bool = os.getenv('LIGHTRAG_ENABLED', 'false').lower() == 'true
 NEO4J_URI: Optional[str] = os.getenv('NEO4J_URI') or None
 NEO4J_USERNAME: str = os.getenv('NEO4J_USERNAME', 'neo4j')
 NEO4J_PASSWORD: Optional[str] = os.getenv('NEO4J_PASSWORD') or None
+# Default number of graph entities/relations (LightRAG top_k) or vector chunks
+# a retrieval pulls, when the agent has no explicit rag_k. Not the same knob as
+# CHUNK_TOP_K, which caps the text chunks reaching the context — see .env.example.
+AGENT_DEFAULT_RAG_K: int = int(os.getenv('AGENT_DEFAULT_RAG_K', '20'))
 # Entity extraction configuration
 # Maximum number of "gleaning" iterations the entity-extraction pipeline
 # should perform when processing documents during indexing. Set to 0 to
