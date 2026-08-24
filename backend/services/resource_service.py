@@ -591,11 +591,29 @@ class ResourceService:
             )
 
         def _run_and_unlock():
+            import time
             from services import silo_indexing_lock
+            from tools.vector_stores.lightrag_store import reset_lightrag_postgres_pool
 
+            # LightRAG's Postgres client pool is process-wide and bound forever
+            # to whichever event loop first created it, but every indexing job
+            # runs in its own throwaway loop (see reset_lightrag_postgres_pool's
+            # docstring) — so two indexing jobs must never touch it at once, or
+            # whichever finishes first pulls the pool out from under the other.
+            # This sentinel id (never a real silo_id) serializes ALL indexing
+            # jobs against each other process-wide, on top of the per-silo lock
+            # below (which only prevents two runs on the *same* silo).
+            _LIGHTRAG_POOL_LOCK_ID = -1
+            pool_lock_conn = None
+            while pool_lock_conn is None:
+                pool_lock_conn = silo_indexing_lock.acquire(_LIGHTRAG_POOL_LOCK_ID)
+                if pool_lock_conn is None:
+                    time.sleep(0.5)
             try:
+                reset_lightrag_postgres_pool()
                 _run()
             finally:
+                silo_indexing_lock.release(pool_lock_conn, _LIGHTRAG_POOL_LOCK_ID)
                 silo_indexing_lock.release(lock_conn, silo_id)
 
         thread = threading.Thread(

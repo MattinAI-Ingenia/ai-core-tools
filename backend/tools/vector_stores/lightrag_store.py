@@ -291,6 +291,55 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     progress_callback(run_total[0], run_total[0])
 
 
+async def _areset_postgres_client_pool():
+    """Force-close and reset lightrag-hku's process-wide Postgres client pool.
+
+    ``lightrag.kg.postgres_impl.ClientManager`` keeps ONE asyncpg pool for the
+    whole process, shared by every workspace, bound forever to whichever event
+    loop first created it ("the first successful initialization defines the
+    pool... for the lifetime of the shared client" — its own docstring). Every
+    indexing job here runs in its own throwaway thread + event loop (see
+    ``resource_service._index_resources_background``), so a pool left over
+    from a *previous* job's now-dead loop makes every LightRAG call in the
+    *next* job fail with "Future attached to a different loop" — 100% of the
+    time, not just under concurrency. Nothing in this codebase ever calls the
+    matching ``ClientManager.release_client``, so the pool is never released
+    on its own either.
+
+    Call this once at the very start of every indexing job, before building
+    any LightRAG instance, while holding the global lock from
+    ``silo_indexing_lock`` (sentinel id) so no other job's loop can be
+    depending on the pool this closes.
+    """
+    from lightrag.kg.postgres_impl import ClientManager  # noqa: WPS433
+
+    async with ClientManager._lock:
+        db = ClientManager._instances["db"]
+        if db is not None and db.pool is not None:
+            try:
+                await db.pool.close()
+            except Exception:
+                # The pool may belong to an already-dead loop from a previous
+                # job's thread — closing it gracefully can itself fail on that
+                # dead loop. Only the reset below is load-bearing (it makes the
+                # next get_client() build a brand new pool); a failed close of
+                # already-broken connections is harmless to ignore.
+                logger.warning("Could not gracefully close stale LightRAG Postgres pool; discarding it anyway.")
+        ClientManager._instances["db"] = None
+        ClientManager._instances["ref_count"] = 0
+        ClientManager._instances["vector_signature"] = None
+
+
+def reset_lightrag_postgres_pool():
+    """Sync wrapper for :func:`_areset_postgres_client_pool` — see its docstring.
+
+    Safe to call even when lightrag-hku has never touched Postgres yet (the
+    pool is simply already ``None``), and safe when lightrag-hku is not
+    installed at all — callers only need this ahead of LightRAG indexing.
+    """
+    _run_async(_areset_postgres_client_pool())
+
+
 def _run_async(coro):
     """Run an async coroutine from synchronous code.
 
