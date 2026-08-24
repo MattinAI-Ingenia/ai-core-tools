@@ -127,7 +127,10 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
 
   // Initialize form with existing silo data
   useEffect(() => {
-    const defaultVectorType = (silo?.vector_db_type || 'PGVECTOR').toUpperCase();
+    // A silo being created (no silo, or the silo_id===0 template) defaults to
+    // LightRAG; an existing silo always keeps its own configured type.
+    const isNewSilo = !silo || silo.silo_id === 0;
+    const defaultVectorType = (isNewSilo ? 'LIGHTRAG' : (silo?.vector_db_type || 'PGVECTOR')).toUpperCase();
     const availableVectorDbOptions = silo?.vector_db_options ?? [];
     const matchedVectorDbOption = availableVectorDbOptions.find(
       (option) => option.code.toUpperCase() === defaultVectorType

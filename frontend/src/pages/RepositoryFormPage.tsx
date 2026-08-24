@@ -125,7 +125,11 @@ const RepositoryFormPage: React.FC = () => {
         setVectorDbOptions(availableVectorDbOptions);
         setAiServices(repository.ai_services ?? []);
 
-        const normalizedVectorDbType = (repository.vector_db_type || 'PGVECTOR').toUpperCase();
+        // A repository being created defaults to LightRAG; an existing one
+        // always keeps its own configured type.
+        const normalizedVectorDbType = (
+          isNewRepository ? 'LIGHTRAG' : (repository.vector_db_type || 'PGVECTOR')
+        ).toUpperCase();
         const resolvedVectorDbType = availableVectorDbOptions.some((option) => option.code === normalizedVectorDbType)
           ? normalizedVectorDbType
           : (availableVectorDbOptions[0]?.code || 'PGVECTOR');
@@ -144,6 +148,9 @@ const RepositoryFormPage: React.FC = () => {
           extract_service_id: repository.extract_service_id ?? repository.indexing_service_id ?? undefined,
           keywords_service_id: repository.keywords_service_id ?? repository.indexing_service_id ?? undefined,
           vlm_service_id: repository.vlm_service_id ?? undefined,
+          // A repository being created defaults to Spanish; an existing one
+          // always keeps its own configured language.
+          lightrag_language: isNewRepository ? 'Spanish' : (repository.lightrag_language || 'English'),
         });
       } catch (err) {
         console.error('Error loading repository:', err);
