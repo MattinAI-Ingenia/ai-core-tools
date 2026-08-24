@@ -255,7 +255,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
                 disabled={disabled || locked}
               />
               <span>
-                Write them myself
+                Write them yourself
                 <span className="block text-gray-500">
                   Type the categories below, or leave blank to use the
                   language-appropriate defaults.
@@ -263,55 +263,55 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
               </span>
             </label>
           </div>
-          <textarea
-            id="lightrag_entity_types"
-            rows={3}
-            value={formData.lightrag_entity_types || ''}
-            onChange={(e) => onFieldChange('lightrag_entity_types', e.target.value)}
-            placeholder={
-              mode === 'infer'
-                ? 'Filled in when you infer them from the documents, before indexing.'
-                : defaultEntityTypesPlaceholder(formData.lightrag_language)
-            }
-            className={`${inputClass} placeholder:text-gray-400`}
-            disabled={disabled || locked}
-          />
-          {/* Native file inputs render their button label in the browser's
-              locale (e.g. "Elegir archivo" on a Spanish browser) with no HTML
-              override — hide it and drive the picker from an English label
-              instead, so it matches the rest of this English-only form. */}
-          <input
-            type="file"
-            id="lightrag_entity_types_file"
-            accept=".txt"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (!file) return;
-              const reader = new FileReader();
-              reader.onload = () => {
-                if (typeof reader.result === 'string') {
-                  onFieldChange('lightrag_entity_types', reader.result);
-                }
-              };
-              reader.readAsText(file);
-              e.target.value = '';
-            }}
-            className="hidden"
-            disabled={disabled || locked}
-          />
-          <label
-            htmlFor="lightrag_entity_types_file"
-            className={`mt-2 inline-block px-3 py-1.5 text-sm border border-gray-300 rounded-lg ${
-              disabled || locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-gray-50'
-            }`}
-          >
-            Choose .txt file
-          </label>
-          <p className="mt-1 text-sm text-gray-500">
-            Comma-separated entity categories LightRAG will use during extraction (e.g. Person, Organization, Location).
-            Leave blank to use the language-appropriate defaults shown above, or upload a .txt file with the same
-            comma-separated format. Locked after creation.
-          </p>
+          {mode === 'manual' && (
+            <>
+              <textarea
+                id="lightrag_entity_types"
+                rows={3}
+                value={formData.lightrag_entity_types || ''}
+                onChange={(e) => onFieldChange('lightrag_entity_types', e.target.value)}
+                placeholder={defaultEntityTypesPlaceholder(formData.lightrag_language)}
+                className={`${inputClass} placeholder:text-gray-400`}
+                disabled={disabled || locked}
+              />
+              {/* Native file inputs render their button label in the browser's
+                  locale (e.g. "Elegir archivo" on a Spanish browser) with no HTML
+                  override — hide it and drive the picker from an English label
+                  instead, so it matches the rest of this English-only form. */}
+              <input
+                type="file"
+                id="lightrag_entity_types_file"
+                accept=".txt"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    if (typeof reader.result === 'string') {
+                      onFieldChange('lightrag_entity_types', reader.result);
+                    }
+                  };
+                  reader.readAsText(file);
+                  e.target.value = '';
+                }}
+                className="hidden"
+                disabled={disabled || locked}
+              />
+              <label
+                htmlFor="lightrag_entity_types_file"
+                className={`mt-2 inline-block px-3 py-1.5 text-sm border border-gray-300 rounded-lg ${
+                  disabled || locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-gray-50'
+                }`}
+              >
+                Choose .txt file
+              </label>
+              <p className="mt-1 text-sm text-gray-500">
+                Comma-separated entity categories LightRAG will use during extraction (e.g. Person, Organization, Location).
+                Leave blank to use the language-appropriate defaults shown above, or upload a .txt file with the same
+                comma-separated format. Locked after creation.
+              </p>
+            </>
+          )}
           {showNote && <ImmutableNote />}
         </div>
       </div>
