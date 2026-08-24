@@ -878,7 +878,8 @@ async def infer_entity_types(
 
     # A session of its own: the request's is closed when this returns.
     background_tasks.add_task(
-        EntityTypeInferenceService.run, job_id, silo_id, body.ai_service_id, SessionLocal()
+        EntityTypeInferenceService.run, job_id, silo_id, body.ai_service_id, SessionLocal(),
+        body.import_job_id,
     )
     return {"job_id": job_id, "status": "pending"}
 

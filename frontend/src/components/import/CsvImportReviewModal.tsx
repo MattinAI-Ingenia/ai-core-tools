@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Trash2, UploadCloud } from 'lucide-react';
+import { Loader2, Trash2, UploadCloud } from 'lucide-react';
 import Modal from '../ui/Modal';
 import DataTable from '../ui/DataTable';
 import type { TableColumn } from '../ui/Table';
@@ -9,11 +9,13 @@ import type { ImportJob, ImportJobRow } from '../../types/csvImport';
 import { useIngestionProgress } from '../../hooks/useIngestionProgress';
 import CostEstimateModal from '../ui/CostEstimateModal';
 import type { CostEstimationResult } from '../../pages/RepositoryDetailPage';
+import { EntityTypeInferenceModal } from '../forms/EntityTypeInferenceModal';
 
 interface CsvImportReviewModalProps {
   appId: number;
   repositoryId: number;
   isLightRagRepository: boolean;
+  siloId: number | null;
   job: ImportJob;
   isOpen: boolean;
   onClose: () => void;
@@ -22,7 +24,7 @@ interface CsvImportReviewModalProps {
 }
 
 export function CsvImportReviewModal({
-  appId, repositoryId, isLightRagRepository, job, isOpen, onClose, onJobUpdated, onIngestionStarted,
+  appId, repositoryId, isLightRagRepository, siloId, job, isOpen, onClose, onJobUpdated, onIngestionStarted,
 }: Readonly<CsvImportReviewModalProps>) {
   const [selected, setSelected] = useState<Set<number>>(
     () => new Set(job.rows.filter((r) => r.status === 'DOWNLOADED').map((r) => r.id)),
@@ -42,6 +44,47 @@ export function CsvImportReviewModal({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [costEstimate, setCostEstimate] = useState<CostEstimationResult | null>(null);
   const ingestion = useIngestionProgress(appId, repositoryId, sessionId);
+
+  // Same gate as manual upload's LightRAG flow (RepositoryDetailPage.tsx):
+  // entity types shape the whole graph and become immutable once anything is
+  // indexed, so a silo set to infer them is gated until a human has settled them.
+  const [siloEntityTypes, setSiloEntityTypes] = useState<{ name: string; mode: string; types: string | null; locked: boolean } | null>(null);
+  const [showEntityTypesModal, setShowEntityTypesModal] = useState(false);
+
+  useEffect(() => {
+    if (!costEstimate || !isLightRagRepository || !siloId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const silo = await apiService.getSilo(appId, siloId) as {
+          name: string; lightrag_entity_types_mode?: string; lightrag_entity_types?: string | null; lightrag_config_locked?: boolean;
+        };
+        if (!cancelled) {
+          setSiloEntityTypes({
+            name: silo.name,
+            mode: silo.lightrag_entity_types_mode ?? 'manual',
+            types: silo.lightrag_entity_types ?? null,
+            locked: !!silo.lightrag_config_locked,
+          });
+        }
+      } catch {
+        if (!cancelled) setSiloEntityTypes(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [costEstimate, isLightRagRepository, siloId, appId]);
+
+  const entityTypesSettled = !!siloEntityTypes?.types?.trim();
+  // Once a silo has been indexed, entity types are immutable — the gate has
+  // nothing left to do and must stop appearing on every later ingest.
+  const entityTypesGateRequired = !!siloEntityTypes && siloEntityTypes.mode === 'infer' && !siloEntityTypes.locked;
+
+  const applyInferredEntityTypes = async (entityTypes: string) => {
+    if (!siloId || !siloEntityTypes) return;
+    await apiService.updateSilo(appId, siloId, { name: siloEntityTypes.name, lightrag_entity_types: entityTypes });
+    setSiloEntityTypes({ ...siloEntityTypes, mode: 'infer', types: entityTypes });
+    setShowEntityTypesModal(false);
+  };
 
   const toggle = (rowId: number) => {
     setSelected((prev) => {
@@ -72,6 +115,7 @@ export function CsvImportReviewModal({
   };
 
   const [confirming, setConfirming] = useState(false);
+  const [estimating, setEstimating] = useState(false);
 
   const doConfirm = async () => {
     setConfirming(true);
@@ -100,12 +144,17 @@ export function CsvImportReviewModal({
   // second confirmation before any Resource is actually created. Reuses the
   // same CostEstimateModal screen as manual upload — see estimateCsvImportRows.
   const handleConfirmClick = async () => {
-    if (!isLightRagRepository) {
-      await doConfirm();
-      return;
+    setEstimating(true);
+    try {
+      if (!isLightRagRepository) {
+        await doConfirm();
+        return;
+      }
+      const estimate = await apiService.estimateCsvImportRows(appId, repositoryId, job.id, Array.from(selected));
+      setCostEstimate(estimate);
+    } finally {
+      setEstimating(false);
     }
-    const estimate = await apiService.estimateCsvImportRows(appId, repositoryId, job.id, Array.from(selected));
-    setCostEstimate(estimate);
   };
 
   const handleDiscardUnselected = async () => {
@@ -184,7 +233,23 @@ export function CsvImportReviewModal({
           const row = job.rows.find((r) => r.id === rowId);
           return { key: String(rowId), label: row?.url ?? String(rowId) };
         })}
+        gate={entityTypesGateRequired ? {
+          required: true,
+          done: entityTypesSettled,
+          label: 'Define entity types',
+          doneLabel: 'Review entity types',
+          onOpen: () => setShowEntityTypesModal(true),
+        } : undefined}
       />
+      {showEntityTypesModal && siloId != null && (
+        <EntityTypeInferenceModal
+          appId={appId}
+          siloId={siloId}
+          importJobId={job.id}
+          onConfirm={applyInferredEntityTypes}
+          onCancel={() => setShowEntityTypesModal(false)}
+        />
+      )}
       <div className="flex justify-end gap-3 mt-4">
         <button
           type="button"
@@ -196,10 +261,12 @@ export function CsvImportReviewModal({
         <button
           type="button"
           onClick={handleConfirmClick}
-          disabled={selected.size === 0 || !!(ingestion.progress && !ingestion.isComplete)}
+          disabled={estimating || selected.size === 0 || !!(ingestion.progress && !ingestion.isComplete)}
           className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 disabled:hover:bg-green-600 transition-colors"
         >
-          <UploadCloud className="w-4 h-4" /> Ingest selected
+          {estimating
+            ? <><Loader2 className="w-4 h-4 animate-spin" /> Loading…</>
+            : <><UploadCloud className="w-4 h-4" /> Ingest selected</>}
         </button>
       </div>
     </Modal>

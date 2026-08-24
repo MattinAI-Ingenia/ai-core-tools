@@ -77,11 +77,24 @@ export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImpor
       >
         {step === 0 && (
           <div className="space-y-4">
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(e) => e.target.files?.[0] && handleFileSelected(e.target.files[0])}
-            />
+            <div className="flex items-center gap-3">
+              <input
+                type="file"
+                id="csv_import_file"
+                accept=".csv"
+                onChange={(e) => e.target.files?.[0] && handleFileSelected(e.target.files[0])}
+                className="hidden"
+              />
+              <label
+                htmlFor="csv_import_file"
+                className="inline-block cursor-pointer px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Choose .csv file
+              </label>
+              <span className="text-sm text-gray-500 truncate">
+                {file ? file.name : 'No file selected'}
+              </span>
+            </div>
             {headers.length > 0 && (
               <div>
                 <label className="block text-sm font-medium mb-1">Link column</label>

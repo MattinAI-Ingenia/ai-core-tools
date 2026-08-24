@@ -1146,10 +1146,10 @@ class ApiService {
   }
 
   /** Start entity-type inference over the silo's uploaded documents. Returns { job_id }. */
-  async inferEntityTypes(appId: number, siloId: number, aiServiceId?: number) {
+  async inferEntityTypes(appId: number, siloId: number, aiServiceId?: number, importJobId?: number) {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/lightrag/infer-entity-types`, {
       method: 'POST',
-      body: JSON.stringify({ ai_service_id: aiServiceId ?? null }),
+      body: JSON.stringify({ ai_service_id: aiServiceId ?? null, import_job_id: importJobId ?? null }),
     });
   }
 

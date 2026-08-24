@@ -46,6 +46,10 @@ class SiloDetailSchema(BaseModel):
     lightrag_max_source_ids_per_relation: Optional[int] = None
     lightrag_entity_types: Optional[str] = None
     lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
+    # True once the silo has a successful index: lightrag_language, chunking
+    # and lightrag_entity_types stop being editable, and the entity-type
+    # inference gate must stop showing (there is nothing left to infer for).
+    lightrag_config_locked: bool = False
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -93,6 +97,12 @@ class UpdateSiloSchema(BaseModel):
     type: Optional[str] = None
     output_parser_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
+    # Editable only until the silo's first successful index (enforced in
+    # SiloService.create_or_update_silo via is_lightrag_config_locked) — this
+    # is the window that lets a human infer/confirm the entity types from the
+    # uploaded documents before anything is extracted.
+    lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
 
 
 class _ContentLengthFilterSchema(BaseModel):
@@ -267,3 +277,8 @@ class InferEntityTypesRequest(BaseModel):
     # paying for on a choice that cannot be undone after indexing. Unset falls
     # back to the silo's own extraction service.
     ai_service_id: Optional[int] = None
+    # Set when inferring from a CSV import review that hasn't been confirmed
+    # yet: on a brand-new silo there are no Resource rows to read from, so the
+    # inference falls back to this job's staged (downloaded but not yet
+    # ingested) PDFs.
+    import_job_id: Optional[int] = None

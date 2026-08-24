@@ -395,6 +395,18 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
             _scale_k_per_100_chunks(agent_k, silo) if k_mode == "per_100_chunks" and silo is not None else agent_k
         )
 
+    # lightrag_chunk_top_k: LightRAG-only text-chunk count, distinct from k
+    # (entities/relations, LightRAG's top_k, for that store). Caller wins;
+    # otherwise the agent's own override; if neither is set, omitted entirely
+    # so LightRAG falls back to its own env-configured CHUNK_TOP_K.
+    if "lightrag_chunk_top_k" in caller:
+        if caller["lightrag_chunk_top_k"] is not None:
+            resolved["lightrag_chunk_top_k"] = caller["lightrag_chunk_top_k"]
+    else:
+        agent_chunk_top_k = getattr(agent, "rag_chunk_top_k", None)
+        if agent_chunk_top_k is not None:
+            resolved["lightrag_chunk_top_k"] = agent_chunk_top_k
+
     # search_type: caller wins; fall back to agent column (server_default 'similarity')
     resolved["search_type"] = (
         caller.get("search_type") or getattr(agent, "rag_search_type", None) or "similarity"
@@ -559,7 +571,10 @@ class SiloService:
             collection_name = COLLECTION_PREFIX + str(silo_id)
 
             # Known retriever parameters that should not be wrapped in 'filter'
-            known_params = {'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type', 'lightrag_query_mode'}
+            known_params = {
+                'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type',
+                'lightrag_query_mode', 'lightrag_chunk_top_k',
+            }
 
             # --- Layer 1: system defaults ---
             merged_search_kwargs: dict = {'k': config.AGENT_DEFAULT_RAG_K}
@@ -869,7 +884,7 @@ class SiloService:
             raise ValidationError("Silo name cannot be empty")
         
         silo.name = name
-        silo.description = data.get('description', '').strip() or None
+        silo.description = (data.get('description') or '').strip() or None
         silo.status = data.get('status')
         silo.app_id = data['app_id']
         silo.fixed_metadata = bool(data.get('fixed_metadata', False))
@@ -2153,6 +2168,8 @@ class SiloService:
                 lightrag_max_source_ids_per_entity=getattr(silo, 'lightrag_max_source_ids_per_entity', None),
                 lightrag_max_source_ids_per_relation=getattr(silo, 'lightrag_max_source_ids_per_relation', None),
                 lightrag_entity_types=getattr(silo, 'lightrag_entity_types', None),
+                lightrag_entity_types_mode=getattr(silo, 'lightrag_entity_types_mode', None),
+                lightrag_config_locked=SiloService.is_lightrag_config_locked(silo_id, db),
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -2200,8 +2217,9 @@ class SiloService:
             'lightrag_max_source_ids_per_entity': getattr(silo_data, 'lightrag_max_source_ids_per_entity', None),
             'lightrag_max_source_ids_per_relation': getattr(silo_data, 'lightrag_max_source_ids_per_relation', None),
             'lightrag_entity_types': getattr(silo_data, 'lightrag_entity_types', None),
+            'lightrag_entity_types_mode': getattr(silo_data, 'lightrag_entity_types_mode', None),
         }
-        
+
         # Create or update using the existing service
         silo = SiloService.create_or_update_silo(form_data, db=db)
         return silo

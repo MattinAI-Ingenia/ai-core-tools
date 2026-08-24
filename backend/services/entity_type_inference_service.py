@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -21,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from models.enums.import_row_status import ImportRowStatus
+from models.import_job_row import ImportJobRow
 from models.resource import Resource
 from models.silo import Silo
 from tools.vector_stores.lightrag.entity_type_inference import (
@@ -36,7 +39,14 @@ logger = logging.getLogger(__name__)
 
 MAX_DOCUMENTS = 30
 SAMPLES_PER_DOCUMENT = 2
-DOCUMENT_TOKEN_BUDGET = 14000
+# Budgets the document payload only. A self-hosted model's window is commonly
+# 20k total; the instructions add ~0.9k, so 14000 here left the completion
+# (up to 12 classes, each with a "why" sentence and examples — several
+# thousand tokens) too little room and the model's response got cut off
+# mid-JSON (observed: prompt_tokens=15433, completion capped at the window,
+# unparseable). 10500 leaves ~8.5k for completion — about double what that
+# failure needed — while keeping most of the original 30-document breadth.
+DOCUMENT_TOKEN_BUDGET = 10500
 MAX_TYPES = 10
 
 # Jobs live in memory: they last a couple of minutes, carry nothing worth
@@ -87,14 +97,17 @@ class EntityTypeInferenceService:
             return dict(job) if job else None
 
     @staticmethod
-    def run(job_id: str, silo_id: int, ai_service_id: Optional[int], db: Session) -> None:
+    def run(
+        job_id: str, silo_id: int, ai_service_id: Optional[int], db: Session,
+        import_job_id: Optional[int] = None,
+    ) -> None:
         """Do the work. Exceptions land on the job, never on the caller."""
         try:
             llm = EntityTypeInferenceService._resolve_ai_service(silo_id, ai_service_id, db)
             silo = db.query(Silo).filter(Silo.silo_id == silo_id).first()
             language = getattr(silo, "lightrag_language", None)
 
-            paths = EntityTypeInferenceService._document_paths(silo_id, db)
+            paths = EntityTypeInferenceService._document_paths(silo_id, db, import_job_id)
             if not paths:
                 raise ValueError(
                     "This silo has no documents uploaded yet. Upload them before "
@@ -178,19 +191,30 @@ class EntityTypeInferenceService:
         return create_llm_from_service(service, 0.2, False)
 
     @staticmethod
-    def _document_paths(silo_id: int, db: Session) -> List[tuple]:
-        """(doc_id, absolute path) for every PDF in the silo's repository."""
+    def _document_paths(
+        silo_id: int, db: Session, import_job_id: Optional[int] = None,
+    ) -> List[tuple]:
+        """(doc_id, absolute path) for every PDF across the silo's repositories.
+
+        A Silo can back more than one Repository (1:N), so ``Silo.repository``
+        is a list, not a single object.
+
+        On a silo's very first ingest there are no Resource rows yet — nothing
+        is persisted until the batch is confirmed, which is exactly what this
+        inference is meant to gate. When ``import_job_id`` is given (a CSV
+        import review not yet confirmed), fall back to that job's staged
+        (downloaded but not yet ingested) PDFs.
+        """
         from services.resource_service import ResourceService  # noqa: PLC0415
 
-        repository = getattr(
+        repositories = getattr(
             db.query(Silo).filter(Silo.silo_id == silo_id).first(), "repository", None
         )
-        if not repository:
-            return []
-
-        resources = db.query(Resource).filter(
-            Resource.repository_id == repository.repository_id
-        ).all()
+        resources = []
+        if repositories:
+            resources = db.query(Resource).filter(
+                Resource.repository_id.in_([r.repository_id for r in repositories])
+            ).all()
 
         paths = []
         for resource in resources:
@@ -199,6 +223,26 @@ class EntityTypeInferenceService:
             path = ResourceService.get_resource_file_path(resource.resource_id, db)
             if path:
                 paths.append(((resource.name or resource.uri).rsplit(".", 1)[0], path))
+
+        if paths or not import_job_id:
+            return paths
+
+        from models.import_job import ImportJob  # noqa: PLC0415 — avoids a cycle
+
+        repository_ids = {r.repository_id for r in repositories} if repositories else set()
+        job = db.query(ImportJob).filter(ImportJob.id == import_job_id).first()
+        if not job or job.repository_id not in repository_ids:
+            return []
+
+        rows = db.query(ImportJobRow).filter(
+            ImportJobRow.import_job_id == import_job_id,
+            ImportJobRow.status == ImportRowStatus.DOWNLOADED,
+            ImportJobRow.staged_path.isnot(None),
+        ).all()
+        for row in rows:
+            if row.staged_path and os.path.exists(row.staged_path):
+                doc_id = (row.url.rsplit("/", 1)[-1] or f"row-{row.id}").rsplit(".", 1)[0]
+                paths.append((doc_id, row.staged_path))
         return paths
 
     @staticmethod
