@@ -501,18 +501,38 @@ class ResourceService:
                     _db.close()
 
             total_chunks = sum(chunk_counts.values()) or len(resource_snapshots)
+
+            from models.silo import Silo as SiloModel
+            _db_silo = _SessionLocal()
+            try:
+                _silo_obj = _db_silo.query(SiloModel).filter_by(silo_id=silo_id).first()
+                _is_lightrag_silo = bool(_silo_obj and _silo_obj.vector_db_type == 'LIGHTRAG')
+            finally:
+                _db_silo.close()
+
             # Phase 2: index each resource, reporting progress by chunk count.
             cumulative = 0
             failed = 0
             try:
-                for resource_id, resource_name in resource_snapshots:
-                    resource_chunks = chunk_counts.get(resource_id, 1)
-                    try:
-                        _db = _SessionLocal()
-                        resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                        _db.close()
-                        if resource_obj:
-                            # Transition resource to 'indexing' before processing starts
+                if _is_lightrag_silo:
+                    # LightRAG path: enqueue every resource first (fast, no LLM
+                    # calls), then drain the whole batch in ONE
+                    # apipeline_process_enqueue_documents() run. Doing one
+                    # enqueue+process cycle per resource (the branch below) caps
+                    # concurrency at that single resource's own page count —
+                    # MAX_PARALLEL_INSERT/MAX_ASYNC_LLM never fill up unless one
+                    # PDF alone has that many pages. See
+                    # LightRAGStore.process_enqueued_documents's docstring.
+                    doc_ids_by_resource = {}
+                    enqueued_resource_ids = []
+                    for resource_id, resource_name in resource_snapshots:
+                        resource_chunks = chunk_counts.get(resource_id, 1)
+                        try:
+                            _db = _SessionLocal()
+                            resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                            _db.close()
+                            if not resource_obj:
+                                continue
                             _db_pre = _SessionLocal()
                             try:
                                 r_pre = _db_pre.query(ResourceModel).filter_by(resource_id=resource_id).first()
@@ -522,65 +542,165 @@ class ResourceService:
                             finally:
                                 _db_pre.close()
 
-                            last_reported = [-1]
-                            def _on_progress(n, total=None, _rid=resource_id):
-                                # Progress lives on the row: every uvicorn worker
-                                # can serve it and it survives F5 and restarts.
-                                # The poller ticks every 0.5 s but only writes
-                                # when n moves.
-                                if n == last_reported[0]:
-                                    return
-                                last_reported[0] = n
-                                _db_p = _SessionLocal()
+                            _, ids_by_res = SiloService.enqueue_resource(resource_obj)
+                            if ids_by_res:
+                                doc_ids_by_resource.update(ids_by_res)
+                                enqueued_resource_ids.append(resource_id)
+                            else:
+                                # Nothing extracted (empty file, no embedding
+                                # service, etc.) — nothing to process, done now.
+                                _db2 = _SessionLocal()
                                 try:
-                                    _db_p.query(ResourceModel).filter_by(resource_id=_rid).update(
-                                        {'progress_done': n, 'progress_total': total}
-                                    )
-                                    _db_p.commit()
-                                except Exception:
-                                    _db_p.rollback()  # progress is best-effort
+                                    r = _db2.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                    if r:
+                                        r.status = 'ready'
+                                        r.progress_done = r.progress_total
+                                        _db2.commit()
                                 finally:
-                                    _db_p.close()
-                            SiloService.index_resource(resource_obj, progress_callback=_on_progress)
-                        # Mark resource as ready in DB
-                        _db2 = _SessionLocal()
+                                    _db2.close()
+                                cumulative += resource_chunks
+                        except Exception as e:
+                            logger.error(f"Failed to enqueue resource {resource_id}: {e}")
+                            _db3 = _SessionLocal()
+                            try:
+                                r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                if r:
+                                    r.status = 'error'
+                                    r.progress_done = r.progress_total
+                                    _db3.commit()
+                            finally:
+                                _db3.close()
+                            failed += resource_chunks
+                            cumulative += resource_chunks
+                            if _is_transient_llm_failure(e):
+                                logger.warning(
+                                    "Aborting batch after a transient failure during enqueue; "
+                                    "remaining resource(s) left pending",
+                                )
+                                break
+
+                    if doc_ids_by_resource:
+                        def _on_progress_multi(rid, n, total):
+                            # Same best-effort DB write as the non-batched
+                            # _on_progress below, keyed by resource id instead
+                            # of a closed-over single resource.
+                            _db_p = _SessionLocal()
+                            try:
+                                _db_p.query(ResourceModel).filter_by(resource_id=rid).update(
+                                    {'progress_done': n, 'progress_total': total}
+                                )
+                                _db_p.commit()
+                            except Exception:
+                                _db_p.rollback()
+                            finally:
+                                _db_p.close()
+
                         try:
-                            r = _db2.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                            if r:
-                                r.status = 'ready'
-                                # Keep done == total: the batch totals are summed
-                                # across finished files too, so the bar must not
-                                # lose them when a file completes.
-                                r.progress_done = r.progress_total
-                                _db2.commit()
-                        finally:
-                            _db2.close()
-                        cumulative += resource_chunks
-                    except Exception as e:
-                        logger.error(f"Failed to index resource {resource_id}: {e}")
-                        _db3 = _SessionLocal()
-                        try:
-                            r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                            if r:
-                                r.status = 'error'
-                                r.progress_done = r.progress_total
-                                _db3.commit()
-                        finally:
-                            _db3.close()
-                        failed += resource_chunks
-                        cumulative += resource_chunks
-                        if _is_transient_llm_failure(e):
-                            # The endpoint is down: every remaining resource would
-                            # fail in milliseconds. Stop and leave them 'pending'
-                            # so "resume indexing" can pick them up later.
-                            logger.warning(
-                                "Aborting batch after a transient LLM failure; "
-                                "%s resource(s) left pending",
-                                len(resource_snapshots) - resource_snapshots.index(
-                                    (resource_id, resource_name)
-                                ) - 1,
+                            SiloService.process_enqueued_batch(
+                                silo_id, doc_ids_by_resource, progress_callback=_on_progress_multi,
                             )
-                            break
+                            batch_failed = False
+                        except Exception as e:
+                            logger.error(f"Failed to process enqueued batch for silo {silo_id}: {e}")
+                            batch_failed = True
+
+                        for resource_id in enqueued_resource_ids:
+                            resource_chunks = chunk_counts.get(resource_id, 1)
+                            _db4 = _SessionLocal()
+                            try:
+                                r = _db4.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                if r:
+                                    # Matches the pre-batch behaviour: a resource
+                                    # is only marked 'error' when the LightRAG
+                                    # call itself failed outright, not when some
+                                    # of its individual pages ended up in
+                                    # doc_status='failed' (LightRAG already
+                                    # tolerates and logs those per-chunk).
+                                    r.status = 'error' if batch_failed else 'ready'
+                                    r.progress_done = r.progress_total
+                                    _db4.commit()
+                            finally:
+                                _db4.close()
+                            if batch_failed:
+                                failed += resource_chunks
+                            cumulative += resource_chunks
+                else:
+                    for resource_id, resource_name in resource_snapshots:
+                        resource_chunks = chunk_counts.get(resource_id, 1)
+                        try:
+                            _db = _SessionLocal()
+                            resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                            _db.close()
+                            if resource_obj:
+                                # Transition resource to 'indexing' before processing starts
+                                _db_pre = _SessionLocal()
+                                try:
+                                    r_pre = _db_pre.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                    if r_pre:
+                                        r_pre.status = 'indexing'
+                                        _db_pre.commit()
+                                finally:
+                                    _db_pre.close()
+
+                                last_reported = [-1]
+                                def _on_progress(n, total=None, _rid=resource_id):
+                                    # Progress lives on the row: every uvicorn worker
+                                    # can serve it and it survives F5 and restarts.
+                                    # The poller ticks every 0.5 s but only writes
+                                    # when n moves.
+                                    if n == last_reported[0]:
+                                        return
+                                    last_reported[0] = n
+                                    _db_p = _SessionLocal()
+                                    try:
+                                        _db_p.query(ResourceModel).filter_by(resource_id=_rid).update(
+                                            {'progress_done': n, 'progress_total': total}
+                                        )
+                                        _db_p.commit()
+                                    except Exception:
+                                        _db_p.rollback()  # progress is best-effort
+                                    finally:
+                                        _db_p.close()
+                                SiloService.index_resource(resource_obj, progress_callback=_on_progress)
+                            # Mark resource as ready in DB
+                            _db2 = _SessionLocal()
+                            try:
+                                r = _db2.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                if r:
+                                    r.status = 'ready'
+                                    # Keep done == total: the batch totals are summed
+                                    # across finished files too, so the bar must not
+                                    # lose them when a file completes.
+                                    r.progress_done = r.progress_total
+                                    _db2.commit()
+                            finally:
+                                _db2.close()
+                            cumulative += resource_chunks
+                        except Exception as e:
+                            logger.error(f"Failed to index resource {resource_id}: {e}")
+                            _db3 = _SessionLocal()
+                            try:
+                                r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                if r:
+                                    r.status = 'error'
+                                    r.progress_done = r.progress_total
+                                    _db3.commit()
+                            finally:
+                                _db3.close()
+                            failed += resource_chunks
+                            cumulative += resource_chunks
+                            if _is_transient_llm_failure(e):
+                                # The endpoint is down: every remaining resource would
+                                # fail in milliseconds. Stop and leave them 'pending'
+                                # so "resume indexing" can pick them up later.
+                                logger.warning(
+                                    "Aborting batch after a transient LLM failure; "
+                                    "%s resource(s) left pending",
+                                    len(resource_snapshots) - resource_snapshots.index(
+                                        (resource_id, resource_name)
+                                    ) - 1,
+                                )
+                                break
 
             finally:
                 loop.close()

@@ -291,6 +291,100 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     progress_callback(run_total[0], run_total[0])
 
 
+async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
+    """Enqueue documents WITHOUT processing them yet (no LLM calls).
+
+    Split out of :func:`_ainsert` so a caller can enqueue several resources'
+    pages before running a single :func:`_aprocess_enqueued_with_progress`
+    over all of them — that single call is what lets LightRAG's
+    ``MAX_PARALLEL_INSERT``/``MAX_ASYNC_LLM`` concurrency slots be shared
+    across resources instead of each resource being capped by its own page
+    count because it ran a whole enqueue+process cycle alone.
+    """
+    from lightrag.parser.routing import resolve_chunk_options
+
+    chunk_opts = resolve_chunk_options(
+        rag.addon_params, process_options=process_options
+    )
+    await rag.apipeline_enqueue_documents(
+        texts,
+        ids=ids,
+        file_paths=file_paths,
+        process_options=process_options,
+        chunk_options=chunk_opts,
+    )
+
+
+async def _aprocess_enqueued_with_progress(rag, doc_ids_by_resource, progress_callback=None):
+    """Run ONE ``apipeline_process_enqueue_documents()`` for everything
+    currently enqueued in this workspace, reporting progress PER RESOURCE.
+
+    ``doc_ids_by_resource`` maps ``resource_id -> [doc_id, ...]`` for that
+    resource's LightRAG doc ids (``res{resource_id}-p{page}``, see
+    ``_lightrag_doc_id``) — known up front because ids are assigned
+    deterministically at enqueue time, before any processing happens.
+
+    ``progress_callback(resource_id, done, total)`` fires whenever a
+    resource's finished-doc count changes (poll, not push — same 0.5s
+    cadence as ``_ainsert_with_progress``).
+
+    ``apipeline_process_enqueue_documents()`` itself drains **everything**
+    pending in the workspace, not just what was just enqueued here (see its
+    own docstring) — so this also picks up, and reports progress for, any
+    other resource whose docs were left pending by an earlier interrupted run.
+
+    Returns ``{resource_id: {"processed": N, "failed": N, "total": N}}`` once
+    the whole batch is drained.
+    """
+    all_ids = [doc_id for ids in doc_ids_by_resource.values() for doc_id in ids]
+    id_to_resource = {
+        doc_id: rid for rid, ids in doc_ids_by_resource.items() for doc_id in ids
+    }
+    totals = {rid: len(ids) for rid, ids in doc_ids_by_resource.items()}
+
+    async def _counts():
+        """{resource_id: {"processed": N, "failed": N}} for this batch's doc ids."""
+        records = await rag.doc_status.get_docs_by_ids(all_ids)
+        counts = {rid: {"processed": 0, "failed": 0} for rid in doc_ids_by_resource}
+        for doc_id, record in records.items():
+            rid = id_to_resource.get(doc_id)
+            if rid is None:
+                continue
+            status = str(getattr(record.status, "value", record.status)).lower()
+            if status in counts[rid]:
+                counts[rid][status] += 1
+        return counts
+
+    last_done = {rid: -1 for rid in doc_ids_by_resource}
+
+    async def _poll():
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                counts = await _counts()
+                for rid, c in counts.items():
+                    done = c["processed"] + c["failed"]
+                    if done != last_done[rid]:
+                        last_done[rid] = done
+                        if progress_callback is not None:
+                            progress_callback(rid, done, totals[rid])
+            except Exception:
+                pass  # polling is best-effort
+
+    poll_task = asyncio.create_task(_poll())
+    try:
+        await rag.apipeline_process_enqueue_documents()
+    finally:
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
+
+    final_counts = await _counts()
+    if progress_callback is not None:
+        for rid, c in final_counts.items():
+            progress_callback(rid, c["processed"] + c["failed"], totals[rid])
+    return {rid: {**c, "total": totals[rid]} for rid, c in final_counts.items()}
+
+
 async def _areset_postgres_client_pool():
     """Force-close and reset lightrag-hku's process-wide Postgres client pool.
 
@@ -917,6 +1011,116 @@ class LightRAGStore(VectorStoreInterface):
         )
         return totals
 
+    def enqueue_documents(
+        self,
+        collection_name: str,
+        documents: List[Document],
+        embedding_service=None,
+    ) -> Dict[int, List[str]]:
+        """Enqueue documents for LATER processing — see ``process_enqueued_documents``.
+
+        Fast: only ``apipeline_enqueue_documents`` (chunking metadata, dedup
+        checks), no LLM calls.
+
+        Returns ``{resource_id: [doc_id, ...]}`` for the enqueued documents
+        (read from the ``resource_id`` metadata every ``Document`` already
+        carries — see ``silo_service.index_resource``), so the caller can pass
+        it straight to ``process_enqueued_documents`` for per-resource
+        progress once it drains the batch.
+        """
+        if not documents:
+            return {}
+
+        rag = self._get_rag_instance(collection_name)
+        texts: List[str] = []
+        file_paths: List[str] = []
+        ids: List[str] = []
+        doc_ids_by_resource: Dict[int, List[str]] = {}
+        for doc in documents:
+            if not doc.page_content:
+                continue
+            doc_id = _lightrag_doc_id(doc.metadata or {}, doc.page_content)
+            texts.append(doc.page_content)
+            file_paths.append(_source_label_from_metadata(doc.metadata or {}))
+            ids.append(doc_id)
+            resource_id = (doc.metadata or {}).get("resource_id")
+            if resource_id is not None:
+                doc_ids_by_resource.setdefault(resource_id, []).append(doc_id)
+
+        if not texts:
+            logger.debug("No non-empty texts to enqueue; skipping.")
+            return {}
+
+        logger.info(
+            "Enqueuing %d documents into LightRAG workspace '%s' (%d resource(s))",
+            len(texts), collection_name, len(doc_ids_by_resource),
+        )
+        _run_async(_aenqueue(rag, texts, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option))
+        return doc_ids_by_resource
+
+    def process_enqueued_documents(
+        self,
+        collection_name: str,
+        doc_ids_by_resource: Dict[int, List[str]],
+        progress_callback=None,
+    ) -> Dict:
+        """Process everything currently enqueued for *collection_name* in ONE run.
+
+        See ``_aprocess_enqueued_with_progress`` for why this — instead of one
+        ``enqueue_documents`` + full process cycle per resource — is what lets
+        ``MAX_PARALLEL_INSERT``/``MAX_ASYNC_LLM`` actually reach their
+        configured concurrency across resources, not just within one.
+
+        ``progress_callback(resource_id, done, total)`` is called per resource
+        as the batch drains.
+
+        Token/cost accounting is aggregated across the WHOLE batch (returned
+        under the ``"_usage"`` key) — unlike ``index_documents``, this cannot
+        attribute tokens to a single resource, because up to
+        ``MAX_ASYNC_LLM`` resources' chunks are extracted concurrently by the
+        same LightRAG pipeline run. Callers that log per-resource
+        ``indexing_metric`` rows should log one row for the whole batch here
+        instead of one per resource.
+
+        Returns ``{resource_id: {"processed": N, "failed": N, "total": N}, ...,
+        "_usage": {...}}``.
+        """
+        if not doc_ids_by_resource:
+            return {"_usage": {}}
+
+        rag = self._get_rag_instance(collection_name)
+
+        from tools.vector_stores.lightrag.token_accumulator import IndexingTokenAccumulator
+        from tools.vector_stores.lightrag.adapters import (
+            set_active_accumulator,
+            reset_active_accumulator,
+        )
+
+        logger.info(
+            "Processing enqueued documents in LightRAG workspace '%s' (%d resource(s), %d doc(s))",
+            collection_name, len(doc_ids_by_resource),
+            sum(len(ids) for ids in doc_ids_by_resource.values()),
+        )
+
+        accumulator = IndexingTokenAccumulator()
+        ctx_token = set_active_accumulator(accumulator)
+        t_start = time.perf_counter()
+        try:
+            result = _run_async(_aprocess_enqueued_with_progress(rag, doc_ids_by_resource, progress_callback))
+        finally:
+            reset_active_accumulator(ctx_token)
+
+        duration = time.perf_counter() - t_start
+        usage = accumulator.totals()
+        usage["duration_seconds"] = round(duration, 3)
+        result["_usage"] = usage
+
+        logger.info(
+            "Processed enqueued batch in workspace '%s' in %.1fs (%d tokens, %d LLM calls)",
+            collection_name, duration, usage["total_tokens"], usage["llm_calls"],
+        )
+        return result
+
     def delete_documents(
         self,
         collection_name: str,
@@ -999,54 +1203,83 @@ class LightRAGStore(VectorStoreInterface):
             logger.warning("Neo4j cleanup for '%s' failed: %s", collection_name, exc)
 
     def _cleanup_qdrant(self, collection_name: str) -> None:
-        """Drop Qdrant collections prefixed with ``lightrag_{collection_name}``."""
+        """Drop this workspace's points from LightRAG's shared Qdrant collections.
+
+        There is no per-workspace Qdrant collection to delete by name: LightRAG
+        partitions ONE physical collection per data kind (entities/
+        relationships/chunks) across every workspace via a ``workspace_id``
+        payload field on each point (see ``lightrag.kg.qdrant_impl``). A
+        previous version of this method looked for collections named
+        ``lightrag_{workspace}_*``, which never exist, so it silently deleted
+        nothing while logging success — every deleted repository's vectors
+        leaked forever into the shared collections.
+
+        Uses each vector storage's own ``drop()`` (the library's native,
+        workspace-payload-filtered wipe, including legacy-collection
+        handling) instead of guessing collection names.
+        """
         try:
-            import config  # noqa: WPS433
-            from qdrant_client import QdrantClient  # noqa: WPS433
+            rag = self._get_rag_instance(collection_name)
 
-            url = getattr(config, "QDRANT_URL", None) or "http://localhost:6333"
-            api_key = getattr(config, "QDRANT_API_KEY", None)
-            client = QdrantClient(url=url, api_key=api_key)
+            async def _drop_all():
+                for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
+                    result = await vdb.drop()
+                    if result.get("status") != "success":
+                        logger.warning(
+                            "Qdrant drop for workspace '%s' reported: %s",
+                            collection_name, result.get("message"),
+                        )
 
-            prefix = f"lightrag_{collection_name}_"
-            for col in client.get_collections().collections:
-                if col.name.startswith(prefix):
-                    client.delete_collection(col.name)
-                    logger.debug("Deleted Qdrant collection '%s'", col.name)
-
-            client.close()
+            _run_async(_drop_all())
             logger.info("Cleaned up Qdrant collections for workspace '%s'", collection_name)
         except Exception as exc:
             logger.warning("Qdrant cleanup for '%s' failed: %s", collection_name, exc)
 
     def _cleanup_postgres(self, collection_name: str) -> None:
-        """Remove KV / vector / doc-status rows scoped to *collection_name*."""
+        """Remove KV / vector / doc-status rows scoped to *collection_name*.
+
+        ``self.db`` is ``db.database.Database`` — a thin wrapper exposing only
+        ``.engine``/``._async_engine`` (see its docstring: "no module-level
+        Session"), never a SQLAlchemy Session/Connection. It has no
+        ``execute``/``commit``, so every call here used to raise
+        ``AttributeError`` on ``self.db.commit()`` — silently, from the outer
+        except below (a WARNING log, easy to miss) — meaning this method has
+        never actually deleted a single Postgres row: every LightRAG repo ever
+        deleted left its KV/doc-status/entity/relation rows behind forever.
+        Use ``self.db.engine`` directly instead.
+        """
+        # LightRAG's Postgres backend names its tables ``LIGHTRAG_*`` (see
+        # NAMESPACE_TABLE_MAP), not ``kv_store_*``. It creates them with
+        # unquoted DDL, so Postgres folds the identifiers to lower case —
+        # we must delete using the lower-cased names (a quoted upper-case
+        # name would not match). KV + doc-status live in Postgres for every
+        # LightRAG silo; the vector tables (lightrag_vdb_*) only when
+        # lightrag_vector_db_type=PGVECTOR. Deleting them all is harmless
+        # otherwise. Best-effort — tables might not exist yet.
         try:
             from sqlalchemy import text  # noqa: WPS433
-
-            # LightRAG's Postgres backend names its tables ``LIGHTRAG_*`` (see
-            # NAMESPACE_TABLE_MAP), not ``kv_store_*``. It creates them with
-            # unquoted DDL, so Postgres folds the identifiers to lower case —
-            # we must delete using the lower-cased names (a quoted upper-case
-            # name would not match). KV + doc-status live in Postgres for every
-            # LightRAG silo; the vector tables (lightrag_vdb_*) only when
-            # lightrag_vector_db_type=PGVECTOR. Deleting them all is harmless
-            # otherwise. Best-effort — tables might not exist yet.
             from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
+        except Exception as exc:
+            logger.warning("PostgreSQL cleanup for '%s' failed: %s", collection_name, exc)
+            return
 
-            tables = {t.lower() for t in NAMESPACE_TABLE_MAP.values()}
-            for table in tables:
-                try:
-                    self.db.execute(
+        tables = {t.lower() for t in NAMESPACE_TABLE_MAP.values()}
+        deleted = {}
+        for table in tables:
+            try:
+                with self.db.engine.begin() as conn:
+                    result = conn.execute(
                         text(f'DELETE FROM {table} WHERE workspace = :ws'),
                         {"ws": collection_name},
                     )
-                except Exception:
-                    pass  # Table may not exist — that's fine.
-            self.db.commit()
-            logger.info("Cleaned up PostgreSQL data for workspace '%s'", collection_name)
-        except Exception as exc:
-            logger.warning("PostgreSQL cleanup for '%s' failed: %s", collection_name, exc)
+                    if result.rowcount:
+                        deleted[table] = result.rowcount
+            except Exception:
+                pass  # Table may not exist, or this deployment doesn't use it — that's fine.
+        logger.info(
+            "Cleaned up PostgreSQL data for workspace '%s': %s",
+            collection_name, deleted or "nothing to delete",
+        )
 
     # ------------------------------------------------------------------
 

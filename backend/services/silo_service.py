@@ -1476,6 +1476,196 @@ class SiloService:
         return index_batch
 
     @staticmethod
+    def enqueue_resource(resource: Resource, index_batch: Optional[str] = None) -> tuple:
+        """Enqueue a resource into its silo's LightRAG workspace WITHOUT processing it.
+
+        Mirrors ``index_resource``'s doc extraction, but calls
+        ``vector_store.enqueue_documents`` instead of ``index_documents`` — no
+        LLM calls yet. Pair with ``process_enqueued_batch`` (called once for
+        every resource enqueued this way) so several resources' pages share
+        LightRAG's concurrency slots — see that method's docstring.
+
+        Only meaningful for LightRAG silos; callers must check
+        ``vector_db_type == 'LIGHTRAG'`` before using this path.
+
+        Returns ``(index_batch, doc_ids_by_resource)`` — the latter empty if
+        nothing was extracted (empty file, missing embedding service, etc.),
+        which the caller should treat as "nothing to process" for this resource.
+        """
+        index_batch = index_batch or uuid.uuid4().hex
+        session = SessionLocal()
+        try:
+            resource_with_relations = session.query(Resource).filter(Resource.resource_id == resource.resource_id).first()
+            if not resource_with_relations:
+                logger.error(f"Resource {resource.resource_id} not found for enqueueing")
+                return index_batch, {}
+
+            collection_name = COLLECTION_PREFIX + str(resource_with_relations.repository.silo_id)
+
+            if resource_with_relations.folder_id:
+                from services.folder_service import FolderService
+                folder_path = FolderService.get_folder_path(resource_with_relations.folder_id, session)
+                path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), folder_path, resource_with_relations.uri)
+            else:
+                path = os.path.join(REPO_BASE_FOLDER, str(resource_with_relations.repository_id), resource_with_relations.uri)
+
+            file_extension = os.path.splitext(resource_with_relations.uri)[1].lower()
+
+            base_metadata = {
+                "repository_id": resource_with_relations.repository_id,
+                "resource_id": resource_with_relations.resource_id,
+                "silo_id": resource_with_relations.repository.silo_id,
+                "name": resource_with_relations.uri,
+                "file_type": file_extension,
+                INDEX_BATCH_FIELD: index_batch,
+            }
+
+            if resource_with_relations.folder_id:
+                from services.folder_service import FolderService
+                folder_path = FolderService.get_folder_path(resource_with_relations.folder_id, session)
+                base_metadata["folder_id"] = resource_with_relations.folder_id
+                base_metadata["folder_path"] = folder_path
+                base_metadata["ref"] = os.path.join(str(resource_with_relations.repository_id), folder_path, resource_with_relations.uri)
+            else:
+                base_metadata["folder_id"] = None
+                base_metadata["folder_path"] = ""
+                base_metadata["ref"] = os.path.join(str(resource_with_relations.repository_id), resource_with_relations.uri)
+
+            if resource_with_relations.extra_metadata:
+                base_metadata = {**resource_with_relations.extra_metadata, **base_metadata}
+
+            docs = SiloService.extract_documents_from_file(
+                path, file_extension, base_metadata, split=False,
+            )
+            if not docs:
+                logger.warning(f"No content extracted from resource {resource_with_relations.resource_id} ({resource_with_relations.uri}). The file may be empty or contain only images/scans without text.")
+                return index_batch, {}
+
+            silo = resource_with_relations.repository.silo
+            embedding_service = silo.embedding_service
+            if not embedding_service:
+                logger.warning(f"Silo {silo.silo_id} has no embedding service, skipping enqueue for resource {resource_with_relations.resource_id}")
+                return index_batch, {}
+
+            vector_store = _get_vector_store(silo)
+            doc_ids_by_resource = vector_store.enqueue_documents(collection_name, docs, embedding_service)
+            return index_batch, doc_ids_by_resource
+        except Exception as e:
+            logger.error(f"Error enqueueing resource {resource.resource_id}: {str(e)}")
+            raise
+        finally:
+            session.close()
+
+    @staticmethod
+    def process_enqueued_batch(silo_id: int, doc_ids_by_resource: dict, progress_callback=None) -> dict:
+        """Process everything enqueued via ``enqueue_resource`` for *silo_id* in ONE run.
+
+        See ``LightRAGStore.process_enqueued_documents`` for why batching like
+        this (instead of one enqueue+process cycle per resource) is what lets
+        ``MAX_PARALLEL_INSERT``/``MAX_ASYNC_LLM`` reach their configured
+        concurrency across resources.
+
+        Logs a SINGLE ``indexing_metric`` row for the whole batch
+        (``resource_id=None``) instead of one per resource — token/cost usage
+        cannot be attributed to a single resource when their chunks were
+        extracted concurrently by the same LightRAG pipeline run.
+
+        Returns ``{resource_id: {"processed": N, "failed": N, "total": N}, ...}``
+        (the ``"_usage"`` key from the store is consumed here, not returned).
+        """
+        session = SessionLocal()
+        try:
+            silo = SiloRepository.get_by_id(silo_id, session)
+            if not silo:
+                logger.error(f"Silo {silo_id} not found for batch processing")
+                return {}
+
+            collection_name = COLLECTION_PREFIX + str(silo_id)
+            vector_store = _get_vector_store(silo)
+
+            from repositories.indexing_metric_repository import IndexingMetricRepository
+            from services.pricing_service import PricingService
+
+            result = vector_store.process_enqueued_documents(
+                collection_name, doc_ids_by_resource, progress_callback=progress_callback,
+            )
+            usage = result.pop("_usage", {}) or {}
+
+            _metric_kwargs: dict = {"status": "success"}
+            if usage:
+                _metric_kwargs.update({
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0),
+                    "tokens_source": usage.get("tokens_source", "estimated"),
+                    "llm_calls": usage.get("llm_calls", 0),
+                    "duration_seconds": usage.get("duration_seconds"),
+                    "embedding_tokens": usage.get("embedding_tokens") or None,
+                })
+                try:
+                    embedding_service = silo.embedding_service
+                    lightrag_ai_service = (
+                        getattr(silo, "extract_service", None)
+                        or getattr(silo, "indexing_service", None)
+                    )
+                    model_name = getattr(lightrag_ai_service, "description", None)
+                    emb_model_name = getattr(embedding_service, "description", None)
+                    _metric_kwargs["model_name"] = model_name
+                    _metric_kwargs["embedding_model_name"] = emb_model_name
+
+                    total_cost = 0.0
+                    has_cost = False
+                    if model_name:
+                        pricing = PricingService.get_llm_pricing(session, model_name)
+                        if pricing and _metric_kwargs.get("total_tokens"):
+                            input_per_1m, output_per_1m = pricing
+                            total_cost += (
+                                _metric_kwargs["prompt_tokens"] / 1_000_000 * input_per_1m
+                                + _metric_kwargs["completion_tokens"] / 1_000_000 * output_per_1m
+                            )
+                            has_cost = True
+
+                    emb_tokens = _metric_kwargs.get("embedding_tokens") or 0
+                    if emb_model_name and emb_tokens:
+                        emb_pricing = PricingService.get_embedding_pricing(session, emb_model_name)
+                        if emb_pricing:
+                            total_cost += emb_tokens / 1_000_000 * emb_pricing
+                            has_cost = True
+
+                    if has_cost:
+                        _metric_kwargs["cost"] = round(total_cost, 8)
+                        _metric_kwargs["currency"] = "USD"
+                except Exception as pricing_exc:
+                    logger.debug(f"Could not resolve pricing for batch metric: {pricing_exc}")
+
+            try:
+                metric_record = IndexingMetricRepository.create(
+                    session,
+                    app_id=silo.app_id,
+                    silo_id=silo_id,
+                    resource_id=None,
+                    content_ref=f"batch of {len(doc_ids_by_resource)} resource(s)",
+                    **_metric_kwargs,
+                )
+                session.flush()
+                logger.debug(
+                    "Persisted batch IndexingMetric %s for silo %s (tokens=%s)",
+                    metric_record.metric_id, silo_id, _metric_kwargs.get("total_tokens", 0),
+                )
+            except Exception as metric_exc:
+                logger.warning(f"Failed to persist batch indexing metric for silo {silo_id}: {metric_exc}")
+
+            try:
+                from services.metadata_values_cache_service import MetadataValuesCacheService
+                MetadataValuesCacheService.invalidate(silo_id)
+            except Exception as _cache_exc:
+                logger.warning("metadata_values_cache: invalidation failed after process_enqueued_batch for silo=%d: %s", silo_id, _cache_exc)
+
+            return result
+        finally:
+            session.close()
+
+    @staticmethod
     def _delete_resource_chunks(resource_id: int, collection_name: str, silo) -> None:
         """Delete all vector chunks for a resource. Propagates vector-store exceptions.
 
