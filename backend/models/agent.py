@@ -95,6 +95,11 @@ class Agent(Base):
     rag_fixed_filters = Column(JSON, nullable=True)     # list of {field, op, value} filter clauses applied on every retrieval
     rag_max_retrieval_calls = Column(Integer, nullable=True)  # NULL = legacy unbounded behaviour
     rag_k_mode = Column(String(20), default='fixed', nullable=False, server_default='fixed')  # 'fixed' | 'per_100_chunks' — see resolve_search_params
+    # LightRAG only: text chunks fetched per search (LightRAG's chunk_top_k),
+    # distinct from rag_k which is entities/relations (LightRAG's top_k) for
+    # this store. NULL defers to the global CHUNK_TOP_K env var LightRAG reads
+    # at import — see .env.example and lightrag_store.py.
+    rag_chunk_top_k = Column(Integer, nullable=True)
 
     # Memory management via LangChain SummarizationMiddleware (when has_memory=True)
     memory_max_messages = Column(Integer, default=20, nullable=False)  # SummarizationMiddleware.keep=("messages", N) — messages to preserve after summarization

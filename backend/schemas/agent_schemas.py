@@ -39,6 +39,9 @@ class RagConfigFieldsMixin(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
+    # LightRAG only: text chunks per search (LightRAG's chunk_top_k). None
+    # defers to the global CHUNK_TOP_K env var — see models/agent.py.
+    rag_chunk_top_k: Optional[int] = None
 
     @field_validator("rag_k")
     @classmethod
@@ -47,6 +50,13 @@ class RagConfigFieldsMixin(BaseModel):
             raise ValueError("rag_k must be at least 1")
         if v is not None and v > _RAG_K_SOFT_MAX:
             logger.warning("rag_k=%s exceeds the recommended maximum of %s", v, _RAG_K_SOFT_MAX)
+        return v
+
+    @field_validator("rag_chunk_top_k")
+    @classmethod
+    def validate_rag_chunk_top_k(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 1:
+            raise ValueError("rag_chunk_top_k must be at least 1")
         return v
 
     @field_validator("rag_search_type")
@@ -192,6 +202,7 @@ class AgentDetailSchema(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
+    rag_chunk_top_k: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -281,6 +292,7 @@ class PublicAgentDetailSchema(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
+    rag_chunk_top_k: Optional[int] = None
 
 
 class CreateAgentRequestSchema(RagConfigFieldsMixin):

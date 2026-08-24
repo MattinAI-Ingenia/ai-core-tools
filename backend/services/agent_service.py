@@ -1,5 +1,6 @@
 from typing import Union, List, Dict, Any, Optional
 from sqlalchemy.orm import Session
+import config
 from models.agent import Agent, AgentSkill, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
 from models.ocr_agent import OCRAgent
 from models.skill import Skill
@@ -295,6 +296,7 @@ class AgentService:
             rag_score_threshold=getattr(agent, 'rag_score_threshold', None) if isinstance(getattr(agent, 'rag_score_threshold', None), (float, int, type(None))) else None,
             rag_max_retrieval_calls=getattr(agent, 'rag_max_retrieval_calls', None) if isinstance(getattr(agent, 'rag_max_retrieval_calls', None), (int, type(None))) else None,
             rag_fixed_filters=getattr(agent, 'rag_fixed_filters', None) if isinstance(getattr(agent, 'rag_fixed_filters', None), (list, type(None))) else None,
+            rag_chunk_top_k=getattr(agent, 'rag_chunk_top_k', None) if isinstance(getattr(agent, 'rag_chunk_top_k', None), (int, type(None))) else None,
         )
 
     def _get_agent_for_detail(self, db: Session, agent_id: int):
@@ -302,9 +304,13 @@ class AgentService:
         if agent_id == 0:
             # New agent
             return type('Agent', (), {
-                'agent_id': 0, 'name': '', 'system_prompt': '', 'prompt_template': '', 
+                'agent_id': 0, 'name': '', 'system_prompt': '', 'prompt_template': '',
                 'type': 'agent', 'is_tool': False, 'create_date': None, 'request_count': 0,
-                'temperature': DEFAULT_AGENT_TEMPERATURE
+                'temperature': DEFAULT_AGENT_TEMPERATURE,
+                # Mirror _update_normal_agent's new-agent defaults so the create
+                # form shows the actual configured values, not a guess.
+                'rag_k': config.AGENT_DEFAULT_RAG_K, 'rag_k_mode': 'fixed',
+                'rag_max_retrieval_calls': 4, 'rag_chunk_top_k': None,
             })()
         else:
             # Existing agent - determine if it's OCR agent or regular agent
@@ -472,14 +478,15 @@ class AgentService:
             agent.is_tool = is_tool_value == 'on'
 
         # RAG retrieval config (step_008).
-        # New agents: apply opinionated defaults (k=10, max_calls=4) when caller omits the field.
-        # Updates: only touch the column when the caller explicitly supplies a value.
+        # New agents: apply opinionated defaults (k=AGENT_DEFAULT_RAG_K env, max_calls=4)
+        # when caller omits the field. Updates: only touch the column when the
+        # caller explicitly supplies a value.
         is_new = not getattr(agent, 'agent_id', None)
 
         if data.get('rag_k') is not None:
             agent.rag_k = data['rag_k']
         elif is_new:
-            agent.rag_k = 10
+            agent.rag_k = config.AGENT_DEFAULT_RAG_K
 
         if data.get('rag_max_retrieval_calls') is not None:
             agent.rag_max_retrieval_calls = data['rag_max_retrieval_calls']
@@ -494,11 +501,15 @@ class AgentService:
         elif is_new:
             agent.rag_k_mode = 'fixed'
 
-        # score_threshold and fixed_filters: clear-able via explicit None/empty
+        # score_threshold, fixed_filters and chunk_top_k: clear-able via explicit
+        # None/empty. rag_chunk_top_k has no forced default even for new
+        # agents — None deliberately means "use the global CHUNK_TOP_K env var".
         if 'rag_score_threshold' in data:
             agent.rag_score_threshold = data['rag_score_threshold']
         if 'rag_fixed_filters' in data:
             agent.rag_fixed_filters = data['rag_fixed_filters']
+        if 'rag_chunk_top_k' in data:
+            agent.rag_chunk_top_k = data['rag_chunk_top_k']
 
     def update_agent_tools(self, db: Session, agent_id: int, tool_ids: list, form_data: dict = None):
         """Update agent tools associations"""

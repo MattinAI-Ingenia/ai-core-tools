@@ -53,6 +53,7 @@ interface Agent {
   rag_search_type?: RagSearchType;
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
+  rag_chunk_top_k?: number | null;
   rag_fixed_filters?: RagFixedFilter[];
   ai_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string; vector_db_type?: string }>;
@@ -96,6 +97,7 @@ interface AgentFormData {
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
+  rag_chunk_top_k: number | null;
   rag_fixed_filters: RagFixedFilter[];
 }
 
@@ -230,6 +232,7 @@ function AgentFormPage() {
     rag_search_type: 'similarity',
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
+    rag_chunk_top_k: null,
     rag_fixed_filters: []
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
@@ -331,6 +334,7 @@ function AgentFormPage() {
         rag_search_type: response.rag_search_type ?? 'similarity',
         rag_score_threshold: response.rag_score_threshold ?? null,
         rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
+        rag_chunk_top_k: response.rag_chunk_top_k ?? null,
         rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
           ...f,
           _key: Math.random().toString(36).slice(2),
@@ -619,6 +623,7 @@ function AgentFormPage() {
       rag_search_type: formData.rag_search_type,
       rag_score_threshold: usesThreshold ? formData.rag_score_threshold : null,
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+      rag_chunk_top_k: selectedSiloIsLightRAG ? formData.rag_chunk_top_k : null,
       rag_fixed_filters: hasSilo ? cleanedFilters : [],
       app_id: Number.parseInt(appId),
     };
@@ -1020,6 +1025,7 @@ function AgentFormPage() {
                         rag_search_type: formData.rag_search_type,
                         rag_score_threshold: formData.rag_score_threshold,
                         rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+                        rag_chunk_top_k: formData.rag_chunk_top_k,
                         rag_fixed_filters: formData.rag_fixed_filters,
                       }}
                       onChange={(patch: Partial<RagConfigValue>) =>

@@ -18,6 +18,10 @@ export interface RagConfigValue {
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
+  // LightRAG only: text chunks per search (LightRAG's chunk_top_k), distinct
+  // from rag_k which is entities/relations (LightRAG's top_k) for that store.
+  // null = defer to the deployment's CHUNK_TOP_K env default.
+  rag_chunk_top_k: number | null;
   rag_fixed_filters: RagFixedFilter[];
 }
 
@@ -72,13 +76,6 @@ function clampInt(raw: string, min: number, max: number, fallback: number): numb
   const n = Number.parseInt(raw, 10);
   if (Number.isNaN(n)) return fallback;
   return Math.min(max, Math.max(min, n));
-}
-
-/** Floor only — no recommended maximum for rag_k, it's a soft warning instead (see RAG_K_SOFT_MAX). */
-function clampMin(raw: string, min: number, fallback: number): number {
-  const n = Number.parseInt(raw, 10);
-  if (Number.isNaN(n)) return fallback;
-  return Math.max(min, n);
 }
 
 /** Render a stored filter value for editing: $in arrays become a comma-separated string. */
@@ -144,6 +141,60 @@ function RagConfigSection({
     setThresholdText(String(clamped));
   };
 
+  // Same local-text-buffer pattern as the threshold above: a plain clamp-on-change
+  // (as this used to do) can never reach an empty string, because clamping NaN
+  // (from "") falls back to the *previous* value, which re-renders the input with
+  // that value still in it — so backspacing the last digit was a no-op and typing
+  // a new number from scratch was impossible.
+  const [ragKText, setRagKText] = useState(String(value.rag_k));
+  useEffect(() => {
+    const parsed = ragKText.trim() === '' ? NaN : Number.parseInt(ragKText, 10);
+    if (parsed !== value.rag_k) setRagKText(String(value.rag_k));
+  }, [value.rag_k]);
+
+  const handleRagKChange = (raw: string) => {
+    setRagKText(raw);
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n)) onChange({ rag_k: n });
+  };
+
+  const handleRagKBlur = () => {
+    const clamped = Math.max(1, value.rag_k);
+    onChange({ rag_k: clamped });
+    setRagKText(String(clamped));
+  };
+
+  // rag_chunk_top_k is nullable (empty = defer to the deployment's CHUNK_TOP_K
+  // env default), so unlike rag_k the empty string is itself a valid committed
+  // state, not just a mid-edit one.
+  const [chunkTopKText, setChunkTopKText] = useState(
+    value.rag_chunk_top_k == null ? '' : String(value.rag_chunk_top_k),
+  );
+  useEffect(() => {
+    const parsed = chunkTopKText.trim() === '' ? null : Number.parseInt(chunkTopKText, 10);
+    const normalized = Number.isFinite(parsed as number) ? parsed : null;
+    if ((value.rag_chunk_top_k ?? null) !== normalized) {
+      setChunkTopKText(value.rag_chunk_top_k == null ? '' : String(value.rag_chunk_top_k));
+    }
+  }, [value.rag_chunk_top_k]);
+
+  const handleChunkTopKChange = (raw: string) => {
+    setChunkTopKText(raw);
+    if (raw.trim() === '') {
+      onChange({ rag_chunk_top_k: null });
+      return;
+    }
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n)) onChange({ rag_chunk_top_k: n });
+  };
+
+  const handleChunkTopKBlur = () => {
+    if (value.rag_chunk_top_k == null) return;
+    const clamped = Math.max(1, value.rag_chunk_top_k);
+    if (clamped !== value.rag_chunk_top_k) onChange({ rag_chunk_top_k: clamped });
+    setChunkTopKText(String(clamped));
+  };
+
   const updateFilter = (index: number, patch: Partial<RagFixedFilter>) => {
     onChange({
       rag_fixed_filters: filters.map((f, i) => (i === index ? { ...f, ...patch } : f)),
@@ -179,7 +230,7 @@ function RagConfigSection({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div>
           <label htmlFor="rag_k_mode" className="block text-sm font-medium text-gray-700 mb-2">
-            Documents to retrieve
+            {isLightRAG ? 'Entities to retrieve' : 'Documents to retrieve'}
           </label>
           <select
             id="rag_k_mode"
@@ -197,14 +248,19 @@ function RagConfigSection({
             id="rag_k"
             type="number"
             min={1}
-            value={value.rag_k}
-            onChange={(e) => onChange({ rag_k: clampMin(e.target.value, 1, value.rag_k) })}
+            value={ragKText}
+            onChange={(e) => handleRagKChange(e.target.value)}
+            onBlur={handleRagKBlur}
             className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
           />
           <p className="text-xs text-gray-500 mt-1">
-            {value.rag_k_mode === 'per_100_chunks'
-              ? 'Chunks fetched per 100 chunks indexed in the silo — scales with knowledge-base size.'
-              : 'Number of chunks fetched per search.'}
+            {isLightRAG
+              ? (value.rag_k_mode === 'per_100_chunks'
+                ? 'Entities/relations fetched per 100 chunks indexed in the silo (LightRAG\'s top_k) — scales with knowledge-base size.'
+                : 'Number of entities/relations from the knowledge graph considered per search (LightRAG\'s top_k) — not text chunks.')
+              : (value.rag_k_mode === 'per_100_chunks'
+                ? 'Chunks fetched per 100 chunks indexed in the silo — scales with knowledge-base size.'
+                : 'Number of chunks fetched per search.')}
           </p>
           {value.rag_k > RAG_K_SOFT_MAX && (
             <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
@@ -213,6 +269,28 @@ function RagConfigSection({
             </p>
           )}
         </div>
+
+        {isLightRAG && (
+          <div>
+            <label htmlFor="rag_chunk_top_k" className="block text-sm font-medium text-gray-700 mb-2">
+              Documents to retrieve
+            </label>
+            <input
+              id="rag_chunk_top_k"
+              type="number"
+              min={1}
+              value={chunkTopKText}
+              placeholder="Deployment default"
+              onChange={(e) => handleChunkTopKChange(e.target.value)}
+              onBlur={handleChunkTopKBlur}
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Number of text chunks fetched per search (LightRAG's chunk_top_k). Empty uses the
+              deployment's default (CHUNK_TOP_K env setting).
+            </p>
+          </div>
+        )}
 
         <div>
           <label htmlFor="rag_max_retrieval_calls" className="block text-sm font-medium text-gray-700 mb-2">
