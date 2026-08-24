@@ -22,6 +22,12 @@ interface Props {
   siloId: number;
   /** Optional AI service override; unset uses the silo's extraction service. */
   aiServiceId?: number;
+  /**
+   * A CSV import review not yet confirmed: on a brand-new silo there are no
+   * Resource rows yet, so inference falls back to this job's staged
+   * (downloaded but not yet ingested) PDFs.
+   */
+  importJobId?: number;
   /** Called with the confirmed comma-separated list. */
   onConfirm: (entityTypes: string) => void;
   onCancel: () => void;
@@ -46,7 +52,7 @@ const STAGE_LABEL: Record<InferenceJob['status'], string> = {
  * proposes, a person decides.
  */
 export function EntityTypeInferenceModal({
-  appId, siloId, aiServiceId, onConfirm, onCancel,
+  appId, siloId, aiServiceId, importJobId, onConfirm, onCancel,
 }: Props) {
   const [job, setJob] = useState<InferenceJob | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -66,7 +72,7 @@ export function EntityTypeInferenceModal({
 
     (async () => {
       try {
-        const { job_id } = await apiService.inferEntityTypes(appId, siloId, aiServiceId) as { job_id: string };
+        const { job_id } = await apiService.inferEntityTypes(appId, siloId, aiServiceId, importJobId) as { job_id: string };
         if (cancelled) return;
 
         timer.current = window.setInterval(async () => {
@@ -92,7 +98,7 @@ export function EntityTypeInferenceModal({
     })();
 
     return () => { cancelled = true; stopPolling(); };
-  }, [appId, siloId, aiServiceId, stopPolling]);
+  }, [appId, siloId, aiServiceId, importJobId, stopPolling]);
 
   const toggle = (name: string) => {
     setSelected((current) => {

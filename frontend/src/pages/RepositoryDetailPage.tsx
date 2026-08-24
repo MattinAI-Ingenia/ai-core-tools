@@ -163,7 +163,7 @@ const RepositoryDetailPage: React.FC = () => {
   const [showEstimateModal, setShowEstimateModal] = useState(false);
   // LightRAG entity types gate the ingestion when the silo is set to infer them
   // and none have been settled yet — they are immutable after the first index.
-  const [siloEntityTypes, setSiloEntityTypes] = useState<{ mode: string; types: string | null } | null>(null);
+  const [siloEntityTypes, setSiloEntityTypes] = useState<{ mode: string; types: string | null; locked: boolean } | null>(null);
   const [showEntityTypesModal, setShowEntityTypesModal] = useState(false);
   const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
   const [uploadEstimate, setUploadEstimate] = useState<CostEstimationResult | null>(null);
@@ -366,12 +366,13 @@ const RepositoryDetailPage: React.FC = () => {
     (async () => {
       try {
         const silo = await apiService.getSilo(Number.parseInt(appId!), repository.silo_id!) as {
-          lightrag_entity_types_mode?: string; lightrag_entity_types?: string | null;
+          lightrag_entity_types_mode?: string; lightrag_entity_types?: string | null; lightrag_config_locked?: boolean;
         };
         if (!cancelled) {
           setSiloEntityTypes({
             mode: silo.lightrag_entity_types_mode ?? 'manual',
             types: silo.lightrag_entity_types ?? null,
+            locked: !!silo.lightrag_config_locked,
           });
         }
       } catch {
@@ -383,7 +384,9 @@ const RepositoryDetailPage: React.FC = () => {
   }, [showEstimateModal, isLightRAG, repository?.silo_id, appId]);
 
   const entityTypesSettled = !!siloEntityTypes?.types?.trim();
-  const entityTypesGateRequired = !!siloEntityTypes && siloEntityTypes.mode === 'infer';
+  // Once a silo has been indexed, entity types are immutable — the gate has
+  // nothing left to do and must stop appearing on every later ingest.
+  const entityTypesGateRequired = !!siloEntityTypes && siloEntityTypes.mode === 'infer' && !siloEntityTypes.locked;
 
   const applyInferredEntityTypes = async (entityTypes: string) => {
     if (!repository?.silo_id) return;
@@ -392,7 +395,7 @@ const RepositoryDetailPage: React.FC = () => {
         name: repository.name,
         lightrag_entity_types: entityTypes,
       });
-      setSiloEntityTypes({ mode: 'infer', types: entityTypes });
+      setSiloEntityTypes({ mode: 'infer', types: entityTypes, locked: false });
       setShowEntityTypesModal(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save the entity types.');
@@ -1000,6 +1003,7 @@ const RepositoryDetailPage: React.FC = () => {
           appId={Number.parseInt(appId!)}
           repositoryId={Number.parseInt(repositoryId!)}
           isLightRagRepository={isLightRAG}
+          siloId={repository?.silo_id ?? null}
           job={activeImportJob}
           isOpen={showImportReviewModal}
           onClose={() => setShowImportReviewModal(false)}
