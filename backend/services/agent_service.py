@@ -297,6 +297,7 @@ class AgentService:
             rag_max_retrieval_calls=getattr(agent, 'rag_max_retrieval_calls', None) if isinstance(getattr(agent, 'rag_max_retrieval_calls', None), (int, type(None))) else None,
             rag_fixed_filters=getattr(agent, 'rag_fixed_filters', None) if isinstance(getattr(agent, 'rag_fixed_filters', None), (list, type(None))) else None,
             rag_chunk_top_k=getattr(agent, 'rag_chunk_top_k', None) if isinstance(getattr(agent, 'rag_chunk_top_k', None), (int, type(None))) else None,
+            rag_chunk_top_k_deployment_default=config.LIGHTRAG_CHUNK_TOP_K_DEFAULT,
         )
 
     def _get_agent_for_detail(self, db: Session, agent_id: int):
@@ -311,6 +312,7 @@ class AgentService:
                 # form shows the actual configured values, not a guess.
                 'rag_k': config.AGENT_DEFAULT_RAG_K, 'rag_k_mode': 'fixed',
                 'rag_max_retrieval_calls': 4, 'rag_chunk_top_k': None,
+                'rag_chunk_top_k_deployment_default': config.LIGHTRAG_CHUNK_TOP_K_DEFAULT,
             })()
         else:
             # Existing agent - determine if it's OCR agent or regular agent

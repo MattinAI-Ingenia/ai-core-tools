@@ -54,6 +54,7 @@ interface Agent {
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
   rag_chunk_top_k?: number | null;
+  rag_chunk_top_k_deployment_default?: number;
   rag_fixed_filters?: RagFixedFilter[];
   ai_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string; vector_db_type?: string }>;
@@ -1037,6 +1038,7 @@ function AgentFormPage() {
                       lightragQueryMode={formData.lightrag_query_mode}
                       lightragQueryModes={agent?.lightrag_query_modes}
                       onLightragQueryModeChange={(mode) => handleInputChange('lightrag_query_mode', mode)}
+                      chunkTopKDeploymentDefault={agent?.rag_chunk_top_k_deployment_default}
                     />
                   )}
 

@@ -68,6 +68,10 @@ NEO4J_PASSWORD: Optional[str] = os.getenv('NEO4J_PASSWORD') or None
 # a retrieval pulls, when the agent has no explicit rag_k. Not the same knob as
 # CHUNK_TOP_K, which caps the text chunks reaching the context — see .env.example.
 AGENT_DEFAULT_RAG_K: int = int(os.getenv('AGENT_DEFAULT_RAG_K', '20'))
+# Informational only — mirrors LightRAG's own read of CHUNK_TOP_K (evaluated by
+# the library itself at import time) so the UI can show the effective default
+# for Agent.rag_chunk_top_k when it is left unset. Not consumed for retrieval.
+LIGHTRAG_CHUNK_TOP_K_DEFAULT: int = int(os.getenv('CHUNK_TOP_K', '30'))
 # Entity extraction configuration
 # Maximum number of "gleaning" iterations the entity-extraction pipeline
 # should perform when processing documents during indexing. Set to 0 to

@@ -36,6 +36,8 @@ interface RagConfigSectionProps {
   lightragQueryMode?: string | null;
   lightragQueryModes?: string[];
   onLightragQueryModeChange?: (mode: string) => void;
+  /** Effective CHUNK_TOP_K when rag_chunk_top_k is left unset — shown so "deployment default" is a real number, not a guess. */
+  chunkTopKDeploymentDefault?: number;
 }
 
 const RAG_K_MODES: Array<{ value: RagKMode; label: string }> = [
@@ -107,6 +109,7 @@ function RagConfigSection({
   lightragQueryMode,
   lightragQueryModes,
   onLightragQueryModeChange,
+  chunkTopKDeploymentDefault,
 }: Readonly<RagConfigSectionProps>) {
   const fieldOptions = [...SYSTEM_FIELDS, ...metadataFields.map((f) => f.name)];
   const filters = value.rag_fixed_filters;
@@ -280,14 +283,16 @@ function RagConfigSection({
               type="number"
               min={1}
               value={chunkTopKText}
-              placeholder="Deployment default"
+              placeholder={
+                chunkTopKDeploymentDefault != null ? `Default: ${chunkTopKDeploymentDefault}` : 'Deployment default'
+              }
               onChange={(e) => handleChunkTopKChange(e.target.value)}
               onBlur={handleChunkTopKBlur}
               className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
             />
             <p className="text-xs text-gray-500 mt-1">
               Number of text chunks fetched per search (LightRAG's chunk_top_k). Empty uses the
-              deployment's default (CHUNK_TOP_K env setting).
+              deployment's default ({chunkTopKDeploymentDefault != null ? `currently ${chunkTopKDeploymentDefault}` : 'CHUNK_TOP_K env setting'}).
             </p>
           </div>
         )}

@@ -203,6 +203,9 @@ class AgentDetailSchema(BaseModel):
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
     rag_chunk_top_k: Optional[int] = None
+    # Informational: the deployment's CHUNK_TOP_K effective value, shown in the
+    # UI when rag_chunk_top_k is left unset. Not part of what gets saved.
+    rag_chunk_top_k_deployment_default: int = 30
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -293,6 +296,9 @@ class PublicAgentDetailSchema(BaseModel):
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
     rag_chunk_top_k: Optional[int] = None
+    # Informational: the deployment's CHUNK_TOP_K effective value, shown in the
+    # UI when rag_chunk_top_k is left unset. Not part of what gets saved.
+    rag_chunk_top_k_deployment_default: int = 30
 
 
 class CreateAgentRequestSchema(RagConfigFieldsMixin):
