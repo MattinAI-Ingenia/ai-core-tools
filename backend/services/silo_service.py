@@ -203,6 +203,13 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
 _GARBAGE_PATTERNS = [
     re.compile(r'(\d+/){8,}'),  # raw decimal codepoint sequences
     re.compile(r'@{5,}'),       # decoded Type3 font artifacts
+    # Table-of-contents dot leaders ("1. UBICACIÓN .......... 4"). Pure layout
+    # filler, but long enough to dominate a page: they dragged every ÍNDICE
+    # page below _is_meaningful_chunk's symbol threshold (ratio 0.23 vs 0.40
+    # required), so the whole table of contents was discarded at index time —
+    # 36 pages across the DOMUSA corpus, which is where questions like "en qué
+    # página está la tabla de parámetros" have to be answered from.
+    re.compile(r'[.·]{4,}'),
 ]
 
 # Detects real words: 3+ consecutive Unicode letters (isalpha-equivalent via \w without digits/_)
@@ -213,6 +220,23 @@ _WORD_RE = re.compile(r'[^\W\d_]{3,}', re.UNICODE)
 # e.g. "V I T O R I A" or "p a s a d o". Used to detect and collapse
 # spaced-out OCR output back into normal words.
 _SPACED_WORD_RE = re.compile(r'[^\W\d_](?: [^\W\d_])+', re.UNICODE)
+
+# A line made only of symbols/punctuation (no letter, no digit anywhere) is the
+# real Type3-font artifact these filters exist for: "@@", "??", "•", "".
+# Anything carrying a letter or a digit is treated as content — see
+# _clean_chunk_text's Rule A for why that distinction is load-bearing.
+_SYMBOL_ONLY_RE = re.compile(r'^[\W_]+$', re.UNICODE)
+
+# Dash-decorated page markers PDF loaders emit per page: "- 15 -", "- 15", "15 -".
+# A *bare* number ("15") is deliberately NOT matched: it is indistinguishable
+# from a table value cell, and dropping a value costs an answer while keeping a
+# stray page number costs a few tokens.
+_PAGE_MARKER_RE = re.compile(r'^(?:-\s*\d{1,4}\s*-?|\d{1,4}\s*-)$')
+
+# Short lines where symbols outnumber alphanumerics are OCR image noise:
+# "r . * * * ! ? *", "^ i * * : * ;". Kept deliberately loose so value cells
+# with punctuation ("0,032", "3/4", "ºC") stay well clear of it.
+_OCR_NOISE_MAX_LEN = 20
 
 
 @functools.lru_cache(maxsize=1)
@@ -282,11 +306,23 @@ def _clean_chunk_text(text: str) -> str:
 
     1. **Span-level:** Replace long runs of repeated glyph sequences in a single
        span (e.g. ``@@@@@`` or ``64/64/64/...``) with a space.
-    2. **Line-level:** Drop entire lines that consist almost entirely of
-       non-alphabetic characters and are very short (≤ 6 chars, < 2 alpha).
-       This catches multi-line Type3 font artifacts such as ``@@h?``, ``@@g``,
-       ``??``, ``?``, ``@@`` — which are Unicode codepoints decoded from glyphs
-       that have no real text mapping (e.g. cp64→@, cp104→h, cp63→?).
+    2. **Line-level:** Drop entire lines that carry no letter and no digit at
+       all (pure symbol runs), plus standalone page markers. This catches the
+       multi-line Type3 font artifacts these filters exist for — ``@@h?``,
+       ``@@g``, ``??``, ``?``, ``@@`` — which are Unicode codepoints decoded
+       from glyphs with no real text mapping (e.g. cp64→@, cp104→h, cp63→?).
+
+    A line holding *any* digit or letter is kept, however short. PyMuPDF emits
+    tables one cell per line, so a technical-characteristics row arrives as
+    ``"Emisiones de óxidos de nitrógeno" / "NOx" / "mg/kWh" / "76" / "73"``.
+    The previous rules ("drop lines ≤8 chars with <3 letters" and "drop lines
+    <50 chars with no 3-letter word") deleted every one of those value cells
+    and short codes — 41% of all digits in the DOMUSA corpus, ~90-100% on the
+    pages that are pure spec tables — leaving the labels behind with no values.
+    That silently caused the "value present in the PDF but missing from the
+    index" failures the RAG benchmark kept attributing to chunking/retrieval.
+    Losing an occasional ``"@@g"`` costs nothing; losing ``"76"`` costs the
+    answer, so the test is now "is there anything alphanumeric here at all".
     """
     # 1. Span-level: strip long repetitive sequences
     for pattern in _GARBAGE_PATTERNS:
@@ -298,19 +334,24 @@ def _clean_chunk_text(text: str) -> str:
     lines = [_collapse_spaced_letters(line) for line in lines]
 
     # 3. Line-level: drop lines that are clearly artifact/garbage
-    #    Rule A — very short lines with minimal alpha (@@h?, @@g, ??, @@, …)
-    #    Rule B — short-medium lines with no real word ≥ 3 letters; catches OCR
-    #             image noise such as "r . * * * ! ? *", "^ i * * : * ;",
-    #             "-'Jl", "i i ¥", etc.
+    #    Rule A — nothing alphanumeric at all (@@, ??, •, "(+) (-)"), or a
+    #             dash-decorated page marker ("- 15 -").
+    #    Rule B — short lines where symbols outnumber alphanumerics: OCR image
+    #             noise ("r . * * * ! ? *", "^ i * * : * ;"). Value cells are
+    #             far from this ("0,032" is 4 alphanumerics to 1 symbol).
     clean_lines = []
     for line in lines:
         s = line.strip()
-        n = len(s)
-        alpha = sum(c.isalpha() for c in s)
-        if n <= 8 and alpha < 3:          # Rule A
+        if not s:
+            clean_lines.append(line)
             continue
-        if n < 50 and not _WORD_RE.search(s):  # Rule B
+        if _SYMBOL_ONLY_RE.match(s) or _PAGE_MARKER_RE.match(s):  # Rule A
             continue
+        if len(s) <= _OCR_NOISE_MAX_LEN:                          # Rule B
+            alnum = sum(c.isalnum() for c in s)
+            symbols = sum(not (c.isalnum() or c.isspace()) for c in s)
+            if symbols > alnum:
+                continue
         clean_lines.append(line)
     text = '\n'.join(clean_lines)
 
@@ -322,15 +363,25 @@ def _clean_chunk_text(text: str) -> str:
 def _is_meaningful_chunk(text: str) -> bool:
     """Return True if *text* (already cleaned) contains real textual content.
 
-    Rejects chunks that are too short or still dominated by non-alphabetic
-    characters after ``_clean_chunk_text`` has been applied.
+    Rejects chunks that are too short or still dominated by symbol noise after
+    ``_clean_chunk_text`` has been applied.
+
+    Digits count as content, not as noise. A spec table or a sensor conversion
+    table is legitimately digit-dense (``CDOC004191`` p.45 — the R-T sensor
+    table — is ~65% digits), so measuring "letters + spaces" alone would
+    discard exactly the pages whose values we most need. Only *symbols*
+    (punctuation, undecoded glyphs) count against a chunk here.
     """
     stripped = text.strip()
     if len(stripped) < 20:
         return False
-    # Generic: fewer than 40 % of characters are letters or spaces → garbage
-    alpha_space = sum(1 for c in stripped if c.isalpha() or c.isspace())
-    if alpha_space / len(stripped) < 0.40:
+    # Fewer than 40 % of characters are letters, digits or spaces → garbage.
+    content = sum(1 for c in stripped if c.isalnum() or c.isspace())
+    if content / len(stripped) < 0.40:
+        return False
+    # A chunk of nothing but digits and punctuation carries no retrievable
+    # meaning on its own (a stray page of figures with no labels at all).
+    if not _WORD_RE.search(stripped):
         return False
     return True
 
