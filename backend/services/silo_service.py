@@ -1527,21 +1527,18 @@ class SiloService:
         return index_batch
 
     @staticmethod
-    def enqueue_resource(resource: Resource, index_batch: Optional[str] = None) -> tuple:
-        """Enqueue a resource into its silo's LightRAG workspace WITHOUT processing it.
+    def extract_resource_documents(resource: Resource, index_batch: Optional[str] = None) -> tuple:
+        """Extract a resource's pages into Documents, WITHOUT touching LightRAG.
 
-        Mirrors ``index_resource``'s doc extraction, but calls
-        ``vector_store.enqueue_documents`` instead of ``index_documents`` — no
-        LLM calls yet. Pair with ``process_enqueued_batch`` (called once for
-        every resource enqueued this way) so several resources' pages share
-        LightRAG's concurrency slots — see that method's docstring.
+        Pure CPU + DB work (PDF text extraction, metadata assembly), split out
+        of ``enqueue_resource`` so a feeder can run it in a worker thread while
+        the LightRAG pipeline keeps running: the enqueue itself must happen on
+        the pipeline's own event loop (calling the sync path from a thread would
+        build a second loop and resurrect the "Future attached to a different
+        loop" failure), but this half is safe anywhere.
 
-        Only meaningful for LightRAG silos; callers must check
-        ``vector_db_type == 'LIGHTRAG'`` before using this path.
-
-        Returns ``(index_batch, doc_ids_by_resource)`` — the latter empty if
-        nothing was extracted (empty file, missing embedding service, etc.),
-        which the caller should treat as "nothing to process" for this resource.
+        Returns ``(index_batch, docs)``; ``docs`` is empty when there is nothing
+        to index (no text layer, no embedding service configured).
         """
         index_batch = index_batch or uuid.uuid4().hex
         session = SessionLocal()
@@ -1598,19 +1595,55 @@ class SiloService:
                 logger.warning(f"Silo {silo.silo_id} has no embedding service, skipping enqueue for resource {resource_with_relations.resource_id}")
                 return index_batch, {}
 
-            vector_store = _get_vector_store(silo)
-            doc_ids_by_resource = vector_store.enqueue_documents(collection_name, docs, embedding_service)
-            return index_batch, doc_ids_by_resource
+            return index_batch, docs
         except Exception as e:
-            logger.error(f"Error enqueueing resource {resource.resource_id}: {str(e)}")
+            logger.error(f"Error extracting resource {resource.resource_id}: {str(e)}")
             raise
+        finally:
+            session.close()
+
+    @staticmethod
+    def split_documents_for_lightrag(documents) -> tuple:
+        """``(texts, file_paths, ids)`` for *documents* — see the store's helper."""
+        from tools.vector_stores.lightrag_store import documents_to_lightrag_payload
+        return documents_to_lightrag_payload(documents)
+
+    @staticmethod
+    def enqueue_resource(resource: Resource, index_batch: Optional[str] = None) -> tuple:
+        """Extract *and* enqueue a resource into its silo's LightRAG workspace.
+
+        The synchronous convenience wrapper: extraction plus enqueue, no LLM
+        calls. Use it from ordinary sync code; a feeder running beside a live
+        pipeline must instead call ``extract_resource_documents`` in a thread
+        and enqueue on the pipeline's loop (see ``LightRAGStore`` feed docs).
+
+        Only meaningful for LightRAG silos; callers must check
+        ``vector_db_type == 'LIGHTRAG'`` before using this path.
+
+        Returns ``(index_batch, doc_ids_by_resource)`` — the latter empty when
+        nothing was extracted.
+        """
+        index_batch, docs = SiloService.extract_resource_documents(resource, index_batch)
+        if not docs:
+            return index_batch, {}
+        session = SessionLocal()
+        try:
+            resource_with_relations = session.query(Resource).filter(
+                Resource.resource_id == resource.resource_id
+            ).first()
+            silo = resource_with_relations.repository.silo
+            collection_name = COLLECTION_PREFIX + str(silo.silo_id)
+            vector_store = _get_vector_store(silo)
+            return index_batch, vector_store.enqueue_documents(
+                collection_name, docs, silo.embedding_service,
+            )
         finally:
             session.close()
 
     @staticmethod
     def process_enqueued_batch(
         silo_id: int, doc_ids_by_resource: dict, progress_callback=None, should_cancel=None,
-        retry_failed: bool = False,
+        retry_failed: bool = False, feed=None, window: int = 3,
     ) -> dict:
         """Process everything enqueued via ``enqueue_resource`` for *silo_id* in ONE run.
 
@@ -1653,6 +1686,8 @@ class SiloService:
                 progress_callback=progress_callback,
                 should_cancel=should_cancel,
                 retry_failed=retry_failed,
+                feed=feed,
+                window=window,
             )
             usage = result.pop("_usage", {}) or {}
 

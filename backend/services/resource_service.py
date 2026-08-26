@@ -6,12 +6,19 @@ from datetime import datetime
 import os
 from services.silo_service import SiloService
 from utils.logger import get_logger
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status, UploadFile
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
+
+# How many resources the feeder keeps in flight in a LightRAG ingestion.
+# Sized against MAX_PARALLEL_INSERT (48 here): documents in this corpus average
+# 38 pages, so 3 resources are ~114 pages — comfortably more than the pool can
+# run at once, which is all it takes to keep it full. Raising it does not add
+# throughput, it only makes a 'cancel' finish more documents before stopping.
+INGESTION_FEED_WINDOW = int(os.getenv('INGESTION_FEED_WINDOW', '3'))
 
 def _is_transient_llm_failure(exc: BaseException) -> bool:
     """Whether *exc* means "the LLM endpoint is unreachable", not "this file is bad".
@@ -521,11 +528,11 @@ class ResourceService:
             finally:
                 _db_silo.close()
 
-            def _stopped() -> bool:
-                """Has the user asked to pause/cancel this batch? (see request_ingestion_stop)"""
+            def _stop_mode():
+                """Pending stop mode for this batch, or None. See request_ingestion_stop."""
                 if repository_id is None:
-                    return False
-                return ResourceService.is_ingestion_stopped(repository_id)
+                    return None
+                return ResourceService.ingestion_stop_mode(repository_id)
 
             # Phase 2: index each resource, reporting progress by chunk count.
             cumulative = 0
@@ -540,70 +547,70 @@ class ResourceService:
                     # MAX_PARALLEL_INSERT/MAX_ASYNC_LLM never fill up unless one
                     # PDF alone has that many pages. See
                     # LightRAGStore.process_enqueued_documents's docstring.
+                    # Sliding window instead of enqueue-everything-then-process:
+                    # a feeder tops the pipeline up as resources complete, so the
+                    # concurrency pool never drains at a batch boundary, and a
+                    # 'cancel' can stop cleanly by simply feeding nothing more
+                    # (the documents already started finish whole — there is no
+                    # per-document delete to undo a half-indexed one with).
                     doc_ids_by_resource = {}
                     enqueued_resource_ids = []
-                    for resource_id, resource_name in resource_snapshots:
-                        resource_chunks = chunk_counts.get(resource_id, 1)
-                        if _stopped():
-                            logger.info(
-                                "Ingestion stopped by user: stopping before enqueueing "
-                                "resource %s (already-enqueued resources still get processed)",
-                                resource_id,
-                            )
-                            break
+                    queue = list(resource_snapshots)
+
+                    def _mark(resource_id, status):
+                        _db_m = _SessionLocal()
                         try:
+                            r = _db_m.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                            if r:
+                                r.status = status
+                                if status != 'indexing':
+                                    r.progress_done = r.progress_total
+                                _db_m.commit()
+                        finally:
+                            _db_m.close()
+
+                    def _extract_next():
+                        """Next resource's documents, or None when the queue is empty.
+
+                        Runs in a worker thread (PDF text extraction is CPU-bound);
+                        the enqueue itself happens on the pipeline's own loop.
+                        """
+                        while queue:
+                            resource_id, _name = queue.pop(0)
                             _db = _SessionLocal()
-                            resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                            _db.close()
+                            try:
+                                resource_obj = _db.query(ResourceModel).filter_by(
+                                    resource_id=resource_id).first()
+                            finally:
+                                _db.close()
                             if not resource_obj:
                                 continue
-                            _db_pre = _SessionLocal()
+                            _mark(resource_id, 'indexing')
                             try:
-                                r_pre = _db_pre.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                                if r_pre:
-                                    r_pre.status = 'indexing'
-                                    _db_pre.commit()
-                            finally:
-                                _db_pre.close()
+                                _, docs = SiloService.extract_resource_documents(resource_obj)
+                            except Exception as exc:
+                                logger.error(f"Failed to extract resource {resource_id}: {exc}")
+                                _mark(resource_id, 'error')
+                                continue
+                            if not docs:
+                                # Nothing extractable (empty file, no embedding
+                                # service): finished, nothing to process.
+                                _mark(resource_id, 'ready')
+                                continue
+                            return resource_id, docs
+                        return None
 
-                            _, ids_by_res = SiloService.enqueue_resource(resource_obj)
-                            if ids_by_res:
-                                doc_ids_by_resource.update(ids_by_res)
-                                enqueued_resource_ids.append(resource_id)
-                            else:
-                                # Nothing extracted (empty file, no embedding
-                                # service, etc.) — nothing to process, done now.
-                                _db2 = _SessionLocal()
-                                try:
-                                    r = _db2.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                                    if r:
-                                        r.status = 'ready'
-                                        r.progress_done = r.progress_total
-                                        _db2.commit()
-                                finally:
-                                    _db2.close()
-                                cumulative += resource_chunks
-                        except Exception as e:
-                            logger.error(f"Failed to enqueue resource {resource_id}: {e}")
-                            _db3 = _SessionLocal()
-                            try:
-                                r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
-                                if r:
-                                    r.status = 'error'
-                                    r.progress_done = r.progress_total
-                                    _db3.commit()
-                            finally:
-                                _db3.close()
-                            failed += resource_chunks
-                            cumulative += resource_chunks
-                            if _is_transient_llm_failure(e):
-                                logger.warning(
-                                    "Aborting batch after a transient failure during enqueue; "
-                                    "remaining resource(s) left pending",
-                                )
-                                break
+                    async def _feed_next():
+                        import asyncio as _asyncio
+                        nxt = await _asyncio.to_thread(_extract_next)
+                        if nxt is None:
+                            return None
+                        resource_id, docs = nxt
+                        texts, file_paths, ids = SiloService.split_documents_for_lightrag(docs)
+                        enqueued_resource_ids.append(resource_id)
+                        return resource_id, texts, file_paths, ids
 
-                    if doc_ids_by_resource:
+                    if queue or doc_ids_by_resource:
                         def _on_progress_multi(rid, n, total):
                             # Same best-effort DB write as the non-batched
                             # _on_progress below, keyed by resource id instead
@@ -629,12 +636,17 @@ class ResourceService:
                                 # (an hour on this corpus), so checking only
                                 # between resources would make the button
                                 # useless. See LightRAGStore's should_cancel.
-                                should_cancel=_stopped,
+                                should_cancel=_stop_mode,
                                 # Only on an explicit resume: one manual-retry
                                 # request buys one retry per FAILED document, so
                                 # doing it on every run would re-burn tokens on
                                 # permanently broken pages.
                                 retry_failed=retry_failed,
+                                # Sliding window: the pipeline is topped up as
+                                # resources finish instead of being handed
+                                # everything up front.
+                                feed=_feed_next,
+                                window=INGESTION_FEED_WINDOW,
                             ) or {}
                             batch_failed = False
                         except Exception as e:
@@ -647,19 +659,10 @@ class ResourceService:
                         # silently lost documents: a resource with 0 of 8 pages
                         # indexed looked finished, stopped counting as resumable,
                         # and could only be recovered by re-uploading it.
-                        parked_status = None
-                        if _stopped() and repository_id is not None:
-                            _db_mode = _SessionLocal()
-                            try:
-                                from models.repository import Repository as _Repo
-                                mode = (
-                                    _db_mode.query(_Repo.ingestion_stop_mode)
-                                    .filter(_Repo.repository_id == repository_id)
-                                    .scalar()
-                                )
-                                parked_status = 'paused' if mode == 'pause' else 'cancelled'
-                            finally:
-                                _db_mode.close()
+                        mode = _stop_mode()
+                        parked_status = (
+                            ('paused' if mode == 'pause' else 'cancelled') if mode else None
+                        )
 
                         for resource_id in enqueued_resource_ids:
                             resource_chunks = chunk_counts.get(resource_id, 1)
@@ -691,7 +694,7 @@ class ResourceService:
                 else:
                     for resource_id, resource_name in resource_snapshots:
                         resource_chunks = chunk_counts.get(resource_id, 1)
-                        if _stopped():
+                        if _stop_mode():
                             logger.info(
                                 "Ingestion stopped by user: stopping before resource %s",
                                 resource_id,
@@ -775,6 +778,15 @@ class ResourceService:
             finally:
                 loop.close()
 
+            # A cancelled run leaves files that were never started. Keeping them
+            # as rows would show a repository holding documents the silo knows
+            # nothing about — and there is no per-document delete in LightRAG to
+            # reconcile that later. Since nothing of theirs reached the graph,
+            # removing them is the one clean-up that is actually safe, so the
+            # repository ends up listing exactly what is indexed.
+            if repository_id is not None and _stop_mode() == 'cancel':
+                ResourceService._discard_unindexed_after_cancel(repository_id)
+
             logger.info(
                 "Background indexing done: %s/%s chunks, %s failed",
                 cumulative - failed, total_chunks, failed,
@@ -831,9 +843,9 @@ class ResourceService:
             db.query(func.count(Resource.resource_id))
             .filter(
                 Resource.repository_id == repository_id,
-                # 'cancelled' is deliberately absent: the user said they were
-                # done with that batch, so the UI must stop nudging them to
-                # resume. An explicit resume_indexing still picks those up.
+                # 'cancelled' is not listed because it does not survive a
+                # cancel: those resources are discarded (nothing of theirs was
+                # indexed), so there is nothing left to nudge about.
                 Resource.status.in_(('pending', 'error', 'indexing', 'paused')),
             )
             .scalar()
@@ -930,11 +942,76 @@ class ResourceService:
             "Ingestion %s requested for repository %s: %s resource(s) -> '%s' (run alive=%s)",
             mode, repository_id, stopped, parked_status, was_running,
         )
+        # No run to do it on the way out (it had already finished, or the click
+        # raced its ending), so discard here instead — otherwise those rows sit
+        # in 'cancelled' for good, listing files the silo knows nothing about.
+        if mode == 'cancel' and not was_running:
+            ResourceService._discard_unindexed_after_cancel(repository_id)
         return {"mode": mode, "stopped": stopped, "was_running": was_running}
 
     @staticmethod
-    def is_ingestion_stopped(repository_id: int) -> bool:
-        """Whether a pause or cancel is pending for *repository_id*'s ingestion.
+    def _discard_unindexed_after_cancel(repository_id: int) -> int:
+        """Delete the resources a cancelled run never indexed. Returns how many.
+
+        Only ``cancelled`` resources with **zero** indexed pages are touched:
+        those never reached the vector store, so deleting them removes a row and
+        a file and nothing else — no orphaned entities, no half-indexed
+        document. A resource that got even one page through is left alone; there
+        is no per-document delete in LightRAG to unwind it with, so silently
+        dropping its row would strand that page in the graph.
+
+        Best-effort per resource: one failure must not abandon the rest.
+        """
+        from services.silo_service import COLLECTION_PREFIX
+        from db.database import SessionLocal
+
+        db = SessionLocal()
+        discarded = 0
+        try:
+            repo = ResourceRepository.get_repository_by_id(db, repository_id)
+            if not repo:
+                return 0
+            workspace = COLLECTION_PREFIX + str(repo.silo_id)
+            candidates = (
+                db.query(Resource.resource_id)
+                .filter(
+                    Resource.repository_id == repository_id,
+                    Resource.status == 'cancelled',
+                )
+                .all()
+            )
+            for (resource_id,) in candidates:
+                indexed = db.execute(
+                    text(
+                        "SELECT count(*) FROM lightrag_doc_status "
+                        "WHERE workspace = :ws AND id LIKE :prefix AND status = 'processed'"
+                    ),
+                    {"ws": workspace, "prefix": f"res{resource_id}-p%"},
+                ).scalar() or 0
+                if indexed:
+                    logger.info(
+                        "Keeping cancelled resource %s: %s page(s) already indexed",
+                        resource_id, indexed,
+                    )
+                    continue
+                try:
+                    if ResourceService.delete_resource(resource_id, db):
+                        discarded += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not discard resource %s: %s", resource_id, exc)
+        finally:
+            db.close()
+
+        if discarded:
+            logger.info(
+                "Cancelled ingestion: discarded %s never-indexed resource(s) from repository %s",
+                discarded, repository_id,
+            )
+        return discarded
+
+    @staticmethod
+    def ingestion_stop_mode(repository_id: int) -> Optional[str]:
+        """The pending stop mode for *repository_id* — ``'pause'``, ``'cancel'`` or None.
 
         Reads ``Repository.ingestion_stop_mode``, the signal written by
         ``request_ingestion_stop``. Called from the indexing thread on its own
@@ -957,10 +1034,10 @@ class ResourceService:
                 .filter(Repository.repository_id == repository_id)
                 .scalar()
             )
-            return mode in ('pause', 'cancel')
+            return mode if mode in ('pause', 'cancel') else None
         except Exception as exc:  # noqa: BLE001 — never let the check kill the run
             logger.warning("Stop check failed for repository %s: %s", repository_id, exc)
-            return False
+            return None
         finally:
             if db is not None:
                 db.close()

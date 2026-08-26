@@ -101,17 +101,21 @@ class TestStopSignalIsIndependentOfPendingRows:
         assert {"ingestion_stop_mode": "cancel"} in updates  # ...but the signal is set
         db.commit.assert_called_once()
 
-    @pytest.mark.parametrize("mode,expected", [("pause", True), ("cancel", True), (None, False), ("", False)])
-    def test_stop_check_reads_the_column(self, mode, expected):
+    @pytest.mark.parametrize(
+        "stored,expected",
+        [("pause", "pause"), ("cancel", "cancel"), (None, None), ("", None), ("bogus", None)],
+    )
+    def test_stop_check_returns_the_mode(self, stored, expected):
+        """The mode itself, not a bool: the run needs it to tell pause from cancel."""
         db = MagicMock()
-        db.query.return_value.filter.return_value.scalar.return_value = mode
+        db.query.return_value.filter.return_value.scalar.return_value = stored
         with patch("db.database.SessionLocal", return_value=db):
-            assert ResourceService.is_ingestion_stopped(1) is expected
+            assert ResourceService.ingestion_stop_mode(1) == expected
 
     def test_stop_check_never_raises(self):
         """A failing check must not kill a running indexing job."""
         with patch("db.database.SessionLocal", side_effect=RuntimeError("db down")):
-            assert ResourceService.is_ingestion_stopped(1) is False
+            assert ResourceService.ingestion_stop_mode(1) is None
 
     def test_clear_wipes_the_signal(self):
         """A stop from a previous run must not abort the next ingestion."""
@@ -125,3 +129,35 @@ class TestStopSignalIsIndependentOfPendingRows:
 class TestStopStatusesContract:
     def test_both_modes_have_a_parked_status(self):
         assert set(ResourceService.STOP_STATUSES) == {"paused", "cancelled"}
+
+
+class TestCancelDiscardsUnindexed:
+    """Cancel must not leave rows for files the silo never saw."""
+
+    def test_discards_immediately_when_no_run_is_alive(self):
+        """The run does the discarding on its way out; with no run, do it here.
+
+        Otherwise a cancel that races the end of a run (or lands after it)
+        leaves those resources in 'cancelled' for good.
+        """
+        db = _db_with_active_batch()
+        with patch("services.silo_indexing_lock.is_locked", return_value=False), \
+             patch.object(ResourceService, "_discard_unindexed_after_cancel") as discard:
+            ResourceService.request_ingestion_stop(db, 1, mode="cancel")
+        discard.assert_called_once_with(1)
+
+    def test_does_not_discard_while_a_run_is_alive(self):
+        """The run finishes its in-flight files first, then discards."""
+        db = _db_with_active_batch()
+        with patch("services.silo_indexing_lock.is_locked", return_value=True), \
+             patch.object(ResourceService, "_discard_unindexed_after_cancel") as discard:
+            ResourceService.request_ingestion_stop(db, 1, mode="cancel")
+        discard.assert_not_called()
+
+    def test_pause_never_discards(self):
+        """Pause exists to keep them — discarding would defeat it."""
+        db = _db_with_active_batch()
+        with patch("services.silo_indexing_lock.is_locked", return_value=False), \
+             patch.object(ResourceService, "_discard_unindexed_after_cancel") as discard:
+            ResourceService.request_ingestion_stop(db, 1, mode="pause")
+        discard.assert_not_called()

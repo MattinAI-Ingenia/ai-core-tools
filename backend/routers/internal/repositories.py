@@ -1008,14 +1008,12 @@ async def stop_indexing(
 ):
     """Ask the running ingestion of this repository to stop.
 
-    ``mode=pause`` (default) or ``mode=cancel``. **Neither deletes anything**:
-    pages already indexed stay indexed either way, and both leave the remaining
-    resources re-indexable via ``resume-indexing``. The difference is intent —
-    ``pause`` keeps them counted as resumable so the UI offers to continue,
-    ``cancel`` does not.
+    ``mode=pause`` keeps everything: the files already indexed stay indexed and
+    the rest stay resumable. ``mode=cancel`` finishes the files already started
+    and then **removes the ones that never started** (row and upload), so the
+    repository ends up listing exactly what is indexed.
 
-    Not immediate: the resource being indexed is left to finish, and only then
-    does the run end.
+    Neither is immediate: files in flight are left to finish first.
 
     Response:
     - ``mode``: the mode applied
@@ -1024,12 +1022,10 @@ async def stop_indexing(
     """
     _validate_repository_app_ownership(repository_id, app_id, db)
 
-    if mode not in ("pause", "cancel"):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="mode must be 'pause' or 'cancel'",
-        )
-    return ResourceService.request_ingestion_stop(db, repository_id, mode=mode)
+    try:
+        return ResourceService.request_ingestion_stop(db, repository_id, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
 
 @repositories_router.get(

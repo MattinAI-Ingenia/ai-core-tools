@@ -12,6 +12,7 @@
 import React from 'react';
 import { AlertCircle, CheckCircle, Loader, PauseCircle, StopCircle } from 'lucide-react';
 import { useIngestionProgress } from '../../hooks/useIngestionProgress';
+import ConfirmationModal from './ConfirmationModal';
 import { apiService } from '../../services/api';
 
 interface IngestionProgressBarProps {
@@ -46,14 +47,17 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     onCompleteRef.current = onComplete;
   });
 
-  // Stop controls. Neither is destructive: pages already indexed stay indexed
-  // and the remaining files are re-indexable in both cases, so a single click
-  // is enough — no confirmation modal.  They stay in the "…ing" state after the
-  // request because the backend lets the file already in flight finish before
-  // the run actually ends, so stopping is never instant.
+  // Stop controls. Pause is reversible (a single click); Cancel removes the
+  // files it never started, so it goes through a disclaimer first. Both stay in
+  // the "…ing" state after the request because the backend lets the files
+  // already in flight finish before the run ends — stopping is never instant.
   const [stopState, setStopState] = React.useState<
     { mode: 'pause' | 'cancel'; phase: 'stopping' | 'failed' } | null
   >(null);
+
+  // Cancel removes files: it needs the consequence spelled out before it runs.
+  // Pause is reversible, so it stays a single click.
+  const [confirmCancel, setConfirmCancel] = React.useState(false);
 
   const requestStop = React.useCallback(
     async (mode: 'pause' | 'cancel') => {
@@ -70,53 +74,62 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     [appId, repositoryId, onStopped],
   );
 
-  const stopButton = (
-    mode: 'pause' | 'cancel',
-    Icon: typeof PauseCircle,
-    label: string,
-    busyLabel: string,
-    tone: string,
-    title: string,
-  ) => {
-    const active = stopState?.mode === mode;
-    const busy = active && stopState?.phase === 'stopping';
-    const failed = active && stopState?.phase === 'failed';
-    return (
-      <button
-        type="button"
-        onClick={() => requestStop(mode)}
-        // Only the in-flight button is disabled: if a pause request failed the
-        // user must still be able to reach for cancel instead.
-        disabled={busy}
-        title={failed ? 'Could not reach the server. Click to try again.' : title}
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded border transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-          failed ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100' : tone
-        }`}
-      >
-        <Icon className="w-4 h-4" />
-        {failed ? `Retry ${label.toLowerCase()}` : busy ? busyLabel : label}
-      </button>
-    );
-  };
+  const stopBtn = "inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded border transition-colors disabled:opacity-60 disabled:cursor-not-allowed";
+  const busy = (mode: 'pause' | 'cancel') =>
+    stopState?.mode === mode && stopState.phase === 'stopping';
+  const failed = (mode: 'pause' | 'cancel') =>
+    stopState?.mode === mode && stopState.phase === 'failed';
+
+  const cancelDisclaimer = (
+    <ConfirmationModal
+      isOpen={confirmCancel}
+      variant="warning"
+      title="Cancel indexing?"
+      confirmLabel="Cancel indexing"
+      cancelLabel="Keep indexing"
+      isLoading={stopState?.mode === 'cancel' && stopState.phase === 'stopping'}
+      onCancel={() => setConfirmCancel(false)}
+      onConfirm={() => {
+        setConfirmCancel(false);
+        requestStop('cancel');
+      }}
+      message={
+        <>
+          Files already being indexed will finish. Files not started yet are
+          removed from the repository — you would need to upload them again.
+          Nothing already indexed is deleted.
+        </>
+      }
+    />
+  );
 
   const stopControls = (
     <div className="flex items-center gap-2">
-      {stopButton(
-        'pause',
-        PauseCircle,
-        'Pause',
-        'Pausing…',
-        'text-amber-700 border-amber-300 bg-white hover:bg-amber-50',
-        'Pause indexing. Keeps what is already indexed and stays listed as resumable.',
-      )}
-      {stopButton(
-        'cancel',
-        StopCircle,
-        'Cancel',
-        'Cancelling…',
-        'text-red-700 border-red-300 bg-white hover:bg-red-50',
-        'Cancel indexing. Keeps what is already indexed but stops offering to resume. Nothing is deleted.',
-      )}
+      {cancelDisclaimer}
+      <button
+        type="button"
+        onClick={() => requestStop('pause')}
+        disabled={busy('pause')}
+        title="Pause indexing. Keeps what is already indexed and stays resumable."
+        className={`${stopBtn} ${failed('pause')
+          ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100'
+          : 'text-amber-700 border-amber-300 bg-white hover:bg-amber-50'}`}
+      >
+        <PauseCircle className="w-4 h-4" />
+        {failed('pause') ? 'Retry pause' : busy('pause') ? 'Pausing…' : 'Pause'}
+      </button>
+      <button
+        type="button"
+        onClick={() => setConfirmCancel(true)}
+        disabled={busy('cancel')}
+        title="Cancel indexing: finishes the files already started and removes the ones not started yet."
+        className={`${stopBtn} ${failed('cancel')
+          ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100'
+          : 'text-red-700 border-red-300 bg-white hover:bg-red-50'}`}
+      >
+        <StopCircle className="w-4 h-4" />
+        {failed('cancel') ? 'Retry cancel' : busy('cancel') ? 'Cancelling…' : 'Cancel'}
+      </button>
     </div>
   );
 

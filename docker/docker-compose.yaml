@@ -99,6 +99,11 @@ services:
       MAX_PARALLEL_INSERT: ${MAX_PARALLEL_INSERT:-3}      # documents (= PDF pages) at once
       MAX_ASYNC_LLM: ${MAX_ASYNC_LLM:-4}                  # concurrent LLM calls per role
       EMBEDDING_FUNC_MAX_ASYNC: ${EMBEDDING_FUNC_MAX_ASYNC:-8}
+      # Files the feeder keeps in flight. Not a throughput knob (3 average files
+      # already exceed MAX_PARALLEL_INSERT in pages): it sets how many files
+      # "Cancel" finishes before stopping, since cancel means "add nothing new,
+      # finish what started".
+      INGESTION_FEED_WINDOW: ${INGESTION_FEED_WINDOW:-3}
       # Per-LLM-call ceiling. Also how long a hung socket (laptop suspend,
       # LLM host gone) takes to surface as a failure and abort the batch.
       LLM_TIMEOUT: ${LLM_TIMEOUT:-240}

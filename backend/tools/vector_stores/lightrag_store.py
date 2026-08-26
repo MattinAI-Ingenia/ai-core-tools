@@ -61,6 +61,11 @@ class _DropUnconfiguredRoleLog(logging.Filter):
 # Installed once at import; LightRAG's logger is the module-level "lightrag".
 logging.getLogger("lightrag").addFilter(_DropUnconfiguredRoleLog())
 
+# How long the feeder waits out a pipeline reservation before giving up. A
+# manual retry drain is bounded by the work it retries, so this only needs to
+# outlast that; failing loudly afterwards beats feeding nothing in silence.
+FEED_ENQUEUE_MAX_WAIT_S = 300
+
 # Valid LightRAG query modes — used for pass-through validation.
 _LIGHTRAG_MODES = frozenset({"local", "global", "hybrid", "naive", "mix", "bypass"})
 
@@ -177,6 +182,26 @@ def _lightrag_doc_id(metadata: dict, content: str) -> str:
     from lightrag.utils import compute_mdhash_id  # noqa: WPS433
 
     return compute_mdhash_id(content, prefix="doc-")
+
+
+def documents_to_lightrag_payload(documents) -> Tuple[List[str], List[str], List[str]]:
+    """Split Documents into the ``(texts, file_paths, ids)`` triple LightRAG takes.
+
+    Shared by the plain enqueue path and the feeder, which needs the payload
+    without touching LightRAG (it builds it in a worker thread, then enqueues on
+    the pipeline's own loop). Empty-content documents are skipped, keeping the
+    three lists aligned.
+    """
+    texts: List[str] = []
+    file_paths: List[str] = []
+    ids: List[str] = []
+    for doc in documents:
+        if not doc.page_content:
+            continue
+        texts.append(doc.page_content)
+        file_paths.append(_source_label_from_metadata(doc.metadata or {}))
+        ids.append(_lightrag_doc_id(doc.metadata or {}, doc.page_content))
+    return texts, file_paths, ids
 
 
 async def _ainsert(rag, texts, file_paths=None, ids=None, process_options="F"):
@@ -350,7 +375,7 @@ async def _arequest_lightrag_cancellation(rag) -> None:
     logger.info("[%s] Requested LightRAG pipeline cancellation", workspace)
 
 
-async def _arequest_failed_retry(rag) -> bool:
+async def _arequest_failed_retry(rag) -> None:
     """Publish a sticky manual-retry request so FAILED documents are retried.
 
     Without this, a page that ended FAILED — a cancelled run, an LLM timeout —
@@ -371,10 +396,8 @@ async def _arequest_failed_retry(rag) -> bool:
     resume, not on every indexing run — otherwise a permanently broken page
     would burn extraction tokens on every pass.
 
-    Returns True when the request was published (the following
-    ``apipeline_process_enqueue_documents`` will then pick FAILED docs up),
-    False when LightRAG refused it (fenced workspace, destructive job in
-    flight) — in which case the run still proceeds with the PENDING work.
+    A refusal (fenced workspace, destructive job in flight) is logged and
+    swallowed: the run still proceeds with the PENDING work.
     """
     from uuid import uuid4  # noqa: WPS433
     from lightrag.kg.shared_storage import (  # noqa: WPS433
@@ -395,17 +418,17 @@ async def _arequest_failed_retry(rag) -> bool:
         )
     except Exception as exc:  # noqa: BLE001 — a failed retry request must not abort the run
         logger.warning("[%s] Could not request FAILED-document retry: %s", workspace, exc)
-        return False
+        return
 
     if refusal:
         logger.warning("[%s] FAILED-document retry refused: %s", workspace, refusal)
-        return False
-    logger.info("[%s] Requested retry of FAILED documents", workspace)
-    return True
+    else:
+        logger.info("[%s] Requested retry of FAILED documents", workspace)
 
 
 async def _aprocess_enqueued_with_progress(
-    rag, doc_ids_by_resource, progress_callback=None, should_cancel=None, retry_failed=False,
+    rag, doc_ids_by_resource, progress_callback=None, should_cancel=None,
+    retry_failed=False, feed=None, window=3, process_options="F",
 ):
     """Run ONE ``apipeline_process_enqueue_documents()`` for everything
     currently enqueued in this workspace, reporting progress PER RESOURCE.
@@ -424,10 +447,19 @@ async def _aprocess_enqueued_with_progress(
     own docstring) — so this also picks up, and reports progress for, any
     other resource whose docs were left pending by an earlier interrupted run.
 
+    ``feed`` is an optional async callable returning
+    ``(resource_id, texts, file_paths, ids)`` for the next resource to add, or
+    ``None`` when there is nothing left. It is called from a feeder task that
+    keeps ``window`` resources in flight, so the pool never drains at a batch
+    boundary — see ``_feed``. ``should_cancel`` may return the stop mode as a
+    string; ``'cancel'`` stops the feeder without cancelling LightRAG, so the
+    documents already started finish whole.
+
     Returns ``{resource_id: {"processed": N, "failed": N, "total": N}}`` once
     the whole batch is drained.
     """
-    all_ids = [doc_id for ids in doc_ids_by_resource.values() for doc_id in ids]
+    # Mutable: the feeder adds resources to these as it enqueues them.
+    doc_ids_by_resource = dict(doc_ids_by_resource)
     id_to_resource = {
         doc_id: rid for rid, ids in doc_ids_by_resource.items() for doc_id in ids
     }
@@ -435,7 +467,8 @@ async def _aprocess_enqueued_with_progress(
 
     async def _counts():
         """{resource_id: {"processed": N, "failed": N}} for this batch's doc ids."""
-        records = await rag.doc_status.get_docs_by_ids(all_ids)
+        all_ids = list(id_to_resource)
+        records = await rag.doc_status.get_docs_by_ids(all_ids) if all_ids else {}
         counts = {rid: {"processed": 0, "failed": 0} for rid in doc_ids_by_resource}
         for doc_id, record in records.items():
             rid = id_to_resource.get(doc_id)
@@ -447,6 +480,7 @@ async def _aprocess_enqueued_with_progress(
         return counts
 
     last_done = {rid: -1 for rid in doc_ids_by_resource}
+    stop_mode: List[Optional[str]] = [None]
 
     async def _poll():
         cancel_sent = False
@@ -456,33 +490,158 @@ async def _aprocess_enqueued_with_progress(
                 counts = await _counts()
                 for rid, c in counts.items():
                     done = c["processed"] + c["failed"]
-                    if done != last_done[rid]:
+                    if last_done.get(rid, -1) != done:
                         last_done[rid] = done
                         if progress_callback is not None:
                             progress_callback(rid, done, totals[rid])
-                # Cancellation rides this same poll: it is already the loop that
+                # Stop handling rides this same poll: it is already the loop that
                 # runs beside the long apipeline_process_enqueue_documents call,
                 # in the right process for LightRAG's per-process flag. The DB
                 # read goes to a thread so a slow query cannot stall the event
                 # loop that the pipeline itself is running on.
                 if should_cancel is not None and not cancel_sent:
-                    if await asyncio.to_thread(should_cancel):
+                    mode = await asyncio.to_thread(should_cancel)
+                    if mode:
                         cancel_sent = True
-                        await _arequest_lightrag_cancellation(rag)
+                        stop_mode[0] = mode if isinstance(mode, str) else 'pause'
+                        # 'cancel' means "add nothing new, finish what started",
+                        # so it must NOT reach LightRAG: its native cancel kills
+                        # pages mid-flight and would leave half-indexed
+                        # documents — the very thing cancel exists to avoid
+                        # (there is no per-document delete to undo them with).
+                        # The feeder stopping is the whole mechanism.
+                        if stop_mode[0] != 'cancel':
+                            await _arequest_lightrag_cancellation(rag)
             except Exception:
                 pass  # polling is best-effort
+
+    async def _feed_guarded():
+        """``_feed`` with its failure made loud.
+
+        The task is awaited via ``gather(..., return_exceptions=True)``, which
+        swallows whatever it raises: a feeder that dies silently just stops
+        topping the pipeline up, and the run finishes early looking successful
+        (it did exactly that — 28 of 67 chunks, three resources never fed).
+        """
+        try:
+            await _feed()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "[%s] Feeder failed — remaining resources will NOT be indexed by this run",
+                getattr(rag, "workspace", None),
+            )
+            raise
+
+    async def _feed():
+        """Keep ``window`` resources in flight, topping up as they complete.
+
+        LightRAG explicitly supports this ("Concurrent indexing is permitted —
+        the running loop is notified via the ingress mailbox and picks up the
+        newly-enqueued doc mid-batch (feeder)", ``apipeline_enqueue_documents``),
+        so the next resource starts the moment one finishes instead of waiting
+        for a batch barrier. Fixed batches would drain the concurrency pool at
+        every boundary; this never lets it empty.
+
+        It is also what makes 'cancel' meaningful: stop feeding and the pipeline
+        finishes exactly the documents it already had, leaving none half-done.
+        """
+        while True:
+            if stop_mode[0] is not None:
+                logger.info("[%s] Stop requested (%s): feeding no further resources",
+                            getattr(rag, "workspace", None), stop_mode[0])
+                return
+            in_flight = sum(1 for rid, t in totals.items() if last_done.get(rid, 0) < t)
+            if in_flight >= window:
+                await asyncio.sleep(0.5)
+                continue
+            if not await _enqueue_next():
+                return  # nothing left to enqueue
 
     # Published before the drive, so this run's pipeline pass is the one that
     # consumes the request and retries the FAILED pages.
     if retry_failed:
         await _arequest_failed_retry(rag)
 
+    async def _aenqueue_with_backpressure(rid, texts, file_paths, ids) -> None:
+        """Enqueue one resource, waiting out LightRAG's reservation conflicts.
+
+        A manual retry request (published by ``retry_failed`` on a resume)
+        drains the pipeline exclusively, and enqueuing during that window
+        raises ``PipelineReservationConflictError`` — "wait for it to finish
+        before retrying", which is exactly what this does. Without it the
+        feeder dies on the first conflict and the run silently indexes only
+        the resources it had primed (seen live: 28 of 67 chunks, three
+        resources never fed).
+        """
+        from lightrag.exceptions import PipelineReservationConflictError  # noqa: WPS433
+
+        for attempt in range(FEED_ENQUEUE_MAX_WAIT_S * 2):
+            try:
+                await _aenqueue(rag, texts, file_paths=file_paths, ids=ids,
+                                process_options=process_options)
+                return
+            except PipelineReservationConflictError:
+                if attempt == 0:
+                    logger.info(
+                        "[%s] Pipeline busy draining a manual retry; holding resource %s",
+                        getattr(rag, "workspace", None), rid,
+                    )
+                await asyncio.sleep(0.5)
+        raise TimeoutError(
+            f"Could not enqueue resource {rid} within {FEED_ENQUEUE_MAX_WAIT_S}s: "
+            "the pipeline stayed reserved the whole time"
+        )
+
+    async def _enqueue_next() -> bool:
+        """Pull one resource from *feed* and enqueue it. False when exhausted."""
+        nxt = await feed()
+        if nxt is None:
+            return False
+        rid, texts, file_paths, ids = nxt
+        if ids:
+            await _aenqueue_with_backpressure(rid, texts, file_paths, ids)
+            doc_ids_by_resource[rid] = ids
+            totals[rid] = len(ids)
+            last_done.setdefault(rid, -1)
+            for doc_id in ids:
+                id_to_resource[doc_id] = rid
+            logger.info("[%s] Fed resource %s (%d page(s)) into the pipeline",
+                        getattr(rag, "workspace", None), rid, len(ids))
+        return True
+
+    # Prime the window before the pipeline starts: with nothing enqueued,
+    # apipeline_process_enqueue_documents() would find no work and return
+    # immediately, ending the run before the feeder got going.
+    exhausted = False
+    if feed is not None:
+        for _ in range(max(1, window)):
+            if not await _enqueue_next():
+                exhausted = True
+                break
+
     poll_task = asyncio.create_task(_poll())
+    feed_task = asyncio.create_task(_feed_guarded()) if feed is not None and not exhausted else None
     try:
         await rag.apipeline_process_enqueue_documents()
+        # The pipeline can reach quiescence while the feeder still has work to
+        # hand over, so keep driving until the feeder is finished — then drive
+        # once more, since whatever it enqueued last may have arrived after the
+        # previous pass had already gone idle.
+        if feed_task is not None:
+            while not feed_task.done():
+                await asyncio.sleep(0.5)
+                await rag.apipeline_process_enqueue_documents()
+            await rag.apipeline_process_enqueue_documents()
     finally:
-        poll_task.cancel()
-        await asyncio.gather(poll_task, return_exceptions=True)
+        for task in (feed_task, poll_task):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(t for t in (feed_task, poll_task) if t is not None),
+            return_exceptions=True,
+        )
 
     final_counts = await _counts()
     if progress_callback is not None:
@@ -1171,6 +1330,8 @@ class LightRAGStore(VectorStoreInterface):
         progress_callback=None,
         should_cancel=None,
         retry_failed=False,
+        feed=None,
+        window: int = 3,
     ) -> Dict:
         """Process everything currently enqueued for *collection_name* in ONE run.
 
@@ -1194,6 +1355,12 @@ class LightRAGStore(VectorStoreInterface):
         instead of being permanently stuck — see ``_arequest_failed_retry``.
         Only for an explicit resume: one request buys one retry per document.
 
+        ``feed``/``window`` turn this into a sliding window: instead of
+        enqueueing every resource up front, the caller supplies the next one on
+        demand and ``window`` of them stay in flight. That keeps the
+        concurrency pool full (no batch barrier) and is what lets a 'cancel'
+        stop cleanly — see ``_feed``.
+
         Token/cost accounting is aggregated across the WHOLE batch (returned
         under the ``"_usage"`` key) — unlike ``index_documents``, this cannot
         attribute tokens to a single resource, because up to
@@ -1205,7 +1372,10 @@ class LightRAGStore(VectorStoreInterface):
         Returns ``{resource_id: {"processed": N, "failed": N, "total": N}, ...,
         "_usage": {...}}``.
         """
-        if not doc_ids_by_resource:
+        # With a feeder, doc_ids_by_resource is empty on entry by design — the
+        # feeder fills it as it enqueues. Only bail out when there is neither
+        # pre-enqueued work nor a feeder to supply any.
+        if not doc_ids_by_resource and feed is None:
             return {"_usage": {}}
 
         rag = self._get_rag_instance(collection_name)
@@ -1217,9 +1387,11 @@ class LightRAGStore(VectorStoreInterface):
         )
 
         logger.info(
-            "Processing enqueued documents in LightRAG workspace '%s' (%d resource(s), %d doc(s))",
+            "Processing documents in LightRAG workspace '%s' "
+            "(%d resource(s) pre-enqueued, %d doc(s); feeder=%s window=%d)",
             collection_name, len(doc_ids_by_resource),
             sum(len(ids) for ids in doc_ids_by_resource.values()),
+            feed is not None, window,
         )
 
         accumulator = IndexingTokenAccumulator()
@@ -1229,6 +1401,8 @@ class LightRAGStore(VectorStoreInterface):
             result = _run_async(_aprocess_enqueued_with_progress(
                 rag, doc_ids_by_resource, progress_callback,
                 should_cancel=should_cancel, retry_failed=retry_failed,
+                feed=feed, window=window,
+                process_options=self._chunk_process_option,
             ))
         finally:
             reset_active_accumulator(ctx_token)
