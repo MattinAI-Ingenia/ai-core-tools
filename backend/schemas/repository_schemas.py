@@ -50,6 +50,23 @@ class RepositoryDetailSchema(BaseModel):
     keywords_service_id: Optional[int] = None
     vlm_service_id: Optional[int] = None
     total_indexing_duration_seconds: Optional[float] = None
+    # LightRAG extraction config, read back from the silo. Returned so the UI can
+    # SHOW what a repository was indexed with: it was previously write-only
+    # (present on CreateUpdateRepositorySchema but not here), so the edit form
+    # fell back to its hardcoded defaults and displayed 1200/100/fixed_token for
+    # a silo actually running 2000/300/paragraph_semantic — plausible and wrong.
+    lightrag_chunk_strategy: Optional[str] = None
+    lightrag_chunk_token_size: Optional[int] = None
+    lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_language: Optional[str] = None
+    lightrag_entity_extract_max_gleaning: Optional[int] = None
+    lightrag_max_source_ids_per_entity: Optional[int] = None
+    lightrag_max_source_ids_per_relation: Optional[int] = None
+    lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[str] = None
+    # True once something has been indexed: the fields above shaped how entities
+    # were extracted, so they must stop changing (see is_lightrag_config_locked).
+    lightrag_config_locked: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

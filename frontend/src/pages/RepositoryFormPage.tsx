@@ -90,6 +90,9 @@ const RepositoryFormPage: React.FC = () => {
   });
 
   const isNewRepository = repositoryId === '0';
+  // Once anything is indexed the extraction config must stop changing, so it is
+  // shown read-only instead of hidden (see is_lightrag_config_locked).
+  const [configLocked, setConfigLocked] = useState(false);
 
   useEffect(() => {
     if (!appId || repositoryId === undefined) {
@@ -151,7 +154,23 @@ const RepositoryFormPage: React.FC = () => {
           // A repository being created defaults to Spanish; an existing one
           // always keeps its own configured language.
           lightrag_language: isNewRepository ? 'Spanish' : (repository.lightrag_language || 'English'),
+          // An existing repository shows the config it was indexed with. Leaving
+          // these to the useState defaults displayed 1200/100/fixed_token for
+          // every repository regardless of its real settings — and submitted
+          // those defaults back on save, silently rewriting an unindexed silo's
+          // config.
+          ...(isNewRepository ? {} : {
+            lightrag_chunk_strategy: repository.lightrag_chunk_strategy ?? 'fixed_token',
+            lightrag_chunk_token_size: repository.lightrag_chunk_token_size ?? undefined,
+            lightrag_chunk_overlap_token_size: repository.lightrag_chunk_overlap_token_size ?? undefined,
+            lightrag_entity_extract_max_gleaning: repository.lightrag_entity_extract_max_gleaning ?? undefined,
+            lightrag_max_source_ids_per_entity: repository.lightrag_max_source_ids_per_entity ?? undefined,
+            lightrag_max_source_ids_per_relation: repository.lightrag_max_source_ids_per_relation ?? undefined,
+            lightrag_entity_types: repository.lightrag_entity_types ?? undefined,
+            lightrag_entity_types_mode: repository.lightrag_entity_types_mode ?? undefined,
+          }),
         });
+        setConfigLocked(!!repository.lightrag_config_locked);
       } catch (err) {
         console.error('Error loading repository:', err);
         setError('Failed to load repository');
@@ -563,7 +582,9 @@ const RepositoryFormPage: React.FC = () => {
               <LightRAGAdvancedSettings
                 formData={formData}
                 onFieldChange={(field, value) => setFormData({ ...formData, [field]: value })}
-                forewarnImmutable
+                disabled={configLocked}
+                locked={configLocked}
+                forewarnImmutable={!configLocked}
               />
 
             </div>

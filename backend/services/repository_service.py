@@ -464,7 +464,27 @@ class RepositoryService:
             db, repository_id=repository_id,
         )
 
+        # Read the LightRAG config back so the UI can show what this repository
+        # was actually indexed with, editable or not.
+        from services.silo_service import SiloService
+        lightrag_fields = {
+            field: getattr(repo.silo, field, None) if repo.silo else None
+            for field in (
+                'lightrag_chunk_strategy',
+                'lightrag_chunk_token_size',
+                'lightrag_chunk_overlap_token_size',
+                'lightrag_language',
+                'lightrag_entity_extract_max_gleaning',
+                'lightrag_max_source_ids_per_entity',
+                'lightrag_max_source_ids_per_relation',
+                'lightrag_entity_types',
+                'lightrag_entity_types_mode',
+            )
+        }
+
         return RepositoryDetailSchema(
+            **lightrag_fields,
+            lightrag_config_locked=SiloService.is_lightrag_config_locked(silo_id, db),
             repository_id=repo.repository_id,
             name=repo.name,
             type=repo.type,
