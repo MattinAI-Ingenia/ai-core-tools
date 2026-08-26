@@ -1044,6 +1044,17 @@ const RepositoryDetailPage: React.FC = () => {
               setIsIndexing(false);
               loadRepository(false);
             }}
+            onStopped={(mode, stopped) => {
+              // The run does not end instantly (the file in flight is left to
+              // finish), so the progress bar stays until it really stops.
+              const skipped = stopped > 0 ? ` ${stopped} pending file(s) skipped.` : '';
+              setReindexNotice({
+                type: 'info',
+                text: mode === 'pause'
+                  ? `Pausing the ingestion — the file being indexed will finish first.${skipped} Use "Resume indexing" to continue.`
+                  : `Cancelling the ingestion — the file being indexed will finish first.${skipped} Nothing already indexed was deleted.`,
+              });
+            }}
           />
         </div>
       )}

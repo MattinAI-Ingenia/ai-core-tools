@@ -18,6 +18,14 @@ class Repository(Base):
                            back_populates='repositories',
                            foreign_keys=[app_id])
     
+    # Pending stop request for this repository's ingestion: NULL when none,
+    # else 'pause' or 'cancel'. Lives on the row rather than in process memory
+    # because the indexing thread runs in one uvicorn worker while the stop
+    # request is balanced across all of them. Cleared when a run starts, so a
+    # stale flag can never kill the next ingestion.
+    # See ResourceService.request_ingestion_stop.
+    ingestion_stop_mode = Column(String(10), nullable=True)
+
     # AI service configuration (centralized for all media in this repository)
     transcription_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
     video_ai_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)

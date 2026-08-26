@@ -993,6 +993,45 @@ async def resume_indexing(
     return {"session_id": session_id, "resumed": resumed}
 
 
+@repositories_router.post(
+    "/{repository_id}/stop-indexing",
+    summary="Pause or cancel the running ingestion",
+    tags=["Resources"],
+)
+async def stop_indexing(
+    app_id: int,
+    repository_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+    mode: str = "pause",
+):
+    """Ask the running ingestion of this repository to stop.
+
+    ``mode=pause`` (default) or ``mode=cancel``. **Neither deletes anything**:
+    pages already indexed stay indexed either way, and both leave the remaining
+    resources re-indexable via ``resume-indexing``. The difference is intent —
+    ``pause`` keeps them counted as resumable so the UI offers to continue,
+    ``cancel`` does not.
+
+    Not immediate: the resource being indexed is left to finish, and only then
+    does the run end.
+
+    Response:
+    - ``mode``: the mode applied
+    - ``stopped``: how many resources this run will no longer index
+    - ``was_running``: whether a run was actually alive when asked
+    """
+    _validate_repository_app_ownership(repository_id, app_id, db)
+
+    if mode not in ("pause", "cancel"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="mode must be 'pause' or 'cancel'",
+        )
+    return ResourceService.request_ingestion_stop(db, repository_id, mode=mode)
+
+
 @repositories_router.get(
     "/{repository_id}/ingestion-status",
     summary="Check if repository silo has an active ingestion",

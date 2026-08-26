@@ -315,7 +315,98 @@ async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
     )
 
 
-async def _aprocess_enqueued_with_progress(rag, doc_ids_by_resource, progress_callback=None):
+async def _arequest_lightrag_cancellation(rag) -> None:
+    """Set LightRAG's own cancellation flag for this workspace's pipeline.
+
+    This is the mechanism LightRAG's REST server exposes as its cancel endpoint
+    (``api/routers/document_routes.py``): the pipeline checks
+    ``pipeline_status["cancellation_requested"]`` at each stage, stops taking
+    new documents, cancels in-flight ones and marks them FAILED with "user
+    cancelled" — documents already PROCESSED stay indexed.
+
+    ``pipeline_status`` is per-process shared state, so this only works when
+    called from the process that is running the pipeline. That is why the
+    cross-worker half of the cancel is a row state in Postgres (see
+    ``ResourceService.request_ingestion_cancel``) and only its actuation
+    happens here, inside the owning worker's indexing thread.
+    """
+    from lightrag.kg.shared_storage import (  # noqa: WPS433
+        get_namespace_data, get_namespace_lock,
+    )
+
+    workspace = getattr(rag, "workspace", None)
+    pipeline_status = await get_namespace_data("pipeline_status", workspace=workspace)
+    pipeline_status_lock = get_namespace_lock("pipeline_status", workspace=workspace)
+    async with pipeline_status_lock:
+        if not pipeline_status.get("busy", False):
+            return
+        if pipeline_status.get("cancellation_requested"):
+            return  # already asked; do not spam the status history
+        pipeline_status["cancellation_requested"] = True
+        pipeline_status["latest_message"] = "Pipeline cancellation requested by user"
+        history = pipeline_status.get("history_messages")
+        if history is not None:
+            history.append("Pipeline cancellation requested by user")
+    logger.info("[%s] Requested LightRAG pipeline cancellation", workspace)
+
+
+async def _arequest_failed_retry(rag) -> bool:
+    """Publish a sticky manual-retry request so FAILED documents are retried.
+
+    Without this, a page that ended FAILED — a cancelled run, an LLM timeout —
+    is never re-processed, no matter how many times its resource is re-indexed:
+    re-enqueuing the same id is rejected by LightRAG's dedup ("File name
+    already exists. Original doc_id: …, Status: failed") and the pipeline only
+    takes PENDING work. LightRAG is explicit about it
+    (``api/routers/document_routes.py``, ``/documents/reprocess_failed``):
+
+        "FAILED documents re-enter the pipeline ONLY through such an explicit
+        request — each request grants at most ONE retry attempt per FAILED
+        document; a document that fails again stays FAILED until the next
+        explicit request."
+
+    This is the same publish that endpoint performs, minus its background-task
+    plumbing: the caller drives the pipeline itself right after. Because one
+    request buys exactly one retry per document, it belongs on an explicit
+    resume, not on every indexing run — otherwise a permanently broken page
+    would burn extraction tokens on every pass.
+
+    Returns True when the request was published (the following
+    ``apipeline_process_enqueue_documents`` will then pick FAILED docs up),
+    False when LightRAG refused it (fenced workspace, destructive job in
+    flight) — in which case the run still proceeds with the PENDING work.
+    """
+    from uuid import uuid4  # noqa: WPS433
+    from lightrag.kg.shared_storage import (  # noqa: WPS433
+        commit_manual_retry_request,
+        get_namespace_data,
+        get_namespace_lock,
+        get_pipeline_ingress,
+    )
+
+    workspace = getattr(rag, "workspace", None)
+    try:
+        pipeline_status = await get_namespace_data("pipeline_status", workspace=workspace)
+        pipeline_status_lock = get_namespace_lock("pipeline_status", workspace=workspace)
+        # Must be resolved before the status lock is taken — never lazily inside it.
+        ingress = await get_pipeline_ingress(workspace)
+        refusal = await commit_manual_retry_request(
+            pipeline_status, pipeline_status_lock, ingress, uuid4().hex, {},
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed retry request must not abort the run
+        logger.warning("[%s] Could not request FAILED-document retry: %s", workspace, exc)
+        return False
+
+    if refusal:
+        logger.warning("[%s] FAILED-document retry refused: %s", workspace, refusal)
+        return False
+    logger.info("[%s] Requested retry of FAILED documents", workspace)
+    return True
+
+
+async def _aprocess_enqueued_with_progress(
+    rag, doc_ids_by_resource, progress_callback=None, should_cancel=None, retry_failed=False,
+):
     """Run ONE ``apipeline_process_enqueue_documents()`` for everything
     currently enqueued in this workspace, reporting progress PER RESOURCE.
 
@@ -358,6 +449,7 @@ async def _aprocess_enqueued_with_progress(rag, doc_ids_by_resource, progress_ca
     last_done = {rid: -1 for rid in doc_ids_by_resource}
 
     async def _poll():
+        cancel_sent = False
         while True:
             await asyncio.sleep(0.5)
             try:
@@ -368,8 +460,22 @@ async def _aprocess_enqueued_with_progress(rag, doc_ids_by_resource, progress_ca
                         last_done[rid] = done
                         if progress_callback is not None:
                             progress_callback(rid, done, totals[rid])
+                # Cancellation rides this same poll: it is already the loop that
+                # runs beside the long apipeline_process_enqueue_documents call,
+                # in the right process for LightRAG's per-process flag. The DB
+                # read goes to a thread so a slow query cannot stall the event
+                # loop that the pipeline itself is running on.
+                if should_cancel is not None and not cancel_sent:
+                    if await asyncio.to_thread(should_cancel):
+                        cancel_sent = True
+                        await _arequest_lightrag_cancellation(rag)
             except Exception:
                 pass  # polling is best-effort
+
+    # Published before the drive, so this run's pipeline pass is the one that
+    # consumes the request and retries the FAILED pages.
+    if retry_failed:
+        await _arequest_failed_retry(rag)
 
     poll_task = asyncio.create_task(_poll())
     try:
@@ -1063,6 +1169,8 @@ class LightRAGStore(VectorStoreInterface):
         collection_name: str,
         doc_ids_by_resource: Dict[int, List[str]],
         progress_callback=None,
+        should_cancel=None,
+        retry_failed=False,
     ) -> Dict:
         """Process everything currently enqueued for *collection_name* in ONE run.
 
@@ -1073,6 +1181,18 @@ class LightRAGStore(VectorStoreInterface):
 
         ``progress_callback(resource_id, done, total)`` is called per resource
         as the batch drains.
+
+        ``should_cancel()`` is polled every 0.5s alongside the progress poll;
+        the first True flips LightRAG's own ``cancellation_requested`` flag
+        (see ``_arequest_lightrag_cancellation``), which stops the pipeline
+        taking new documents and fails the in-flight ones. Documents already
+        processed stay indexed, and the run returns normally with whatever it
+        completed — a cancel is not an error.
+
+        ``retry_failed`` publishes a manual-retry request first, so pages left
+        FAILED by an earlier run (cancelled, LLM timeout) are re-processed
+        instead of being permanently stuck — see ``_arequest_failed_retry``.
+        Only for an explicit resume: one request buys one retry per document.
 
         Token/cost accounting is aggregated across the WHOLE batch (returned
         under the ``"_usage"`` key) — unlike ``index_documents``, this cannot
@@ -1106,7 +1226,10 @@ class LightRAGStore(VectorStoreInterface):
         ctx_token = set_active_accumulator(accumulator)
         t_start = time.perf_counter()
         try:
-            result = _run_async(_aprocess_enqueued_with_progress(rag, doc_ids_by_resource, progress_callback))
+            result = _run_async(_aprocess_enqueued_with_progress(
+                rag, doc_ids_by_resource, progress_callback,
+                should_cancel=should_cancel, retry_failed=retry_failed,
+            ))
         finally:
             reset_active_accumulator(ctx_token)
 

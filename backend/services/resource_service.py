@@ -419,7 +419,8 @@ class ResourceService:
 
     @staticmethod
     def _index_resources_background(
-        resources: List[Resource], silo_id: int = 0, lock_conn=None
+        resources: List[Resource], silo_id: int = 0, lock_conn=None,
+        retry_failed: bool = False,
     ) -> str:
         """Launch indexing in a background thread and return a session_id.
 
@@ -442,6 +443,13 @@ class ResourceService:
             (r.resource_id, getattr(r, 'uri', str(r.resource_id)))
             for r in resources
         ]
+        # Captured here, not read off an ORM object inside the thread: these
+        # instances belong to the caller's session and would be detached.
+        # Needed so the loop can poll for a user cancellation (see
+        # request_ingestion_cancel).
+        repository_id = next(
+            (r.repository_id for r in resources if getattr(r, 'repository_id', None)), None
+        )
 
         # Stamp the batch synchronously, before the thread starts: the client
         # connects to the SSE stream as soon as the upload response returns, and
@@ -469,6 +477,9 @@ class ResourceService:
                 synchronize_session=False,
             )
             _stamp_db.commit()
+            # A stop requested for a previous run must not abort this one.
+            if repository_id is not None:
+                ResourceService.clear_ingestion_stop(_stamp_db, repository_id)
         finally:
             _stamp_db.close()
 
@@ -510,6 +521,12 @@ class ResourceService:
             finally:
                 _db_silo.close()
 
+            def _stopped() -> bool:
+                """Has the user asked to pause/cancel this batch? (see request_ingestion_stop)"""
+                if repository_id is None:
+                    return False
+                return ResourceService.is_ingestion_stopped(repository_id)
+
             # Phase 2: index each resource, reporting progress by chunk count.
             cumulative = 0
             failed = 0
@@ -527,6 +544,13 @@ class ResourceService:
                     enqueued_resource_ids = []
                     for resource_id, resource_name in resource_snapshots:
                         resource_chunks = chunk_counts.get(resource_id, 1)
+                        if _stopped():
+                            logger.info(
+                                "Ingestion stopped by user: stopping before enqueueing "
+                                "resource %s (already-enqueued resources still get processed)",
+                                resource_id,
+                            )
+                            break
                         try:
                             _db = _SessionLocal()
                             resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
@@ -595,28 +619,68 @@ class ResourceService:
                             finally:
                                 _db_p.close()
 
+                        batch_result = {}
                         try:
-                            SiloService.process_enqueued_batch(
-                                silo_id, doc_ids_by_resource, progress_callback=_on_progress_multi,
-                            )
+                            batch_result = SiloService.process_enqueued_batch(
+                                silo_id, doc_ids_by_resource,
+                                progress_callback=_on_progress_multi,
+                                # Polled from inside the run so a cancel lands
+                                # mid-batch: this single call is the long part
+                                # (an hour on this corpus), so checking only
+                                # between resources would make the button
+                                # useless. See LightRAGStore's should_cancel.
+                                should_cancel=_stopped,
+                                # Only on an explicit resume: one manual-retry
+                                # request buys one retry per FAILED document, so
+                                # doing it on every run would re-burn tokens on
+                                # permanently broken pages.
+                                retry_failed=retry_failed,
+                            ) or {}
                             batch_failed = False
                         except Exception as e:
                             logger.error(f"Failed to process enqueued batch for silo {silo_id}: {e}")
                             batch_failed = True
 
+                        # A stop leaves part of the batch unprocessed, so the
+                        # per-resource counts decide the final status. Marking
+                        # everything 'ready' regardless (what this did before)
+                        # silently lost documents: a resource with 0 of 8 pages
+                        # indexed looked finished, stopped counting as resumable,
+                        # and could only be recovered by re-uploading it.
+                        parked_status = None
+                        if _stopped() and repository_id is not None:
+                            _db_mode = _SessionLocal()
+                            try:
+                                from models.repository import Repository as _Repo
+                                mode = (
+                                    _db_mode.query(_Repo.ingestion_stop_mode)
+                                    .filter(_Repo.repository_id == repository_id)
+                                    .scalar()
+                                )
+                                parked_status = 'paused' if mode == 'pause' else 'cancelled'
+                            finally:
+                                _db_mode.close()
+
                         for resource_id in enqueued_resource_ids:
                             resource_chunks = chunk_counts.get(resource_id, 1)
+                            counts = batch_result.get(resource_id) or {}
+                            total = counts.get('total') or 0
+                            complete = bool(total) and counts.get('processed', 0) >= total
                             _db4 = _SessionLocal()
                             try:
                                 r = _db4.query(ResourceModel).filter_by(resource_id=resource_id).first()
                                 if r:
-                                    # Matches the pre-batch behaviour: a resource
-                                    # is only marked 'error' when the LightRAG
-                                    # call itself failed outright, not when some
-                                    # of its individual pages ended up in
-                                    # doc_status='failed' (LightRAG already
-                                    # tolerates and logs those per-chunk).
-                                    r.status = 'error' if batch_failed else 'ready'
+                                    if batch_failed:
+                                        r.status = 'error'
+                                    elif parked_status and not complete:
+                                        # Interrupted by the user: park it so
+                                        # "resume indexing" can finish it.
+                                        r.status = parked_status
+                                    else:
+                                        # Complete, or individual pages failed on
+                                        # their own — LightRAG tolerates and logs
+                                        # those per-chunk, same as before.
+                                        r.status = 'ready'
                                     r.progress_done = r.progress_total
                                     _db4.commit()
                             finally:
@@ -627,6 +691,12 @@ class ResourceService:
                 else:
                     for resource_id, resource_name in resource_snapshots:
                         resource_chunks = chunk_counts.get(resource_id, 1)
+                        if _stopped():
+                            logger.info(
+                                "Ingestion stopped by user: stopping before resource %s",
+                                resource_id,
+                            )
+                            break
                         try:
                             _db = _SessionLocal()
                             resource_obj = _db.query(ResourceModel).filter_by(resource_id=resource_id).first()
@@ -761,7 +831,10 @@ class ResourceService:
             db.query(func.count(Resource.resource_id))
             .filter(
                 Resource.repository_id == repository_id,
-                Resource.status.in_(('pending', 'error', 'indexing')),
+                # 'cancelled' is deliberately absent: the user said they were
+                # done with that batch, so the UI must stop nudging them to
+                # resume. An explicit resume_indexing still picks those up.
+                Resource.status.in_(('pending', 'error', 'indexing', 'paused')),
             )
             .scalar()
         ) or 0
@@ -771,15 +844,158 @@ class ResourceService:
             "resumable": 0 if alive else unfinished,
         }
 
+    # Statuses a stopped-but-not-yet-indexed resource is parked in. Both stop
+    # the run; they differ only in whether the UI keeps nudging you to finish
+    # (see get_ingestion_liveness) — 'paused' means "I'll continue", 'cancelled'
+    # means "I'm done with this batch".
+    STOP_STATUSES = ('paused', 'cancelled')
+
+    @staticmethod
+    def request_ingestion_stop(db: Session, repository_id: int, mode: str = 'pause') -> dict:
+        """Ask the running ingestion of *repository_id* to stop.
+
+        ``mode`` is ``'pause'`` or ``'cancel'``. **Neither is destructive**:
+        pages already indexed stay indexed in both cases, and neither deletes
+        anything from the graph. The only difference is intent, recorded as the
+        parked status:
+
+        * ``pause``   → resources land in ``paused``; they still count towards
+          ``resumable``, so the UI keeps offering "Resume indexing".
+        * ``cancel``  → resources land in ``cancelled``; they stop counting as
+          resumable so the UI stops nudging, but an explicit "Resume indexing"
+          still picks them up (they are simply not-ready resources).
+
+        The signal is ``Repository.ingestion_stop_mode``, a row and not a flag
+        in process memory, for the same reason ``get_indexing_progress`` reads
+        progress from the rows: the indexing thread lives in one uvicorn worker
+        while this HTTP request is balanced across all of them
+        (``UVICORN_WORKERS`` is 4 in this deployment), so an in-memory flag
+        would be invisible to most requests.
+
+        That column — not the parked resources — is what carries the signal.
+        Deriving it from "is any resource parked?" looked equivalent and was
+        not: once every resource of the batch has been enqueued there are no
+        ``pending`` rows left to park, so a stop arriving during the long
+        LightRAG batch (the hour-long part this button exists for) wrote
+        nothing and was silently ignored.
+
+        The resource currently being indexed is deliberately left alone: the
+        loop owns its status and would overwrite it, and its work is already
+        paid for — letting it finish keeps the graph consistent. So stopping is
+        never instant.
+
+        Returns ``{"mode": str, "stopped": N, "was_running": bool}``.
+        """
+        from services import silo_indexing_lock
+
+        if mode not in ('pause', 'cancel'):
+            raise ValueError(f"mode must be 'pause' or 'cancel', got {mode!r}")
+        parked_status = 'paused' if mode == 'pause' else 'cancelled'
+
+        from models.repository import Repository
+
+        repo = ResourceRepository.get_repository_by_id(db, repository_id)
+        silo_id = repo.silo_id if repo and repo.silo_id else 0
+        was_running = silo_indexing_lock.is_locked(db, silo_id) if silo_id else False
+
+        # The signal itself — written whether or not there is anything left to
+        # park, so a stop lands during the long batch too.
+        db.query(Repository).filter(
+            Repository.repository_id == repository_id
+        ).update({'ingestion_stop_mode': mode}, synchronize_session=False)
+
+        # Parking the not-yet-started resources is what makes them count as
+        # not-indexed (and, for 'pause', as resumable). Independent of the signal.
+        active_batch = (
+            db.query(func.max(Resource.progress_started_at))
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.status.in_(('pending', 'indexing')),
+            )
+            .scalar()
+        )
+        stopped = 0
+        if active_batch is not None:
+            stopped = (
+                db.query(Resource)
+                .filter(
+                    Resource.repository_id == repository_id,
+                    Resource.progress_started_at == active_batch,
+                    Resource.status == 'pending',
+                )
+                .update({'status': parked_status}, synchronize_session=False)
+            )
+        db.commit()
+        logger.info(
+            "Ingestion %s requested for repository %s: %s resource(s) -> '%s' (run alive=%s)",
+            mode, repository_id, stopped, parked_status, was_running,
+        )
+        return {"mode": mode, "stopped": stopped, "was_running": was_running}
+
+    @staticmethod
+    def is_ingestion_stopped(repository_id: int) -> bool:
+        """Whether a pause or cancel is pending for *repository_id*'s ingestion.
+
+        Reads ``Repository.ingestion_stop_mode``, the signal written by
+        ``request_ingestion_stop``. Called from the indexing thread on its own
+        short-lived session, so it never touches the caller's.
+
+        ``clear_ingestion_stop`` blanks the column when a run starts, so this
+        only ever reports a stop meant for the run that is currently going.
+        """
+        from db.database import SessionLocal as _SessionLocal
+        from models.repository import Repository
+
+        # Session creation is inside the try on purpose: a saturated pool raises
+        # here, and this check must never be the thing that kills a running
+        # indexing job — worst case we miss one poll and catch the stop 0.5s later.
+        db = None
+        try:
+            db = _SessionLocal()
+            mode = (
+                db.query(Repository.ingestion_stop_mode)
+                .filter(Repository.repository_id == repository_id)
+                .scalar()
+            )
+            return mode in ('pause', 'cancel')
+        except Exception as exc:  # noqa: BLE001 — never let the check kill the run
+            logger.warning("Stop check failed for repository %s: %s", repository_id, exc)
+            return False
+        finally:
+            if db is not None:
+                db.close()
+
+    @staticmethod
+    def clear_ingestion_stop(db: Session, repository_id: int) -> None:
+        """Drop any pending stop request for *repository_id*.
+
+        Called when a run starts: without this, a repository stopped once would
+        carry the flag forever and every later ingestion would abort itself
+        immediately.
+        """
+        from models.repository import Repository
+
+        db.query(Repository).filter(
+            Repository.repository_id == repository_id
+        ).update({'ingestion_stop_mode': None}, synchronize_session=False)
+        db.commit()
+
     @staticmethod
     def resume_indexing(db: Session, repository_id: int) -> Tuple[Optional[str], int]:
         """Re-run indexing for every resource of *repository_id* not yet indexed.
 
         Resuming needs no checkpoint of our own: LightRAG skips documents already
-        in ``PROCESSED`` and resets interrupted ones (``PROCESSING``/``PARSING``/
-        ``ANALYZING``/``FAILED``) back to ``PENDING``
-        (``lightrag/pipeline.py:1457-1470``), so a file that stopped at 70% picks
-        up at 70% instead of re-extracting what is already in the graph.
+        in ``PROCESSED``, so a file that stopped at 70% picks up at 70% instead
+        of re-extracting what is already in the graph.
+
+        Pages left ``FAILED`` are a different matter and used to be lost here.
+        Re-enqueuing them is rejected by LightRAG's dedup ("File name already
+        exists. Original doc_id: …, Status: failed") and its pipeline only takes
+        PENDING work, so a cancelled batch stayed cancelled no matter how often
+        it was resumed — the resources went back to ``ready`` with pages missing
+        and nothing flagged as pending. ``retry_failed=True`` publishes the
+        manual-retry request that LightRAG requires for FAILED documents to
+        re-enter the pipeline (see ``_arequest_failed_retry``).
 
         Returns ``(session_id, resources_queued)``; the session id is ``None``
         when there was nothing left to index.
@@ -795,7 +1011,11 @@ class ResourceService:
             db.query(Resource)
             .filter(
                 Resource.repository_id == repository_id,
-                Resource.status.in_(('pending', 'error', 'indexing')),
+                # Both stop statuses are included: an explicit resume means the
+                # user changed their mind, so even a 'cancelled' batch can be
+                # finished without re-uploading. (Only the *nudge* in
+                # get_ingestion_liveness distinguishes the two.)
+                Resource.status.in_(('pending', 'error', 'indexing') + ResourceService.STOP_STATUSES),
             )
             .order_by(Resource.resource_id)
             .all()
@@ -821,7 +1041,7 @@ class ResourceService:
             repository_id, len(pending),
         )
         session_id = ResourceService._index_resources_background(
-            pending, silo_id, lock_conn=lock_conn,
+            pending, silo_id, lock_conn=lock_conn, retry_failed=True,
         )
         return session_id, len(pending)
 

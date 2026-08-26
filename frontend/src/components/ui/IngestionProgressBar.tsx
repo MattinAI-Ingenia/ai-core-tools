@@ -10,14 +10,17 @@
  */
 
 import React from 'react';
-import { AlertCircle, CheckCircle, Loader } from 'lucide-react';
+import { AlertCircle, CheckCircle, Loader, PauseCircle, StopCircle } from 'lucide-react';
 import { useIngestionProgress } from '../../hooks/useIngestionProgress';
+import { apiService } from '../../services/api';
 
 interface IngestionProgressBarProps {
   appId: number;
   repositoryId: number;
   sessionId: string | null;
   onComplete?: () => void;
+  /** Called after the backend accepted a pause/cancel, so the parent can notify. */
+  onStopped?: (mode: 'pause' | 'cancel', stoppedCount: number) => void;
 }
 
 export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
@@ -25,6 +28,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   repositoryId,
   sessionId,
   onComplete,
+  onStopped,
 }) => {
   const { progress, isConnected, isComplete, error } = useIngestionProgress(
     appId,
@@ -41,6 +45,80 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   React.useEffect(() => {
     onCompleteRef.current = onComplete;
   });
+
+  // Stop controls. Neither is destructive: pages already indexed stay indexed
+  // and the remaining files are re-indexable in both cases, so a single click
+  // is enough — no confirmation modal.  They stay in the "…ing" state after the
+  // request because the backend lets the file already in flight finish before
+  // the run actually ends, so stopping is never instant.
+  const [stopState, setStopState] = React.useState<
+    { mode: 'pause' | 'cancel'; phase: 'stopping' | 'failed' } | null
+  >(null);
+
+  const requestStop = React.useCallback(
+    async (mode: 'pause' | 'cancel') => {
+      setStopState({ mode, phase: 'stopping' });
+      try {
+        const result = await apiService.stopIngestion(appId, repositoryId, mode);
+        onStopped?.(mode, result.stopped);
+      } catch {
+        // Leave the run alone and let the user retry: a failed request must not
+        // look like a successful stop.
+        setStopState({ mode, phase: 'failed' });
+      }
+    },
+    [appId, repositoryId, onStopped],
+  );
+
+  const stopButton = (
+    mode: 'pause' | 'cancel',
+    Icon: typeof PauseCircle,
+    label: string,
+    busyLabel: string,
+    tone: string,
+    title: string,
+  ) => {
+    const active = stopState?.mode === mode;
+    const busy = active && stopState?.phase === 'stopping';
+    const failed = active && stopState?.phase === 'failed';
+    return (
+      <button
+        type="button"
+        onClick={() => requestStop(mode)}
+        // Only the in-flight button is disabled: if a pause request failed the
+        // user must still be able to reach for cancel instead.
+        disabled={busy}
+        title={failed ? 'Could not reach the server. Click to try again.' : title}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded border transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
+          failed ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100' : tone
+        }`}
+      >
+        <Icon className="w-4 h-4" />
+        {failed ? `Retry ${label.toLowerCase()}` : busy ? busyLabel : label}
+      </button>
+    );
+  };
+
+  const stopControls = (
+    <div className="flex items-center gap-2">
+      {stopButton(
+        'pause',
+        PauseCircle,
+        'Pause',
+        'Pausing…',
+        'text-amber-700 border-amber-300 bg-white hover:bg-amber-50',
+        'Pause indexing. Keeps what is already indexed and stays listed as resumable.',
+      )}
+      {stopButton(
+        'cancel',
+        StopCircle,
+        'Cancel',
+        'Cancelling…',
+        'text-red-700 border-red-300 bg-white hover:bg-red-50',
+        'Cancel indexing. Keeps what is already indexed but stops offering to resume. Nothing is deleted.',
+      )}
+    </div>
+  );
 
   React.useEffect(() => {
     if (!isComplete) return;
@@ -116,14 +194,16 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       return (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
           <Loader className="w-5 h-5 text-blue-600 animate-spin" />
-          <p className="text-blue-800 font-medium">Indexing in progress...</p>
+          <p className="text-blue-800 font-medium flex-1">Indexing in progress...</p>
+          {stopControls}
         </div>
       );
     }
     return (
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
         <Loader className="w-5 h-5 text-blue-600 animate-spin" />
-        <p className="text-blue-800 font-medium">Connecting to indexing session...</p>
+        <p className="text-blue-800 font-medium flex-1">Connecting to indexing session...</p>
+        {stopControls}
       </div>
     );
   }
@@ -153,9 +233,12 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
             {isComplete ? 'Ingestion Complete' : 'Ingesting Documents'}
           </span>
         </div>
-        <span className="text-sm font-mono text-gray-600">
-          {formatPercent(progress.progress_percent)}%
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-mono text-gray-600">
+            {formatPercent(progress.progress_percent)}%
+          </span>
+          {!isComplete && stopControls}
+        </div>
       </div>
 
       {/* Progress bar */}

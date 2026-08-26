@@ -1608,7 +1608,10 @@ class SiloService:
             session.close()
 
     @staticmethod
-    def process_enqueued_batch(silo_id: int, doc_ids_by_resource: dict, progress_callback=None) -> dict:
+    def process_enqueued_batch(
+        silo_id: int, doc_ids_by_resource: dict, progress_callback=None, should_cancel=None,
+        retry_failed: bool = False,
+    ) -> dict:
         """Process everything enqueued via ``enqueue_resource`` for *silo_id* in ONE run.
 
         See ``LightRAGStore.process_enqueued_documents`` for why batching like
@@ -1620,6 +1623,14 @@ class SiloService:
         (``resource_id=None``) instead of one per resource — token/cost usage
         cannot be attributed to a single resource when their chunks were
         extracted concurrently by the same LightRAG pipeline run.
+
+        ``should_cancel()`` is polled while the batch runs; returning True stops
+        it early, keeping whatever finished (see
+        ``LightRAGStore.process_enqueued_documents``). The metric row is still
+        written, so a cancelled run's token spend is not lost.
+
+        ``retry_failed`` asks LightRAG to retry pages left FAILED by a previous
+        run — required for a resume to actually recover a cancelled batch.
 
         Returns ``{resource_id: {"processed": N, "failed": N, "total": N}, ...}``
         (the ``"_usage"`` key from the store is consumed here, not returned).
@@ -1638,7 +1649,10 @@ class SiloService:
             from services.pricing_service import PricingService
 
             result = vector_store.process_enqueued_documents(
-                collection_name, doc_ids_by_resource, progress_callback=progress_callback,
+                collection_name, doc_ids_by_resource,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+                retry_failed=retry_failed,
             )
             usage = result.pop("_usage", {}) or {}
 

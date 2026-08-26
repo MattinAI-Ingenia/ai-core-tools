@@ -1482,6 +1482,17 @@ class ApiService {
     });
   }
 
+  async stopIngestion(
+    appId: number,
+    repositoryId: number,
+    mode: 'pause' | 'cancel',
+  ): Promise<{ mode: string; stopped: number; was_running: boolean }> {
+    return this.request(
+      `/internal/apps/${appId}/repositories/${repositoryId}/stop-indexing?mode=${mode}`,
+      { method: 'POST' },
+    );
+  }
+
   async estimateUploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {
     const formData = new FormData();
     files.forEach(file => {
