@@ -493,7 +493,19 @@ class ResourceService:
                 ResourceService.clear_ingestion_stop(_stamp_db, repository_id)
                 # A fresh job starts the timer over; a resume carries on from
                 # what the paused runs already spent (see request_ingestion_stop).
-                if not resumed:
+                # An upload during a pause is accepted (a paused run holds no
+                # silo lock) but is not a fresh job: parked files are still
+                # waiting and would lose the minutes they banked. Only 'paused'
+                # holds the clock — 'cancelled' never resumes, and the files
+                # stamped above are 'pending'. `and` short-circuits, so a resume
+                # never runs the query.
+                fresh_job = not resumed and _stamp_db.query(
+                    _StampResource.resource_id
+                ).filter(
+                    _StampResource.repository_id == repository_id,
+                    _StampResource.status == 'paused',
+                ).first() is None
+                if fresh_job:
                     from models.repository import Repository as _StampRepository
                     _stamp_db.query(_StampRepository).filter(
                         _StampRepository.repository_id == repository_id

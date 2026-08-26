@@ -125,7 +125,9 @@ def test_resume_processes_resources_in_a_stable_order(committed_repo):
 
     captured = {}
 
-    def fake_background(resources, silo_id=0, lock_conn=None):
+    # **kwargs: this stub only cares about the order it is handed, so it must not
+    # break every time the real function gains a flag (retry_failed, resumed).
+    def fake_background(resources, silo_id=0, lock_conn=None, **kwargs):
         captured["ids"] = [r.resource_id for r in resources]
         return "fake-session-id"
 
@@ -135,3 +137,65 @@ def test_resume_processes_resources_in_a_stable_order(committed_repo):
         ResourceService.resume_indexing(session, repo.repository_id)
 
     assert captured["ids"] == [third.resource_id, first.resource_id, second.resource_id]
+
+
+# ---------------------------------------------------------------------------
+# The accumulated ingestion clock (Repository.ingestion_elapsed_seconds)
+# ---------------------------------------------------------------------------
+
+
+def _bank(session, repo, seconds):
+    """Pretend an earlier run already spent this long."""
+    session.get(Repository, repo.repository_id).ingestion_elapsed_seconds = seconds
+    session.commit()
+
+
+def _clock(session, repo):
+    session.expire_all()  # the stamping step writes through its own session
+    return session.get(Repository, repo.repository_id).ingestion_elapsed_seconds
+
+
+def test_a_fresh_upload_starts_the_clock_over(committed_repo, no_op_background_thread):
+    session, repo = committed_repo
+    _bank(session, repo, 900)
+    new_file = _add(session, repo, name="new.pdf", status="pending")
+
+    ResourceService._index_resources_background([new_file], silo_id=0)
+
+    assert _clock(session, repo) == 0
+
+
+def test_uploading_during_a_pause_keeps_the_banked_time(committed_repo, no_op_background_thread):
+    """A paused run holds no silo lock, so an upload is accepted while files sit
+    parked. That is not a fresh job — wiping the clock would cost the parked
+    files the minutes they had already banked."""
+    session, repo = committed_repo
+    _bank(session, repo, 900)
+    _add(session, repo, name="parked.pdf", status="paused")
+    new_file = _add(session, repo, name="new.pdf", status="pending")
+
+    ResourceService._index_resources_background([new_file], silo_id=0)
+
+    assert _clock(session, repo) == 900
+
+
+def test_a_cancelled_leftover_does_not_hold_the_clock(committed_repo, no_op_background_thread):
+    """Cancelled rows never resume, so they must not keep a stale clock alive."""
+    session, repo = committed_repo
+    _bank(session, repo, 900)
+    _add(session, repo, name="dropped.pdf", status="cancelled")
+    new_file = _add(session, repo, name="new.pdf", status="pending")
+
+    ResourceService._index_resources_background([new_file], silo_id=0)
+
+    assert _clock(session, repo) == 0
+
+
+def test_resuming_never_resets_the_clock(committed_repo, no_op_background_thread):
+    session, repo = committed_repo
+    _bank(session, repo, 900)
+    _add(session, repo, name="parked.pdf", status="paused")
+
+    ResourceService.resume_indexing(session, repo.repository_id)
+
+    assert _clock(session, repo) == 900
