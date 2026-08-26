@@ -1060,8 +1060,11 @@ const RepositoryDetailPage: React.FC = () => {
               // cancel does the opposite. Only cancel states a count — removal
               // is the surprise; for pause the strip and the Resume button
               // already say how many files are left.
+              // Future tense on purpose: removal happens once the run truly
+              // ends (the discard step, or the liveness sweep if the run dies
+              // first), not at the instant this click lands.
               const removed = stopped > 0
-                ? ` ${stopped} file(s) not started were removed from the repository.` : '';
+                ? ` ${stopped} file(s) not started will be removed from the repository.` : '';
               setReindexNotice({
                 type: 'info',
                 text: mode === 'pause'

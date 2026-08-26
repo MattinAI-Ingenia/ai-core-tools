@@ -429,6 +429,31 @@ class ResourceService:
             return {'filename': file.filename, 'error': str(e)}
 
     @staticmethod
+    def _claim_pending_resource_for_indexing(db: Session, resource_id: int) -> Optional[Resource]:
+        """Atomically move one resource from 'pending' to 'indexing'.
+
+        The LightRAG batch feeder's queue is snapshotted once, before the run
+        starts, so a stop requested afterwards (``request_ingestion_stop``
+        parks 'pending' resources to 'cancelled'/'paused' synchronously,
+        independent of the feeder) can land on a resource still sitting
+        unfed in that queue. A plain read-then-write would still race it: the
+        UPDATE ... WHERE status='pending' here is the compare-and-swap that
+        makes only one of the two writers win — a stop that parks it first
+        makes this claim affect zero rows, and the feeder must not proceed to
+        feed a resource the stop already claimed for itself.
+
+        Returns the freshly-claimed row, or ``None`` if the claim lost the
+        race (or the resource no longer exists).
+        """
+        claimed = db.query(Resource).filter_by(
+            resource_id=resource_id, status='pending',
+        ).update({'status': 'indexing'})
+        db.commit()
+        if not claimed:
+            return None
+        return db.query(Resource).filter_by(resource_id=resource_id).first()
+
+    @staticmethod
     def _progress_update_fields(n: int, total: int) -> dict:
         """The row update for one live progress tick of a LightRAG-batch resource.
 
@@ -651,13 +676,13 @@ class ResourceService:
                             resource_id, _name = queue.pop(0)
                             _db = _SessionLocal()
                             try:
-                                resource_obj = _db.query(ResourceModel).filter_by(
-                                    resource_id=resource_id).first()
+                                resource_obj = ResourceService._claim_pending_resource_for_indexing(
+                                    _db, resource_id,
+                                )
                             finally:
                                 _db.close()
                             if not resource_obj:
                                 continue
-                            _mark(resource_id, 'indexing')
                             try:
                                 _, docs = SiloService.extract_resource_documents(resource_obj)
                             except Exception as exc:
