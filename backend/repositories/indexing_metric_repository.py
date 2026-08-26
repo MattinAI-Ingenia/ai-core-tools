@@ -8,6 +8,7 @@ from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session
 
 from models.indexing_metric import IndexingMetric
+from models.repository import Repository
 from models.resource import Resource
 
 
@@ -247,12 +248,42 @@ class IndexingMetricRepository:
         resource that needed more than one run to reach 'ready' contributes
         each run's time, not just its last one.
 
+        Two sums, because a run is recorded one of two ways. Per-resource runs
+        carry a ``resource_id``; a LightRAG batch is one pipeline pass over
+        several documents, so it records a single row with ``resource_id`` NULL
+        (see ``SiloService.process_enqueued_batch``) whose only route back is the
+        silo. Without the second sum, batch-indexed repositories reported no time
+        at all while the seconds sat in the table unreachable.
+
+        That route reads "this row is silo X's, this repository uses silo X, so
+        it is this repository's" — exact only while a silo belongs to one
+        repository, which is how they are built (``create_repository`` always
+        creates its own ``SiloType.REPO`` silo). Two repositories sharing one
+        would both claim its batch rows; that would need a ``repository_id`` on
+        the row. ``resource_id IS NULL`` keeps the sums disjoint: per-resource
+        rows carry a ``silo_id`` too, and would otherwise be counted twice.
+
         Returns ``None`` when nothing in this repository has been indexed yet.
         """
-        total = (
+        per_resource = (
             db.query(func.sum(IndexingMetric.duration_seconds))
             .join(Resource, Resource.resource_id == IndexingMetric.resource_id)
             .filter(Resource.repository_id == repository_id)
             .scalar()
         )
-        return round(total, 1) if total is not None else None
+        silo_id = (
+            db.query(Repository.silo_id)
+            .filter(Repository.repository_id == repository_id)
+            .scalar()
+        )
+        batch = (
+            db.query(func.sum(IndexingMetric.duration_seconds))
+            .filter(
+                IndexingMetric.resource_id.is_(None),
+                IndexingMetric.silo_id == silo_id,
+            )
+            .scalar()
+        ) if silo_id else None
+        if per_resource is None and batch is None:
+            return None
+        return round((per_resource or 0) + (batch or 0), 1)

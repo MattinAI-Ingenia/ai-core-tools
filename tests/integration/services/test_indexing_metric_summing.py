@@ -205,3 +205,36 @@ def test_repository_duration_total_sums_across_all_resources_and_runs(db, fake_a
 
 def test_repository_duration_total_is_none_when_nothing_indexed(db, repo):
     assert IndexingMetricRepository.get_repository_duration_total(db, repository_id=repo.repository_id) is None
+
+
+def test_repository_duration_total_includes_batch_rows_with_no_resource(db, fake_app, fake_silo, repo, resource):
+    """A LightRAG batch is one pipeline pass over several documents, so it
+    records a single row with resource_id NULL. Reached only through the silo —
+    without that route every batch-indexed repository reported no time at all
+    while the seconds sat in the table."""
+    _record(
+        db, app_id=fake_app.app_id, silo_id=fake_silo.silo_id, resource_id=resource.resource_id,
+        duration_seconds=100.0,
+    )
+    _record(
+        db, app_id=fake_app.app_id, silo_id=fake_silo.silo_id, resource_id=None,
+        duration_seconds=200.0,
+    )
+
+    total = IndexingMetricRepository.get_repository_duration_total(db, repository_id=repo.repository_id)
+
+    # 300, not 400: the per-resource row carries a silo_id too, and is reached by
+    # the join — counting it again through the silo would double it.
+    assert total == pytest.approx(300.0)
+
+
+def test_repository_duration_total_ignores_another_silos_batch(db, fake_app, fake_silo, repo):
+    """The silo route must not turn into "every batch in the app"."""
+    from models.silo import Silo
+
+    other = Silo(name="other", silo_type="REPO", app_id=fake_app.app_id)
+    db.add(other)
+    db.flush()
+    _record(db, app_id=fake_app.app_id, silo_id=other.silo_id, resource_id=None, duration_seconds=999.0)
+
+    assert IndexingMetricRepository.get_repository_duration_total(db, repository_id=repo.repository_id) is None

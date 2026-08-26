@@ -1759,7 +1759,10 @@ class SiloService:
                     app_id=silo.app_id,
                     silo_id=silo_id,
                     resource_id=None,
-                    content_ref=f"batch of {len(doc_ids_by_resource)} resource(s)",
+                    # result, not doc_ids_by_resource: the feeder supplies the
+                    # documents as slots free up, so the dict passed in is empty
+                    # and this read "batch of 0 resource(s)".
+                    content_ref=f"batch of {len(result)} resource(s)",
                     **_metric_kwargs,
                 )
                 session.flush()
