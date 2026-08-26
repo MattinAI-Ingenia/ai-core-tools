@@ -286,6 +286,9 @@ Local dev: port 5173 (Vite). Docker: port 3000.
 - Modifying base library for client-specific features — use `clientConfig.ts`
 - Skipping migration downgrade tests — always verify rollback works
 - Manual version bumping — use semantic versioning tooling
+- Saying a change is ready to commit without running `/ponytail-review` on its
+  diff first, and applying (or explicitly declining, with the reason) what it
+  finds. The review is part of finishing the work, not an optional extra step.
 
 ## Additional Documentation
 

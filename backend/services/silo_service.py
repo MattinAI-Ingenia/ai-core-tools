@@ -810,12 +810,27 @@ class SiloService:
             silo.vector_db_type = _resolve_vector_db_type(silo, requested_vector_db_type)
 
             if silo.vector_db_type == 'LIGHTRAG':
-                resolved_lightrag_vector_db_type = (
+                current_lightrag_vector_db_type = getattr(silo, 'lightrag_vector_db_type', None)
+                # Switching store orphans the embeddings: the graph would point at
+                # chunks whose vectors live in the other backend, so the corpus
+                # looks indexed and retrieves nothing. Refused loudly, unlike the
+                # extraction fields, which only degrade and are dropped silently.
+                if (
                     requested_lightrag_vector_db_type
-                    or getattr(silo, 'lightrag_vector_db_type', None)
+                    and current_lightrag_vector_db_type
+                    and requested_lightrag_vector_db_type != current_lightrag_vector_db_type
+                    and SiloService.is_lightrag_config_locked(silo_id, db)
+                ):
+                    raise ValidationError(
+                        "lightrag_vector_db_type cannot change after indexing: the "
+                        f"embeddings of this silo are in {current_lightrag_vector_db_type}. "
+                        "Create a new repository to index into a different vector store."
+                    )
+                silo.lightrag_vector_db_type = (
+                    requested_lightrag_vector_db_type
+                    or current_lightrag_vector_db_type
                     or 'QDRANT'
                 )
-                silo.lightrag_vector_db_type = resolved_lightrag_vector_db_type
             else:
                 silo.lightrag_vector_db_type = None
 

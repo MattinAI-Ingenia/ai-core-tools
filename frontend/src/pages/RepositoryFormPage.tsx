@@ -484,16 +484,28 @@ const RepositoryFormPage: React.FC = () => {
             </div>
           )}
 
-          {/* LightRAG Configuration — shown only when LIGHTRAG is selected (new repositories) */}
-          {isNewRepository && formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
+          {/* Was gated on isNewRepository, so an existing repository's Edit page
+              showed none of this and the only way to learn what a corpus had been
+              indexed with was to query the database. Shown read-only instead. */}
+          {formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
             <div className="border-t border-gray-200 pt-6 mt-6 space-y-6">
               <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">LightRAG Configuration</h3>
+              {/* Distinct from the component's own note, which reads "cannot be
+                  changed after creation" whether or not it already happened. */}
+              {configLocked && (
+                <p className="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                  This corpus is already indexed, so the vector store and the
+                  extraction settings are read-only. The LLM services stay editable.
+                </p>
+              )}
 
               {/* LightRAG Database Type */}
               <div>
                 <label htmlFor="lightrag_vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
                   LightRAG Database Type <span className="text-red-500">*</span>
                 </label>
+                {/* Locked after indexing: the embeddings live in whichever store
+                    indexed them, so the backend refuses a switch outright. */}
                 <select
                   id="lightrag_vector_db_type"
                   value={formData.lightrag_vector_db_type}
@@ -503,8 +515,9 @@ const RepositoryFormPage: React.FC = () => {
                       lightrag_vector_db_type: e.target.value.toUpperCase(),
                     })
                   }
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
                   required
+                  disabled={configLocked}
                 >
                   <option value="QDRANT">Qdrant</option>
                   <option value="PGVECTOR">PGVector</option>

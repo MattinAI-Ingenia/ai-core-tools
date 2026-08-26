@@ -28,6 +28,19 @@ LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 
 _REPOSITORY_NOT_FOUND = "Repository not found"
 
+# Fields of UpdateRepositorySchema that belong to the silo, not the repository
+# row. Which of them a given silo will actually accept is decided downstream by
+# SiloService.is_lightrag_config_locked.
+_SILO_OWNED_FIELDS = {
+    'extract_service_id', 'keywords_service_id', 'vlm_service_id',
+    'lightrag_vector_db_type', 'lightrag_chunk_strategy',
+    'lightrag_chunk_token_size', 'lightrag_chunk_overlap_token_size',
+    'lightrag_language', 'lightrag_entity_extract_max_gleaning',
+    'lightrag_max_source_ids_per_entity', 'lightrag_max_source_ids_per_relation',
+    'lightrag_entity_types', 'lightrag_entity_types_mode',
+}
+
+
 class RepositoryService:
 
     # ==================== BASIC CRUD OPERATIONS ====================
@@ -615,13 +628,33 @@ class RepositoryService:
         repo.transcription_service_id = repo_data.transcription_service_id
         repo.video_ai_service_id = repo_data.video_ai_service_id
 
-        return RepositoryService.update_repository(
+        updated = RepositoryService.update_repository(
             repo,
             repo_data.embedding_service_id,
             None,
             repo_data.indexing_service_id,
             db,
         )
+
+        # Forward the silo-level settings the form edits. They used to stop here
+        # (absent from UpdateRepositorySchema, then never passed on), so editing
+        # the chunking or the entity-types mode of an existing repository did
+        # nothing at all. create_or_update_silo decides what may actually change:
+        # the extraction fields freeze after the first index, the LLM roles do not.
+        silo_fields = repo_data.model_dump(include=_SILO_OWNED_FIELDS, exclude_none=True)
+        if updated.silo_id and silo_fields:
+            from services.silo_service import SiloService
+            SiloService.create_or_update_silo(
+                {
+                    'silo_id': updated.silo_id,
+                    'app_id': app_id,
+                    'name': updated.silo.name if updated.silo else updated.name,
+                    **silo_fields,
+                },
+                db=db,
+            )
+
+        return updated
 
     @staticmethod
     def create_or_update_repository_router(

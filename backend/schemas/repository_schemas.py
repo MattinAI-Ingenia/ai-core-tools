@@ -107,6 +107,22 @@ class UpdateRepositorySchema(BaseModel):
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
     indexing_service_id: Optional[int] = None  # legacy alias for extract_service_id
+    # Absent before, so Pydantic dropped them from every update: the form sent
+    # them and the backend never saw them. What a silo will accept is decided by
+    # SiloService.is_lightrag_config_locked, not here.
+    extract_service_id: Optional[int] = None
+    keywords_service_id: Optional[int] = None
+    vlm_service_id: Optional[int] = None
+    lightrag_vector_db_type: Optional[str] = None
+    lightrag_chunk_strategy: Optional[str] = None
+    lightrag_chunk_token_size: Optional[int] = None
+    lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_language: Optional[str] = None
+    lightrag_entity_extract_max_gleaning: Optional[int] = None
+    lightrag_max_source_ids_per_entity: Optional[int] = None
+    lightrag_max_source_ids_per_relation: Optional[int] = None
+    lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
 
 
 # Backward-compatible alias used by internal callers that haven't been updated yet
