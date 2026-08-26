@@ -429,6 +429,54 @@ class ResourceService:
             return {'filename': file.filename, 'error': str(e)}
 
     @staticmethod
+    def _progress_update_fields(n: int, total: int) -> dict:
+        """The row update for one live progress tick of a LightRAG-batch resource.
+
+        Flips to 'ready' the moment this resource's own pages all reach a
+        terminal LightRAG state (processed or failed — the same test the
+        end-of-batch finalization loop uses), instead of waiting for the
+        whole batch call to return. The sliding window already lets other
+        resources keep working while one is done; without this, the done one
+        just sits at "indexing" for however long the slowest one in the batch
+        takes, and depends on reaching that shared finalization step to ever
+        become 'ready' at all — a batch-wide crash orphans it regardless of
+        it having finished. Re-applying the same rule there afterwards is a
+        harmless no-op for a resource already 'ready'.
+        """
+        update = {'progress_done': n, 'progress_total': total}
+        if total and n >= total:
+            update['status'] = 'ready'
+        return update
+
+    @staticmethod
+    def _resolve_batch_resource_status(counts: dict, row_progress_done, row_progress_total,
+                                        parked_status: Optional[str]) -> Tuple[bool, str]:
+        """Decide one LightRAG-batch resource's final status. Returns (complete, status).
+
+        ``counts`` is the batch call's own return value for this resource — {}
+        when the call raised, even for a resource that had already finished:
+        the exception wipes the return value, not the DB row. ``row_progress_*``
+        is what ``_on_progress_multi`` wrote live as each page landed, so it
+        survives that exception intact and is what completeness falls back to.
+
+        A resource that reached 100% lands 'ready' regardless of whether the
+        batch call blew up elsewhere — the crash is not this resource's
+        failure. Only an incomplete resource is downgraded: to ``parked_status``
+        if the user asked to stop (paused/cancelled, so "resume indexing" can
+        finish it), otherwise 'error'.
+        """
+        total = counts.get('total') or row_progress_total or 0
+        done = counts.get('processed', row_progress_done or 0)
+        complete = bool(total) and done >= total
+        if complete:
+            status = 'ready'
+        elif parked_status:
+            status = parked_status
+        else:
+            status = 'error'
+        return complete, status
+
+    @staticmethod
     def _index_resources_background(
         resources: List[Resource], silo_id: int = 0, lock_conn=None,
         retry_failed: bool = False, resumed: bool = False,
@@ -638,12 +686,14 @@ class ResourceService:
                         def _on_progress_multi(rid, n, total):
                             # Same best-effort DB write as the non-batched
                             # _on_progress below, keyed by resource id instead
-                            # of a closed-over single resource.
+                            # of a closed-over single resource. See
+                            # _progress_update_fields for why this can also
+                            # finalize the resource, ahead of the batch's own
+                            # end-of-call loop below.
+                            update = ResourceService._progress_update_fields(n, total)
                             _db_p = _SessionLocal()
                             try:
-                                _db_p.query(ResourceModel).filter_by(resource_id=rid).update(
-                                    {'progress_done': n, 'progress_total': total}
-                                )
+                                _db_p.query(ResourceModel).filter_by(resource_id=rid).update(update)
                                 _db_p.commit()
                             except Exception:
                                 _db_p.rollback()
@@ -672,10 +722,12 @@ class ResourceService:
                                 feed=_feed_next,
                                 window=INGESTION_FEED_WINDOW,
                             ) or {}
-                            batch_failed = False
                         except Exception as e:
+                            # batch_result stays {} — the loop below then falls
+                            # back to each row's own live-updated progress to
+                            # decide completeness, since this exception wiped
+                            # out the call's per-resource return value.
                             logger.error(f"Failed to process enqueued batch for silo {silo_id}: {e}")
-                            batch_failed = True
 
                         # A stop leaves part of the batch unprocessed, so the
                         # per-resource counts decide the final status. Marking
@@ -691,28 +743,19 @@ class ResourceService:
                         for resource_id in enqueued_resource_ids:
                             resource_chunks = chunk_counts.get(resource_id, 1)
                             counts = batch_result.get(resource_id) or {}
-                            total = counts.get('total') or 0
-                            complete = bool(total) and counts.get('processed', 0) >= total
                             _db4 = _SessionLocal()
                             try:
                                 r = _db4.query(ResourceModel).filter_by(resource_id=resource_id).first()
+                                complete = False
                                 if r:
-                                    if batch_failed:
-                                        r.status = 'error'
-                                    elif parked_status and not complete:
-                                        # Interrupted by the user: park it so
-                                        # "resume indexing" can finish it.
-                                        r.status = parked_status
-                                    else:
-                                        # Complete, or individual pages failed on
-                                        # their own — LightRAG tolerates and logs
-                                        # those per-chunk, same as before.
-                                        r.status = 'ready'
+                                    complete, r.status = ResourceService._resolve_batch_resource_status(
+                                        counts, r.progress_done, r.progress_total, parked_status,
+                                    )
                                     r.progress_done = r.progress_total
                                     _db4.commit()
                             finally:
                                 _db4.close()
-                            if batch_failed:
+                            if not complete and not parked_status:
                                 failed += resource_chunks
                             cumulative += resource_chunks
                 else:
@@ -863,14 +906,30 @@ class ResourceService:
         repo = ResourceRepository.get_repository_by_id(db, repository_id)
         silo_id = repo.silo_id if repo and repo.silo_id else 0
         alive = bool(silo_id) and silo_indexing_lock.is_locked(db.connection(), silo_id)
+
+        # The background thread normally sweeps zero-progress 'cancelled' rows
+        # itself once the batch it belongs to winds down (see
+        # _discard_unindexed_after_cancel) — but that is reachability, not a
+        # guarantee: a crash or a container restart mid-run kills the thread
+        # before it gets there, and those rows would sit forever instead of
+        # disappearing. This read path doubles as the sweep with nothing live
+        # to interfere with; idempotent and cheap once there is nothing left
+        # to discard, so running it on every liveness check is fine.
+        if not alive:
+            ResourceService._discard_unindexed_after_cancel(repository_id)
+
         unfinished = (
             db.query(func.count(Resource.resource_id))
             .filter(
                 Resource.repository_id == repository_id,
-                # 'cancelled' is not listed because it does not survive a
-                # cancel: those resources are discarded (nothing of theirs was
-                # indexed), so there is nothing left to nudge about.
-                Resource.status.in_(('pending', 'error', 'indexing', 'paused')),
+                # A 'cancelled' row that still exists always carries real
+                # progress: _discard_unindexed_after_cancel removes the
+                # zero-progress ones as soon as cancel lands. Whatever is left
+                # is a file cancel meant to finish (it had already started) but
+                # didn't — a race in the pipeline, or the process dying mid-run
+                # (container restart, OOM). resume_indexing already accepts
+                # 'cancelled' for exactly this; the nudge just has to say so.
+                Resource.status.in_(('pending', 'error', 'indexing', 'paused', 'cancelled')),
             )
             .scalar()
         ) or 0
