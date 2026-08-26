@@ -41,6 +41,7 @@ interface Silo {
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
   lightrag_entity_types?: string;
+  lightrag_entity_types_mode?: 'infer' | 'manual';
   ai_services?: AIServiceOption[];
 }
 
@@ -73,6 +74,7 @@ interface SiloFormData {
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
   lightrag_entity_types?: string;
+  lightrag_entity_types_mode?: 'infer' | 'manual';
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -105,6 +107,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     lightrag_max_source_ids_per_entity: 1000,
     lightrag_max_source_ids_per_relation: 1000,
     lightrag_entity_types: '',
+    lightrag_entity_types_mode: 'infer',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,6 +171,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       lightrag_max_source_ids_per_entity: silo?.lightrag_max_source_ids_per_entity || 1000,
       lightrag_max_source_ids_per_relation: silo?.lightrag_max_source_ids_per_relation || 1000,
       lightrag_entity_types: silo?.lightrag_entity_types || '',
+      lightrag_entity_types_mode: silo?.lightrag_entity_types_mode || 'infer',
     }));
   }, [silo]);
 

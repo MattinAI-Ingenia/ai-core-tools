@@ -93,6 +93,7 @@ class RepositoryService:
         lightrag_max_source_ids_per_entity: Optional[int] = None,
         lightrag_max_source_ids_per_relation: Optional[int] = None,
         lightrag_entity_types: Optional[str] = None,
+        lightrag_entity_types_mode: Optional[str] = None,
     ) -> Repository:
         """
         Create a new repository with its associated silo
@@ -143,6 +144,7 @@ class RepositoryService:
             'lightrag_max_source_ids_per_entity': lightrag_max_source_ids_per_entity,
             'lightrag_max_source_ids_per_relation': lightrag_max_source_ids_per_relation,
             'lightrag_entity_types': lightrag_entity_types,
+            'lightrag_entity_types_mode': lightrag_entity_types_mode,
         }
         silo = silo_service.create_or_update_silo(silo_data, SiloType.REPO, db)
 
@@ -598,6 +600,7 @@ class RepositoryService:
             lightrag_max_source_ids_per_entity=repo_data.lightrag_max_source_ids_per_entity,
             lightrag_max_source_ids_per_relation=repo_data.lightrag_max_source_ids_per_relation,
             lightrag_entity_types=repo_data.lightrag_entity_types,
+            lightrag_entity_types_mode=repo_data.lightrag_entity_types_mode,
         )
 
     @staticmethod
