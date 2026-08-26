@@ -225,7 +225,12 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     // Fast completion: indexing finished before we received any progress data
     // (e.g. proxy buffered the SSE stream and delivered all events at once).
     if (isComplete) {
-      return (
+      return stopState?.mode === 'cancel' ? (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-3">
+          <StopCircle className="w-5 h-5 text-red-600" />
+          <p className="text-red-800 font-medium">Ingestion cancelled</p>
+        </div>
+      ) : (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-3">
           <CheckCircle className="w-5 h-5 text-green-600" />
           <p className="text-green-800 font-medium">Indexing complete</p>
@@ -253,6 +258,11 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     );
   }
 
+  // stopState is not reset after a successful request, so its mode still
+  // reads 'cancel' once isComplete flips — the backend's completion signal
+  // does not say why a run ended, only that it did.
+  const cancelled = stopState?.mode === 'cancel';
+
   const formatTime = (seconds: number | null) => {
     if (seconds === null || seconds === undefined) return '--:--:--';
     const total = Math.floor(seconds);
@@ -270,12 +280,14 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           {isComplete ? (
-            <CheckCircle className="w-5 h-5 text-green-600" />
+            cancelled
+              ? <StopCircle className="w-5 h-5 text-red-600" />
+              : <CheckCircle className="w-5 h-5 text-green-600" />
           ) : (
             <Loader className="w-5 h-5 text-blue-600 animate-spin" />
           )}
           <span className="font-medium text-gray-900">
-            {isComplete ? 'Ingestion Complete' : 'Ingesting Documents'}
+            {isComplete ? (cancelled ? 'Ingestion Cancelled' : 'Ingestion Complete') : 'Ingesting Documents'}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -289,7 +301,8 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       {/* Progress bar */}
       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
         <div
-          className={`h-full transition-all duration-300 ${isComplete ? 'bg-green-600' : 'bg-blue-600'
+          className={`h-full transition-all duration-300 ${
+            isComplete ? (cancelled ? 'bg-red-600' : 'bg-green-600') : 'bg-blue-600'
             }`}
           style={{ width: `${progress.progress_percent}%` }}
         />

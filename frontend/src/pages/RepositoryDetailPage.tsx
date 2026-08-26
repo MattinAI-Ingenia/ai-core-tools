@@ -269,6 +269,22 @@ const RepositoryDetailPage: React.FC = () => {
     };
   }, [repository, appId, repositoryId]);
 
+  // The SSE stream reports a run's end before the 3s poll notices, so onComplete
+  // would clear isIndexing while resumable was still 0 — and with both false the
+  // poll below stops, leaving nothing to ever fetch the new count. The Resume
+  // strip then stayed invisible until an F5. Ask the backend instead of assuming.
+  const refreshResumable = async () => {
+    try {
+      const status = await apiService.getIngestionStatus(
+        Number.parseInt(appId!),
+        Number.parseInt(repositoryId!),
+      );
+      setResumable(status.resumable ?? 0);
+    } catch {
+      // Nothing to recover: a run still alive keeps the poll below going.
+    }
+  };
+
   // Poll while a run is alive OR while something is resumable, so the badges and
   // the resume button stay current without an F5.  Liveness is the backend's
   // answer, not our reading of the row statuses.
@@ -1034,6 +1050,8 @@ const RepositoryDetailPage: React.FC = () => {
               setIngestionSessionId(null);
               setIsIndexing(false);
               loadRepository(false);
+              // Files a stop left behind only surface through this count.
+              refreshResumable();
             }}
             onStopped={(mode, stopped) => {
               // Neither mode ends the run instantly, and they differ in what
@@ -1145,7 +1163,7 @@ const RepositoryDetailPage: React.FC = () => {
                               <h3 className="font-medium text-gray-900 truncate min-w-0" title={resource.name}>
                                 {resource.name}
                               </h3>
-                              {resource.status === 'indexing' && (
+                              {resource.status === 'indexing' && indexingInProgress && (
                                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
                                   <Loader className="w-3 h-3 animate-spin shrink-0" />
                                   {resource.progress_total ? (
@@ -1170,10 +1188,17 @@ const RepositoryDetailPage: React.FC = () => {
                                   <CheckCircle className="w-3 h-3" /> Indexed
                                 </span>
                               )}
-                              {/* One badge for both: while a run is alive 'pending'
-                                  means queued, and outside one it means the same as
-                                  'paused' — Resume picks it up, and counts both. */}
-                              {(resource.status === 'pending' || resource.status === 'paused') && (
+                              {/* One badge for the four unfinished states. With a run
+                                  alive, 'pending' means queued; outside one, all four mean
+                                  the same thing — Resume picks them up and the backend
+                                  counts them together. 'indexing' with no run is a run that
+                                  died mid-file; 'cancelled' with leftover rows always carries
+                                  real progress (the zero-progress ones are discarded), so it
+                                  is resumable too — cancel promises to finish what started,
+                                  and a page a race or a restart left behind still needs to. */}
+                              {(resource.status === 'pending' || resource.status === 'paused'
+                                || resource.status === 'cancelled'
+                                || (resource.status === 'indexing' && !indexingInProgress)) && (
                                 indexingInProgress && resource.status === 'pending' ? (
                                   <span
                                     title="Waiting its turn in the running ingestion."
@@ -1183,7 +1208,7 @@ const RepositoryDetailPage: React.FC = () => {
                                   </span>
                                 ) : (
                                   <span
-                                    title={'Not indexed yet — "Resume indexing" picks this file up.'}
+                                    title={'Not fully indexed yet — "Resume indexing" picks this file up.'}
                                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
                                   >
                                     <PauseCircle className="w-3 h-3" /> Will resume
