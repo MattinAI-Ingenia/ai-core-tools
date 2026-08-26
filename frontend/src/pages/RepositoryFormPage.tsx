@@ -31,6 +31,7 @@ interface RepositoryFormData {
   lightrag_max_source_ids_per_entity?: number;
   lightrag_max_source_ids_per_relation?: number;
   lightrag_entity_types?: string;
+  lightrag_entity_types_mode?: 'infer' | 'manual';
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -268,6 +269,12 @@ const RepositoryFormPage: React.FC = () => {
       lightrag_max_source_ids_per_entity: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_max_source_ids_per_entity : undefined,
       lightrag_max_source_ids_per_relation: normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_max_source_ids_per_relation : undefined,
       lightrag_entity_types: normalizedVectorDbType === 'LIGHTRAG' ? sanitizeEntityTypesList(formData.lightrag_entity_types) : undefined,
+      // Was missing, and the silo therefore stayed on whatever mode it had:
+      // picking "Write them yourself" changed the radio but never reached the
+      // backend, so the silo kept mode='infer' and the "Define entity types"
+      // gate went on blocking every ingestion no matter what the user chose.
+      lightrag_entity_types_mode:
+        normalizedVectorDbType === 'LIGHTRAG' ? formData.lightrag_entity_types_mode : undefined,
     };
 
     setError(null);
