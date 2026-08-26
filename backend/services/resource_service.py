@@ -20,6 +20,10 @@ logger = get_logger(__name__)
 # throughput, it only makes a 'cancel' finish more documents before stopping.
 INGESTION_FEED_WINDOW = int(os.getenv('INGESTION_FEED_WINDOW', '3'))
 
+# Seconds a batch must run before its ETA is published. Below this the estimate
+# is dominated by pages LightRAG skips by dedup, so it is worse than no answer.
+ETA_WARMUP_SECONDS = 30
+
 def _is_transient_llm_failure(exc: BaseException) -> bool:
     """Whether *exc* means "the LLM endpoint is unreachable", not "this file is bad".
 
@@ -427,7 +431,7 @@ class ResourceService:
     @staticmethod
     def _index_resources_background(
         resources: List[Resource], silo_id: int = 0, lock_conn=None,
-        retry_failed: bool = False,
+        retry_failed: bool = False, resumed: bool = False,
     ) -> str:
         """Launch indexing in a background thread and return a session_id.
 
@@ -487,6 +491,14 @@ class ResourceService:
             # A stop requested for a previous run must not abort this one.
             if repository_id is not None:
                 ResourceService.clear_ingestion_stop(_stamp_db, repository_id)
+                # A fresh job starts the timer over; a resume carries on from
+                # what the paused runs already spent (see request_ingestion_stop).
+                if not resumed:
+                    from models.repository import Repository as _StampRepository
+                    _stamp_db.query(_StampRepository).filter(
+                        _StampRepository.repository_id == repository_id
+                    ).update({'ingestion_elapsed_seconds': 0}, synchronize_session=False)
+                    _stamp_db.commit()
         finally:
             _stamp_db.close()
 
@@ -910,6 +922,11 @@ class ResourceService:
         silo_id = repo.silo_id if repo and repo.silo_id else 0
         was_running = silo_indexing_lock.is_locked(db, silo_id) if silo_id else False
 
+        # Read before the write below: a second click on the same batch must not
+        # bank its time twice ('indexing' rows survive the first stop, so the
+        # active-batch lookup still finds them).
+        already_stopping = repo.ingestion_stop_mode is not None if repo else True
+
         # The signal itself — written whether or not there is anything left to
         # park, so a stop lands during the long batch too.
         db.query(Repository).filter(
@@ -926,6 +943,21 @@ class ResourceService:
             )
             .scalar()
         )
+        # Bank what this batch has spent so the resumed run's timer continues
+        # instead of restarting at zero. Only for 'pause': 'cancel' never
+        # resumes, and an upload resets the accumulator anyway. The seconds the
+        # in-flight files still take after this click are not counted — small,
+        # and the alternative is having the dying thread write it.
+        if mode == 'pause' and active_batch is not None and not already_stopping:
+            db.query(Repository).filter(
+                Repository.repository_id == repository_id
+            ).update(
+                {'ingestion_elapsed_seconds':
+                    Repository.ingestion_elapsed_seconds
+                    + int((datetime.now() - active_batch).total_seconds())},
+                synchronize_session=False,
+            )
+
         stopped = 0
         if active_batch is not None:
             stopped = (
@@ -1118,7 +1150,7 @@ class ResourceService:
             repository_id, len(pending),
         )
         session_id = ResourceService._index_resources_background(
-            pending, silo_id, lock_conn=lock_conn, retry_failed=True,
+            pending, silo_id, lock_conn=lock_conn, retry_failed=True, resumed=True,
         )
         return session_id, len(pending)
 
@@ -1172,12 +1204,28 @@ class ResourceService:
             .scalar()
         )
 
-        elapsed = (datetime.now() - active_batch).total_seconds()
+        from models.repository import Repository
+
+        # Runs before a pause are in the accumulator; this batch's own time is
+        # live. Together they read as one continuous clock across a resume.
+        banked = (
+            db.query(Repository.ingestion_elapsed_seconds)
+            .filter(Repository.repository_id == repository_id)
+            .scalar()
+        ) or 0
+        batch_elapsed = (datetime.now() - active_batch).total_seconds()
+        elapsed = banked + batch_elapsed
         percent = min(100.0, done * 100 / total) if total else 0.0
-        # Linear extrapolation from the batch start — same formula the in-memory
-        # tracker used.  Optimistic early on: the first pages run before entity
-        # merging piles up.
-        remaining = (total - done) * elapsed / done if done else None
+        # Extrapolate over THIS batch only — `elapsed` carries banked minutes of
+        # runs whose pages are not in `done`, and would inflate the estimate by
+        # however long the ingestion sat paused. Withheld for the first seconds
+        # because a resumed batch's `done` climbs almost free at the start
+        # (LightRAG skips what a previous run indexed), reading absurdly low.
+        remaining = (
+            (total - done) * batch_elapsed / done
+            if done and batch_elapsed >= ETA_WARMUP_SECONDS
+            else None
+        )
 
         return {
             'session_id': active_batch.isoformat(),

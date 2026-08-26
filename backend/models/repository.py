@@ -26,6 +26,14 @@ class Repository(Base):
     # See ResourceService.request_ingestion_stop.
     ingestion_stop_mode = Column(String(10), nullable=True)
 
+    # Wall-clock seconds of the ingestion runs that came before the current
+    # batch, so the progress bar's timer survives a pause instead of restarting
+    # at 00:00:00. Only completed stretches land here: the live batch's own time
+    # is (now - progress_started_at), added on read. Reset when a fresh upload
+    # starts a new job, kept across pause -> resume.
+    # See ResourceService.request_ingestion_stop / get_indexing_progress.
+    ingestion_elapsed_seconds = Column(Integer, nullable=False, server_default='0')
+
     # AI service configuration (centralized for all media in this repository)
     transcription_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)
     video_ai_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)

@@ -5,6 +5,9 @@ mode parks resources in, what counts as a stop signal, refusing a bad mode),
 not SQLAlchemy itself.
 """
 
+from datetime import datetime
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -161,3 +164,42 @@ class TestCancelDiscardsUnindexed:
              patch.object(ResourceService, "_discard_unindexed_after_cancel") as discard:
             ResourceService.request_ingestion_stop(db, 1, mode="pause")
         discard.assert_not_called()
+
+
+class TestPauseBanksElapsedTime:
+    """Pause has to bank the batch's wall time, or the resumed run's progress
+    bar restarts at 00:00:00 (the clock is now() - progress_started_at, and
+    resuming stamps a new batch)."""
+
+    @staticmethod
+    def _db_and_repo(prior_stop_mode):
+        db = _db_with_active_batch(batch=datetime(2026, 8, 26, 9, 0, 0))
+        repo = SimpleNamespace(silo_id=7, ingestion_stop_mode=prior_stop_mode)
+        return db, repo
+
+    @staticmethod
+    def _banked_updates(db):
+        return [
+            c.args[0] for c in db.query.return_value.filter.return_value.update.call_args_list
+            if isinstance(c.args[0], dict) and 'ingestion_elapsed_seconds' in c.args[0]
+        ]
+
+    def _run(self, mode, prior_stop_mode):
+        db, repo = self._db_and_repo(prior_stop_mode)
+        with patch("services.resource_service.ResourceRepository.get_repository_by_id",
+                   return_value=repo), \
+             patch("services.silo_indexing_lock.is_locked", return_value=True):
+            ResourceService.request_ingestion_stop(db, repository_id=1, mode=mode)
+        return self._banked_updates(db)
+
+    def test_pause_banks_the_batch_time(self):
+        assert len(self._run("pause", prior_stop_mode=None)) == 1
+
+    def test_cancel_does_not_bank(self):
+        """Cancel never resumes, so there is no clock to carry over."""
+        assert self._run("cancel", prior_stop_mode=None) == []
+
+    def test_second_pause_does_not_bank_twice(self):
+        """'indexing' rows outlive the first stop, so the active-batch lookup
+        still succeeds on a second click — it must not double-count."""
+        assert self._run("pause", prior_stop_mode="pause") == []

@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import { AlertCircle, CheckCircle, Loader, PauseCircle, StopCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle, Loader, PauseCircle, RefreshCw, StopCircle } from 'lucide-react';
 import { useIngestionProgress } from '../../hooks/useIngestionProgress';
 import ConfirmationModal from './ConfirmationModal';
 import { apiService } from '../../services/api';
@@ -22,6 +22,10 @@ interface IngestionProgressBarProps {
   onComplete?: () => void;
   /** Called after the backend accepted a pause/cancel, so the parent can notify. */
   onStopped?: (mode: 'pause' | 'cancel', stoppedCount: number) => void;
+  /** Files a stopped run left unindexed. Drives the idle "Resume" state. */
+  resumable?: number;
+  onResume?: () => void;
+  resuming?: boolean;
 }
 
 export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
@@ -30,6 +34,9 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   sessionId,
   onComplete,
   onStopped,
+  resumable = 0,
+  onResume,
+  resuming = false,
 }) => {
   const { progress, isConnected, isComplete, error } = useIngestionProgress(
     appId,
@@ -110,7 +117,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
         type="button"
         onClick={() => requestStop('pause')}
         disabled={busy('pause')}
-        title="Pause indexing. Keeps what is already indexed and stays resumable."
+        title="Pause indexing right away. A file caught mid-way is finished later by Resume."
         className={`${stopBtn} ${failed('pause')
           ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100'
           : 'text-amber-700 border-amber-300 bg-white hover:bg-amber-50'}`}
@@ -165,6 +172,9 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     if (lastEstimateUpdateRef.current === 0 || now - lastEstimateUpdateRef.current >= 5000) {
       lastEstimateUpdateRef.current = now;
       setThrottledEstimates({
+        // null until the batch is old enough to extrapolate from. The backend
+        // gates it: only it separates this batch's time from the total carried
+        // across a pause. Do not re-gate on elapsed_seconds here.
         remaining: progress.estimated_remaining_seconds,
         total: progress.estimated_total_time_seconds,
       });
@@ -172,7 +182,27 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   }, [progress]);
 
   if (!sessionId) {
-    return null;
+    if (!resumable || !onResume) return null;
+    return (
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-center gap-3">
+        <PauseCircle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+        <p className="text-amber-800 font-medium flex-1">
+          Indexing stopped &mdash; {resumable} file(s) still unindexed.
+        </p>
+        <button
+          type="button"
+          onClick={onResume}
+          disabled={resuming}
+          title="Pick up an ingestion that was interrupted. Pages already indexed are skipped."
+          className={`${stopBtn} text-amber-700 border-amber-300 bg-white hover:bg-amber-50`}
+        >
+          {resuming
+            ? <Loader className="w-4 h-4 animate-spin" />
+            : <RefreshCw className="w-4 h-4" />}
+          {resuming ? 'Resuming…' : `Resume indexing (${resumable})`}
+        </button>
+      </div>
+    );
   }
 
   // Error with no data yet — show a dedicated error state

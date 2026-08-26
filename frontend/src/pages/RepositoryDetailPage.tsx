@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader, RefreshCw } from 'lucide-react';
+import { ArrowLeft, CheckCircle, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader, PauseCircle, RefreshCw } from 'lucide-react';
 import { apiService } from '../services/api';
 import Modal from '../components/ui/Modal';
 import FolderTree from '../components/FolderTree';
@@ -939,20 +939,6 @@ const RepositoryDetailPage: React.FC = () => {
                 {indexingInProgress ? 'Indexing…' : 'Upload Files'}
               </button>
 
-              {resumable > 0 && !indexingInProgress && (
-                <button
-                  onClick={handleResumeIngestion}
-                  disabled={resuming}
-                  title="Pick up an ingestion that was interrupted. Pages already indexed are skipped."
-                  className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
-                >
-                  {resuming
-                    ? <Loader className="w-4 h-4 animate-spin" />
-                    : <RefreshCw className="w-4 h-4" />}
-                  Resume indexing ({resumable})
-                </button>
-              )}
-
               <button
                 onClick={() => {
                   setShowMediaUploadModal(true);
@@ -1032,13 +1018,18 @@ const RepositoryDetailPage: React.FC = () => {
         />
       )}
 
-      {/* Ingestion Progress Bar — shown while background indexing is running */}
-      {ingestionSessionId && (
+      {/* Ingestion strip — the running progress bar, or the Resume control when
+          a stopped run left files behind. Both live here so the ingestion
+          controls are never split across the page. */}
+      {(ingestionSessionId || resumable > 0) && (
         <div className="mb-6">
           <IngestionProgressBar
             appId={Number.parseInt(appId!)}
             repositoryId={Number.parseInt(repositoryId!)}
             sessionId={ingestionSessionId}
+            resumable={resumable}
+            resuming={resuming}
+            onResume={handleResumeIngestion}
             onComplete={() => {
               setIngestionSessionId(null);
               setIsIndexing(false);
@@ -1051,7 +1042,7 @@ const RepositoryDetailPage: React.FC = () => {
               setReindexNotice({
                 type: 'info',
                 text: mode === 'pause'
-                  ? `Pausing the ingestion — the file being indexed will finish first.${skipped} Use "Resume indexing" to continue.`
+                  ? `Pausing the ingestion now.${skipped} Pages left half-done are picked up again by "Resume indexing".`
                   : `Cancelling the ingestion — the file being indexed will finish first.${skipped} Nothing already indexed was deleted.`,
               });
             }}
@@ -1176,6 +1167,17 @@ const RepositoryDetailPage: React.FC = () => {
                               {resource.status === 'ready' && (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
                                   <CheckCircle className="w-3 h-3" /> Indexed
+                                </span>
+                              )}
+                              {(resource.status === 'paused' || resource.status === 'pending') && (
+                                <span
+                                  title={indexingInProgress
+                                    ? 'Waiting its turn in the running ingestion.'
+                                    : 'Not indexed yet — "Resume indexing" picks this file up.'}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
+                                >
+                                  <PauseCircle className="w-3 h-3" />
+                                  {indexingInProgress ? 'Queued' : 'Will resume'}
                                 </span>
                               )}
                               {resource.status === 'error' && (
