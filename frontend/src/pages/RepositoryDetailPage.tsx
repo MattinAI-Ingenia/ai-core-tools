@@ -1036,14 +1036,20 @@ const RepositoryDetailPage: React.FC = () => {
               loadRepository(false);
             }}
             onStopped={(mode, stopped) => {
-              // The run does not end instantly (the file in flight is left to
-              // finish), so the progress bar stays until it really stops.
-              const skipped = stopped > 0 ? ` ${stopped} pending file(s) skipped.` : '';
+              // Neither mode ends the run instantly, and they differ in what
+              // survives: pause drops the pages in flight (LightRAG aborts them
+              // at their next checkpoint) and keeps the untouched files, while
+              // cancel does the opposite. Only cancel states a count — removal
+              // is the surprise; for pause the strip and the Resume button
+              // already say how many files are left.
+              const removed = stopped > 0
+                ? ` ${stopped} file(s) not started were removed from the repository.` : '';
               setReindexNotice({
                 type: 'info',
                 text: mode === 'pause'
-                  ? `Pausing the ingestion now.${skipped} Pages left half-done are picked up again by "Resume indexing".`
-                  : `Cancelling the ingestion — the file being indexed will finish first.${skipped} Nothing already indexed was deleted.`,
+                  ? 'Pausing. Pages already in progress are dropped rather than finished.'
+                  : `Cancelling — files already being indexed will finish.${removed}`
+                    + ' Nothing already indexed was deleted.',
               });
             }}
           />
@@ -1139,11 +1145,6 @@ const RepositoryDetailPage: React.FC = () => {
                               <h3 className="font-medium text-gray-900 truncate min-w-0" title={resource.name}>
                                 {resource.name}
                               </h3>
-                              {resource.status === 'pending' && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700">
-                                  Pending
-                                </span>
-                              )}
                               {resource.status === 'indexing' && (
                                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
                                   <Loader className="w-3 h-3 animate-spin shrink-0" />
@@ -1169,16 +1170,25 @@ const RepositoryDetailPage: React.FC = () => {
                                   <CheckCircle className="w-3 h-3" /> Indexed
                                 </span>
                               )}
-                              {(resource.status === 'paused' || resource.status === 'pending') && (
-                                <span
-                                  title={indexingInProgress
-                                    ? 'Waiting its turn in the running ingestion.'
-                                    : 'Not indexed yet — "Resume indexing" picks this file up.'}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
-                                >
-                                  <PauseCircle className="w-3 h-3" />
-                                  {indexingInProgress ? 'Queued' : 'Will resume'}
-                                </span>
+                              {/* One badge for both: while a run is alive 'pending'
+                                  means queued, and outside one it means the same as
+                                  'paused' — Resume picks it up, and counts both. */}
+                              {(resource.status === 'pending' || resource.status === 'paused') && (
+                                indexingInProgress && resource.status === 'pending' ? (
+                                  <span
+                                    title="Waiting its turn in the running ingestion."
+                                    className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700"
+                                  >
+                                    Queued
+                                  </span>
+                                ) : (
+                                  <span
+                                    title={'Not indexed yet — "Resume indexing" picks this file up.'}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
+                                  >
+                                    <PauseCircle className="w-3 h-3" /> Will resume
+                                  </span>
+                                )
                               )}
                               {resource.status === 'error' && (
                                 <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
