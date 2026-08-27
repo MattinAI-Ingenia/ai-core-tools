@@ -244,6 +244,41 @@ es a nivel de silo: `delete_collection` (`lightrag_store.py`) limpia Neo4j,
 Qdrant y PostgreSQL directamente (helpers `_cleanup_neo4j/_cleanup_qdrant/
 _cleanup_postgres`, `lightrag_store.py`).
 
+### 5.1 Rodaje del feeder (ventana deslizante)
+
+`INGESTION_FEED_WINDOW` (`resource_service.py`, `_feed`) mantiene N
+**recursos** en vuelo a la vez, no N páginas. Un recurso no libera su hueco
+hasta estar **terminado entero** — aunque tenga 90 páginas y
+`MAX_PARALLEL_INSERT` tenga huecos libres de sobra. Con window pequeño y los
+primeros recursos grandes, el siguiente recurso puede tardar minutos en entrar
+aunque haya cientos de páginas listas para procesarse en paralelo.
+
+Observado en producción (silo Domusa, 2026-08-27, `MAX_PARALLEL_INSERT=48`,
+`window=3`): los 3 primeros recursos (91+19+44=154 páginas) tardaron **15
+minutos** en liberar hueco para el 4º. El ritmo de indexado real (chunks
+completados por segundo) también se observó acelerando con el tiempo — 4.66 →
+1.84 → 1.42 s/chunk en ventanas sucesivas de la misma tanda — consistente con
+un rodaje de concurrencia al principio del lote, no con que el trabajo se
+volviera más ligero.
+
+**Ojo con el razonamiento previo sobre este valor**: el comentario original en
+`.env`/`.env.example` asumía que "3 ficheros de tamaño medio ya producen más
+páginas en vuelo que huecos en `MAX_PARALLEL_INSERT`, así que subir la ventana
+no da más rendimiento". Con 154 páginas para un tope de 48, esa condición se
+cumplía numéricamente — y aun así hubo 15 minutos de espera. Eso apunta a que
+el cuello de botella real no es la disponibilidad de páginas, sino algo más
+fino en el ritmo de despacho/extracción al arrancar (posiblemente el trabajo
+de extracción de texto por página, que corre en un thread pool y es más
+secuencial que las llamadas LLM). **No verificado a fondo** — perfilar el
+arranque (cuánto tarda cada etapa: extracción, chunking, primera llamada LLM)
+sería el siguiente paso si se quiere una respuesta firme.
+
+`INGESTION_FEED_WINDOW` se subió de 3 a 8 el 2026-08-27 como experimento, sin
+certeza de que resuelva el rodaje — si acorta la fase lenta inicial en la
+siguiente indexación, mantenerlo; si no, la causa está en otro sitio y subir
+la ventana no es la palanca correcta. Tratar este valor como algo a ajustar
+por despliegue, no como una constante ya cerrada.
+
 ---
 
 ## 6. Extracción de entidades
