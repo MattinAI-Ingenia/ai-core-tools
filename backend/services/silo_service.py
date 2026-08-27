@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import config
 import functools
 import math
@@ -118,6 +118,77 @@ def model_supports_vision(model_name: str) -> bool:
     """True only when the model is known to handle image inputs."""
     specs = _lookup_model_specs(model_name)
     return bool(specs and specs[2])
+
+
+# Self-hosted baseline (tokens/sec), calibrated against this deployment's own
+# runs of a ~30B self-hosted model — see estimate_indexing_cost's docstring
+# history. Everything below scales *from* this pair, so it stays the anchor
+# even as the multipliers next to it change.
+_LLM_THROUGHPUT_BASE = (180.0, 70.0)  # (optimistic, pessimistic) tok/s
+_EMBEDDING_THROUGHPUT_BASE = (1200.0, 350.0)
+
+# A self-hosted model name commonly encodes its size directly ("Qwen3-30B",
+# "Llama-3-70B-Instruct") where the curated _MODEL_SPECS table above only
+# knows commercial model IDs — this is the fallback for that case.
+_PARAM_COUNT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*B(?:illion)?', re.IGNORECASE)
+
+# Below this, a self-hosted model is "small" for throughput purposes — needs
+# less compute per generated token on the same hardware, so it decodes
+# faster. Unrelated to _ROLE_MIN_SPECS above, which is about whether a model
+# is *capable enough* for a role, not how fast it runs.
+_SMALL_MODEL_PARAMS_B = 12
+
+
+def _model_params_b(model_name: str) -> Optional[float]:
+    """Parameter count in billions, from the curated table or the model's
+    own name, or ``None`` when neither yields one."""
+    specs = _lookup_model_specs(model_name)
+    if specs and specs[1]:
+        return specs[1]
+    match = _PARAM_COUNT_RE.search(model_name or '')
+    return float(match.group(1)) if match else None
+
+
+def _llm_throughput_bounds(model_name: str, self_hosted: bool) -> Tuple[float, float]:
+    """(optimistic, pessimistic) tokens/sec for the indexing time estimate.
+
+    Two adjustments on top of the self-hosted baseline, both rough,
+    order-of-magnitude corrections — not measurements, since this deployment
+    has no real run to calibrate against for most of these combinations
+    (get_indexing_progress's own live ETA takes over with real numbers the
+    moment a run actually starts; this only has to be reasonable for the
+    pre-upload estimate):
+
+    - Cloud API: a managed cluster is not bottlenecked by one local GPU and
+      typically sustains much higher aggregate throughput at this
+      deployment's concurrency levels. 3x the self-hosted baseline.
+    - Self-hosted, small model (< 12B params): decoding speed scales
+      roughly inversely with parameter count on the same hardware, so a
+      small model needs less compute per token than the ~30B baseline this
+      was tuned against. 2x the self-hosted baseline.
+
+    A self-hosted model at or above the baseline's own size gets no
+    adjustment — it is what the baseline already measured.
+    """
+    opt, pess = _LLM_THROUGHPUT_BASE
+    if not self_hosted:
+        return opt * 3, pess * 3
+    params_b = _model_params_b(model_name)
+    if params_b is not None and params_b < _SMALL_MODEL_PARAMS_B:
+        return opt * 2, pess * 2
+    return opt, pess
+
+
+def _embedding_throughput_bounds(self_hosted: bool) -> Tuple[float, float]:
+    """(optimistic, pessimistic) tokens/sec for embedding calls.
+
+    Same cloud-vs-self-hosted reasoning as _llm_throughput_bounds, without
+    the model-size adjustment: embedding models are small enough across the
+    board (self-hosted or not) that size is not the dominant factor the way
+    it is for an LLM extraction call.
+    """
+    opt, pess = _EMBEDDING_THROUGHPUT_BASE
+    return (opt, pess) if self_hosted else (opt * 3, pess * 3)
 
 
 def _validate_model_for_role(role: str, model_name: str) -> Optional[str]:
@@ -2868,8 +2939,21 @@ class SiloService:
         # Account for worker concurrency. When we already have successful
         # indexing runs for this silo, prefer an empirical throughput derived
         # from real durations over static heuristics.
-        llm_workers = getattr(silo, 'llm_model_max_sync', 4) or 4
-        embedding_workers = getattr(silo, 'embedding_model_max_sync', 8) or 8
+        #
+        # Read from the real env vars LightRAG's own pipeline reads at RAG
+        # construction time (see lightrag_store.py) — not a silo field.
+        # llm_model_max_sync/embedding_model_max_sync never existed on Silo
+        # (models/silo.py has no such column), so this getattr always
+        # silently returned its default: the estimate was permanently deaf to
+        # MAX_ASYNC_LLM/MAX_PARALLEL_INSERT, no matter how those were tuned.
+        # A chunk's LLM extraction call also cannot start until it has a
+        # feeder slot, so the real ceiling on concurrent LLM calls is
+        # whichever of the two is smaller.
+        llm_workers = min(
+            int(os.getenv('MAX_ASYNC_LLM', 4) or 4),
+            int(os.getenv('MAX_PARALLEL_INSERT', 3) or 3),
+        )
+        embedding_workers = int(os.getenv('EMBEDDING_FUNC_MAX_ASYNC', 8) or 8)
         overhead_factor = 1.1
 
         successful_metrics = (
@@ -2891,12 +2975,17 @@ class SiloService:
         # (existing successful runs) no longer pays.
         fixed_overhead_s = 8 if successful_metrics else 30
 
-        # Default envelope tuned from observed local runs; historical metrics
-        # below can further refine the estimate for an already-used silo.
-        llm_throughput_opt = 180.0
-        llm_throughput_pess = 70.0
-        embedding_throughput_opt = 1200.0
-        embedding_throughput_pess = 350.0
+        # Scaled from the self-hosted baseline by provider (cloud vs
+        # self-hosted) and, for a self-hosted LLM, its size — see
+        # _llm_throughput_bounds. Historical metrics below can further refine
+        # the estimate for an already-used silo, overriding this envelope
+        # with this silo's own real throughput once it has any.
+        llm_throughput_opt, llm_throughput_pess = _llm_throughput_bounds(
+            model_name, llm_self_hosted,
+        )
+        embedding_throughput_opt, embedding_throughput_pess = _embedding_throughput_bounds(
+            emb_self_hosted,
+        )
 
         # Phase 1 — extraction (1 call/chunk + gleaning passes, parallelised across chunks)
         llm_tokens_per_chunk = (avg_chunk_tokens + _prompt_overhead_tokens) * (1 + max_gleaning)

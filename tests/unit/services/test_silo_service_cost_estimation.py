@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from services.silo_service import SiloService
+from services.silo_service import SiloService, _llm_throughput_bounds, _model_params_b
 
 
 # ---------------------------------------------------------------------------
@@ -30,8 +30,6 @@ def _make_lightrag_silo(chunk_size=1200, model_name="gpt-4o"):
     silo.lightrag_chunk_token_size = chunk_size
     silo.lightrag_chunk_overlap_token_size = 0
     silo.lightrag_chunk_strategy = None
-    silo.llm_model_max_sync = 4
-    silo.embedding_model_max_sync = 8
     # Legacy indexing service — used as fallback for extract_service.
     silo.indexing_service = MagicMock()
     silo.indexing_service.description = None
@@ -350,3 +348,114 @@ def test_unpriced_cloud_model_stays_unavailable(monkeypatch):
 
     assert result["estimated_cost_min"] is None
     assert any("No pricing found" in w for w in result["warnings"]), result["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# Time estimate reacts to real concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestTimeEstimateFollowsConcurrencyEnvVars:
+    """llm_workers/embedding_workers used to read Silo.llm_model_max_sync /
+    Silo.embedding_model_max_sync — columns that never existed on the model,
+    so getattr's default silently won every time in production. In these
+    tests the silo is a MagicMock, which auto-creates any attribute you
+    haven't explicitly blanked, so the same code accidentally read a real
+    number here and the bug never showed up in this suite. Raising
+    MAX_ASYNC_LLM/MAX_PARALLEL_INSERT made indexing genuinely faster while the
+    estimate stayed exactly the same, no matter what was set."""
+
+    @staticmethod
+    def _estimate(env):
+        silo = _make_lightrag_silo(chunk_size=1200)
+        db = MagicMock()
+        documents = [{"content": "x" * 48000}]  # enough chunks for workers to matter
+        with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo), \
+             patch.dict("os.environ", env, clear=False):
+            return SiloService.estimate_indexing_cost(1, documents, db)
+
+    def test_more_concurrent_llm_calls_lowers_the_estimate(self):
+        slow = self._estimate({"MAX_ASYNC_LLM": "2", "MAX_PARALLEL_INSERT": "2"})
+        fast = self._estimate({"MAX_ASYNC_LLM": "20", "MAX_PARALLEL_INSERT": "20"})
+
+        assert fast["estimated_indexing_time_max"] < slow["estimated_indexing_time_max"]
+        assert fast["estimated_indexing_time_min"] < slow["estimated_indexing_time_min"]
+
+    def test_llm_concurrency_is_capped_by_the_smaller_of_the_two_knobs(self):
+        """A chunk's LLM call cannot start before it has a feeder slot —
+        MAX_PARALLEL_INSERT=2 caps real throughput even if MAX_ASYNC_LLM=20."""
+        bottlenecked = self._estimate({"MAX_ASYNC_LLM": "20", "MAX_PARALLEL_INSERT": "2"})
+        both_low = self._estimate({"MAX_ASYNC_LLM": "2", "MAX_PARALLEL_INSERT": "2"})
+
+        assert bottlenecked["estimated_indexing_time_max"] == both_low["estimated_indexing_time_max"]
+
+    def test_more_embedding_concurrency_lowers_the_estimate(self):
+        slow = self._estimate({"EMBEDDING_FUNC_MAX_ASYNC": "1"})
+        fast = self._estimate({"EMBEDDING_FUNC_MAX_ASYNC": "32"})
+
+        assert fast["estimated_indexing_time_max"] <= slow["estimated_indexing_time_max"]
+
+
+# ---------------------------------------------------------------------------
+# Time estimate follows model size and hosting (cloud API vs self-hosted)
+# ---------------------------------------------------------------------------
+
+
+class TestModelParamsB:
+    def test_reads_the_curated_table_for_a_known_commercial_model(self):
+        # Not gpt-4o-mini: _lookup_model_specs' substring matching hits the
+        # shorter "gpt-4o" entry first for that name (pre-existing, unrelated
+        # to this change) — pick a name with no such collision.
+        assert _model_params_b("mistral-small") == 10
+
+    def test_falls_back_to_the_size_in_a_self_hosted_models_own_name(self):
+        assert _model_params_b("Qwen3-30B-A3B-Instruct") == 30
+        assert _model_params_b("Qwen3-4B-Instruct") == 4
+
+    def test_unknown_name_with_no_size_hint_yields_none(self):
+        assert _model_params_b("my-custom-finetune") is None
+
+
+class TestLlmThroughputBounds:
+    def test_cloud_api_is_faster_than_the_self_hosted_baseline(self):
+        cloud = _llm_throughput_bounds("gpt-4o", self_hosted=False)
+        self_hosted_big = _llm_throughput_bounds("Qwen3-30B-Instruct", self_hosted=True)
+        assert cloud[0] > self_hosted_big[0]
+        assert cloud[1] > self_hosted_big[1]
+
+    def test_a_small_self_hosted_model_is_faster_than_a_big_one(self):
+        small = _llm_throughput_bounds("Qwen3-4B-Instruct", self_hosted=True)
+        big = _llm_throughput_bounds("Qwen3-30B-Instruct", self_hosted=True)
+        assert small[0] > big[0]
+        assert small[1] > big[1]
+
+    def test_self_hosted_with_no_size_hint_keeps_the_calibrated_baseline(self):
+        """Unknown size must not guess "small" and overpromise — the baseline
+        was measured against this deployment's own ~30B model."""
+        assert _llm_throughput_bounds("my-custom-finetune", self_hosted=True) == (180.0, 70.0)
+
+
+class TestTimeEstimateEndToEnd:
+    """Through estimate_indexing_cost, not just the bounds helper — confirms
+    the wiring (model_name/llm_self_hosted actually reach it) and not only
+    the formula in isolation."""
+
+    @staticmethod
+    def _estimate(model_name, provider):
+        silo = _make_lightrag_silo(chunk_size=1200, model_name=model_name)
+        silo.indexing_service.provider = provider
+        silo.embedding_service.provider = provider
+        db = MagicMock()
+        documents = [{"content": "x" * 48000}]
+        with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+            return SiloService.estimate_indexing_cost(1, documents, db)
+
+    def test_cloud_model_estimates_faster_than_self_hosted(self):
+        cloud = self._estimate("gpt-4o", "OpenAI")
+        self_hosted = self._estimate("Qwen3-30B-A3B-Instruct", "Custom")
+        assert cloud["estimated_indexing_time_max"] < self_hosted["estimated_indexing_time_max"]
+
+    def test_small_self_hosted_model_estimates_faster_than_a_big_one(self):
+        small = self._estimate("Qwen3-4B-Instruct", "Custom")
+        big = self._estimate("Qwen3-30B-A3B-Instruct", "Custom")
+        assert small["estimated_indexing_time_max"] < big["estimated_indexing_time_max"]
