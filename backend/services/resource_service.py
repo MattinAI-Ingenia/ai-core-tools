@@ -747,12 +747,18 @@ class ResourceService:
                                 feed=_feed_next,
                                 window=INGESTION_FEED_WINDOW,
                             ) or {}
-                        except Exception as e:
+                        except Exception:
                             # batch_result stays {} — the loop below then falls
                             # back to each row's own live-updated progress to
                             # decide completeness, since this exception wiped
                             # out the call's per-resource return value.
-                            logger.error(f"Failed to process enqueued batch for silo {silo_id}: {e}")
+                            #
+                            # .exception(), not .error(f"...: {e}") — a bare
+                            # str(e) on a generic "Connection error." (seen
+                            # live from a resume) says nothing about which
+                            # service or call raised it. The full traceback is
+                            # what actually pins the cause next time.
+                            logger.exception(f"Failed to process enqueued batch for silo {silo_id}")
 
                         # A stop leaves part of the batch unprocessed, so the
                         # per-resource counts decide the final status. Marking

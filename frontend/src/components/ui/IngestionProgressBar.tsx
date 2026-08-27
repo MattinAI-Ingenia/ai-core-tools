@@ -64,6 +64,17 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     { mode: 'pause' | 'cancel'; phase: 'stopping' | 'failed' } | null
   >(null);
 
+  // React does not remount this component just because sessionId changes
+  // (no key forces it), so stopState survives a Pause -> Resume into the new
+  // session's render. Left alone, the Pause button stayed stuck on
+  // "Pausing…" and disabled over an active, healthy new session — the same
+  // stale-state-across-a-session bug as useIngestionProgress's isComplete,
+  // one layer up (this component owns the stop buttons; the hook owns the
+  // completion banner).
+  React.useEffect(() => {
+    setStopState(null);
+  }, [sessionId]);
+
   // Cancel removes files: it needs the consequence spelled out before it runs.
   // Pause is reversible, so it stays a single click.
   const [confirmCancel, setConfirmCancel] = React.useState(false);

@@ -50,6 +50,16 @@ export function useIngestionProgress(
       return;
     }
 
+    // isComplete/progress/error are set-once state with no "reset" event from
+    // the server — the 'complete' event fires once per session and nothing
+    // ever un-fires it. Without this, a paused-then-resumed run kept showing
+    // the old session's "Ingestion Complete" banner over the new session's
+    // real, active progress: the effect below opens a fresh EventSource for
+    // the new sessionId, but isComplete stayed true from the session before.
+    setIsComplete(false);
+    setProgress(null);
+    setError(null);
+
     const baseUrl = configService.getApiBaseUrl();
     const url = `${baseUrl}/internal/apps/${appId}/repositories/${repositoryId}/ingestion-progress/${sessionId}`;
 

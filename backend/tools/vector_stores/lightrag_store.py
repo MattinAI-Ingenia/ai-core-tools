@@ -66,6 +66,20 @@ logging.getLogger("lightrag").addFilter(_DropUnconfiguredRoleLog())
 # outlast that; failing loudly afterwards beats feeding nothing in silence.
 FEED_ENQUEUE_MAX_WAIT_S = 300
 
+# How long a SINGLE enqueue call may take before it is treated as hung.
+# _aenqueue does no LLM work (just a doc_status/storage write, normally
+# sub-second), so this is far below the LLM worker timeouts (120s/240s,
+# logged at RAG init) on purpose — those bound genuine generation time, this
+# bounds a call that should never be slow. Found live: a stale pooled
+# connection (CLOSE_WAIT to Qdrant/the LLM host, left behind by an earlier
+# transient disconnect) can wedge this call forever with no exception raised,
+# which wedges the feeder — a single sequential loop — with it. Nothing else
+# in the batch notices: already-fed resources keep finishing on their own
+# connections while every resource still waiting simply never gets fed,
+# completely silently. Nearly an hour of a real run's silence traced back to
+# exactly this before this timeout existed.
+FEED_ENQUEUE_CALL_TIMEOUT_S = 60
+
 # Valid LightRAG query modes — used for pass-through validation.
 _LIGHTRAG_MODES = frozenset({"local", "global", "hybrid", "naive", "mix", "bypass"})
 
@@ -463,7 +477,49 @@ async def _aprocess_enqueued_with_progress(
     id_to_resource = {
         doc_id: rid for rid, ids in doc_ids_by_resource.items() for doc_id in ids
     }
+    # doc_id -> file_path, only populated for docs added through _enqueue_next
+    # (the only path that has file_paths available) — see _counts' dedup check.
+    id_to_file_path: Dict[str, str] = {}
     totals = {rid: len(ids) for rid, ids in doc_ids_by_resource.items()}
+
+    async def _dedup_processed_file_paths(file_paths) -> set:
+        """file_path -> already indexed under another doc_id, content-hash-deduped.
+
+        A page LightRAG rejects as "Identical content already exists under
+        another filename" (e.g. a shared boilerplate/legal page reused across
+        several manuals) never gets its own doc_status row — it only leaves a
+        ``dup-*`` bookkeeping row under its file_path. Without this, such a
+        page never counts as done and the resource sits at done < total
+        forever, even though its content is genuinely indexed (just under the
+        other resource's doc_id).
+        """
+        if not file_paths:
+            return set()
+        workspace = getattr(rag, "workspace", None)
+
+        def _query():
+            from db.database import SessionLocal  # noqa: WPS433
+            from sqlalchemy import text  # noqa: WPS433
+
+            db = SessionLocal()
+            try:
+                rows = db.execute(
+                    text(
+                        "SELECT DISTINCT file_path FROM lightrag_doc_status "
+                        "WHERE workspace = :ws AND id LIKE 'dup-%' "
+                        "AND file_path = ANY(:paths) "
+                        "AND error_msg LIKE '%Status: processed%'"
+                    ),
+                    {"ws": workspace, "paths": list(file_paths)},
+                ).fetchall()
+                return {row[0] for row in rows}
+            finally:
+                db.close()
+
+        try:
+            return await asyncio.to_thread(_query)
+        except Exception:
+            return set()  # best-effort — a resource just stays pending, not stuck wrong
 
     async def _counts():
         """{resource_id: {"processed": N, "failed": N}} for this batch's doc ids."""
@@ -477,6 +533,13 @@ async def _aprocess_enqueued_with_progress(
             status = str(getattr(record.status, "value", record.status)).lower()
             if status in counts[rid]:
                 counts[rid][status] += 1
+
+        missing_ids = [doc_id for doc_id in id_to_resource if doc_id not in records]
+        missing_paths = {id_to_file_path[i] for i in missing_ids if i in id_to_file_path}
+        deduped = await _dedup_processed_file_paths(missing_paths)
+        for doc_id in missing_ids:
+            if id_to_file_path.get(doc_id) in deduped:
+                counts[id_to_resource[doc_id]]["processed"] += 1
         return counts
 
     last_done = {rid: -1 for rid in doc_ids_by_resource}
@@ -579,8 +642,11 @@ async def _aprocess_enqueued_with_progress(
 
         for attempt in range(FEED_ENQUEUE_MAX_WAIT_S * 2):
             try:
-                await _aenqueue(rag, texts, file_paths=file_paths, ids=ids,
-                                process_options=process_options)
+                await asyncio.wait_for(
+                    _aenqueue(rag, texts, file_paths=file_paths, ids=ids,
+                              process_options=process_options),
+                    timeout=FEED_ENQUEUE_CALL_TIMEOUT_S,
+                )
                 return
             except PipelineReservationConflictError:
                 if attempt == 0:
@@ -589,6 +655,19 @@ async def _aprocess_enqueued_with_progress(
                         getattr(rag, "workspace", None), rid,
                     )
                 await asyncio.sleep(0.5)
+            except asyncio.TimeoutError:
+                # Deliberately not retried: a hung call here has been a stale
+                # pooled connection every time it's been diagnosed, and
+                # retrying reuses the SAME pool — likely the same dead socket.
+                # Raising loudly is what lets _feed_guarded log it and end the
+                # run instead of hanging silently for however long nobody
+                # notices; a fresh pool only comes from restarting the run.
+                raise TimeoutError(
+                    f"Enqueuing resource {rid} did not complete within "
+                    f"{FEED_ENQUEUE_CALL_TIMEOUT_S}s — likely a stale pooled "
+                    "connection (see FEED_ENQUEUE_CALL_TIMEOUT_S). Restarting "
+                    "the run gets a fresh connection pool."
+                )
         raise TimeoutError(
             f"Could not enqueue resource {rid} within {FEED_ENQUEUE_MAX_WAIT_S}s: "
             "the pipeline stayed reserved the whole time"
@@ -605,8 +684,9 @@ async def _aprocess_enqueued_with_progress(
             doc_ids_by_resource[rid] = ids
             totals[rid] = len(ids)
             last_done.setdefault(rid, -1)
-            for doc_id in ids:
+            for doc_id, file_path in zip(ids, file_paths):
                 id_to_resource[doc_id] = rid
+                id_to_file_path[doc_id] = file_path
             logger.info("[%s] Fed resource %s (%d page(s)) into the pipeline",
                         getattr(rag, "workspace", None), rid, len(ids))
         return True
