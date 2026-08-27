@@ -1792,13 +1792,21 @@ class LightRAGStore(VectorStoreInterface):
         try:
             from sqlalchemy import text  # noqa: WPS433
 
-            result = self.db.execute(
-                text(
-                    'SELECT COUNT(*) FROM lightrag_doc_status WHERE workspace = :ws'
-                ),
-                {"ws": collection_name},
-            )
-            row = result.scalar()
+            # self.db is db.database.Database — it exposes only .engine, not
+            # .execute (see _cleanup_postgres's docstring on this same
+            # mistake): this used to raise AttributeError on every call,
+            # silently swallowed by the except below, so this always
+            # returned 0 — masked further by count_docs_in_silo's own
+            # fallback, which itself only credits per-resource metric rows
+            # and misses batch-indexed ones (resource_id IS NULL).
+            with self.db.engine.begin() as conn:
+                result = conn.execute(
+                    text(
+                        'SELECT COUNT(*) FROM lightrag_doc_status WHERE workspace = :ws'
+                    ),
+                    {"ws": collection_name},
+                )
+                row = result.scalar()
             return int(row) if row else 0
         except Exception as exc:
             logger.debug(

@@ -204,12 +204,14 @@ def test_get_retriever_with_custom_query_mode(store, mock_rag):
 def test_count_documents_queries_postgres(store):
     mock_result = MagicMock()
     mock_result.scalar.return_value = 42
-    store.db.execute.return_value = mock_result
+    mock_conn = MagicMock()
+    mock_conn.execute.return_value = mock_result
+    store.db.engine.begin.return_value.__enter__.return_value = mock_conn
 
     count = store.count_documents("silo_1")
 
     assert count == 42
-    store.db.execute.assert_called_once()
+    mock_conn.execute.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
