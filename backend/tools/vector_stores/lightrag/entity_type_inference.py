@@ -28,6 +28,7 @@ This module does the extraction and prompt building only — no LLM call, no DB.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 from dataclasses import dataclass, field
@@ -122,12 +123,39 @@ _SAMPLE_CHARS = 700
 # A page carrying this many dot-leader lines is an index, not a body page.
 _TOC_PAGE_LEADERS = 3
 
-# Measured against a real payload of Spanish manual outlines and spec tables:
-# 50.836 characters tokenised to 22.156 tokens. The usual "4 chars per token"
-# rule of thumb is for prose; accented words, model codes (THERMAPRO 16 HTT)
-# and figures with units all split much harder, and being optimistic here means
-# the provider rejects the whole call.
+# Fallback only, for when tiktoken is unavailable — approx_tokens counts for
+# real otherwise (see _count_tokens). Measured against a real payload of
+# Spanish manual outlines and spec tables: 50.836 characters tokenised to
+# 22.156 tokens. The usual "4 chars per token" rule of thumb is for prose;
+# accented words, model codes (THERMAPRO 16 HTT) and figures with units all
+# split much harder. That measurement is what set this ratio, and it still
+# missed budget on a later run (prompt_tokens=12342 against a 10500 budget) —
+# an approximation, however well-calibrated, drifts with whatever corpus is
+# selected this time. Real counting doesn't.
 _CHARS_PER_TOKEN = 2.3
+
+
+@functools.lru_cache(maxsize=1)
+def _token_encoder():
+    """tiktoken encoder matching silo_service._token_encoder — not imported
+    from there: this tools-layer module does not depend on the services
+    layer. Same encoding choice for consistency, not because this call goes
+    through gpt-4o-mini specifically (the configured ai_service may differ);
+    it is an approximation of whatever model actually runs either way."""
+    import tiktoken
+    try:
+        return tiktoken.encoding_for_model("gpt-4o-mini")
+    except Exception:
+        return tiktoken.get_encoding("o200k_base")
+
+
+def _count_tokens(text: str) -> int:
+    if not text:
+        return 0
+    try:
+        return len(_token_encoder().encode(text))
+    except Exception:
+        return int(len(text) / _CHARS_PER_TOKEN)  # ponytail: tiktoken unavailable
 
 # Cap per document so one 172-page manual cannot eat the whole context window.
 # Top-level entries are kept first: they carry the document's outline, while
@@ -152,9 +180,9 @@ class DocumentOutline:
 
     @property
     def approx_tokens(self) -> int:
-        body = sum(len(t) + len(x) + 2 for t, x in self.samples)
-        chars = len(self.cover) + sum(len(t) + 1 for t in self.toc) + body
-        return int(chars / _CHARS_PER_TOKEN)
+        body = "\n".join(f"{t}\n{x}" for t, x in self.samples)
+        text = self.cover + "\n".join(self.toc) + body
+        return _count_tokens(text)
 
 
 def _clean(text: str) -> str:

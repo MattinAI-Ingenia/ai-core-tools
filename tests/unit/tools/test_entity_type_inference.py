@@ -16,6 +16,7 @@ from backend.tools.vector_stores.lightrag.entity_type_inference import (  # noqa
     _TOC_TAIL_RE,
     _cap_toc,
     _clean,
+    _count_tokens,
     assign_families,
     build_prompt,
     select_diverse,
@@ -148,3 +149,34 @@ def test_consolidation_prompt_lists_the_candidates_with_their_examples():
     assert "Presion" in prompt
     assert "3 bar" in prompt
     assert "No inventes nombres nuevos" in prompt
+
+
+class TestApproxTokensUsesRealCounting:
+    """approx_tokens used to be a chars/2.3 heuristic, calibrated once against
+    a real payload — and still missed budget on a later run
+    (prompt_tokens=12342 against a 10500 budget it should have fit under).
+    Any fixed ratio drifts with whatever corpus is selected; a real tiktoken
+    count does not.
+    """
+
+    def test_matches_a_direct_tiktoken_count(self):
+        outline = DocumentOutline(
+            doc_id="d1",
+            cover="THERMAPRO 16 HTT — manual técnico",
+            toc=["21 CARACTERÍSTICAS TÉCNICAS", "13.1 PARÁMETROS DEL SISTEMA"],
+            samples=[("21 CARACTERÍSTICAS TÉCNICAS", "Potencia nominal 16 kW, 230V, 45ºC máx.")],
+        )
+        expected = _count_tokens(
+            outline.cover
+            + "\n".join(outline.toc)
+            + "\n".join(f"{t}\n{x}" for t, x in outline.samples)
+        )
+        assert outline.approx_tokens == expected
+
+    def test_scales_with_content_length(self):
+        short = DocumentOutline(doc_id="d1", cover="A", toc=[])
+        long = DocumentOutline(doc_id="d2", cover="A " * 500, toc=[])
+        assert long.approx_tokens > short.approx_tokens
+
+    def test_empty_outline_costs_nothing(self):
+        assert DocumentOutline(doc_id="d1", cover="").approx_tokens == 0
