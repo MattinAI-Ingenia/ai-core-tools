@@ -103,7 +103,16 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             <option value="fixed_token">Fixed token (default)</option>
             <option value="recursive_character">Recursive character</option>
             <option value="semantic_vector">Semantic vector</option>
-            <option value="paragraph_semantic">Paragraph semantic</option>
+            {/* Needs a .blocks.jsonl sidecar that only LightRAG's own document
+                parser produces (native: DOCX only today; PDF needs the mineru
+                or docling external engine, neither wired up here) — our
+                extraction feeds LightRAG plain text directly, so this sidecar
+                never exists. Shown, not hidden, so it reads as "not yet" and
+                not "doesn't exist"; a native <select> cannot host an icon per
+                option, so the explanation lives in the title tooltip instead. */}
+            <option value="paragraph_semantic" disabled title="Not implemented yet — needs document-structure parsing (mineru/docling) this deployment does not have.">
+              Paragraph semantic (not implemented yet)
+            </option>
           </select>
         </div>
 
