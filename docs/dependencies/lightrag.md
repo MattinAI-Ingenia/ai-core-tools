@@ -289,6 +289,39 @@ entender `SiloGraphService` (§9). Comprobar en `silo_graph_service.py` y
 el helper de limpieza `_cleanup_neo4j` (`lightrag_store.py`,
 ``MATCH (n:`silo_X`) DETACH DELETE n``).
 
+### 6.1 Deduplicado/merge de entidades
+
+LightRAG fusiona entidades por **coincidencia exacta de `entity_name`** tras
+normalizarlo con `normalize_entity_name()` → `normalize_extracted_info()`
+(`utils.py`): limpieza de tags HTML, caracteres chinos full-width → ASCII,
+comillas envolventes, NBSP, y filtrado de nombres puramente numéricos cortos
+(`< 3` dígitos, o patrones `x.y.z` de `< 6` caracteres). **No hay lowercase,
+fuzzy matching, embeddings ni ninguna resolución de entidades real** — dos
+nombres que difieren en mayúsculas, tildes, o forma (acrónimo vs. nombre
+completo) quedan como nodos separados. El merge en sí ocurre en
+`_merge_nodes_then_upsert()` (`operate.py`): funde `source_id`s, vota el
+`entity_type` mayoritario, dedupea descripciones exactas y, si hay varias
+descripciones distintas, dispara un resumen vía LLM
+(`_handle_entity_relation_summary`) — pero solo entre nodos que ya
+coincidían carácter a carácter. El repo no añade ninguna capa propia de
+dedup/resolución encima de esto; se hereda el comportamiento nativo tal cual.
+
+**Mejora de implementación pendiente (no urgente)**: el filtro numérico
+nativo (`< 3` dígitos puros) es limitado y deja pasar valores técnicos con
+unidad como entidades sueltas — confirmado en el grafo real del silo Domusa
+(`silo_11`, Neo4j): ~81 de 8488 nodos (~1%) son ruido tipo `230 V`, `45 ºC`,
+`700mm`, `7 bar`, `4.500 W`, `35Hz`, `1,4 Kg`, o rangos como `30 - 85 ºC`
+—probablemente atributos (presión/temperatura/caudal) mal promovidos a nodo
+propio en vez de quedar como propiedad de la entidad real. Impacto detectado
+bajo (nodos sin relaciones ricas, no colisionan entre sí ni con entidades
+reales), por lo que se deja documentado como mejora futura y no como fix
+inmediato. Si se aborda: post-filtro regex tipo
+`^\d+[.,]?\d*\s*(V|A|ºC|mm|bar|W|Hz|rpm|Kg|L|Pa|Ω|cm|m|kW|mbar)$` aplicado
+tras `normalize_entity_name` en `lightrag_store.py`, o limpieza retroactiva
+vía Cypher sobre el grafo ya indexado. Señal para priorizarlo: si el eval de
+un silo muestra respuestas citando estos valores como si fueran entidades
+relevantes, o si el ratio de ruido crece con corpus más grandes.
+
 ---
 
 ## 7. Queries

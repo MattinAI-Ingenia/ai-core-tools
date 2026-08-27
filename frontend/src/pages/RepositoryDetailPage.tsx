@@ -1052,6 +1052,9 @@ const RepositoryDetailPage: React.FC = () => {
               loadRepository(false);
               // Files a stop left behind only surface through this count.
               refreshResumable();
+              // The "Pausing…"/"Cancelling…" notice from onStopped below
+              // otherwise outlives the run it was reporting on.
+              setReindexNotice(null);
             }}
             onStopped={(mode, stopped) => {
               // Neither mode ends the run instantly, and they differ in what
@@ -1191,16 +1194,34 @@ const RepositoryDetailPage: React.FC = () => {
                                   <CheckCircle className="w-3 h-3" /> Indexed
                                 </span>
                               )}
-                              {/* One badge for the four unfinished states. With a run
-                                  alive, 'pending' means queued; outside one, all four mean
-                                  the same thing — Resume picks them up and the backend
-                                  counts them together. 'indexing' with no run is a run that
-                                  died mid-file; 'cancelled' with leftover rows always carries
-                                  real progress (the zero-progress ones are discarded), so it
-                                  is resumable too — cancel promises to finish what started,
-                                  and a page a race or a restart left behind still needs to. */}
+                              {/* A 'cancelled' row with zero progress is not resumable —
+                                  it is exactly what _discard_unindexed_after_cancel removes
+                                  (once the run ends, or via the liveness sweep if it never
+                                  gets there). Between the click and that cleanup it is still
+                                  visible, so it needs its own label rather than "Will
+                                  resume": that promise is untrue for it. Read off
+                                  progress_done itself rather than inferring from
+                                  indexingInProgress — the same zero-vs-real-progress split
+                                  also happens for a split second inside the finalization
+                                  loop, while the run is technically still "alive" by the
+                                  lock. The data says which one it is either way. */}
+                              {resource.status === 'cancelled' && !resource.progress_done && (
+                                <span
+                                  title="Not started before Cancel landed — removed once the run finishes, not resumed."
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-gray-200 text-gray-600"
+                                >
+                                  <PauseCircle className="w-3 h-3" /> Cancelled
+                                </span>
+                              )}
+                              {/* One badge for the remaining unfinished states. Outside a
+                                  run, all of them mean the same thing: Resume picks them up
+                                  and the backend counts them together. 'indexing' with no
+                                  run is a run that died mid-file; 'cancelled' with real
+                                  progress is resumable too — cancel promises to finish what
+                                  started, and a page a race or a restart left behind still
+                                  needs to. */}
                               {(resource.status === 'pending' || resource.status === 'paused'
-                                || resource.status === 'cancelled'
+                                || (resource.status === 'cancelled' && !!resource.progress_done)
                                 || (resource.status === 'indexing' && !indexingInProgress)) && (
                                 indexingInProgress && resource.status === 'pending' ? (
                                   <span
