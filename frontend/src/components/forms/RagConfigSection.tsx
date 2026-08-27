@@ -276,7 +276,7 @@ function RagConfigSection({
         {isLightRAG && (
           <div>
             <label htmlFor="rag_chunk_top_k" className="block text-sm font-medium text-gray-700 mb-2">
-              Documents to retrieve
+              Chunks to retrieve
             </label>
             <input
               id="rag_chunk_top_k"
