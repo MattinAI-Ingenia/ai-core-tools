@@ -74,3 +74,6 @@ docker/docker-compose.override.yml
 prompts/
 .specify/
 specs/
+
+# RAG eval benchmark: datasets, run results, and reports — not versioned
+benchmark/
