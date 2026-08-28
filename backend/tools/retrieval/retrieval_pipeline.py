@@ -1,22 +1,3 @@
-"""
-Retrieval pipeline orchestrator.
-
-Composes a final retriever from two ordered stages:
-
-    search_methods[]  ->  (RRF fusion if >1)  ->  (transformers[] applied in order)  ->  final retriever
-
-* **Search methods** (dense, BM25, sparse, ...) each produce a retriever from
-  the corpus. With more than one search method, they are fused via
-  Reciprocal Rank Fusion (see ``tools.retrieval.fusion.fuse_with_rrf``) before
-  any transformer runs.
-* **Transformers** are strategies (rerank, ...) applied left to right. Each
-  one collapses the current list of retrievers into a new list (usually a
-  single retriever) for the next transformer.
-
-This is the single place that knows how the retrieval components fit together,
-so adding a new search method or strategy never touches the call sites.
-"""
-
 from typing import List, Optional
 
 from langchain_core.retrievers import BaseRetriever

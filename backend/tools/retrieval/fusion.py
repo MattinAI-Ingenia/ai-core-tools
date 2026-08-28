@@ -1,12 +1,3 @@
-"""
-Shared Reciprocal Rank Fusion (RRF) helper.
-
-Wraps LangChain's ``EnsembleRetriever`` so both ``HybridSearchMethod`` (fixed
-dense+bm25 pair) and ``RetrievalPipeline`` (arbitrary N selected search
-methods) fuse ranked lists the same way, without duplicating the
-construction logic.
-"""
-
 from typing import List, Optional
 
 from langchain_core.retrievers import BaseRetriever

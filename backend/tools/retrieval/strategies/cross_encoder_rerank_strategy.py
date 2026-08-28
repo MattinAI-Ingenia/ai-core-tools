@@ -1,24 +1,3 @@
-"""
-Cross-encoder rerank retrieval strategy.
-
-Unlike :class:`~tools.retrieval.strategies.rerank_strategy.RerankStrategy` (which
-re-scores candidates against the same embedding vectors already used to retrieve
-them), this strategy scores each (query, document) pair jointly through a
-dedicated cross-encoder model — a strictly more accurate but slower re-scoring
-signal, since it attends over the query and document together instead of
-comparing two independently-computed vectors.
-
-The model is a local ``sentence-transformers`` cross-encoder (no API key, no
-new external dependency beyond the package itself), configured via
-``config.CROSS_ENCODER_RERANK_MODEL`` / ``config.CROSS_ENCODER_RERANK_DEVICE``.
-It is loaded once per process (on first use of this strategy) and reused for
-every request, since — unlike the embeddings rerank — it does not depend on
-the silo's embedding_service.
-
-Parameters (read from ``params``):
-    top_n: How many documents to keep after reranking. Defaults to 5.
-"""
-
 from typing import List
 
 from langchain_core.retrievers import BaseRetriever

@@ -1,16 +1,3 @@
-"""
-Dense vector search method.
-
-This is the default search method: it asks the silo's vector store backend for a
-LangChain retriever configured with the requested ``search_type``
-(similarity / mmr / similarity_score_threshold). "Dense" refers to the fact that
-documents and queries are represented as dense embedding vectors and matched by
-vector similarity — as opposed to sparse/lexical methods such as BM25.
-
-It preserves the exact behaviour the application had before the retrieval
-pipeline refactor: it is a thin wrapper over ``vector_store.get_retriever``.
-"""
-
 from langchain_core.retrievers import BaseRetriever
 
 from tools.retrieval.retrieval_component import SearchMethod

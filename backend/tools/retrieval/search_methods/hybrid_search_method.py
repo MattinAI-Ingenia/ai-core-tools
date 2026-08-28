@@ -1,18 +1,3 @@
-"""
-Hybrid (dense + lexical) search method.
-
-Combines the dense (embeddings similarity) and BM25 (lexical) search methods
-into a single retriever via LangChain's ``EnsembleRetriever``, which fuses the
-two ranked lists using Reciprocal Rank Fusion (RRF) — a document that ranks
-well in either list scores well overall, without needing comparable raw score
-scales between a cosine-similarity search and a term-frequency search.
-
-This reuses ``DenseSearchMethod``/``BM25SearchMethod`` as-is (same
-``search_kwargs``/``params`` contract), so hybrid search inherits their
-existing behaviour (search_type for the dense side, bm25_max_docs for the
-lexical side) with no duplicated logic.
-"""
-
 from typing import List
 
 from langchain_core.retrievers import BaseRetriever

@@ -1,27 +1,3 @@
-"""
-BM25 lexical search method.
-
-Unlike the dense search method, BM25 is a **sparse / lexical** retriever: it
-ranks documents by exact term overlap (term frequency x inverse document
-frequency) rather than by embedding similarity. It needs the whole corpus to
-build an in-memory index, so this search method fetches every document from the
-silo's collection (via ``vector_store.get_all_documents``) and feeds them to
-LangChain's ``BM25Retriever``.
-
-Because the index is built in memory on every call, a configurable cap
-(``bm25_max_docs``) bounds how many documents are pulled from large collections.
-
-``BM25Retriever``'s default tokenizer is a bare ``text.split()`` — no
-lowercasing, no punctuation stripping, no stemming. That means a query like
-"plan" would NOT match a document containing "plans." (plural, with trailing
-punctuation still attached to the token): the two are different tokens as far
-as bare BM25 is concerned, even though a human (or a dense/embeddings search)
-would consider them an obvious match. ``_preprocess`` fixes this by lowercasing,
-tokenizing on word boundaries (dropping punctuation), and stemming each token
-with a Snowball stemmer, so plural/singular and simple verb-conjugation
-differences no longer prevent a lexical match.
-"""
-
 import re
 from typing import List
 

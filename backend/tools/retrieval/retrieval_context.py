@@ -1,17 +1,3 @@
-"""
-Shared context object for the retrieval pipeline.
-
-A single :class:`RetrievalContext` is built once per retrieval request and
-passed to every component (sources and transformers) in the pipeline. It
-carries everything a component might need to build or wrap a retriever, so the
-component interfaces stay small and uniform.
-
-This is what lets the architecture admit BOTH new search methods (sources, e.g.
-dense / BM25 / sparse — which need the vector store, collection and embeddings
-to *produce* a retriever) and post-processing strategies (transformers, e.g.
-rerank / ensemble — which only *wrap* already-built retrievers).
-"""
-
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 

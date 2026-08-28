@@ -1,20 +1,3 @@
-"""
-Pure-function builders for a silo's dynamic retrieval tool name, description,
-and argument schema.
-
-These functions are pure: no database, vector store, or external service access.
-All runtime data (distinct metadata field values) must be supplied by the caller
-via :func:`collect_distinct_values`.
-
-All admin-supplied strings embedded in LLM tool definitions are passed through
-``sanitize_metadata_value`` — never filter values, which must match stored
-metadata exactly.
-
-Enum / Literal policy: when a string field has ≤ MAX_ENUM_VALUES (25) distinct
-values the schema uses ``Literal``; otherwise the free base type with up to
-MAX_EXAMPLE_VALUES (10) example values in the description.
-"""
-
 from __future__ import annotations
 
 import keyword

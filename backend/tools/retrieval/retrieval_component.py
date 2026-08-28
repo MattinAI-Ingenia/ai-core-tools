@@ -1,24 +1,3 @@
-"""
-Base abstractions for retrieval components.
-
-The retrieval layer is built from two kinds of components, both of which are
-``RetrievalComponent`` subtypes so the pipeline can treat them uniformly:
-
-* :class:`SearchMethod` — a **search method** (a *producer*). Given the
-  request context, it builds a fresh ``BaseRetriever`` straight from the corpus.
-  Examples: dense vector search, BM25 lexical search, sparse/SPLADE search.
-
-* :class:`RetrievalTransformer` — a **strategy** (a *transformer*). Given one or
-  more already-built retrievers, it returns a single wrapped/combined
-  retriever. Examples: embeddings rerank, ensemble (RRF), multi-query. When no
-  strategy is selected the pipeline returns the search-method retriever as-is.
-
-Keeping the two contracts separate (instead of forcing everything through one
-``build_retriever(base_retriever, ...)`` signature) is what allows the
-architecture to grow with new *search methods* and new *strategies*
-independently.
-"""
-
 from abc import ABC, abstractmethod
 from typing import List
 

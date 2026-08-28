@@ -1,18 +1,3 @@
-"""
-Factory for retrieval strategies (transformers).
-
-Mirrors the SearchMethodFactory / VectorStoreFactory pattern: it maps a strategy
-name to a concrete RetrievalTransformer implementation, caching one instance per
-strategy.
-
-The 'rerank' (embeddings-based) and 'cross_encoder_rerank' (dedicated
-cross-encoder model) strategies are implemented. Additional strategies
-(hybrid, multi-query, ...) are reserved as future support and can be moved into
-IMPLEMENTED_STRATEGIES once their implementation is added. When no strategy is
-selected the retrieval pipeline simply returns the search-method retriever
-unchanged, so there is no explicit no-op strategy.
-"""
-
 import threading
 from typing import Dict, List
 

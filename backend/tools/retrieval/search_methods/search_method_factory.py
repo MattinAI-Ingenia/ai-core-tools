@@ -1,16 +1,3 @@
-"""
-Factory for retrieval search methods.
-
-Mirrors the StrategyFactory / VectorStoreFactory pattern: it maps a
-search method name to a concrete SearchMethod implementation, caching one
-instance per search method.
-
-The 'dense' (vector similarity), 'bm25' (lexical), and 'hybrid' (dense + bm25
-fused via RRF) search methods are implemented. Additional search methods
-(sparse/SPLADE, ...) are reserved as future support and can be moved into
-IMPLEMENTED_SEARCH_METHODS once their implementation is added.
-"""
-
 from typing import Dict, List, Optional
 
 from tools.retrieval.retrieval_component import SearchMethod
