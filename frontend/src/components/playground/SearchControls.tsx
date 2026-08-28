@@ -8,7 +8,7 @@ export interface SearchControlsValue {
   fetchK: number;
   lambdaMult: number;
   searchMethod: 'dense' | 'bm25' | 'hybrid';
-  strategy: '' | 'rerank';
+  strategy: '' | 'rerank' | 'cross_encoder_rerank';
   topN: number;
   similarityThreshold: number | null;
 }
@@ -33,6 +33,7 @@ const SEARCH_METHODS: Array<{ value: SearchControlsValue['searchMethod']; label:
 const STRATEGIES: Array<{ value: SearchControlsValue['strategy']; label: string }> = [
   { value: '', label: 'None' },
   { value: 'rerank', label: 'Rerank (embeddings-based)' },
+  { value: 'cross_encoder_rerank', label: 'Rerank (cross-encoder)' },
 ];
 
 interface SearchControlsProps {
@@ -191,53 +192,54 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
             </select>
           </div>
 
-          {/* Rerank options — only when strategy is rerank */}
-          {value.strategy === 'rerank' && (
-            <>
-              <div>
-                <label htmlFor="rerank-top-n-input" className="block text-sm text-gray-700 mb-1">
-                  Rerank top N
-                </label>
-                <input
-                  id="rerank-top-n-input"
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={value.topN}
-                  disabled={disabled}
-                  onChange={(e) => {
-                    const parsed = Number(e.target.value);
-                    if (!Number.isNaN(parsed)) {
-                      handleChange({ topN: Math.min(50, Math.max(1, parsed)) });
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-                />
-                <p className="text-xs text-gray-500 mt-1">Documents kept after reranking (1-50).</p>
-              </div>
+          {/* Rerank top N — shared by both rerank strategies */}
+          {(value.strategy === 'rerank' || value.strategy === 'cross_encoder_rerank') && (
+            <div>
+              <label htmlFor="rerank-top-n-input" className="block text-sm text-gray-700 mb-1">
+                Rerank top N
+              </label>
+              <input
+                id="rerank-top-n-input"
+                type="number"
+                min={1}
+                max={50}
+                value={value.topN}
+                disabled={disabled}
+                onChange={(e) => {
+                  const parsed = Number(e.target.value);
+                  if (!Number.isNaN(parsed)) {
+                    handleChange({ topN: Math.min(50, Math.max(1, parsed)) });
+                  }
+                }}
+                className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+              />
+              <p className="text-xs text-gray-500 mt-1">Documents kept after reranking (1-50).</p>
+            </div>
+          )}
 
-              <div>
-                <label htmlFor="rerank-similarity-threshold-input" className="block text-sm text-gray-700 mb-1">
-                  Rerank similarity threshold
-                </label>
-                <input
-                  id="rerank-similarity-threshold-input"
-                  type="number"
-                  step={0.01}
-                  min={0}
-                  max={1}
-                  value={value.similarityThreshold ?? ''}
-                  placeholder="Optional"
-                  disabled={disabled}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    handleChange({ similarityThreshold: raw === '' ? null : Number(raw) });
-                  }}
-                  className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-                />
-                <p className="text-xs text-gray-500 mt-1">Optional minimum similarity score, 0-1, applied after reranking.</p>
-              </div>
-            </>
+          {/* Similarity threshold — only the embeddings-based rerank supports it */}
+          {value.strategy === 'rerank' && (
+            <div>
+              <label htmlFor="rerank-similarity-threshold-input" className="block text-sm text-gray-700 mb-1">
+                Rerank similarity threshold
+              </label>
+              <input
+                id="rerank-similarity-threshold-input"
+                type="number"
+                step={0.01}
+                min={0}
+                max={1}
+                value={value.similarityThreshold ?? ''}
+                placeholder="Optional"
+                disabled={disabled}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  handleChange({ similarityThreshold: raw === '' ? null : Number(raw) });
+                }}
+                className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
+              />
+              <p className="text-xs text-gray-500 mt-1">Optional minimum similarity score, 0-1, applied after reranking.</p>
+            </div>
           )}
 
           {/* Score threshold — only when similarity_score_threshold */}

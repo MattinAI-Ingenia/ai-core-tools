@@ -48,8 +48,8 @@ interface Agent {
   rag_search_type?: RagSearchType;
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
-  rag_search_method?: RagSearchMethod;
-  rag_strategy?: 'rerank' | null;
+  rag_search_method?: RagSearchMethod[];
+  rag_strategy?: string[] | null;
   rag_rerank_top_n?: number | null;
   rag_rerank_similarity_threshold?: number | null;
   // Media processing configuration (playground media upload)
@@ -97,8 +97,8 @@ interface AgentFormData {
   rag_search_type: RagSearchType;
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
-  rag_search_method: RagSearchMethod;
-  rag_strategy: 'rerank' | null;
+  rag_search_method: RagSearchMethod[];
+  rag_strategy: string[] | null;
   rag_rerank_top_n: number | null;
   rag_rerank_similarity_threshold: number | null;
   // Media processing configuration (playground media upload)
@@ -239,7 +239,7 @@ function AgentFormPage() {
     rag_search_type: 'similarity',
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
-    rag_search_method: 'dense',
+    rag_search_method: ['dense'],
     rag_strategy: null,
     rag_rerank_top_n: null,
     rag_rerank_similarity_threshold: null,
@@ -339,8 +339,8 @@ function AgentFormPage() {
         rag_search_type: response.rag_search_type ?? 'similarity',
         rag_score_threshold: response.rag_score_threshold ?? null,
         rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
-        rag_search_method: response.rag_search_method ?? 'dense',
-        rag_strategy: response.rag_strategy ?? null,
+        rag_search_method: response.rag_search_method?.length ? response.rag_search_method : ['dense'],
+        rag_strategy: response.rag_strategy?.length ? response.rag_strategy : null,
         rag_rerank_top_n: response.rag_rerank_top_n ?? null,
         rag_rerank_similarity_threshold: response.rag_rerank_similarity_threshold ?? null,
         // Media processing configuration
@@ -497,9 +497,9 @@ function AgentFormPage() {
     if (!appId || !agentId) return;
 
     // rag_search_type governs the dense component of retrieval — BM25 ignores it, so the
-    // threshold requirement/field is moot (and hidden) once bm25 (without hybrid) is selected.
+    // threshold requirement/field is moot (and hidden) unless dense is among the selected methods.
     const usesThreshold =
-      formData.rag_search_method !== 'bm25' && formData.rag_search_type === 'similarity_score_threshold';
+      formData.rag_search_method.includes('dense') && formData.rag_search_type === 'similarity_score_threshold';
 
     // Mirror the backend invariant: a threshold strategy needs a threshold value.
     if (usesThreshold && formData.rag_score_threshold == null) {
@@ -547,9 +547,9 @@ function AgentFormPage() {
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
       rag_search_method: formData.rag_search_method,
       rag_strategy: formData.rag_strategy,
-      rag_rerank_top_n: formData.rag_strategy === 'rerank' ? formData.rag_rerank_top_n : null,
+      rag_rerank_top_n: formData.rag_strategy?.includes('rerank') ? formData.rag_rerank_top_n : null,
       rag_rerank_similarity_threshold:
-        formData.rag_strategy === 'rerank' ? formData.rag_rerank_similarity_threshold : null,
+        formData.rag_strategy?.includes('rerank') ? formData.rag_rerank_similarity_threshold : null,
       // Media processing configuration
       transcription_service_id: formData.transcription_service_id,
       video_ai_service_id: formData.video_ai_service_id,

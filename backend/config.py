@@ -53,3 +53,12 @@ WEAVIATE_API_KEY = os.getenv('WEAVIATE_API_KEY')
 CHROMA_PERSIST_DIR = os.getenv('CHROMA_PERSIST_DIR', './chroma_db')
 
 MCP_BASE_URL = os.getenv('MCP_BASE_URL', 'http://localhost:8000')
+
+# Cross-encoder reranker (backend/tools/retrieval/strategies/cross_encoder_rerank_strategy.py).
+# Local sentence-transformers model, no API key. Default is a ~100M-param MiniLM
+# fine-tuned on mMARCO (confirmed EN/ES coverage — see the mMARCO dataset card),
+# chosen for low latency in conversational chat. Override per deployment for other
+# language/quality-latency tradeoffs (e.g. BAAI/bge-reranker-v2-m3 for broader,
+# less-verified multilingual coverage at ~5x the parameter count and latency).
+CROSS_ENCODER_RERANK_MODEL = os.getenv('CROSS_ENCODER_RERANK_MODEL', 'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
+CROSS_ENCODER_RERANK_DEVICE = os.getenv('CROSS_ENCODER_RERANK_DEVICE', 'cpu')

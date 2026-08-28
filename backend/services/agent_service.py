@@ -151,8 +151,8 @@ class AgentService:
             rag_score_threshold=getattr(agent, 'rag_score_threshold', None) if isinstance(getattr(agent, 'rag_score_threshold', None), (float, int, type(None))) else None,
             rag_max_retrieval_calls=getattr(agent, 'rag_max_retrieval_calls', None) if isinstance(getattr(agent, 'rag_max_retrieval_calls', None), (int, type(None))) else None,
             rag_fixed_filters=getattr(agent, 'rag_fixed_filters', None) if isinstance(getattr(agent, 'rag_fixed_filters', None), (list, type(None))) else None,
-            rag_search_method=getattr(agent, 'rag_search_method', None) if isinstance(getattr(agent, 'rag_search_method', None), (str, type(None))) else None,
-            rag_strategy=getattr(agent, 'rag_strategy', None) if isinstance(getattr(agent, 'rag_strategy', None), (str, type(None))) else None,
+            rag_search_method=getattr(agent, 'rag_search_method', None) if isinstance(getattr(agent, 'rag_search_method', None), (list, type(None))) else None,
+            rag_strategy=getattr(agent, 'rag_strategy', None) if isinstance(getattr(agent, 'rag_strategy', None), (list, type(None))) else None,
             rag_rerank_top_n=getattr(agent, 'rag_rerank_top_n', None) if isinstance(getattr(agent, 'rag_rerank_top_n', None), (int, type(None))) else None,
             rag_rerank_similarity_threshold=getattr(agent, 'rag_rerank_similarity_threshold', None) if isinstance(getattr(agent, 'rag_rerank_similarity_threshold', None), (float, int, type(None))) else None,
         )
@@ -368,7 +368,7 @@ class AgentService:
         if data.get('rag_search_method') is not None:
             agent.rag_search_method = data['rag_search_method']
         elif is_new:
-            agent.rag_search_method = 'dense'
+            agent.rag_search_method = ['dense']
 
         # score_threshold and fixed_filters: clear-able via explicit None/empty
         if 'rag_score_threshold' in data:

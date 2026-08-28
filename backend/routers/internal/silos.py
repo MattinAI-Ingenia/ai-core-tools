@@ -372,7 +372,12 @@ async def search_silo_documents(
         logger.info(f"Getting silo {silo_id} for validation")
         
         t0 = time.perf_counter()
-        result = SiloService.search_silo_documents_router(
+        # Reranking (especially the cross-encoder strategy, which runs local CPU-bound
+        # model inference) can take long enough to starve the event loop of every other
+        # request on this worker, so this runs off-loop like the other retrieval paths
+        # (see tools/agentTools.py's _run_retrieval and reindex_silo_resource above).
+        result = await asyncio.to_thread(
+            SiloService.search_silo_documents_router,
             silo_id,
             search_query.query,
             search_query.filter_metadata,

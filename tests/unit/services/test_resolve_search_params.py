@@ -214,7 +214,18 @@ class TestSearchMethodPrecedence:
 
         sp, _ = resolve_search_params(agent, {})
 
-        assert sp["search_method"] == DEFAULT_SEARCH_METHOD
+        assert sp["search_method"] == [DEFAULT_SEARCH_METHOD]
+
+    def test_agent_multiselect_list_passed_through_unchanged(self):
+        """Post-multiselect-migration agent column is a JSON list; resolve_search_params
+        passes it through as-is (normalization to a pipeline name list happens later, in
+        _build_pipeline_retriever)."""
+        silo = _make_silo()
+        agent = _make_agent(rag_search_method=["dense", "bm25"], silo=silo)
+
+        sp, _ = resolve_search_params(agent, {})
+
+        assert sp["search_method"] == ["dense", "bm25"]
 
 
 class TestStrategyPrecedence:

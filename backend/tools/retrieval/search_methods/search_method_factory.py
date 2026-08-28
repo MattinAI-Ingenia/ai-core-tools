@@ -34,6 +34,13 @@ class SearchMethodFactory:
     # Search methods that are currently implemented and can be selected by users
     IMPLEMENTED_SEARCH_METHODS = ("dense", "bm25", "hybrid")
 
+    # Atomic methods selectable in an agent's multiselect rag_search_method list.
+    # "hybrid" is excluded here: combining dense+bm25 is now expressed by selecting
+    # both atomic methods (RetrievalPipeline fuses them via RRF), not by the
+    # "hybrid" string. "hybrid" itself remains valid as a single-value override
+    # (e.g. the Silo Playground) via IMPLEMENTED_SEARCH_METHODS above.
+    MULTISELECT_SEARCH_METHODS = tuple(m for m in IMPLEMENTED_SEARCH_METHODS if m != "hybrid")
+
     _instances: Dict[str, SearchMethod] = {}
 
     @staticmethod
@@ -78,6 +85,16 @@ class SearchMethodFactory:
 
         options: List[Dict[str, str]] = []
         for key in SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS:
+            label = SearchMethodFactory.SUPPORTED_SEARCH_METHODS.get(key, key)
+            options.append({"code": key, "label": label})
+        return options
+
+    @staticmethod
+    def get_available_multiselect_options() -> List[Dict[str, str]]:
+        """Expose the atomic methods selectable in an agent's multiselect config."""
+
+        options: List[Dict[str, str]] = []
+        for key in SearchMethodFactory.MULTISELECT_SEARCH_METHODS:
             label = SearchMethodFactory.SUPPORTED_SEARCH_METHODS.get(key, key)
             options.append({"code": key, "label": label})
         return options

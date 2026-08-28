@@ -57,6 +57,53 @@ class TestRetrievalPipeline:
         mock_transformer.apply.assert_called_once_with([base_retriever], ctx)
         assert result is wrapped_retriever
 
+    def test_multiple_search_methods_are_fused_before_transformers(self):
+        ctx = RetrievalContext()
+        dense_retriever = MagicMock(name="dense_retriever")
+        bm25_retriever = MagicMock(name="bm25_retriever")
+        fused_retriever = MagicMock(name="fused_retriever")
+
+        dense_method = MagicMock()
+        dense_method.build.return_value = dense_retriever
+        bm25_method = MagicMock()
+        bm25_method.build.return_value = bm25_retriever
+
+        mock_transformer = MagicMock()
+        mock_transformer.apply.return_value = MagicMock(name="reranked")
+
+        with patch(
+            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
+            side_effect=[dense_method, bm25_method],
+        ), patch(
+            "tools.retrieval.fusion.fuse_with_rrf", return_value=fused_retriever
+        ) as mock_fuse, patch(
+            "tools.retrieval.retrieval_pipeline.StrategyFactory.get_strategy",
+            return_value=mock_transformer,
+        ):
+            result = RetrievalPipeline.build(
+                ctx, search_method_names=["dense", "bm25"], transformer_names=["rerank"]
+            )
+
+        mock_fuse.assert_called_once_with([dense_retriever, bm25_retriever], weights=None)
+        # The transformer must run on the fused retriever, not on the raw dense one.
+        mock_transformer.apply.assert_called_once_with([fused_retriever], ctx)
+        assert result is mock_transformer.apply.return_value
+
+    def test_single_search_method_never_calls_fusion(self):
+        ctx = RetrievalContext()
+        mock_retriever = MagicMock(name="dense_retriever")
+        mock_search_method = MagicMock()
+        mock_search_method.build.return_value = mock_retriever
+
+        with patch(
+            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
+            return_value=mock_search_method,
+        ), patch("tools.retrieval.fusion.fuse_with_rrf") as mock_fuse:
+            result = RetrievalPipeline.build(ctx, search_method_names=["dense"])
+
+        mock_fuse.assert_not_called()
+        assert result is mock_retriever
+
     def test_multiple_transformers_applied_in_order(self):
         ctx = RetrievalContext()
         base_retriever = MagicMock(name="base_retriever")

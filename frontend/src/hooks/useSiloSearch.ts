@@ -36,7 +36,7 @@ export interface PanelState {
   error: string | null;
   clientMs: number | null;
   searchMethod?: 'dense' | 'bm25' | 'hybrid';
-  strategy?: '' | 'rerank';
+  strategy?: '' | 'rerank' | 'cross_encoder_rerank';
   searchType?: SearchControlsValue['searchType'];
   scoreThreshold?: number;
   fetchK?: number;
@@ -132,7 +132,7 @@ export interface SiloSearchState {
     setter: Dispatch<SetStateAction<PanelState>>,
     panelOverrides?: {
       searchMethod?: 'dense' | 'bm25' | 'hybrid';
-      strategy?: '' | 'rerank';
+      strategy?: '' | 'rerank' | 'cross_encoder_rerank';
       searchType?: SearchControlsValue['searchType'];
       scoreThreshold?: number;
       fetchK?: number;
@@ -313,7 +313,7 @@ export function useSiloSearch(
           maxContentLength: maxContentLength ?? undefined,
           searchMethod: searchControls.searchMethod,
           strategy: searchControls.strategy || undefined,
-          topN: searchControls.strategy === 'rerank' ? searchControls.topN : undefined,
+          topN: searchControls.strategy ? searchControls.topN : undefined,
           similarityThreshold: searchControls.strategy === 'rerank' ? (searchControls.similarityThreshold ?? undefined) : undefined,
         },
       );
@@ -471,7 +471,7 @@ export function useSiloSearch(
     setter: Dispatch<SetStateAction<PanelState>>,
     panelOverrides?: {
       searchMethod?: 'dense' | 'bm25' | 'hybrid';
-      strategy?: '' | 'rerank';
+      strategy?: '' | 'rerank' | 'cross_encoder_rerank';
       searchType?: SearchControlsValue['searchType'];
       scoreThreshold?: number;
       fetchK?: number;
@@ -503,7 +503,7 @@ export function useSiloSearch(
           maxContentLength: maxContentLength ?? undefined,
           searchMethod: resolvedSearchMethod,
           strategy: resolvedStrategy || undefined,
-          topN: resolvedStrategy === 'rerank' ? searchControls.topN : undefined,
+          topN: resolvedStrategy ? searchControls.topN : undefined,
           similarityThreshold: resolvedStrategy === 'rerank' ? (searchControls.similarityThreshold ?? undefined) : undefined,
         },
       );

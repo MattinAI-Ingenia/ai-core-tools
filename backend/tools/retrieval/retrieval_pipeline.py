@@ -3,14 +3,15 @@ Retrieval pipeline orchestrator.
 
 Composes a final retriever from two ordered stages:
 
-    search_methods[]  ->  (transformers[] applied in order)  ->  final retriever
+    search_methods[]  ->  (RRF fusion if >1)  ->  (transformers[] applied in order)  ->  final retriever
 
 * **Search methods** (dense, BM25, sparse, ...) each produce a retriever from
-  the corpus. With more than one search method, a combining transformer
-  (e.g. ensemble / RRF) is expected to fuse them.
-* **Transformers** are strategies (rerank, ensemble, ...) applied
-  left to right. Each one collapses the current list of retrievers into a new
-  list (usually a single retriever) for the next transformer.
+  the corpus. With more than one search method, they are fused via
+  Reciprocal Rank Fusion (see ``tools.retrieval.fusion.fuse_with_rrf``) before
+  any transformer runs.
+* **Transformers** are strategies (rerank, ...) applied left to right. Each
+  one collapses the current list of retrievers into a new list (usually a
+  single retriever) for the next transformer.
 
 This is the single place that knows how the retrieval components fit together,
 so adding a new search method or strategy never touches the call sites.
@@ -63,6 +64,11 @@ class RetrievalPipeline:
         retrievers: List[BaseRetriever] = [
             SearchMethodFactory.get_search_method(name).build(ctx) for name in search_method_names
         ]
+
+        if len(retrievers) > 1:
+            from tools.retrieval.fusion import fuse_with_rrf
+
+            retrievers = [fuse_with_rrf(retrievers, weights=ctx.params.get("hybrid_weights"))]
 
         for name in transformer_names or []:
             transformer = StrategyFactory.get_strategy(name)

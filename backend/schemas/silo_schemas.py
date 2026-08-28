@@ -81,10 +81,13 @@ class SiloSearchSchema(BaseModel):
     `search_method` — one of SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS ("dense", "bm25").
         None/"dense" keeps the default similarity-search code path unchanged (same `_score`
         in results); any other value routes the search through the RetrievalPipeline instead.
-    `strategy` — one of StrategyFactory.IMPLEMENTED_STRATEGIES ("rerank"). When set, the
-        search always routes through the RetrievalPipeline.
-    `top_n` — documents kept after reranking; only meaningful when strategy="rerank".
-    `similarity_threshold` — optional score floor for reranked candidates 0-1.
+    `strategy` — one of StrategyFactory.IMPLEMENTED_STRATEGIES ("rerank",
+        "cross_encoder_rerank"). When set, the search always routes through the
+        RetrievalPipeline.
+    `top_n` — documents kept after reranking; meaningful for either strategy.
+    `similarity_threshold` — optional score floor for reranked candidates 0-1;
+        only meaningful for strategy="rerank" (the embeddings-based EmbeddingsFilter).
+        "cross_encoder_rerank" has no equivalent floor and ignores this field.
     """
     query: str
     limit: Optional[int] = None

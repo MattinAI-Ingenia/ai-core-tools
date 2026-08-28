@@ -19,8 +19,8 @@ class RagConfigFieldsMixin(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
-    rag_search_method: Optional[str] = None
-    rag_strategy: Optional[str] = None
+    rag_search_method: Optional[List[str]] = None
+    rag_strategy: Optional[List[str]] = None
     rag_rerank_top_n: Optional[int] = None
     rag_rerank_similarity_threshold: Optional[float] = None
 
@@ -66,21 +66,44 @@ class RagConfigFieldsMixin(BaseModel):
 
     @field_validator("rag_search_method")
     @classmethod
-    def validate_rag_search_method(cls, v: Optional[str]) -> Optional[str]:
+    def validate_rag_search_method(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         from tools.retrieval.search_methods.search_method_factory import SearchMethodFactory
-        if v is not None and v not in SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("rag_search_method must contain at least one search method")
+        deduped = list(dict.fromkeys(v))
+        unknown = [m for m in deduped if m not in SearchMethodFactory.MULTISELECT_SEARCH_METHODS]
+        if unknown:
             raise ValueError(
-                f"rag_search_method must be one of {sorted(SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS)}"
+                f"rag_search_method must only contain {sorted(SearchMethodFactory.MULTISELECT_SEARCH_METHODS)}, "
+                f"got unknown value(s): {sorted(unknown)}"
             )
-        return v
+        return deduped
 
     @field_validator("rag_strategy")
     @classmethod
-    def validate_rag_strategy(cls, v: Optional[str]) -> Optional[str]:
+    def validate_rag_strategy(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         from tools.retrieval.strategies.strategy_factory import StrategyFactory
-        if v is not None and v not in StrategyFactory.IMPLEMENTED_STRATEGIES:
-            raise ValueError(f"rag_strategy must be one of {sorted(StrategyFactory.IMPLEMENTED_STRATEGIES)}")
-        return v
+        if not v:
+            return None
+        deduped = list(dict.fromkeys(v))
+        unknown = [s for s in deduped if s not in StrategyFactory.IMPLEMENTED_STRATEGIES]
+        if unknown:
+            raise ValueError(
+                f"rag_strategy must only contain {sorted(StrategyFactory.IMPLEMENTED_STRATEGIES)}, "
+                f"got unknown value(s): {sorted(unknown)}"
+            )
+        # 'rerank' and 'cross_encoder_rerank' both re-score and truncate the same
+        # candidate set to top_n; chaining them would silently double-rerank with
+        # no way to control or observe the order, so only one may be selected.
+        rerank_strategies = {"rerank", "cross_encoder_rerank"}
+        selected_rerank = [s for s in deduped if s in rerank_strategies]
+        if len(selected_rerank) > 1:
+            raise ValueError(
+                f"rag_strategy must not combine {sorted(rerank_strategies)} — choose one reranker"
+            )
+        return deduped
 
     @field_validator("rag_rerank_top_n")
     @classmethod
@@ -213,8 +236,8 @@ class AgentDetailSchema(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
-    rag_search_method: Optional[str] = None
-    rag_strategy: Optional[str] = None
+    rag_search_method: Optional[List[str]] = None
+    rag_strategy: Optional[List[str]] = None
     rag_rerank_top_n: Optional[int] = None
     rag_rerank_similarity_threshold: Optional[float] = None
 
@@ -334,8 +357,8 @@ class PublicAgentDetailSchema(BaseModel):
     rag_score_threshold: Optional[float] = None
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
-    rag_search_method: Optional[str] = None
-    rag_strategy: Optional[str] = None
+    rag_search_method: Optional[List[str]] = None
+    rag_strategy: Optional[List[str]] = None
     rag_rerank_top_n: Optional[int] = None
     rag_rerank_similarity_threshold: Optional[float] = None
 

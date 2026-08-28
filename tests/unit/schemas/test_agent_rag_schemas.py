@@ -224,7 +224,12 @@ class TestRagSearchMethod:
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
     @pytest.mark.parametrize("valid_method", ["dense", "bm25"])
     def test_valid_search_method_passes(self, schema_fn, valid_method):
-        schema_fn(rag_search_method=valid_method)
+        schema_fn(rag_search_method=[valid_method])
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_valid_multiselect_combo_passes_and_dedupes(self, schema_fn):
+        obj = schema_fn(rag_search_method=["dense", "bm25", "dense"])
+        assert obj.rag_search_method == ["dense", "bm25"]
 
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
     def test_none_search_method_passes(self, schema_fn):
@@ -233,12 +238,18 @@ class TestRagSearchMethod:
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
     def test_invalid_search_method_raises(self, schema_fn):
         with pytest.raises(ValidationError, match="rag_search_method"):
-            schema_fn(rag_search_method="sparse")
+            schema_fn(rag_search_method=["sparse"])
 
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_empty_string_raises(self, schema_fn):
+    def test_hybrid_is_not_a_valid_list_element(self, schema_fn):
+        """'hybrid' is expressed by selecting both dense and bm25, not as its own value."""
         with pytest.raises(ValidationError, match="rag_search_method"):
-            schema_fn(rag_search_method="")
+            schema_fn(rag_search_method=["hybrid"])
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_empty_list_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_search_method"):
+            schema_fn(rag_search_method=[])
 
 
 # ---------------------------------------------------------------------------
@@ -248,21 +259,35 @@ class TestRagSearchMethod:
 class TestRagStrategy:
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
     def test_valid_strategy_passes(self, schema_fn):
-        schema_fn(rag_strategy="rerank")
+        schema_fn(rag_strategy=["rerank"])
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_cross_encoder_rerank_passes(self, schema_fn):
+        schema_fn(rag_strategy=["cross_encoder_rerank"])
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_combining_both_rerank_strategies_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_strategy"):
+            schema_fn(rag_strategy=["rerank", "cross_encoder_rerank"])
 
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
     def test_none_strategy_passes(self, schema_fn):
         schema_fn(rag_strategy=None)
 
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_invalid_strategy_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_strategy"):
-            schema_fn(rag_strategy="hybrid")
+    def test_empty_list_normalizes_to_none(self, schema_fn):
+        obj = schema_fn(rag_strategy=[])
+        assert obj.rag_strategy is None
 
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_empty_string_raises(self, schema_fn):
+    def test_invalid_strategy_raises(self, schema_fn):
         with pytest.raises(ValidationError, match="rag_strategy"):
-            schema_fn(rag_strategy="")
+            schema_fn(rag_strategy=["hybrid"])
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_empty_string_element_raises(self, schema_fn):
+        with pytest.raises(ValidationError, match="rag_strategy"):
+            schema_fn(rag_strategy=[""])
 
 
 # ---------------------------------------------------------------------------

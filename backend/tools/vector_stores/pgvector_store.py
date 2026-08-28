@@ -7,6 +7,7 @@ wrapping LangChain's PGVector functionality while conforming to our abstract int
 
 import json
 import logging
+import threading
 import numpy as np
 from typing import List, Optional, Dict, Any
 from sqlalchemy import text
@@ -18,6 +19,17 @@ from tools.vector_stores.vector_store_interface import VectorStoreInterface
 from tools.embeddingTools import get_embeddings_model
 
 logger = logging.getLogger(__name__)
+
+# langchain_postgres.vectorstores caches its CollectionStore/EmbeddingStore ORM
+# classes in a module-level global (`_classes`) the first time a PGVector instance
+# is constructed, with a check-then-create that isn't thread-safe: two threads
+# racing to build the first-ever PGVector in this process can both declare the
+# same SQLAlchemy table, raising "Table '...' is already defined for this
+# MetaData instance". Retrieval now runs off the event loop via asyncio.to_thread
+# (real concurrent threads), so this narrow first-construction window is guarded
+# here instead of relying on the upstream library to be thread-safe.
+_pgvector_first_build_lock = threading.Lock()
+_pgvector_primed = False
 
 
 # PGVector-style operator -> SQL fragment for numeric comparisons
@@ -116,9 +128,23 @@ class PGVectorStore(VectorStoreInterface):
             Configured PGVector instance
         """
         connection = self.async_engine if (use_async and self.async_engine) else self.engine
-        
+        embeddings = get_embeddings_model(embedding_service)
+
+        global _pgvector_primed
+        if not _pgvector_primed:
+            with _pgvector_first_build_lock:
+                if not _pgvector_primed:
+                    vs = PGVector(
+                        embeddings=embeddings,
+                        collection_name=collection_name,
+                        connection=connection,
+                        use_jsonb=True,
+                    )
+                    _pgvector_primed = True
+                    return vs
+
         return PGVector(
-            embeddings=get_embeddings_model(embedding_service),
+            embeddings=embeddings,
             collection_name=collection_name,
             connection=connection,
             use_jsonb=True,

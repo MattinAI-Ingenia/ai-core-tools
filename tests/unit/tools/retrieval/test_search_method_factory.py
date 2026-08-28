@@ -46,7 +46,15 @@ class TestSearchMethodFactory:
     def test_get_available_search_method_options(self):
         options = SearchMethodFactory.get_available_search_method_options()
         codes = [o["code"] for o in options]
-        assert codes == ["dense", "bm25"]
+        assert codes == ["dense", "bm25", "hybrid"]
         assert all({"code", "label"} == set(o.keys()) for o in options)
         # Only implemented methods are exposed — "sparse" must not leak.
         assert "sparse" not in codes
+
+    def test_get_available_multiselect_options_excludes_hybrid(self):
+        options = SearchMethodFactory.get_available_multiselect_options()
+        codes = [o["code"] for o in options]
+        assert codes == ["dense", "bm25"]
+        assert all({"code", "label"} == set(o.keys()) for o in options)
+        # "hybrid" is expressed by selecting both atomic methods, not as its own value.
+        assert "hybrid" not in codes

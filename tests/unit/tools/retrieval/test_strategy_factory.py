@@ -1,8 +1,21 @@
 """Unit tests for StrategyFactory."""
 
+from unittest.mock import patch
+
+from langchain_community.cross_encoders.base import BaseCrossEncoder
+
 import pytest
 
 from tools.retrieval.strategies.strategy_factory import StrategyFactory
+
+
+class _FakeCrossEncoder(BaseCrossEncoder):
+    """Minimal BaseCrossEncoder — CrossEncoderReranker validates the ``model``
+    field as a ``BaseCrossEncoder`` instance, so a plain MagicMock fails
+    pydantic validation."""
+
+    def score(self, text_pairs):
+        return [0.0 for _ in text_pairs]
 
 
 class TestStrategyFactory:
@@ -48,8 +61,30 @@ class TestStrategyFactory:
     def test_get_available_strategy_options(self):
         options = StrategyFactory.get_available_strategy_options()
         codes = [o["code"] for o in options]
-        assert codes == ["rerank"]
+        assert codes == ["rerank", "cross_encoder_rerank"]
         assert all({"code", "label"} == set(o.keys()) for o in options)
         # Only implemented strategies are exposed — "hybrid"/"multi_query" must not leak.
         assert "hybrid" not in codes
         assert "multi_query" not in codes
+
+    def test_cross_encoder_rerank_returns_cross_encoder_rerank_strategy(self):
+        from tools.retrieval.strategies.cross_encoder_rerank_strategy import (
+            CrossEncoderRerankStrategy,
+        )
+
+        with patch(
+            "tools.retrieval.strategies.cross_encoder_rerank_strategy.HuggingFaceCrossEncoder",
+            return_value=_FakeCrossEncoder(),
+        ):
+            strategy = StrategyFactory.get_strategy("cross_encoder_rerank")
+
+        assert isinstance(strategy, CrossEncoderRerankStrategy)
+
+    def test_cross_encoder_rerank_instances_are_cached(self):
+        with patch(
+            "tools.retrieval.strategies.cross_encoder_rerank_strategy.HuggingFaceCrossEncoder",
+            return_value=_FakeCrossEncoder(),
+        ):
+            first = StrategyFactory.get_strategy("cross_encoder_rerank")
+            second = StrategyFactory.get_strategy("cross_encoder_rerank")
+        assert first is second

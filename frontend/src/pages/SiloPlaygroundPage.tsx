@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from 'react';
+import type { Dispatch, SetStateAction, FormEvent } from 'react';
 import { useParams } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Search, Info, Clock, History, Bot, SplitSquareHorizontal } from 'lucide-react';
 import SearchControls from '../components/playground/SearchControls';
@@ -8,6 +8,20 @@ import ResultCard from '../components/playground/ResultCard';
 import Modal from '../components/ui/Modal';
 import { useSiloSearch } from '../hooks/useSiloSearch';
 import type { PanelState } from '../hooks/useSiloSearch';
+import type { SearchControlsValue } from '../components/playground/SearchControls';
+
+// A panel's own method/strategy/etc. override the shared SearchControls when set,
+// so each A/B panel can compare a different retrieval config for the same query.
+function getPanelOverrides(panel: PanelState, controls: SearchControlsValue) {
+  return {
+    searchMethod: panel.searchMethod ?? controls.searchMethod,
+    strategy: panel.strategy ?? controls.strategy,
+    searchType: panel.searchType ?? controls.searchType,
+    scoreThreshold: panel.scoreThreshold ?? controls.scoreThreshold,
+    fetchK: panel.fetchK ?? controls.fetchK,
+    lambdaMult: panel.lambdaMult ?? controls.lambdaMult,
+  };
+}
 
 function SiloPlaygroundPage() {
   const { appId, siloId } = useParams();
@@ -140,52 +154,21 @@ function SiloPlaygroundPage() {
     setter: Dispatch<SetStateAction<PanelState>>,
   ) {
     const panelMax = panel.results.length > 0 ? Math.max(...panel.results.map((r) => r.score ?? 0)) : 0;
-    const effectiveSearchMethod = panel.searchMethod ?? searchControls.searchMethod;
-    const effectiveStrategy = panel.strategy ?? searchControls.strategy;
-    const effectiveSearchType = panel.searchType ?? searchControls.searchType;
-    const effectiveScoreThreshold = panel.scoreThreshold ?? searchControls.scoreThreshold;
-    const effectiveFetchK = panel.fetchK ?? searchControls.fetchK;
-    const effectiveLambdaMult = panel.lambdaMult ?? searchControls.lambdaMult;
-    const panelOverrides = {
-      searchMethod: effectiveSearchMethod,
-      strategy: effectiveStrategy,
-      searchType: effectiveSearchType,
-      scoreThreshold: effectiveScoreThreshold,
-      fetchK: effectiveFetchK,
-      lambdaMult: effectiveLambdaMult,
-    };
+    const { searchMethod: effectiveSearchMethod, strategy: effectiveStrategy, searchType: effectiveSearchType,
+      scoreThreshold: effectiveScoreThreshold, fetchK: effectiveFetchK, lambdaMult: effectiveLambdaMult } =
+      getPanelOverrides(panel, searchControls);
     return (
       <div className="bg-white shadow rounded-lg p-4 flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">
             Panel {label}
           </span>
-          {panel.clientMs !== null && (
-            <span className="text-xs text-gray-400">{panel.clientMs} ms</span>
+          {panel.query && (
+            <span className="text-xs text-gray-400 truncate">“{panel.query}”</span>
           )}
-        </div>
-
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={panel.query}
-            onChange={(e) => setter((p) => ({ ...p, query: e.target.value }))}
-            onKeyDown={(e) => { if (e.key === 'Enter') void searchPanel(panel.query, setter, panelOverrides); }}
-            placeholder="Enter query…"
-            className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500"
-            disabled={panel.isSearching}
-          />
-          <button
-            type="button"
-            onClick={() => void searchPanel(panel.query, setter, panelOverrides)}
-            disabled={panel.isSearching}
-            className="px-3 py-1.5 text-sm bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded flex items-center gap-1"
-          >
-            {panel.isSearching && (
-              <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-            )}
-            Search
-          </button>
+          {panel.clientMs !== null && (
+            <span className="text-xs text-gray-400 ml-auto">{panel.clientMs} ms</span>
+          )}
         </div>
 
         <div className="flex gap-2">
@@ -212,12 +195,13 @@ function SiloPlaygroundPage() {
             <select
               id={`panel-${label}-strategy-select`}
               value={effectiveStrategy}
-              onChange={(e) => setter((p) => ({ ...p, strategy: e.target.value as '' | 'rerank' }))}
+              onChange={(e) => setter((p) => ({ ...p, strategy: e.target.value as '' | 'rerank' | 'cross_encoder_rerank' }))}
               disabled={panel.isSearching}
               className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
             >
               <option value="">None</option>
-              <option value="rerank">Rerank</option>
+              <option value="rerank">Rerank (embeddings)</option>
+              <option value="cross_encoder_rerank">Rerank (cross-encoder)</option>
             </select>
           </div>
         </div>
@@ -313,6 +297,15 @@ function SiloPlaygroundPage() {
 
         {panel.error && <p className="text-xs text-red-600">{panel.error}</p>}
 
+        {panel.isSearching && (
+          <div className="flex items-center gap-2 text-xs text-gray-500 py-1">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-600 shrink-0"></div>
+            {effectiveStrategy === 'cross_encoder_rerank'
+              ? 'Searching… (cross-encoder rerank can take a few seconds, longer on first use)'
+              : 'Searching…'}
+          </div>
+        )}
+
         {panel.results.length === 0 && !panel.isSearching && (
           <p className="text-xs text-gray-400 italic">No results yet. Run a search.</p>
         )}
@@ -335,6 +328,20 @@ function SiloPlaygroundPage() {
         </div>
       </div>
     );
+  }
+
+  const isCompareSearching = panelA.isSearching || panelB.isSearching;
+
+  async function handleTopSearchSubmit(e: FormEvent) {
+    if (compareMode) {
+      e.preventDefault();
+      await Promise.all([
+        searchPanel(searchQuery, setPanelA, getPanelOverrides(panelA, searchControls)),
+        searchPanel(searchQuery, setPanelB, getPanelOverrides(panelB, searchControls)),
+      ]);
+      return;
+    }
+    await handleSearch(e);
   }
 
   return (
@@ -385,7 +392,7 @@ function SiloPlaygroundPage() {
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Search Documents</h2>
         
-        <form onSubmit={handleSearch} className="space-y-4">
+        <form onSubmit={handleTopSearchSubmit} className="space-y-4">
           {/* Metadata Filters */}
           <SearchFilters
             metadataFields={silo.metadata_fields}
@@ -444,7 +451,8 @@ function SiloPlaygroundPage() {
             )}
           </div>
 
-          {/* Search Query */}
+          {/* Search Query — shared by both A/B panels in compare mode, so the comparison
+              is always the same term across different retrieval configs. */}
           <div>
             <label htmlFor="searchQuery" className="block text-sm font-medium text-gray-700 mb-2">
               Search Query
@@ -455,19 +463,23 @@ function SiloPlaygroundPage() {
                 id="searchQuery"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Enter your search query (leave empty to browse all documents)..."
+                placeholder={
+                  compareMode
+                    ? 'Enter the term to compare across panels A and B…'
+                    : 'Enter your search query (leave empty to browse all documents)...'
+                }
                 className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                disabled={isSearching}
+                disabled={compareMode ? isCompareSearching : isSearching}
               />
               <button
                 type="submit"
-                disabled={isSearching}
+                disabled={compareMode ? isCompareSearching : isSearching}
                 className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded-lg flex items-center"
               >
-                {isSearching && (
+                {(compareMode ? isCompareSearching : isSearching) && (
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
                 )}
-                {isSearching ? 'Searching...' : 'Search'}
+                {(compareMode ? isCompareSearching : isSearching) ? 'Searching...' : 'Search'}
               </button>
             </div>
           </div>

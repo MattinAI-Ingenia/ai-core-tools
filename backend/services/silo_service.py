@@ -59,6 +59,19 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
 
+def _as_name_list(value: Optional[Any]) -> List[str]:
+    """Normalize a search-method/strategy value to a list of names.
+
+    Accepts a bare string (legacy scalar callers, e.g. the Silo Playground),
+    a list (agent multiselect config), or ``None``/empty (-> ``[]``).
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
 def _build_pipeline_retriever(
     vector_store: VectorStoreInterface,
     collection_name: str,
@@ -91,8 +104,8 @@ def _build_pipeline_retriever(
         The final composed retriever.
     """
     retriever_search_type = merged_search_kwargs.pop("search_type", "similarity")
-    search_method_name = merged_search_kwargs.pop("search_method", None)
-    strategy_name = merged_search_kwargs.pop("strategy", None)
+    search_method_value = merged_search_kwargs.pop("search_method", None)
+    strategy_value = merged_search_kwargs.pop("strategy", None)
 
     # Component-specific params (e.g. rerank's top_n/similarity_threshold) travel
     # separately from the search-method's own search_kwargs (k/filter/...).
@@ -113,8 +126,8 @@ def _build_pipeline_retriever(
         params={"search_type": retriever_search_type, "use_async": use_async, **component_params},
     )
 
-    search_method_names = [search_method_name or DEFAULT_SEARCH_METHOD]
-    transformer_names = [strategy_name] if strategy_name else []
+    search_method_names = _as_name_list(search_method_value) or [DEFAULT_SEARCH_METHOD]
+    transformer_names = _as_name_list(strategy_value)
 
     return RetrievalPipeline.build(ctx, search_method_names, transformer_names)
 
@@ -276,15 +289,17 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
     if "lambda_mult" in caller:
         resolved["lambda_mult"] = caller["lambda_mult"]
 
-    # search_method: caller wins; fall back to agent column (server_default 'dense')
+    # search_method: caller wins; fall back to agent column (server_default ["dense"]).
+    # Both may be a bare string (legacy/Playground) or a list (agent multiselect config);
+    # _build_pipeline_retriever normalizes either shape via _as_name_list.
     from tools.retrieval.search_methods.search_method_factory import DEFAULT_SEARCH_METHOD
 
     resolved["search_method"] = (
-        caller.get("search_method") or getattr(agent, "rag_search_method", None) or DEFAULT_SEARCH_METHOD
+        caller.get("search_method") or getattr(agent, "rag_search_method", None) or [DEFAULT_SEARCH_METHOD]
     )
 
     # strategy: caller wins (explicit None clears). Only a concrete value is stored,
-    # so absent key falls back to the agent's configured strategy (None == no strategy).
+    # so absent key falls back to the agent's configured strategy (None/[] == no strategy).
     if "strategy" in caller:
         if caller["strategy"] is not None:
             resolved["strategy"] = caller["strategy"]

@@ -30,8 +30,7 @@ class HybridSearchMethod(SearchMethod):
     """Produce a single retriever that fuses dense and BM25 results via RRF."""
 
     def build(self, ctx: RetrievalContext) -> BaseRetriever:
-        from langchain_classic.retrievers.ensemble import EnsembleRetriever
-
+        from tools.retrieval.fusion import fuse_with_rrf
         from tools.retrieval.search_methods.dense_search_method import DenseSearchMethod
         from tools.retrieval.search_methods.bm25_search_method import BM25SearchMethod
 
@@ -46,4 +45,4 @@ class HybridSearchMethod(SearchMethod):
             weights,
         )
 
-        return EnsembleRetriever(retrievers=[dense_retriever, bm25_retriever], weights=weights)
+        return fuse_with_rrf([dense_retriever, bm25_retriever], weights=weights)

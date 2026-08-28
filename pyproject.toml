@@ -173,6 +173,15 @@ pydub = ">=0.25.1"
 ffmpeg-python = "^0.2.0"
 pymupdf = "^1.27.2.3"
 langchain-aws = ">=1.0.0,<2.0.0"
+sentence-transformers = "<6.0"
+# CPU-only wheel: the default PyPI build pulls the full CUDA/NVIDIA stack
+# (~5GB), which single-host CPU deployments (see backend/Dockerfile) never use.
+torch = { version = ">=2.2,<3.0", source = "pytorch-cpu" }
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [tool.poetry.scripts]
 dev = "uvicorn backend.main:app --reload --port 8000"
