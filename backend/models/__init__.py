@@ -36,6 +36,7 @@ from .usage_record import UsageRecord
 from .user_credential import UserCredential
 from .pricing_catalog import PricingCatalog
 from .indexing_metric import IndexingMetric
+from .entity_type_inference_job import EntityTypeInferenceJob
 from .refresh_token import RefreshToken
 
 __all__ = [
@@ -56,5 +57,6 @@ __all__ = [
     'UserCredential',
     'PricingCatalog',
     'IndexingMetric',
+    'EntityTypeInferenceJob',
     'RefreshToken',
 ]

@@ -615,13 +615,36 @@ ENTITY_TYPES_JSON_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "why": {"type": "string"},
+                    "name": {"type": "string", "maxLength": 60},
+                    # Bounded, but generously. Under guided decoding a maxLength
+                    # is a hard grammar cut, not a hint to be brief: the string
+                    # ends mid-sentence. This field is where the model reasons
+                    # about whether a class deserves to exist, so a tight cap
+                    # removes the reasoning instead of shortening it. 300 was
+                    # tried and the classes came back one-per-table-row
+                    # (PresionMaxima, Caudal, Potencia…), which is what the
+                    # prompt explicitly forbids — plausibly cause, not proven.
+                    # 600 leaves several sentences of room while keeping the
+                    # worst-case response provably inside a 20k window; the
+                    # dimension that actually overflowed it was `examples`.
+                    "why": {"type": "string", "maxLength": 600},
                     # minItems is load-bearing: without it a model under
                     # pressure to hit a target count emits a class with an
                     # empty examples list, and "no instances" is exactly the
                     # signal that the class should not exist.
-                    "examples": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+                    #
+                    # maxItems equally so, and it was missing: guided decoding
+                    # forces VALID JSON, not SHORT JSON, so an unbounded array
+                    # let the model emit examples until it ran out of context.
+                    # Observed: 11,673 completion tokens for at most 20 classes
+                    # (~580 each), truncating mid-JSON against a 20k window.
+                    # Four examples is already more than a reviewer reads.
+                    "examples": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {"type": "string", "maxLength": 80},
+                    },
                 },
                 "required": ["name", "why", "examples"],
                 "additionalProperties": False,

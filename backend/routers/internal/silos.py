@@ -898,7 +898,7 @@ async def infer_entity_types_status(
 
     _validate_silo_app_ownership(silo_id, app_id, db)
 
-    job = EntityTypeInferenceService.status(job_id)
+    job = EntityTypeInferenceService.status(job_id, db)
     # silo_id is checked so a job id cannot be read across silos.
     if not job or job.get("silo_id") != silo_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
