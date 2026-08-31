@@ -389,6 +389,40 @@ async def _arequest_lightrag_cancellation(rag) -> None:
     logger.info("[%s] Requested LightRAG pipeline cancellation", workspace)
 
 
+def _build_rerank_func():
+    """LightRAG's ``rerank_model_func`` hook, or None when no endpoint is set.
+
+    Wired at this layer on purpose. LightRAG reranks inside its own
+    ``process_chunks_unified`` (``lightrag/utils.py``) **before** the
+    ``chunk_top_k`` cut, so the reranker decides WHICH chunks survive that cut
+    instead of leaving it to raw vector/graph order. Wrapping our retriever
+    from the outside cannot do this: by then LightRAG has already chosen and
+    concatenated the chunks into the single context Document that
+    ``_wrap_query_response`` returns — there is nothing left to reorder.
+
+    Delegates to the library's own ``generic_rerank_api``, so any
+    Cohere/Jina-shaped endpoint works with no request/response parsing of ours.
+    """
+    import config  # noqa: WPS433
+
+    if not config.LIGHTRAG_RERANK_URL:
+        return None
+
+    from lightrag.rerank import generic_rerank_api  # noqa: WPS433
+
+    async def _rerank(query, documents, top_n=None, **_kwargs):
+        return await generic_rerank_api(
+            query=query,
+            documents=documents,
+            model=config.LIGHTRAG_RERANK_MODEL,
+            base_url=config.LIGHTRAG_RERANK_URL,
+            api_key=config.LIGHTRAG_RERANK_API_KEY,
+            top_n=top_n,
+        )
+
+    return _rerank
+
+
 async def _arequest_failed_retry(rag) -> None:
     """Publish a sticky manual-retry request so FAILED documents are retried.
 
@@ -1219,6 +1253,17 @@ class LightRAGStore(VectorStoreInterface):
             extra_kwargs["max_source_ids_per_entity"] = self.max_source_ids_per_entity
         if self.max_source_ids_per_relation:
             extra_kwargs["max_source_ids_per_relation"] = self.max_source_ids_per_relation
+
+        # Logged, not silent: LightRAG's own warning for "rerank enabled but no
+        # model configured" is easy to miss, and an unnoticed no-op here looks
+        # exactly like a reranker that simply isn't helping.
+        rerank_func = _build_rerank_func()
+        if rerank_func is not None:
+            extra_kwargs["rerank_model_func"] = rerank_func
+            logger.info(
+                "[%s] Rerank enabled: model=%s endpoint=%s",
+                collection_name, config.LIGHTRAG_RERANK_MODEL, config.LIGHTRAG_RERANK_URL,
+            )
 
         gleaning = (
             self.entity_extract_max_gleaning

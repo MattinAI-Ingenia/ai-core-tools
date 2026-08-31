@@ -72,6 +72,15 @@ AGENT_DEFAULT_RAG_K: int = int(os.getenv('AGENT_DEFAULT_RAG_K', '20'))
 # the library itself at import time) so the UI can show the effective default
 # for Agent.rag_chunk_top_k when it is left unset. Not consumed for retrieval.
 LIGHTRAG_CHUNK_TOP_K_DEFAULT: int = int(os.getenv('CHUNK_TOP_K', '30'))
+# Optional rerank endpoint. The EMBEDDED LightRAG library never reads its own
+# RERANK_* env vars — only its standalone API server does — so reranking stays
+# silently off until we pass a rerank_model_func explicitly (see
+# lightrag_store._build_rerank_func). Unset here = no reranking.
+# The URL is the FULL endpoint including its path (the library POSTs to it
+# verbatim, it does not append anything), e.g. http://reranker:7997/rerank.
+LIGHTRAG_RERANK_URL: Optional[str] = os.getenv('LIGHTRAG_RERANK_URL') or None
+LIGHTRAG_RERANK_MODEL: str = os.getenv('LIGHTRAG_RERANK_MODEL', 'BAAI/bge-reranker-v2-m3')
+LIGHTRAG_RERANK_API_KEY: Optional[str] = os.getenv('LIGHTRAG_RERANK_API_KEY') or None
 # Entity extraction configuration
 # Maximum number of "gleaning" iterations the entity-extraction pipeline
 # should perform when processing documents during indexing. Set to 0 to
