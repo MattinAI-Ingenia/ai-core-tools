@@ -77,3 +77,6 @@ specs/
 
 # RAG eval benchmark: datasets, run results, and reports — not versioned
 benchmark/
+
+# Infinity model weights (reranker/embeddings) — GBs of downloaded checkpoints
+docker/utilities/*/hf_cache/

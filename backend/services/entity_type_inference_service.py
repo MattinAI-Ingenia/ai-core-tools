@@ -39,14 +39,34 @@ logger = logging.getLogger(__name__)
 
 MAX_DOCUMENTS = 30
 SAMPLES_PER_DOCUMENT = 2
-# Budgets the document payload only. A self-hosted model's window is commonly
-# 20k total; the instructions add ~0.9k, so 14000 here left the completion
-# (up to 12 classes, each with a "why" sentence and examples — several
-# thousand tokens) too little room and the model's response got cut off
-# mid-JSON (observed: prompt_tokens=15433, completion capped at the window,
-# unparseable). 10500 leaves ~8.5k for completion — about double what that
-# failure needed — while keeping most of the original 30-document breadth.
-DOCUMENT_TOKEN_BUDGET = 10500
+# Budgets the document payload only, in REAL tokens. The arithmetic that has
+# to hold, against the smallest window in play (self-hosted extraction servers
+# are commonly started with max_model_len=20000):
+#
+#   payload (this) + instructions (~2.1k, measured) + completion  <=  window
+#
+# The completion is the expensive half: up to MAX_TYPES classes, each with a
+# "why" sentence and examples. A truncated run generated 7.4k and was still
+# cut off mid-JSON, so budget ~10k for it. 20000 - 2100 - 10000 leaves ~7.9k,
+# hence 7000 with margin.
+#
+# History, because this constant has now broken twice for the same reason —
+# it is only meaningful relative to how tokens are counted:
+#   14000: sized against no real counting at all; truncated.
+#   10500: sized while approx_tokens still used len/CHARS_PER_TOKEN, which
+#          OVERESTIMATED Spanish text by ~1.65x (real: 3.8 chars/token, the
+#          constant assumed 2.3). fit_budget therefore stopped trimming at
+#          ~6.4k REAL tokens, and 10500 never actually applied. Making the
+#          counter accurate removed that accidental safety margin, the payload
+#          grew to the full 10500, and the completion was squeezed to 7.4k —
+#          truncated again (prompt_tokens=12562, total exactly 20000).
+#   7000:  sized against real tiktoken counting, so the number now means what
+#          it says. Close to the ~6.4k that empirically worked.
+#
+# ponytail: a fixed constant, not derived from the model's advertised window —
+# that would need a per-provider capability lookup for a value that only has
+# to be conservative. Revisit if a deployment's window is smaller than 20k.
+DOCUMENT_TOKEN_BUDGET = 7000
 MAX_TYPES = 10
 
 # Jobs live in memory: they last a couple of minutes, carry nothing worth

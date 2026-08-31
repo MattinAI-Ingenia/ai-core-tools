@@ -150,29 +150,62 @@ def _model_params_b(model_name: str) -> Optional[float]:
 
 
 def _llm_throughput_bounds(model_name: str, self_hosted: bool) -> Tuple[float, float]:
-    """(optimistic, pessimistic) tokens/sec for the indexing time estimate.
+    """(optimistic, pessimistic) tokens/sec for ONE extraction call.
 
-    Two adjustments on top of the self-hosted baseline, both rough,
-    order-of-magnitude corrections — not measurements, since this deployment
-    has no real run to calibrate against for most of these combinations
-    (get_indexing_progress's own live ETA takes over with real numbers the
-    moment a run actually starts; this only has to be reasonable for the
-    pre-upload estimate):
+    Per-call, not aggregate — see _llm_aggregate_throughput, which is what the
+    estimate actually uses. Kept because the cloud path still scales this by
+    concurrency.
 
-    - Cloud API: a managed cluster is not bottlenecked by one local GPU and
-      typically sustains much higher aggregate throughput at this
-      deployment's concurrency levels. 3x the self-hosted baseline.
-    - Self-hosted, small model (< 12B params): decoding speed scales
-      roughly inversely with parameter count on the same hardware, so a
-      small model needs less compute per token than the ~30B baseline this
-      was tuned against. 2x the self-hosted baseline.
-
-    A self-hosted model at or above the baseline's own size gets no
-    adjustment — it is what the baseline already measured.
+    - Cloud API: a managed fleet is not bottlenecked by one local GPU. 3x the
+      self-hosted baseline.
+    - Self-hosted, small model (< 12B params): decoding cost per token falls
+      roughly with parameter count on the same hardware. 2x the baseline.
     """
     opt, pess = _LLM_THROUGHPUT_BASE
     if not self_hosted:
         return opt * 3, pess * 3
+    params_b = _model_params_b(model_name)
+    if params_b is not None and params_b < _SMALL_MODEL_PARAMS_B:
+        return opt * 2, pess * 2
+    return opt, pess
+
+
+# Aggregate tok/s summed over ALL concurrent extraction calls against one
+# self-hosted GPU. Measured on this deployment's own runs (prompt+completion
+# from indexing_metric, divided by wall-clock duration, Qwen3-30B-A3B with
+# MAX_ASYNC_LLM=48): 932 tok/s over 115 min on one silo, 1246 tok/s over 74 min
+# on another.
+_LLM_AGGREGATE_SELF_HOSTED = (1250.0, 900.0)  # (optimistic, pessimistic)
+
+# A hosted API answers from a fleet, so concurrency really does multiply
+# throughput there — but not without limit (rate limits, per-account
+# shaping). Caps the multiplier so a large MAX_ASYNC_LLM cannot produce an
+# absurdly fast estimate.
+_CLOUD_CONCURRENCY_CAP = 12
+
+
+def _llm_aggregate_throughput(
+    model_name: str, self_hosted: bool, workers: int,
+) -> Tuple[float, float]:
+    """(optimistic, pessimistic) tok/s across the whole extraction phase.
+
+    Self-hosted is deliberately NOT per-call-times-workers. One GPU has a
+    fixed token throughput: raising MAX_ASYNC_LLM queues more work, it does
+    not create more FLOPs. The previous model multiplied a per-call figure by
+    ``min(MAX_ASYNC_LLM, MAX_PARALLEL_INSERT)`` — 48 here — and so assumed
+    3,360-8,640 tok/s where this deployment actually sustains 932-1,246. It
+    estimated 11-28 min for a corpus that took 115, and got *more* optimistic
+    every time the concurrency knobs were raised, which is backwards: those
+    knobs stopped buying throughput long before 48.
+
+    Cloud keeps the concurrency scaling, bounded by _CLOUD_CONCURRENCY_CAP.
+    """
+    if not self_hosted:
+        opt, pess = _llm_throughput_bounds(model_name, self_hosted=False)
+        effective = max(1, min(workers, _CLOUD_CONCURRENCY_CAP))
+        return opt * effective, pess * effective
+
+    opt, pess = _LLM_AGGREGATE_SELF_HOSTED
     params_b = _model_params_b(model_name)
     if params_b is not None and params_b < _SMALL_MODEL_PARAMS_B:
         return opt * 2, pess * 2
@@ -2980,19 +3013,27 @@ class SiloService:
         # _llm_throughput_bounds. Historical metrics below can further refine
         # the estimate for an already-used silo, overriding this envelope
         # with this silo's own real throughput once it has any.
-        llm_throughput_opt, llm_throughput_pess = _llm_throughput_bounds(
-            model_name, llm_self_hosted,
+        llm_aggregate_opt, llm_aggregate_pess = _llm_aggregate_throughput(
+            model_name, llm_self_hosted, llm_workers,
         )
         embedding_throughput_opt, embedding_throughput_pess = _embedding_throughput_bounds(
             emb_self_hosted,
         )
 
-        # Phase 1 — extraction (1 call/chunk + gleaning passes, parallelised across chunks)
-        llm_tokens_per_chunk = (avg_chunk_tokens + _prompt_overhead_tokens) * (1 + max_gleaning)
-        llm_s_per_chunk_opt = (llm_tokens_per_chunk / llm_throughput_opt) * overhead_factor
-        llm_s_per_chunk_pess = (llm_tokens_per_chunk / llm_throughput_pess) * overhead_factor
-        llm_wall_s_opt = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_opt
-        llm_wall_s_pess = math.ceil(num_chunks / llm_workers) * llm_s_per_chunk_pess
+        # Phase 1 — extraction (1 call/chunk + gleaning passes). Total tokens
+        # divided by the AGGREGATE throughput: the concurrency is already
+        # baked into that figure, so dividing the chunk count by the worker
+        # count as well would count the same parallelism twice.
+        # Prompt AND completion. The aggregate throughput above was measured as
+        # (prompt_tokens + completion_tokens) / wall-clock from indexing_metric,
+        # so dividing only the input by it understates the work by ~a third —
+        # extraction generates almost as many tokens as it reads (measured:
+        # 3.30M prompt vs 3.15M completion on this corpus).
+        # No (1 + max_gleaning) factor here: extraction_calls above already
+        # carries it, so both figures are per-run totals, not per-chunk.
+        llm_tokens_total = estimated_input_tokens + estimated_output_tokens
+        llm_wall_s_opt = (llm_tokens_total / llm_aggregate_opt) * overhead_factor
+        llm_wall_s_pess = (llm_tokens_total / llm_aggregate_pess) * overhead_factor
 
         # Embedding (parallel to LLM, but we take the max wall time)
         emb_tokens_total = estimated_embedding_tokens
@@ -3010,8 +3051,13 @@ class SiloService:
                 observed_tokens_per_second = observed_total_tokens / observed_total_duration
                 estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
                 observed_time = fixed_overhead_s + (estimated_total_tokens / observed_tokens_per_second)
-                estimated_indexing_time_min = min(estimated_indexing_time_min, observed_time * 0.85)
-                estimated_indexing_time_max = min(estimated_indexing_time_max, observed_time * 1.35)
+                # REPLACES the heuristic, not min()'d against it. This silo's
+                # own wall-clock is ground truth for this silo; min() meant a
+                # reality slower than the heuristic was silently discarded, so
+                # the estimate could never learn it was too optimistic — it
+                # stayed at 11-28 min across five real runs averaging 115.
+                estimated_indexing_time_min = observed_time * 0.85
+                estimated_indexing_time_max = observed_time * 1.35
 
         estimated_indexing_time_min = round(max(fixed_overhead_s, estimated_indexing_time_min), 1)
         estimated_indexing_time_max = round(max(estimated_indexing_time_min, estimated_indexing_time_max), 1)

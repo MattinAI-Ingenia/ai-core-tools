@@ -48,6 +48,15 @@ PRICING_PER_1M = {
     "gpt-5": (1.25, 10.00),
     "gpt-4.1": (2.00, 8.00),
     "gpt-4o": (2.50, 10.00),
+    # Self-hosted on our own GPUs: no per-token billing. Listed explicitly
+    # rather than left to the fallback, which would price a free run at
+    # gpt-5.4 rates and report ~$8.7 for something that cost nothing.
+    # Longest-key-first matching puts these ahead of the "gpt-5"/"gpt-4o"
+    # substrings they do not actually contain anyway.
+    "gpt-oss-120b": (0.0, 0.0),
+    "gpt-oss-20b": (0.0, 0.0),
+    "glm-4.5-air": (0.0, 0.0),
+    "qwen3": (0.0, 0.0),
 }
 
 
@@ -73,10 +82,99 @@ _MONITORING_LINE_RE = re.compile(
 )
 
 
+def corpus_vocabulary(eval_set: dict) -> list[str]:
+    """Every document code the eval set ever expects, longest first.
+
+    Derived from the data instead of a hard-coded regex like ``CDOC\\d{6}``:
+    the corpus's naming scheme is not this script's business, and the union of
+    all ``docs_esperados`` covers the whole corpus anyway (30/30 for the DOMUSA
+    set). Longest-first so a code that is a prefix of another can't shadow it.
+    """
+    vocab = set()
+    for q in eval_set.get("preguntas", []):
+        vocab.update(q.get("docs_esperados") or [])
+    return sorted(vocab, key=len, reverse=True)
+
+
+def score_doc_recall(answer: str | None, expected: list[str], vocab: list[str]) -> dict | None:
+    """Which expected documents the answer actually cites.
+
+    Objective counterpart to reading the answers by hand: a human (or an LLM)
+    grading "did it cover the right documents?" drifts between passes, and on
+    this eval set that drift was worth roughly as much as the effect being
+    measured. Counting citations is deterministic and free, so a config change
+    can be judged on it without a grading pass at all.
+
+    ``extra`` only counts REAL corpus documents cited but not expected — an
+    invented code is a hallucination, a different question this does not try to
+    answer. Returns None when the question has no document-level ground truth.
+    """
+    if not expected:
+        return None
+    text = answer or ""
+    mentioned = {code for code in vocab if code in text}
+    expected_set = set(expected)
+    found = sorted(mentioned & expected_set)
+    return {
+        "found": len(found),
+        "expected": len(expected_set),
+        "recall": round(len(found) / len(expected_set), 4),
+        "missing": sorted(expected_set - mentioned),
+        "extra": sorted(mentioned - expected_set),
+    }
+
+
+def aggregate_doc_recall(results: list[dict]) -> dict:
+    """Corpus-level recall, overall and per ``tipo``.
+
+    Reports macro (mean of per-question recall) and micro (total hits / total
+    expected) side by side: macro weights every question equally, micro is
+    dominated by the wide fan-out questions. They can diverge a lot here — one
+    question expects 25 documents and several expect 1 — and which one moved
+    is itself informative.
+    """
+    scored = [
+        (r, r["doc_recall"]) for r in results
+        if not r.get("error") and r.get("doc_recall")
+    ]
+    if not scored:
+        return {}
+
+    def _block(rows):
+        hits = sum(s["found"] for _, s in rows)
+        total = sum(s["expected"] for _, s in rows)
+        return {
+            "n_preguntas": len(rows),
+            "recall_macro": round(sum(s["recall"] for _, s in rows) / len(rows), 4),
+            "recall_micro": round(hits / total, 4) if total else None,
+            "docs_encontrados": hits,
+            "docs_esperados": total,
+            "citas_extra": sum(len(s["extra"]) for _, s in rows),
+        }
+
+    by_tipo = {}
+    for r, s in scored:
+        by_tipo.setdefault(r.get("tipo") or "sin_tipo", []).append((r, s))
+
+    return {
+        "global": _block(scored),
+        "por_tipo": {t: _block(rows) for t, rows in sorted(by_tipo.items())},
+        "nota": (
+            "Recall de citas de documento, calculado sin intervencion humana ni LLM: "
+            "se busca cada codigo del corpus (union de docs_esperados del eval set) "
+            "en respuesta_agente. 'citas_extra' son documentos reales del corpus "
+            "citados pero no esperados; un codigo inventado no se cuenta aqui. "
+            "Solo cubre preguntas con docs_esperados; las de valor puntual no."
+        ),
+    }
+
+
 def introspect_config(app_id: int, agent_id: int) -> dict:
     """Pull the agent+silo LightRAG config from the running backend container."""
     snippet = f"""
 import json
+import os as _os
+import config as _cfg
 from db.database import SessionLocal
 from models.agent import Agent
 from models.silo import Silo
@@ -94,6 +192,19 @@ print(json.dumps({{
     "chunk_strategy": (silo.lightrag_chunk_strategy if silo else None),
     "llm_model": (llm_service.description if llm_service else None),
     "has_system_prompt": bool((agent.system_prompt or "").strip()),
+    # Read from the backend's own config, not the DB: rerank is deployment-wide
+    # config, and whether it was on is the single biggest confounder when
+    # comparing two runs.
+    "rerank": _cfg.LIGHTRAG_RERANK_URL or None,
+    "rerank_model": (_cfg.LIGHTRAG_RERANK_MODEL if _cfg.LIGHTRAG_RERANK_URL else None),
+    # The EFFECTIVE chunk cap: LightRAG falls back to its env CHUNK_TOP_K when
+    # the agent leaves rag_chunk_top_k unset. Reporting only the DB value once
+    # made an A/B report "60" for a run that actually executed at 30.
+    "effective_chunk_top_k": (
+        agent.rag_chunk_top_k
+        if agent.rag_chunk_top_k is not None
+        else int(_os.getenv("CHUNK_TOP_K", "30"))
+    ),
 }}))
 """
     out = subprocess.run(
@@ -207,6 +318,7 @@ def main() -> int:
 
     eval_set = json.loads(Path(args.eval_set).read_text(encoding="utf-8"))
     questions = eval_set["preguntas"]
+    vocab = corpus_vocabulary(eval_set)
     if args.limit:
         questions = questions[: args.limit]
 
@@ -221,11 +333,13 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             answer = None
             error = str(exc)
+        response_text = answer["response"] if answer else None
         results.append({
             **q,
-            "respuesta_agente": answer["response"] if answer else None,
+            "respuesta_agente": response_text,
             "error": error,
             "latency_s": round(time.monotonic() - t0, 2),
+            "doc_recall": score_doc_recall(response_text, q.get("docs_esperados") or [], vocab),
         })
 
     usage_events = fetch_monitoring_usage(
@@ -239,11 +353,38 @@ def main() -> int:
         total_tokens += (usage or {}).get("total_tokens", 0)
 
     today = date.today().isoformat().replace("-", "")
+    # The EFFECTIVE value, not the DB one — see introspect_config. A filename
+    # that says 60 for a run that executed at 30 is worse than no filename tag.
+    chunk_top_k_tag = f"chunktopk{config['effective_chunk_top_k']}"
+    rerank_tag = "rerank" if config.get("rerank") else "norerank"
+    # A --limit run is a smoke test and MUST NOT be able to land on the filename
+    # of a full run: same config + same day produces the same name, so a 2-question
+    # sanity check silently replaced a finished 99-question result with a
+    # 2-question file. The analysis had already been written up, but the raw data
+    # was gone. The tag makes the collision impossible rather than merely unlikely.
+    smoke_tag = f"_smoke{args.limit}" if args.limit is not None else ""
     out_name = (
         f"resultado_chunk{chunk_size}_{chunk_strategy}_{query_mode}_"
-        f"{model_slug}_{prompt_tag}_{today}.json"
+        f"{chunk_top_k_tag}_{rerank_tag}_{model_slug}_{prompt_tag}_{today}{smoke_tag}.json"
     )
     out_path = Path(args.out_dir) / out_name
+
+    # Belt and braces on top of smoke_tag: never replace a result that covered
+    # MORE questions than this one, whatever the filename says. Side-steps
+    # rather than aborts — the answers are already paid for (~25 min, ~$8.5),
+    # so refusing to write would destroy the very thing this guard protects.
+    if out_path.exists():
+        try:
+            previous = json.loads(out_path.read_text(encoding="utf-8")).get("n_preguntas", 0)
+        except Exception:  # noqa: BLE001 — unreadable/corrupt file is not worth protecting
+            previous = 0
+        if previous > len(results):
+            out_path = out_path.with_name(f"{out_path.stem}_parcial{len(results)}.json")
+            print(
+                f"  (aviso: el destino ya tenia {previous} preguntas y esta corrida solo "
+                f"{len(results)}; NO se sobrescribe. Guardando en {out_path.name})",
+                file=sys.stderr,
+            )
 
     output = {
         "corpus": eval_set.get("corpus"),
@@ -257,10 +398,14 @@ def main() -> int:
             "query_mode": query_mode,
             "rag_k": config["rag_k"],
             "rag_chunk_top_k": config["rag_chunk_top_k"],
+            "effective_chunk_top_k": config["effective_chunk_top_k"],
+            "rerank": config.get("rerank"),
+            "rerank_model": config.get("rerank_model"),
             "llm_model": llm_model,
             "has_system_prompt": has_system_prompt,
         },
         "n_preguntas": len(results),
+        "doc_recall": aggregate_doc_recall(results),
         "coste_estimado": {
             "total_tokens": total_tokens,
             "cost_usd_upper_bound": round(total_cost, 4),
