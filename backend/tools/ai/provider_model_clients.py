@@ -28,6 +28,7 @@ from tools.ai.model_catalog import (
     PROVIDER_MISTRAL,
     PROVIDER_OLLAMA,
     PROVIDER_OPENAI,
+    PROVIDER_OPENAI_COMPATIBLE,
     PROVIDER_OPENROUTER,
     enrich,
 )
@@ -209,6 +210,38 @@ def list_custom_models(req: ListProviderModelsRequest) -> List[ProviderModelInfo
     return _list_openai_compatible(
         req, provider=PROVIDER_CUSTOM, base_url=base_url or None, extra_headers=headers or None,
     )
+
+
+def list_openai_compatible_models(req: ListProviderModelsRequest) -> List[ProviderModelInfo]:
+    """Self-hosted embedding server speaking OpenAI's protocol.
+
+    Tries the base URL exactly as entered first, then with ``/v1`` appended,
+    because the servers in this class disagree on where they mount the route:
+    Infinity serves ``/models`` at the root, while TEI and vLLM serve
+    ``/v1/models``. Probing both is what lets one provider card cover all of
+    them — asking the operator to know which flavour their server is would be
+    the kind of detail that turns into a mystery 404.
+
+    Only the first attempt's failure is swallowed, and only to try the second;
+    if both fail the second error propagates, so a genuinely unreachable host
+    still reports a real error instead of a confusing one.
+    """
+    base = (req.base_url or "").rstrip("/")
+    headers = build_ollama_auth_headers(req.api_key, req.base_url) or None
+    candidates = [base] if base.endswith("/v1") else [base, f"{base}/v1"]
+
+    for index, candidate in enumerate(candidates):
+        try:
+            return _list_openai_compatible(
+                req,
+                provider=PROVIDER_OPENAI_COMPATIBLE,
+                base_url=candidate or None,
+                extra_headers=headers,
+            )
+        except ProviderListingError:
+            if index == len(candidates) - 1:
+                raise
+    return []
 
 
 # ==================== ANTHROPIC ====================

@@ -133,6 +133,26 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
     supportedFor: ['embedding'],
   },
   {
+    // Own provider value, NOT a second 'OpenAI' card: getProviderDescriptor
+    // resolves by value with .find(), so two cards sharing a value collapse
+    // onto the first one — the base-URL field would never render and the card
+    // would be selectable but unusable. The backend maps this value to the
+    // same builder as OpenAI, which forwards `endpoint` as base_url.
+    value: 'OpenAICompatible',
+    label: 'OpenAI-compatible / Self-hosted',
+    description: 'Self-hosted embeddings speaking the OpenAI protocol (Infinity, TEI, vLLM).',
+    Icon: Server,
+    apiKey: 'optional',
+    needsBaseUrl: true,
+    baseUrlPlaceholder: 'http://localhost:7997',
+    // Listing works: the backend probes the base URL as given and then with
+    // /v1, covering Infinity (/models) and TEI/vLLM (/v1/models) alike.
+    supportsModelListing: true,
+    apiKeyPlaceholder: 'optional bearer token',
+    apiKeyHelp: 'Optional. Only needed if your endpoint is behind auth.',
+    supportedFor: ['embedding'],
+  },
+  {
     // Custom for embeddings is the HuggingFace Inference API. There is
     // no generic /models listing — the user types the model id manually.
     value: 'Custom',

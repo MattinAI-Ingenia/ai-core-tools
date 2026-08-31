@@ -29,6 +29,7 @@ from tools.ai.model_catalog import (
     PROVIDER_MISTRAL,
     PROVIDER_OLLAMA,
     PROVIDER_OPENAI,
+    PROVIDER_OPENAI_COMPATIBLE,
     PROVIDER_OPENROUTER,
     drop_dated_snapshots_when_alias_exists,
     is_chat_model,
@@ -45,6 +46,7 @@ from utils.secret_utils import PLACEHOLDER_API_KEY, is_masked_key
 
 _DISPATCH: Dict[str, str] = {
     PROVIDER_OPENAI: "list_openai_models",
+    PROVIDER_OPENAI_COMPATIBLE: "list_openai_compatible_models",
     PROVIDER_ANTHROPIC: "list_anthropic_models",
     PROVIDER_MISTRAL: "list_mistral_models",
     PROVIDER_GOOGLE: "list_google_models",
@@ -138,7 +140,8 @@ class ProviderModelsService:
         without an API key when the server has auth disabled, so the
         check is skipped for those providers.
         """
-        if req.provider in (PROVIDER_OLLAMA, PROVIDER_CUSTOM, PROVIDER_OPENROUTER):
+        if req.provider in (PROVIDER_OLLAMA, PROVIDER_CUSTOM, PROVIDER_OPENROUTER,
+                            PROVIDER_OPENAI_COMPATIBLE):
             return
 
         api_key = req.api_key or ""

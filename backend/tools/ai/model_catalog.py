@@ -38,6 +38,9 @@ from schemas.provider_models_schemas import (
 # models — keeps the listing pipeline cheap and importable from anywhere.
 
 PROVIDER_OPENAI = "OpenAI"
+# Self-hosted server speaking OpenAI's /embeddings protocol (Infinity, TEI,
+# vLLM). Embedding-only; see EmbeddingProvider.OpenAICompatible.
+PROVIDER_OPENAI_COMPATIBLE = "OpenAICompatible"
 PROVIDER_ANTHROPIC = "Anthropic"
 PROVIDER_MISTRAL = "MistralAI"
 PROVIDER_GOOGLE = "Google"
@@ -109,6 +112,16 @@ _EMBEDDING_PATTERNS = (
     re.compile(r"^mxbai-embed"),
     re.compile(r"^e5-"),
     re.compile(r"^all-minilm"),
+)
+
+# Rerankers are cross-encoders: they score (query, document) pairs and return
+# no vector at all, so they can never back an Embedding Service. They need an
+# explicit veto because the naming collides with the embedding families —
+# "bge-reranker-v2-m3" matches ^bge- — and picking one as the embedding model
+# would fail at index time, or worse, silently store garbage.
+_RERANK_PATTERNS = (
+    re.compile(r"rerank"),
+    re.compile(r"cross-encoder"),
 )
 
 # Pure-audio (transcription / TTS only). They get audio=True without chat.
@@ -234,14 +247,27 @@ def heuristic_capabilities_from_id(provider: str, model_id: str) -> ProviderCapa
     """
     lid = (model_id or "").lower()
 
-    if provider == PROVIDER_OPENROUTER and "/" in lid:
+    # Vetoed on the FULL id, before any prefix stripping: the rerank signal can
+    # live in the vendor half ("cross-encoder/ms-marco"), and stripping first
+    # left "ms-marco", which fell through to the default chat classification.
+    if _matches_any(lid, _RERANK_PATTERNS):
+        return ProviderCapabilities()
+
+    # Both providers report slash-prefixed ids, and the family patterns match
+    # the part after the slash: OpenRouter prefixes with the upstream vendor
+    # ("openai/gpt-4o"), while self-hosted servers report the HuggingFace repo
+    # id ("BAAI/bge-m3"). Without stripping, bge-m3 served by Infinity failed
+    # every embedding pattern and the wizard listed zero models — an empty list
+    # with no error, which reads as "the endpoint has nothing".
+    if "/" in lid and provider in (PROVIDER_OPENROUTER, PROVIDER_OPENAI_COMPATIBLE):
         _, unprefixed = lid.split("/", 1)
         caps = _match_heuristic(unprefixed)
-        # OR-merge OpenRouter-specific extras on the full id
-        extra_caps = _match_openrouter_extras(lid)
-        for field_name in ProviderCapabilities.model_fields:
-            if getattr(extra_caps, field_name):
-                setattr(caps, field_name, True)
+        if provider == PROVIDER_OPENROUTER:
+            # OR-merge OpenRouter-specific extras on the full id
+            extra_caps = _match_openrouter_extras(lid)
+            for field_name in ProviderCapabilities.model_fields:
+                if getattr(extra_caps, field_name):
+                    setattr(caps, field_name, True)
         return caps
 
     return _match_heuristic(lid)

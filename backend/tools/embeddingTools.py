@@ -23,9 +23,32 @@ class HuggingFaceEmbeddingsAdapter:
 
 
 def _build_openai_embeddings(embedding_service, model_id):
+    """OpenAI, or any endpoint speaking its /embeddings protocol.
+
+    ``endpoint`` is forwarded as ``base_url`` so a self-hosted server (Infinity,
+    TEI, vLLM, LiteLLM…) can be used without a new provider. This mirrors what
+    the LLM side already does in ``_build_custom_llm``; embeddings lacked it,
+    which left OpenAI-compatible self-hosted servers with no way in at all —
+    the "Custom" embedding provider is HuggingFace's Inference protocol and
+    "Ollama" is Ollama's own, neither of which such a server speaks.
+
+    Empty/unset endpoint keeps the real OpenAI API, so existing services are
+    unaffected (they store '' in that column, not NULL).
+
+    ``check_embedding_ctx_length`` is switched off for custom endpoints only.
+    Left on, OpenAIEmbeddings tokenizes client-side with tiktoken and sends
+    arrays of token IDs instead of text — an OpenAI-specific optimization that
+    Infinity/TEI/vLLM reject with a 422 ("Input should be a valid string").
+    Kept ON for real OpenAI, where it also chunks inputs past the model's
+    context limit; our chunks (2000 tokens) are far below bge-m3's 8192, so
+    losing that on self-hosted costs nothing.
+    """
+    endpoint = embedding_service.endpoint or None
     return OpenAIEmbeddings(
         model=model_id,
-        api_key=embedding_service.api_key
+        api_key=embedding_service.api_key,
+        base_url=endpoint,
+        check_embedding_ctx_length=endpoint is None,
     )
 
 
@@ -109,6 +132,8 @@ def _build_google_cloud_embeddings(embedding_service, model_id):
 
 _EMBEDDING_BUILDERS = {
     EmbeddingProvider.OpenAI.value: _build_openai_embeddings,
+    # Same builder: it already honours `endpoint` as base_url.
+    EmbeddingProvider.OpenAICompatible.value: _build_openai_embeddings,
     EmbeddingProvider.MistralAI.value: _build_mistral_embeddings,
     EmbeddingProvider.Custom.value: _build_huggingface_embeddings,
     EmbeddingProvider.Ollama.value: _build_ollama_embeddings,
