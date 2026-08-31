@@ -660,15 +660,26 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
     )
     lightrag_mode = getattr(agent, "lightrag_query_mode", None) if is_lightrag else None
 
+    # Resolved BEFORE the skill-routed branch, not after. resolve_search_params
+    # is the only place that maps Agent.rag_k -> k and Agent.rag_chunk_top_k ->
+    # lightrag_chunk_top_k; returning early with the raw caller params (None on
+    # the agent-execution path) silently dropped every per-agent RAG setting for
+    # skill-routed agents, which then ran on the deployment-wide env defaults
+    # instead. It was invisible: the UI and the eval harness both read the
+    # stored DB values, so they reported a config that was never applied — an
+    # A/B of rag_chunk_top_k 30 vs 60 ran at 30 both times and "proved" the
+    # change did nothing.
+    resolved_sp, resolved_pinned = resolve_search_params(agent, caller_search_params)
+
     if lightrag_mode == "skill-routed":
         skill_assocs = getattr(agent, "skill_associations", None) or []
         if any(getattr(a.skill, "name", None) == LIGHTRAG_ROUTER_SKILL_NAME
                for a in skill_assocs if a.skill):
-            return _create_dynamic_lightrag_tool(silo, caller_search_params)
+            # The dynamic tool sets lightrag_query_mode itself, per call.
+            return _create_dynamic_lightrag_tool(silo, resolved_sp)
         # ponytail: router skill toggled off — fall back transparently to hybrid
         lightrag_mode = "hybrid"
 
-    resolved_sp, resolved_pinned = resolve_search_params(agent, caller_search_params)
     if lightrag_mode:
         resolved_sp["lightrag_query_mode"] = lightrag_mode
     return get_retriever_tool(
