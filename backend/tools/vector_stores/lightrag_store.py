@@ -850,6 +850,26 @@ def _run_async(coro):
         return future.result()
 
 
+# MAX_TOTAL_TOKENS is passed to LightRAG's own QueryParam, but its entity/
+# relation expansion can still overshoot it (seen live: 155k tokens against a
+# 120k budget, crashing the synthesis call with a 400 from the LLM). This is
+# the hard stop LightRAG itself doesn't provide: truncate the assembled
+# context ourselves before it ever reaches the LLM.
+def _clamp_docs_to_token_budget(docs: List[Document], max_total_tokens: Optional[int]) -> None:
+    import os  # noqa: WPS433
+    import tiktoken  # noqa: WPS433
+
+    # Per-agent override, else the same env var LightRAG's own QueryParam
+    # defaults from (see docker-compose.yaml) — never unlimited.
+    max_total_tokens = max_total_tokens or int(os.getenv("MAX_TOTAL_TOKENS", "120000"))
+
+    enc = tiktoken.get_encoding("o200k_base")
+    for doc in docs:
+        tokens = enc.encode(doc.page_content)
+        if len(tokens) > max_total_tokens:
+            doc.page_content = enc.decode(tokens[:max_total_tokens])
+
+
 class LightRAGRetriever(BaseRetriever):
     """LangChain retriever backed by a LightRAG instance.
 
@@ -912,6 +932,7 @@ class LightRAGRetriever(BaseRetriever):
         # The legacy aquery() wrapper discards raw_data, so we can't use it.
         response = _run_async(rag.aquery_llm(query, param=param))
         docs = _wrap_query_response(response, self.query_mode)
+        _clamp_docs_to_token_budget(docs, self.max_total_tokens)
         logger.debug("[LightRAG retriever] query=%r mode=%s top_k=%d → %d doc(s)", query, self.query_mode, self.top_k, len(docs))
         return docs
 
@@ -929,6 +950,7 @@ class LightRAGRetriever(BaseRetriever):
         # data (data.*); the legacy aquery() wrapper discards raw_data.
         response = await rag.aquery_llm(query, param=param)
         docs = _wrap_query_response(response, self.query_mode)
+        _clamp_docs_to_token_budget(docs, self.max_total_tokens)
         logger.debug("[LightRAG retriever] query=%r mode=%s top_k=%d → %d doc(s)", query, self.query_mode, self.top_k, len(docs))
         return docs
 
