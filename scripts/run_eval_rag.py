@@ -279,7 +279,7 @@ def fetch_monitoring_usage(
     return events + [{}] * (n_calls - len(events))
 
 
-def call_agent(base_url: str, app_id: int, agent_id: int, api_key: str, message: str) -> dict:
+def call_agent(base_url: str, app_id: int, agent_id: int, api_key: str, message: str, timeout: int = 120) -> dict:
     url = f"{base_url}/public/v1/app/{app_id}/chat/{agent_id}/call"
     boundary = "----evalragboundary"
     body = (
@@ -291,8 +291,95 @@ def call_agent(base_url: str, app_id: int, agent_id: int, api_key: str, message:
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("X-API-KEY", api_key)
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def run_questions(
+    questions: list[dict], base_url: str, app_id: int, agent_id: int, api_key: str,
+    timeout: int, vocab: list[str],
+) -> list[dict]:
+    """Call the agent for each question in order, scoring doc recall as it goes.
+
+    Shared by a full run and a --retry-failed run: identical per-question
+    behaviour, only the input list differs.
+    """
+    results = []
+    for i, q in enumerate(questions, 1):
+        print(f"[{i}/{len(questions)}] {q['id']}: {q['pregunta'][:70]}...", file=sys.stderr)
+        t0 = time.monotonic()
+        try:
+            answer = call_agent(base_url, app_id, agent_id, api_key, q["pregunta"], timeout=timeout)
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            answer = None
+            error = str(exc)
+        response_text = answer["response"] if answer else None
+        results.append({
+            **q,
+            "respuesta_agente": response_text,
+            "error": error,
+            "latency_s": round(time.monotonic() - t0, 2),
+            "doc_recall": score_doc_recall(response_text, q.get("docs_esperados") or [], vocab),
+        })
+    return results
+
+
+def retry_failed(args, eval_set: dict, vocab: list[str]) -> int:
+    """Re-run only the questions that errored in an existing result file.
+
+    Overwrites those entries IN PLACE (same file) and recomputes the file's
+    aggregate doc_recall/coste_estimado over the merged results — everything
+    that did not error the first time is left untouched.
+    """
+    out_path = Path(args.retry_failed)
+    existing = json.loads(out_path.read_text(encoding="utf-8"))
+    by_id = {q["id"]: q for q in eval_set["preguntas"]}
+    failed_ids = [
+        r["id"] for r in existing["resultados"]
+        if r.get("error") or not r.get("respuesta_agente")
+    ]
+    if not failed_ids:
+        print("Nada que reintentar: ninguna pregunta tiene error/respuesta vacia.", file=sys.stderr)
+        return 0
+
+    to_retry = [by_id[i] for i in failed_ids if i in by_id]
+    print(f"Reintentando {len(to_retry)} pregunta(s) con timeout={args.timeout}s: {failed_ids}", file=sys.stderr)
+    new_results = run_questions(
+        to_retry, args.base_url, args.app_id, args.agent_id, args.api_key,
+        args.timeout, vocab,
+    )
+
+    config = existing.get("config", {})
+    input_per_1m, output_per_1m, _ = resolve_pricing(config.get("llm_model"))
+    usage_events = fetch_monitoring_usage(
+        args.agent_id, datetime.now(timezone.utc), len(new_results), input_per_1m, output_per_1m,
+    )
+    for r, usage in zip(new_results, usage_events):
+        r["usage"] = usage or None
+
+    merged_by_id = {r["id"]: r for r in existing["resultados"]}
+    still_failing = []
+    for r in new_results:
+        merged_by_id[r["id"]] = r
+        if r.get("error") or not r.get("respuesta_agente"):
+            still_failing.append(r["id"])
+    merged_results = [merged_by_id[r["id"]] for r in existing["resultados"]]
+
+    existing["resultados"] = merged_results
+    existing["doc_recall"] = aggregate_doc_recall(merged_results)
+    total_cost = sum((r.get("usage") or {}).get("cost_usd_upper_bound", 0.0) for r in merged_results)
+    total_tokens = sum((r.get("usage") or {}).get("total_tokens", 0) for r in merged_results)
+    existing.setdefault("coste_estimado", {})["total_tokens"] = total_tokens
+    existing["coste_estimado"]["cost_usd_upper_bound"] = round(total_cost, 4)
+
+    out_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nGuardado (sobrescrito): {out_path}", file=sys.stderr)
+    if still_failing:
+        print(f"Siguen fallando {len(still_failing)}: {still_failing}", file=sys.stderr)
+    else:
+        print("Todas las reintentadas se resolvieron.", file=sys.stderr)
+    return 0
 
 
 def main() -> int:
@@ -304,7 +391,18 @@ def main() -> int:
     parser.add_argument("--eval-set", default=str(REPO_ROOT / "benchmark" / "data" / "eval_set.json"))
     parser.add_argument("--out-dir", default=str(REPO_ROOT / "benchmark" / "resultados"))
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N questions (smoke test)")
+    parser.add_argument("--timeout", type=int, default=120, help="HTTP timeout per question, in seconds")
+    parser.add_argument(
+        "--retry-failed", default=None, metavar="RESULTADO_JSON",
+        help="Re-run only the questions that errored in this existing result file, "
+             "and overwrite them in place (ignores --limit)",
+    )
     args = parser.parse_args()
+
+    if args.retry_failed:
+        eval_set = json.loads(Path(args.eval_set).read_text(encoding="utf-8"))
+        vocab = corpus_vocabulary(eval_set)
+        return retry_failed(args, eval_set, vocab)
 
     config = introspect_config(args.app_id, args.agent_id)
     chunk_size = config["chunk_size"] or 1200  # LightRAG default when unset
@@ -323,24 +421,10 @@ def main() -> int:
         questions = questions[: args.limit]
 
     run_started_at = datetime.now(timezone.utc)
-    results = []
-    for i, q in enumerate(questions, 1):
-        print(f"[{i}/{len(questions)}] {q['id']}: {q['pregunta'][:70]}...", file=sys.stderr)
-        t0 = time.monotonic()
-        try:
-            answer = call_agent(args.base_url, args.app_id, args.agent_id, args.api_key, q["pregunta"])
-            error = None
-        except Exception as exc:  # noqa: BLE001
-            answer = None
-            error = str(exc)
-        response_text = answer["response"] if answer else None
-        results.append({
-            **q,
-            "respuesta_agente": response_text,
-            "error": error,
-            "latency_s": round(time.monotonic() - t0, 2),
-            "doc_recall": score_doc_recall(response_text, q.get("docs_esperados") or [], vocab),
-        })
+    results = run_questions(
+        questions, args.base_url, args.app_id, args.agent_id, args.api_key,
+        args.timeout, vocab,
+    )
 
     usage_events = fetch_monitoring_usage(
         args.agent_id, run_started_at, len(results), input_per_1m, output_per_1m,
