@@ -1048,7 +1048,11 @@ _CITATION_INSTRUCTION = (
     "immediately after that sentence using this exact Markdown syntax: "
     "[N](cite://N), where N is the source number. Cite only sources you actually "
     "used; combine several as [1](cite://1)[2](cite://2) when a sentence draws on "
-    "more than one. Do not add a separate reference list at the end."
+    "more than one. Do not add a separate reference list at the end. "
+    "Each source's label already includes its document name and page number "
+    "(e.g. 'CDOC004043.pdf p.63') — when the question asks WHERE something is "
+    "documented (which page, which section), state that document name and page "
+    "number explicitly in your answer text, not just as an inline citation marker."
 )
 
 
