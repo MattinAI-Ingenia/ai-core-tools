@@ -121,6 +121,12 @@ services:
       AGENT_DEFAULT_RAG_K: ${AGENT_DEFAULT_RAG_K:-30}
       # Chunks pulled per entity/relation before the global CHUNK_TOP_K cut.
       RELATED_CHUNK_NUMBER: ${RELATED_CHUNK_NUMBER:-5}
+      # Optional rerank endpoint (see .env.example). Read only by backend/config.py,
+      # not by the embedded LightRAG library itself — unset here means silently off
+      # even with a value in .env, same as every other var on this list.
+      LIGHTRAG_RERANK_URL: ${LIGHTRAG_RERANK_URL:-}
+      LIGHTRAG_RERANK_MODEL: ${LIGHTRAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      LIGHTRAG_RERANK_API_KEY: ${LIGHTRAG_RERANK_API_KEY:-}
     volumes:
       - ../backend/data:/aict_backend/data
       - ../backend/logs:/aict_backend/logs
