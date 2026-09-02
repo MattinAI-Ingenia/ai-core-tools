@@ -34,7 +34,15 @@ export type AppFlowNode = Node<AppFlowNodeData, GraphNodeKind>;
  * wrapper so React Flow's `nodeTypes` map has one distinct component per
  * `GraphNodeKind`, matching the entity kinds from `useAppGraph`.
  */
-function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly data: AppFlowNodeData }) {
+function EntityNodeCard({
+  kind,
+  data,
+  isConnectable,
+}: {
+  readonly kind: GraphNodeKind;
+  readonly data: AppFlowNodeData;
+  readonly isConnectable?: boolean;
+}) {
   const visual = NODE_KIND_VISUALS[kind];
   const Icon = visual.icon;
   const isCollapsibleAgent = kind === 'agent' && data.onToggleCollapse !== undefined;
@@ -48,6 +56,7 @@ function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly
       <Handle
         type="target"
         position={Position.Left}
+        isConnectable={isConnectable}
         className="!h-2.5 !w-2.5 !border-2 !border-white dark:!border-gray-900 !bg-gray-400 dark:!bg-gray-500"
       />
 
@@ -100,6 +109,7 @@ function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly
       <Handle
         type="source"
         position={Position.Right}
+        isConnectable={isConnectable}
         className="!h-2.5 !w-2.5 !border-2 !border-white dark:!border-gray-900 !bg-gray-400 dark:!bg-gray-500"
       />
     </div>
@@ -112,32 +122,32 @@ function EntityNodeCard({ kind, data }: { readonly kind: GraphNodeKind; readonly
  * embedding/skill/mcp/parser), even though they all delegate to the shared
  * `EntityNodeCard` renderer above.
  */
-export function AgentNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="agent" data={data} />;
+export function AgentNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="agent" data={data} isConnectable={isConnectable} />;
 }
 
-export function ServiceNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="service" data={data} />;
+export function ServiceNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="service" data={data} isConnectable={isConnectable} />;
 }
 
-export function SiloNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="silo" data={data} />;
+export function SiloNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="silo" data={data} isConnectable={isConnectable} />;
 }
 
-export function EmbeddingNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="embedding" data={data} />;
+export function EmbeddingNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="embedding" data={data} isConnectable={isConnectable} />;
 }
 
-export function SkillNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="skill" data={data} />;
+export function SkillNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="skill" data={data} isConnectable={isConnectable} />;
 }
 
-export function McpNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="mcp" data={data} />;
+export function McpNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="mcp" data={data} isConnectable={isConnectable} />;
 }
 
-export function ParserNode({ data }: NodeProps<AppFlowNode>) {
-  return <EntityNodeCard kind="parser" data={data} />;
+export function ParserNode({ data, isConnectable }: NodeProps<AppFlowNode>) {
+  return <EntityNodeCard kind="parser" data={data} isConnectable={isConnectable} />;
 }
 
 /** React Flow `nodeTypes` map - one entry per `GraphNodeKind`. */
