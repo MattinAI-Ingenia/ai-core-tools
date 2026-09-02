@@ -6,7 +6,10 @@ import { toFlowNodes, toFlowEdges } from './graphAdapter';
 import { computeGraphLayout, type GraphPosition } from './graphLayout';
 import { computeVisibleGraph } from './graphVisibility';
 import { useGraphLayoutStorage } from './useGraphLayoutStorage';
+import { useGraphMutations } from './useGraphMutations';
+import { isValidGraphConnection } from './graphConnectionRules';
 import type { AppFlowNode } from './EntityNodeCard';
+import type { AppFlowEdge } from './graphAdapter';
 
 export interface AppGraphCanvasProps {
   readonly appId: string | number | undefined;
@@ -37,6 +40,11 @@ export interface AppGraphCanvasProps {
 export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasProps) {
   const { nodes: graphNodes, edges: graphEdges, loading, error, refetch } = useAppGraph(appId);
   const { load, save } = useGraphLayoutStorage(appId);
+  const { pendingEdges, hiddenEdgeIds, connect, disconnect } = useGraphMutations({
+    appId,
+    graphNodes,
+    onSettled: refetch,
+  });
 
   const [collapsedAgentIds, setCollapsedAgentIds] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -129,6 +137,10 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     [visibleGraph.nodes, defaultPositions, collapsedAgentIds, handleToggleCollapse, onEditNode],
   );
   const flowEdges = useMemo(() => toFlowEdges(visibleGraph.edges), [visibleGraph.edges]);
+  const displayedEdges = useMemo(
+    () => [...flowEdges.filter((edge) => !hiddenEdgeIds.has(edge.id)), ...pendingEdges],
+    [flowEdges, hiddenEdgeIds, pendingEdges],
+  );
 
   // Re-seeds from `flowNodes` whenever the visible node set changes (new
   // fetch/refetch OR a collapse/expand toggle) - but preserves the
@@ -164,14 +176,29 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     [collapsedAgentIds, persistLayout],
   );
 
+  const handleIsValidConnection = useCallback(
+    (connection: Parameters<typeof isValidGraphConnection>[1]) => isValidGraphConnection(graphNodes, connection),
+    [graphNodes],
+  );
+
+  const handleEdgesDelete = useCallback(
+    (edges: readonly AppFlowEdge[]) => {
+      for (const edge of edges) disconnect(edge);
+    },
+    [disconnect],
+  );
+
   return (
     <GraphFlowView
       nodes={nodes}
-      edges={flowEdges}
+      edges={displayedEdges}
       loading={loading}
       error={error}
       onNodesChange={onNodesChange}
       onNodeDragStop={handleNodeDragStop}
+      onConnect={connect}
+      onEdgesDelete={handleEdgesDelete}
+      isValidConnection={handleIsValidConnection}
       onRetry={refetch}
       className={className}
     />
