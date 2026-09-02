@@ -71,7 +71,7 @@ export const defaultNavigation: NavigationConfig = {
     },
     {
       path: '/apps/:appId/visual-editor',
-      name: 'Editor visual',
+      name: 'Visual editor',
       icon: <Network size={16} />,
       section: 'appNavigation'
     },
