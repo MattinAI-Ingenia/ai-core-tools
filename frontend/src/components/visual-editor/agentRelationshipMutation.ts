@@ -25,10 +25,10 @@ export function buildRelationshipChange(
   agent: Agent,
   change: RelationshipChange,
   mode: 'add' | 'remove',
-): Partial<Agent> {
+): Partial<Agent> & { silo_id?: number | null } {
   switch (change.kind) {
     case 'silo':
-      return { silo_id: mode === 'add' ? change.targetNumericId : null } as Partial<Agent>;
+      return { silo_id: mode === 'add' ? change.targetNumericId : null };
     case 'skill':
       return { skill_ids: toggleId(agent.skill_ids, change.targetNumericId, mode) };
     case 'mcp':
