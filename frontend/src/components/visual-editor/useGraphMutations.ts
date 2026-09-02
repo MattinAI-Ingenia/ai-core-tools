@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../../constants/messages';
-import { apiService } from '../../services/api';
+import { apiService, type Agent } from '../../services/api';
 import { parseNodeId, type GraphNode } from '../../hooks/useAppGraph';
 import { buildRelationshipChange } from './agentRelationshipMutation';
 import { toFlowEdges, type AppFlowEdge } from './graphAdapter';
@@ -20,7 +20,14 @@ export interface UseGraphMutationsResult {
   /** Edge ids optimistically hidden pending a delete mutation. */
   readonly hiddenEdgeIds: ReadonlySet<string>;
   readonly connect: (connection: { source: string | null; target: string | null }) => void;
-  readonly disconnect: (edge: AppFlowEdge) => void;
+  /**
+   * Removes a batch of edges (e.g. from a multi-select delete). Edges owned
+   * by the same agent are folded into a single fetch-then-update round trip
+   * so concurrent removals on the same agent never race each other; distinct
+   * agents' groups are mutated independently and a failure in one never
+   * blocks the others.
+   */
+  readonly disconnectMany: (edges: readonly AppFlowEdge[]) => void;
 }
 
 function parseAppId(appId: string | number | undefined): number | null {
@@ -50,6 +57,37 @@ async function applyRelationshipMutation(
   }
 }
 
+/**
+ * Removes every edge in `groupEdges` (all owned by the same `agentNumericId`)
+ * with a single fetch + single update round trip, folding each removal's
+ * patch into the next so multiple removals on the same relationship array
+ * (e.g. two skill edges deleted together) compose correctly instead of one
+ * overwriting the other.
+ */
+async function disconnectAgentGroup(
+  numericAppId: number,
+  agentNumericId: number,
+  groupEdges: readonly AppFlowEdge[],
+): Promise<void> {
+  const agent = await apiService.getAgent(numericAppId, agentNumericId);
+  let workingAgent: Omit<Agent, 'silo_id'> & { silo_id?: number | null } = agent;
+  let patch: Omit<Partial<Agent>, 'silo_id'> & { silo_id?: number | null } = {};
+
+  for (const edge of groupEdges) {
+    const kind = edge.data?.kind;
+    if (!kind) continue;
+    const change = buildRelationshipChange(
+      workingAgent as Agent,
+      { kind, targetNumericId: parseNodeId(edge.target).numericId },
+      'remove',
+    );
+    patch = { ...patch, ...change };
+    workingAgent = { ...workingAgent, ...change };
+  }
+
+  await apiService.updateAgent(numericAppId, agentNumericId, { ...agent, ...patch });
+}
+
 export function useGraphMutations({
   appId,
   graphNodes,
@@ -64,7 +102,10 @@ export function useGraphMutations({
       if (numericAppId === null) return;
 
       const resolved = resolveConnection(graphNodes, connection);
-      if (!resolved) return;
+      if (!resolved) {
+        toast.error("This relationship can't be edited from the canvas");
+        return;
+      }
 
       const optimisticEdge = toFlowEdges([
         {
@@ -83,29 +124,55 @@ export function useGraphMutations({
     [appId, graphNodes, onSettled],
   );
 
-  const disconnect = useCallback(
-    (edge: AppFlowEdge) => {
+  const disconnectMany = useCallback(
+    (edges: readonly AppFlowEdge[]) => {
       const numericAppId = parseAppId(appId);
-      const kind = edge.data?.kind;
-      if (numericAppId === null || !kind) return;
+      if (numericAppId === null || edges.length === 0) return;
 
-      const resolved: ResolvedConnection = {
-        kind,
-        agentNumericId: parseNodeId(edge.source).numericId,
-        targetNumericId: parseNodeId(edge.target).numericId,
-      };
+      const groups = new Map<number, AppFlowEdge[]>();
+      for (const edge of edges) {
+        if (!edge.data?.kind) continue;
+        const agentNumericId = parseNodeId(edge.source).numericId;
+        const group = groups.get(agentNumericId);
+        if (group) {
+          group.push(edge);
+        } else {
+          groups.set(agentNumericId, [edge]);
+        }
+      }
 
-      setHiddenEdgeIds((current) => new Set(current).add(edge.id));
-      applyRelationshipMutation(numericAppId, resolved, 'remove', onSettled).finally(() => {
-        setHiddenEdgeIds((current) => {
-          const next = new Set(current);
-          next.delete(edge.id);
-          return next;
-        });
+      const edgeIds = edges.map((edge) => edge.id);
+      setHiddenEdgeIds((current) => {
+        const next = new Set(current);
+        for (const id of edgeIds) next.add(id);
+        return next;
       });
+
+      const groupSettlements = Array.from(groups.entries()).map(([agentNumericId, groupEdges]) =>
+        disconnectAgentGroup(numericAppId, agentNumericId, groupEdges).catch((err: unknown) => {
+          toast.error(errorMessage(err, MESSAGES.UPDATE_FAILED('connection')));
+          throw err;
+        }),
+      );
+
+      Promise.allSettled(groupSettlements)
+        .then(async (results) => {
+          const succeeded = results.some((result) => result.status === 'fulfilled');
+          if (succeeded) {
+            toast.success(MESSAGES.UPDATED('connection'));
+            await onSettled();
+          }
+        })
+        .finally(() => {
+          setHiddenEdgeIds((current) => {
+            const next = new Set(current);
+            for (const id of edgeIds) next.delete(id);
+            return next;
+          });
+        });
     },
     [appId, onSettled],
   );
 
-  return { pendingEdges, hiddenEdgeIds, connect, disconnect };
+  return { pendingEdges, hiddenEdgeIds, connect, disconnectMany };
 }
