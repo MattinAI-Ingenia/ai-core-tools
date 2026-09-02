@@ -97,7 +97,7 @@ function VisualEditorPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold text-gray-900 dark:text-gray-100">
             <Network className="h-6 w-6 text-indigo-500 dark:text-indigo-400" aria-hidden="true" />
-            Editor visual
+            Visual editor
           </h1>
           <p className="text-gray-600 dark:text-gray-400">
             Explore the resource graph for {app?.name || appId}. Drag nodes to rearrange, collapse an agent to
