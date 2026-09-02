@@ -112,6 +112,11 @@ function nodeId(kind: GraphNodeKind, id: number): string {
   return `${kind}:${id}`;
 }
 
+export function parseNodeId(id: string): { kind: GraphNodeKind; numericId: number } {
+  const [kind, rawId] = id.split(':') as [GraphNodeKind, string];
+  return { kind, numericId: Number.parseInt(rawId, 10) };
+}
+
 function edgeId(kind: GraphEdgeKind, source: string, target: string): string {
   return `${kind}:${source}->${target}`;
 }
