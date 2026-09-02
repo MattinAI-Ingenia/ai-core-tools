@@ -19,10 +19,13 @@ export interface GraphFlowViewProps {
 }
 
 /**
- * Pure, presentational read-only React Flow canvas for the app resource
- * graph. Takes already-adapted `@xyflow/react` nodes/edges plus the loading
- * and error state from `useAppGraph` - no data fetching of its own, so it
- * can be rendered/tested with plain fixture props.
+ * Pure, presentational React Flow canvas for the app resource graph.
+ * Takes already-adapted `@xyflow/react` nodes/edges plus the loading and
+ * error state from `useAppGraph` - no data fetching of its own, so it can be
+ * rendered/tested with plain fixture props. When optional onConnect/onEdgesDelete/
+ * isValidConnection props are provided, the 4 editable relationship kinds
+ * (silo/skill/tool/mcp) support drag-to-connect and delete via keyboard;
+ * without them, the canvas renders read-only from plain fixtures.
  */
 export function GraphFlowView({
   nodes,

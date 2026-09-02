@@ -34,8 +34,10 @@ export interface AppGraphCanvasProps {
  *   (`useGraphLayoutStorage`), scoped per app.
  *
  * All actual rendering lives in the pure `GraphFlowView` so that component
- * stays easy to unit test with plain fixtures. Still read-only: no
- * relationship editing, everything here is client-side view state.
+ * stays easy to unit test with plain fixtures. Relationship editing is backed
+ * by `useGraphMutations` (connect/disconnect) which syncs 4 editable relationship
+ * kinds—silo/skill/tool/mcp—to the backend via drag-to-connect and select+delete;
+ * layout and collapse state remain client-side only (localStorage).
  */
 export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasProps) {
   const { nodes: graphNodes, edges: graphEdges, loading, error, refetch } = useAppGraph(appId);
