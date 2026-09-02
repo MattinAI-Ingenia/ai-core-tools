@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { applyNodeChanges, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
+import { applyEdgeChanges, applyNodeChanges, type OnEdgesChange, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
 import { useAppGraph, type GraphNode } from '../../hooks/useAppGraph';
 import { GraphFlowView } from './GraphFlowView';
 import { toFlowNodes, toFlowEdges } from './graphAdapter';
@@ -153,6 +153,32 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     [flowEdges, hiddenEdgeIds, pendingEdges],
   );
 
+  // Local, selectable copy of `displayedEdges`, mirroring the `nodes` state
+  // above. React Flow computes click-to-select (and every other pointer
+  // interaction) as a "change" it hands to `onEdgesChange` - without owned
+  // state to apply that change to, a click has nowhere to record `selected`,
+  // so edges could never be selected (and therefore never deleted via the
+  // canvas's own delete-key handling, which acts on the currently-selected
+  // edges).
+  const [edges, setEdges] = useState<AppFlowEdge[]>([]);
+
+  // Re-seeds from `displayedEdges` whenever the visible/optimistic edge set
+  // changes, preserving each edge's live `selected` state across that resync
+  // (same rationale as the node position merge above).
+  useEffect(() => {
+    setEdges((current) => {
+      const currentById = new Map(current.map((edge) => [edge.id, edge]));
+      return displayedEdges.map((edge) => {
+        const existing = currentById.get(edge.id);
+        return existing ? { ...edge, selected: existing.selected } : edge;
+      });
+    });
+  }, [displayedEdges]);
+
+  const onEdgesChange: OnEdgesChange<AppFlowEdge> = (changes) => {
+    setEdges((current) => applyEdgeChanges(changes, current));
+  };
+
   // Re-seeds from `flowNodes` whenever the visible node set changes (new
   // fetch/refetch OR a collapse/expand toggle) - but preserves the
   // in-memory position of every node id already present in the current
@@ -202,11 +228,12 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
   return (
     <GraphFlowView
       nodes={nodes}
-      edges={displayedEdges}
+      edges={edges}
       loading={showFullScreenLoading}
       error={error}
       onNodesChange={onNodesChange}
       onNodeDragStop={handleNodeDragStop}
+      onEdgesChange={onEdgesChange}
       onConnect={connect}
       onEdgesDelete={handleEdgesDelete}
       isValidConnection={handleIsValidConnection}
