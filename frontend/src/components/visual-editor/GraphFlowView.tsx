@@ -1,4 +1,4 @@
-import { ReactFlow, MiniMap, Controls, Background, BackgroundVariant, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
+import { ReactFlow, MiniMap, Controls, Background, BackgroundVariant, type OnNodeDrag, type OnNodesChange, type OnConnect, type OnEdgesDelete, type IsValidConnection } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { AlertTriangle, Loader2, RefreshCw, Workflow } from 'lucide-react';
 import { APP_GRAPH_NODE_TYPES, type AppFlowNode } from './EntityNodeCard';
@@ -11,6 +11,9 @@ export interface GraphFlowViewProps {
   readonly error: string | null;
   readonly onNodesChange?: OnNodesChange<AppFlowNode>;
   readonly onNodeDragStop?: OnNodeDrag<AppFlowNode>;
+  readonly onConnect?: OnConnect;
+  readonly onEdgesDelete?: OnEdgesDelete<AppFlowEdge>;
+  readonly isValidConnection?: IsValidConnection<AppFlowEdge>;
   readonly onRetry?: () => void;
   readonly className?: string;
 }
@@ -28,6 +31,9 @@ export function GraphFlowView({
   error,
   onNodesChange,
   onNodeDragStop,
+  onConnect,
+  onEdgesDelete,
+  isValidConnection,
   onRetry,
   className = '',
 }: GraphFlowViewProps) {
@@ -94,14 +100,17 @@ export function GraphFlowView({
         edges={edges as AppFlowEdge[]}
         onNodesChange={onNodesChange}
         onNodeDragStop={onNodeDragStop}
+        onConnect={onConnect}
+        onEdgesDelete={onEdgesDelete}
+        isValidConnection={isValidConnection}
         nodeTypes={APP_GRAPH_NODE_TYPES}
-        nodesConnectable={false}
+        nodesConnectable
         elementsSelectable
         nodesDraggable
         nodesFocusable={false}
         edgesReconnectable={false}
         edgesFocusable={false}
-        deleteKeyCode={null}
+        deleteKeyCode={['Delete', 'Backspace']}
         proOptions={{ hideAttribution: true }}
         fitView
         fitViewOptions={{ padding: 0.2 }}
