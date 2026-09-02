@@ -18,6 +18,12 @@ export interface VisibleGraph {
  *   (so Silo -> EmbeddingService chains resolve correctly). A resource
  *   shared by several agents therefore stays visible as long as ANY
  *   referencing agent is expanded.
+ * - A resource with no incoming edge at all (not referenced by any agent,
+ *   e.g. a Silo just created and not yet attached) has no agent to gate its
+ *   visibility - it is ALWAYS visible, regardless of collapse state, so it
+ *   can be dragged onto an agent from the canvas. Anything IT in turn
+ *   depends on (e.g. that orphan Silo's own EmbeddingService) is pulled in
+ *   the same way as an expanded agent's resources are.
  * - A `tool` edge (agent -> agent, agent-as-tool composition) is visible
  *   only while its SOURCE agent is expanded - collapsing an agent hides the
  *   tool edge it draws, but never the target agent node, which is always
@@ -32,7 +38,8 @@ export function computeVisibleGraph(
   const expandedAgentIds = new Set([...agentIds].filter((id) => !collapsedAgentIds.has(id)));
 
   // Adjacency over every non-`tool` edge, used to walk from an expanded
-  // agent to its (possibly indirect, e.g. Silo -> EmbeddingService) resources.
+  // agent (or an orphan resource, see below) to its (possibly indirect,
+  // e.g. Silo -> EmbeddingService) resources.
   const adjacency = new Map<string, string[]>();
   for (const edge of edges) {
     if (edge.kind === 'tool') continue;
@@ -44,10 +51,19 @@ export function computeVisibleGraph(
     }
   }
 
-  const visibleResourceIds = new Set<string>();
-  for (const agentId of expandedAgentIds) {
-    const queue: string[] = [agentId];
-    const seen = new Set<string>([agentId]);
+  const referencedResourceIds = new Set(
+    edges.filter((edge) => edge.kind !== 'tool').map((edge) => edge.target),
+  );
+  const orphanResourceIds = new Set(
+    nodes
+      .filter((node) => node.kind !== 'agent' && !referencedResourceIds.has(node.id))
+      .map((node) => node.id),
+  );
+
+  const visibleResourceIds = new Set<string>(orphanResourceIds);
+  for (const rootId of [...expandedAgentIds, ...orphanResourceIds]) {
+    const queue: string[] = [rootId];
+    const seen = new Set<string>([rootId]);
     while (queue.length > 0) {
       const current = queue.shift() as string;
       for (const next of adjacency.get(current) ?? []) {
