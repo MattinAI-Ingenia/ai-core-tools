@@ -3,7 +3,7 @@ import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../../constants/messages';
 import { apiService, type Agent } from '../../services/api';
 import { parseNodeId, type GraphNode } from '../../hooks/useAppGraph';
-import { buildRelationshipChange } from './agentRelationshipMutation';
+import { buildRelationshipChange, type AgentPatch } from './agentRelationshipMutation';
 import { toFlowEdges, type AppFlowEdge } from './graphAdapter';
 import { resolveConnection, type ResolvedConnection } from './graphConnectionRules';
 
@@ -71,7 +71,7 @@ async function disconnectAgentGroup(
 ): Promise<void> {
   const agent = await apiService.getAgent(numericAppId, agentNumericId);
   let workingAgent: Omit<Agent, 'silo_id'> & { silo_id?: number | null } = agent;
-  let patch: Omit<Partial<Agent>, 'silo_id'> & { silo_id?: number | null } = {};
+  let patch: AgentPatch = {};
 
   for (const edge of groupEdges) {
     const kind = edge.data?.kind;
