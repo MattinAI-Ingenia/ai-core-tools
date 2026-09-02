@@ -3,7 +3,7 @@ import type { GraphNode } from '../../../hooks/useAppGraph';
 import { isValidGraphConnection, resolveConnection } from '../graphConnectionRules';
 
 function node(id: string, kind: GraphNode['kind'], data: Record<string, unknown> = {}): GraphNode {
-  return { id, kind, label: id, data: data as GraphNode['data'] };
+  return { id, kind, label: id, data: data as unknown as GraphNode['data'] };
 }
 
 const agentA = node('agent:1', 'agent', { is_tool: false });

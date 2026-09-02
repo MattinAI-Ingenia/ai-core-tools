@@ -25,7 +25,7 @@ export function buildRelationshipChange(
   agent: Agent,
   change: RelationshipChange,
   mode: 'add' | 'remove',
-): Partial<Agent> & { silo_id?: number | null } {
+): Omit<Partial<Agent>, 'silo_id'> & { silo_id?: number | null } {
   switch (change.kind) {
     case 'silo':
       return { silo_id: mode === 'add' ? change.targetNumericId : null };
