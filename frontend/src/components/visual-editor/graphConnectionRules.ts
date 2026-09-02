@@ -17,12 +17,12 @@ export const DELETABLE_EDGE_KINDS: ReadonlySet<GraphEdgeKind> = new Set([
   'tool',
 ]);
 
-/** Non-agent node kinds that pair with an agent to form a valid connection. */
-const AGENT_RESOURCE_PAIRS: ReadonlyArray<{ readonly kind: GraphEdgeKind; readonly resourceKind: GraphNodeKind }> = [
-  { kind: 'silo', resourceKind: 'silo' },
-  { kind: 'skill', resourceKind: 'skill' },
-  { kind: 'mcp', resourceKind: 'mcp' },
-];
+/** Non-agent node kinds that may form an agent-to-resource connection edge. */
+const AGENT_RESOURCE_EDGE_KINDS: ReadonlySet<GraphEdgeKind> = new Set([
+  'silo',
+  'skill',
+  'mcp',
+]);
 
 export interface ResolvedConnection {
   readonly kind: GraphEdgeKind;
@@ -69,17 +69,22 @@ export function resolveConnection(
     };
   }
 
-  const pair = AGENT_RESOURCE_PAIRS.find(
-    ({ resourceKind }) =>
-      (sourceNode.kind === 'agent' && targetNode.kind === resourceKind) ||
-      (targetNode.kind === 'agent' && sourceNode.kind === resourceKind),
-  );
-  if (!pair) return null;
+  let agentNode: GraphNode | null = null;
+  let edgeKind: GraphEdgeKind | null = null;
 
-  const agentNode = sourceNode.kind === 'agent' ? sourceNode : targetNode;
+  if (sourceNode.kind === 'agent' && AGENT_RESOURCE_EDGE_KINDS.has(targetNode.kind as GraphEdgeKind)) {
+    agentNode = sourceNode;
+    edgeKind = targetNode.kind as GraphEdgeKind;
+  } else if (targetNode.kind === 'agent' && AGENT_RESOURCE_EDGE_KINDS.has(sourceNode.kind as GraphEdgeKind)) {
+    agentNode = targetNode;
+    edgeKind = sourceNode.kind as GraphEdgeKind;
+  }
+
+  if (!agentNode || !edgeKind) return null;
+
   const resourceNode = sourceNode.kind === 'agent' ? targetNode : sourceNode;
   return {
-    kind: pair.kind,
+    kind: edgeKind,
     agentNumericId: parseNodeId(agentNode.id).numericId,
     targetNumericId: parseNodeId(resourceNode.id).numericId,
   };
