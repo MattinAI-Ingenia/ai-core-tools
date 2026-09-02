@@ -101,9 +101,23 @@ function VisualEditorPage() {
           </h1>
           <p className="text-gray-600 dark:text-gray-400">
             Explore the resource graph for {app?.name || appId}. Drag nodes to rearrange, collapse an agent to
-            hide its satellites, and use each card&apos;s edit button to jump to that resource.
+            hide its satellites, and use each card&apos;s edit button to jump to that resource. Silo, Skill,
+            MCP and Agent-as-tool relationships can be edited directly on the canvas.
           </p>
         </div>
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-800/50 dark:text-gray-400">
+        <p className="font-medium text-gray-700 dark:text-gray-300">How connections work</p>
+        <p className="mt-1">
+          Each card has two connection dots. The <span className="font-medium">left</span> dot accepts a
+          connection - it marks this node as something being attached to. The{' '}
+          <span className="font-medium">right</span> dot starts one - drag from it to attach this node to
+          another. So dragging from an Agent&apos;s right dot to a Silo, Skill, MCP config, or another
+          tool-enabled Agent&apos;s left dot attaches that resource to the agent. Only those four relationship
+          kinds are editable this way; AI Service, Embedding Service and Output Parser stay read-only. Select
+          an edge and press Delete/Backspace to remove a connection.
+        </p>
       </div>
 
       <AppGraphCanvas appId={appId} onEditNode={handleEditNode} />
