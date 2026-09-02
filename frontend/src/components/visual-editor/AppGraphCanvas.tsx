@@ -42,11 +42,20 @@ export interface AppGraphCanvasProps {
 export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasProps) {
   const { nodes: graphNodes, edges: graphEdges, loading, error, refetch } = useAppGraph(appId);
   const { load, save } = useGraphLayoutStorage(appId);
-  const { pendingEdges, hiddenEdgeIds, connect, disconnect } = useGraphMutations({
+  const { pendingEdges, hiddenEdgeIds, connect, disconnectMany } = useGraphMutations({
     appId,
     graphNodes,
     onSettled: refetch,
   });
+
+  // Only show the full-screen loading state on the genuinely-empty initial
+  // load. `loading` also flips true during every background refetch that
+  // `onSettled` triggers after a mutation - if that raw value reached
+  // `GraphFlowView` it would unmount/remount `<ReactFlow>` on every
+  // connect/disconnect (resetting `fitView`'s viewport), defeating this
+  // canvas's optimistic-update intent. Once there's already a rendered
+  // graph, a background refetch should never unmount it.
+  const showFullScreenLoading = loading && graphNodes.length === 0;
 
   const [collapsedAgentIds, setCollapsedAgentIds] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -185,16 +194,16 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
 
   const handleEdgesDelete = useCallback(
     (edges: readonly AppFlowEdge[]) => {
-      for (const edge of edges) disconnect(edge);
+      disconnectMany(edges);
     },
-    [disconnect],
+    [disconnectMany],
   );
 
   return (
     <GraphFlowView
       nodes={nodes}
       edges={displayedEdges}
-      loading={loading}
+      loading={showFullScreenLoading}
       error={error}
       onNodesChange={onNodesChange}
       onNodeDragStop={handleNodeDragStop}
