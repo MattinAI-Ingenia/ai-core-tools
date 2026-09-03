@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
@@ -30,6 +30,8 @@ interface Silo {
 function SiloFormPage() {
   const { appId, siloId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnTo = (location.state as { returnTo?: string } | null)?.returnTo;
   const mutate = useApiMutation();
   const [silo, setSilo] = useState<Silo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -83,7 +85,7 @@ function SiloFormPage() {
     );
 
     if (result !== undefined) {
-      navigate(`/apps/${appId}/silos`);
+      navigate(returnTo || `/apps/${appId}/silos`);
     }
   }
 

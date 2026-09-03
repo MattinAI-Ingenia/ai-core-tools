@@ -31,9 +31,29 @@ describe('toFlowNodes connectable flag', () => {
     }
   });
 
-  it('never marks a node deletable (node deletion is out of scope)', () => {
-    const nodes = toFlowNodes([node('agent:1', 'agent')], new Map(), noopOptions);
-    expect(nodes[0].deletable).toBe(false);
+});
+
+describe('toFlowNodes deletable flag', () => {
+  it('marks agent, silo, skill nodes deletable', () => {
+    const nodes = toFlowNodes(
+      [node('agent:1', 'agent'), node('silo:1', 'silo'), node('skill:1', 'skill')],
+      new Map(),
+      noopOptions,
+    );
+    for (const flowNode of nodes) {
+      expect(flowNode.deletable).toBe(true);
+    }
+  });
+
+  it('leaves mcp, service, embedding, parser nodes non-deletable', () => {
+    const nodes = toFlowNodes(
+      [node('mcp:1', 'mcp'), node('service:1', 'service'), node('embedding:1', 'embedding'), node('parser:1', 'parser')],
+      new Map(),
+      noopOptions,
+    );
+    for (const flowNode of nodes) {
+      expect(flowNode.deletable).toBe(false);
+    }
   });
 });
 

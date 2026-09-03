@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Plus } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
@@ -162,6 +162,8 @@ function getPageDescription(type: string, isNewAgent: boolean, agentName?: strin
 function AgentFormPage() {
   const { appId, agentId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnTo = (location.state as { returnTo?: string } | null)?.returnTo;
   const mutate = useApiMutation();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [loading, setLoading] = useState(true);
@@ -549,7 +551,7 @@ function AgentFormPage() {
     setSaving(false);
 
     if (result !== undefined) {
-      navigate(`/apps/${appId}/agents`);
+      navigate(returnTo || `/apps/${appId}/agents`);
     }
   };
 

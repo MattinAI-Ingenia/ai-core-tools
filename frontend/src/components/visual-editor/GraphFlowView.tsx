@@ -1,4 +1,4 @@
-import { ReactFlow, MiniMap, Controls, Background, BackgroundVariant, type OnNodeDrag, type OnNodesChange, type OnEdgesChange, type OnConnect, type OnEdgesDelete, type IsValidConnection } from '@xyflow/react';
+import { ReactFlow, MiniMap, Controls, Background, BackgroundVariant, type OnNodeDrag, type OnNodesChange, type OnEdgesChange, type OnConnect, type OnEdgesDelete, type OnBeforeDelete, type IsValidConnection } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { AlertTriangle, Loader2, RefreshCw, Workflow } from 'lucide-react';
 import { APP_GRAPH_NODE_TYPES, type AppFlowNode } from './EntityNodeCard';
@@ -14,6 +14,7 @@ export interface GraphFlowViewProps {
   readonly onEdgesChange?: OnEdgesChange<AppFlowEdge>;
   readonly onConnect?: OnConnect;
   readonly onEdgesDelete?: OnEdgesDelete<AppFlowEdge>;
+  readonly onBeforeDelete?: OnBeforeDelete<AppFlowNode, AppFlowEdge>;
   readonly isValidConnection?: IsValidConnection<AppFlowEdge>;
   readonly onRetry?: () => void;
   readonly className?: string;
@@ -26,7 +27,8 @@ export interface GraphFlowViewProps {
  * rendered/tested with plain fixture props. When optional onConnect/onEdgesDelete/
  * isValidConnection props are provided, the 4 editable relationship kinds
  * (silo/skill/tool/mcp) support drag-to-connect and delete via keyboard;
- * without them, the canvas renders read-only from plain fixtures.
+ * `onBeforeDelete` similarly gates outright node deletion (agent/silo/skill).
+ * Without these props, the canvas renders read-only from plain fixtures.
  */
 export function GraphFlowView({
   nodes,
@@ -38,6 +40,7 @@ export function GraphFlowView({
   onEdgesChange,
   onConnect,
   onEdgesDelete,
+  onBeforeDelete,
   isValidConnection,
   onRetry,
   className = '',
@@ -108,6 +111,7 @@ export function GraphFlowView({
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onEdgesDelete={onEdgesDelete}
+        onBeforeDelete={onBeforeDelete}
         isValidConnection={isValidConnection}
         nodeTypes={APP_GRAPH_NODE_TYPES}
         nodesConnectable

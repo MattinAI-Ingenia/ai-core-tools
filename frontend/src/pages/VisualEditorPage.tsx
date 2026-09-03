@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Network } from 'lucide-react';
+import { Network, Plus } from 'lucide-react';
 import { apiService } from '../services/api';
 import { AppGraphCanvas } from '../components/visual-editor/AppGraphCanvas';
+import { NODE_KIND_VISUALS } from '../components/visual-editor/nodeKindConfig';
+import Modal from '../components/ui/Modal';
+import SkillForm from '../components/forms/SkillForm';
+import { useApiMutation } from '../hooks/useApiMutation';
+import { MESSAGES, errorMessage } from '../constants/messages';
 import type { GraphNode } from '../hooks/useAppGraph';
 import type { Agent, Silo } from '../services/api';
 
@@ -55,8 +60,21 @@ function resolveNodeEditPath(appId: string, node: GraphNode): string {
 function VisualEditorPage() {
   const { appId } = useParams();
   const navigate = useNavigate();
+  const mutate = useApiMutation();
 
   const [app, setApp] = useState<App | null>(null);
+  const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
+
+  // AppGraphCanvas owns the actual graph fetch/refetch; this page only
+  // needs to trigger one after an action it handles itself (creating a
+  // Skill via the inline modal below) - captured in a ref rather than
+  // state since calling it is an imperative side effect, not something
+  // this component re-renders in response to.
+  const refetchGraphRef = useRef<() => Promise<void>>(async () => {});
+
+  const handleRefetchAvailable = useCallback((refetch: () => Promise<void>) => {
+    refetchGraphRef.current = refetch;
+  }, []);
 
   useEffect(() => {
     if (!appId) return;
@@ -81,6 +99,35 @@ function VisualEditorPage() {
     },
     [appId, navigate],
   );
+
+  // Agent and Silo creation reuse their existing full-page forms exactly as
+  // the "+ New" buttons on their own list pages do - `returnTo` is the only
+  // addition, read by those pages' post-save navigation so finishing sends
+  // the user back to this canvas instead of stranding them on the list.
+  const handleCreateAgent = useCallback(() => {
+    if (!appId) return;
+    navigate(`/apps/${appId}/agents/0`, { state: { returnTo: `/apps/${appId}/visual-editor` } });
+  }, [appId, navigate]);
+
+  const handleCreateSilo = useCallback(() => {
+    if (!appId) return;
+    navigate(`/apps/${appId}/silos/new`, { state: { returnTo: `/apps/${appId}/visual-editor` } });
+  }, [appId, navigate]);
+
+  // Skill has no dedicated route (only a modal on the Skills list page), so
+  // it gets the same modal inline here instead - same `Modal` + `SkillForm`
+  // components SkillsPage.tsx already uses.
+  async function handleSaveSkill(data: unknown) {
+    if (!appId) return;
+    const result = await mutate(() => apiService.createSkill(Number.parseInt(appId), data), {
+      loading: MESSAGES.CREATING('skill'),
+      success: MESSAGES.CREATED('skill'),
+      error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('skill')),
+    });
+    if (result === undefined) return;
+    setIsSkillModalOpen(false);
+    void refetchGraphRef.current();
+  }
 
   if (!appId) {
     return (
@@ -120,7 +167,45 @@ function VisualEditorPage() {
         </p>
       </div>
 
-      <AppGraphCanvas appId={appId} onEditNode={handleEditNode} />
+      <div className="flex items-center gap-3">
+        <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Add to canvas:</span>
+        {(
+          [
+            { kind: 'agent' as const, label: 'New Agent', onClick: handleCreateAgent },
+            { kind: 'silo' as const, label: 'New Silo', onClick: handleCreateSilo },
+            { kind: 'skill' as const, label: 'New Skill', onClick: () => setIsSkillModalOpen(true) },
+          ]
+        ).map(({ kind, label, onClick }) => {
+          const visual = NODE_KIND_VISUALS[kind];
+          const Icon = visual.icon;
+          return (
+            <button
+              key={kind}
+              type="button"
+              onClick={onClick}
+              aria-label={label}
+              title={label}
+              className={`relative flex h-11 w-11 items-center justify-center rounded-full border shadow-sm transition-shadow hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${visual.chipClass} ${visual.borderClass}`}
+            >
+              <Icon className={`h-5 w-5 ${visual.iconClass}`} aria-hidden="true" />
+              <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-indigo-600 text-white dark:bg-indigo-500">
+                <Plus className="h-3 w-3" aria-hidden="true" strokeWidth={3} />
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <AppGraphCanvas appId={appId} onEditNode={handleEditNode} onRefetchAvailable={handleRefetchAvailable} />
+
+      <Modal
+        isOpen={isSkillModalOpen}
+        onClose={() => setIsSkillModalOpen(false)}
+        title="Create New Skill"
+        size="large"
+      >
+        <SkillForm skill={null} onSubmit={handleSaveSkill} onCancel={() => setIsSkillModalOpen(false)} />
+      </Modal>
     </div>
   );
 }
