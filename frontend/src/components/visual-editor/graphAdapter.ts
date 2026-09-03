@@ -91,6 +91,9 @@ export function toFlowEdges(edges: readonly GraphEdge[]): AppFlowEdge[] {
       reconnectable: false,
       deletable: DELETABLE_EDGE_KINDS.has(edge.kind),
       focusable: false,
+      // Wider than React Flow's own default (20px) - these edges are thin
+      // (1.5-2px) and easy to miss on a precise click.
+      interactionWidth: 40,
       style: {
         stroke: visual.stroke,
         strokeWidth: visual.strokeWidth,
