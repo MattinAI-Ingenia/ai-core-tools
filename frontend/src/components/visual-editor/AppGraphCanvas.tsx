@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { applyEdgeChanges, applyNodeChanges, type OnEdgesChange, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
+import { toast } from 'sonner';
 import { useAppGraph, type GraphNode } from '../../hooks/useAppGraph';
 import { GraphFlowView } from './GraphFlowView';
 import { toFlowNodes, toFlowEdges } from './graphAdapter';
@@ -178,6 +179,27 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
   const onEdgesChange: OnEdgesChange<AppFlowEdge> = (changes) => {
     setEdges((current) => applyEdgeChanges(changes, current));
   };
+
+  // React Flow's own delete-key handling silently drops any selected edge
+  // whose `deletable` is false before `onEdgesDelete` ever fires - so a
+  // read-only relationship (e.g. Silo -> EmbeddingService) can be selected
+  // and Delete pressed with zero feedback. This listener runs independently
+  // of that pipeline purely to surface a toast for the read-only edges in
+  // the current selection; deletable edges in the same selection are still
+  // removed normally via `onEdgesDelete`/`disconnectMany`.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+      if (event.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
+
+      const hasBlockedSelection = edges.some((edge) => edge.selected && edge.deletable === false);
+      if (hasBlockedSelection) {
+        toast.error("This relationship is read-only and can't be deleted from the canvas.");
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [edges]);
 
   // `toFlowEdges` sets a fixed per-kind stroke/width so relationship kinds
   // stay visually distinct - but that inline `style` also outranks React
