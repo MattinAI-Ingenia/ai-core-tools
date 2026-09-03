@@ -179,6 +179,23 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     setEdges((current) => applyEdgeChanges(changes, current));
   };
 
+  // `toFlowEdges` sets a fixed per-kind stroke/width so relationship kinds
+  // stay visually distinct - but that inline `style` also outranks React
+  // Flow's default CSS for `.selected` edges (inline style beats a CSS
+  // class), so a selected edge otherwise looks identical to an unselected
+  // one. Overlaying a bold, consistent "selected" style here (applied at
+  // render time, over the `edges` state itself) gives the user visible
+  // confirmation of what select+Delete is about to remove.
+  const styledEdges = useMemo(
+    () =>
+      edges.map((edge) =>
+        edge.selected
+          ? { ...edge, style: { ...edge.style, stroke: '#2563eb', strokeWidth: 3 } }
+          : edge,
+      ),
+    [edges],
+  );
+
   // Re-seeds from `flowNodes` whenever the visible node set changes (new
   // fetch/refetch OR a collapse/expand toggle) - but preserves the
   // in-memory position of every node id already present in the current
@@ -228,7 +245,7 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
   return (
     <GraphFlowView
       nodes={nodes}
-      edges={edges}
+      edges={styledEdges}
       loading={showFullScreenLoading}
       error={error}
       onNodesChange={onNodesChange}
