@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { applyEdgeChanges, applyNodeChanges, type OnEdgesChange, type OnNodeDrag, type OnNodesChange } from '@xyflow/react';
+import {
+  applyEdgeChanges,
+  applyNodeChanges,
+  type OnBeforeDelete,
+  type OnEdgesChange,
+  type OnNodeDrag,
+  type OnNodesChange,
+} from '@xyflow/react';
 import { toast } from 'sonner';
-import { useAppGraph, type GraphNode } from '../../hooks/useAppGraph';
+import { useAppGraph, parseNodeId, type GraphNode, type GraphNodeKind } from '../../hooks/useAppGraph';
 import { GraphFlowView } from './GraphFlowView';
 import { toFlowNodes, toFlowEdges } from './graphAdapter';
 import { computeGraphLayout, type GraphPosition } from './graphLayout';
@@ -9,8 +16,32 @@ import { computeVisibleGraph } from './graphVisibility';
 import { useGraphLayoutStorage } from './useGraphLayoutStorage';
 import { useGraphMutations } from './useGraphMutations';
 import { isValidGraphConnection } from './graphConnectionRules';
+import { useConfirm } from '../../contexts/ConfirmContext';
+import { useApiMutation } from '../../hooks/useApiMutation';
+import { apiService } from '../../services/api';
+import { MESSAGES, errorMessage } from '../../constants/messages';
 import type { AppFlowNode } from './EntityNodeCard';
 import type { AppFlowEdge } from './graphAdapter';
+
+/** Node kinds deletable outright from the canvas, and how to delete each. */
+const DELETE_ENTITY_KIND_LABEL: Partial<Record<GraphNodeKind, string>> = {
+  agent: 'agent',
+  silo: 'silo',
+  skill: 'skill',
+};
+
+function deleteEntity(appId: number, kind: GraphNodeKind, numericId: number): Promise<void> {
+  switch (kind) {
+    case 'agent':
+      return apiService.deleteAgent(appId, numericId);
+    case 'silo':
+      return apiService.deleteSilo(appId, numericId);
+    case 'skill':
+      return apiService.deleteSkill(appId, numericId);
+    default:
+      throw new Error(`Node kind "${kind}" is not deletable from the canvas`);
+  }
+}
 
 export interface AppGraphCanvasProps {
   readonly appId: string | number | undefined;
@@ -23,6 +54,13 @@ export interface AppGraphCanvasProps {
    * entity kind.
    */
   readonly onEditNode?: (node: GraphNode) => void;
+  /**
+   * Handed this canvas's `useAppGraph` refetch function once available, so
+   * the hosting page can trigger a resync after an action it owns itself
+   * (e.g. creating a Skill via an inline modal) - the canvas has no other
+   * way to learn about graph-affecting actions that happen outside it.
+   */
+  readonly onRefetchAvailable?: (refetch: () => Promise<void>) => void;
 }
 
 /**
@@ -40,7 +78,7 @@ export interface AppGraphCanvasProps {
  * kinds—silo/skill/tool/mcp—to the backend via drag-to-connect and select+delete;
  * layout and collapse state remain client-side only (localStorage).
  */
-export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasProps) {
+export function AppGraphCanvas({ appId, className, onEditNode, onRefetchAvailable }: AppGraphCanvasProps) {
   const { nodes: graphNodes, edges: graphEdges, loading, error, refetch } = useAppGraph(appId);
   const { load, save } = useGraphLayoutStorage(appId);
   const { pendingEdges, hiddenEdgeIds, connect, disconnectMany } = useGraphMutations({
@@ -48,6 +86,12 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     graphNodes,
     onSettled: refetch,
   });
+  const confirm = useConfirm();
+  const mutate = useApiMutation();
+
+  useEffect(() => {
+    onRefetchAvailable?.(refetch);
+  }, [refetch, onRefetchAvailable]);
 
   // Only show the full-screen loading state on the genuinely-empty initial
   // load. `loading` also flips true during every background refetch that
@@ -271,6 +315,66 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     [disconnectMany],
   );
 
+  // Gates outright node deletion (agent/silo/skill - the same 3 kinds the
+  // canvas can create). React Flow only offers this candidate list for
+  // nodes already marked `deletable` (graphAdapter.ts), but deleting an
+  // entity is destructive and irreversible, so each one still gets its own
+  // confirm dialog and its own delete-endpoint call before React Flow is
+  // allowed to remove it locally. Any edge in the same delete-key press
+  // that touches one of the candidate nodes is excluded from what reaches
+  // `onEdgesDelete` afterward - deleting the entity already cascades its
+  // relationships server-side, so a separate disconnect call would be
+  // redundant at best (and would 404 against an entity that no longer
+  // exists at worst); an edge cancelled here because its node was skipped
+  // stays untouched too, since cancelling a node's deletion shouldn't sever
+  // its relationships either.
+  const handleBeforeDelete: OnBeforeDelete<AppFlowNode, AppFlowEdge> = useCallback(
+    async ({ nodes: candidateNodes, edges: candidateEdges }) => {
+      const numericAppId = typeof appId === 'number' ? appId : Number.parseInt(appId ?? '', 10);
+      const allowedNodes: AppFlowNode[] = [];
+
+      if (!Number.isNaN(numericAppId)) {
+        for (const node of candidateNodes) {
+          const { kind, numericId } = parseNodeId(node.id);
+          const label = DELETE_ENTITY_KIND_LABEL[kind];
+          if (!label) continue;
+
+          const ok = await confirm({
+            title: MESSAGES.CONFIRM_DELETE_TITLE(label),
+            message: `Are you sure you want to delete "${node.data.label}"? This action cannot be undone.`,
+            variant: 'danger',
+            confirmLabel: 'Delete',
+          });
+          if (!ok) continue;
+
+          const result = await mutate(
+            async () => {
+              await deleteEntity(numericAppId, kind, numericId);
+              return true;
+            },
+            {
+              loading: MESSAGES.DELETING(label),
+              success: MESSAGES.DELETED(label),
+              error: (err) => errorMessage(err, MESSAGES.DELETE_FAILED(label)),
+            },
+          );
+          if (result === true) allowedNodes.push(node);
+        }
+      }
+
+      if (allowedNodes.length > 0) {
+        void refetch();
+      }
+
+      const candidateNodeIds = new Set(candidateNodes.map((node) => node.id));
+      const remainingEdges = candidateEdges.filter(
+        (edge) => !candidateNodeIds.has(edge.source) && !candidateNodeIds.has(edge.target),
+      );
+      return { nodes: allowedNodes, edges: remainingEdges };
+    },
+    [appId, confirm, mutate, refetch],
+  );
+
   return (
     <GraphFlowView
       nodes={nodes}
@@ -282,6 +386,7 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
       onEdgesChange={onEdgesChange}
       onConnect={connect}
       onEdgesDelete={handleEdgesDelete}
+      onBeforeDelete={handleBeforeDelete}
       isValidConnection={handleIsValidConnection}
       onRetry={refetch}
       className={className}
