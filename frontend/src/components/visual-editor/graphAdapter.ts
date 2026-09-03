@@ -4,7 +4,7 @@ import type { AppFlowNode, AppFlowNodeData } from './EntityNodeCard';
 import type { GraphPosition } from './graphLayout';
 import { describeGraphNode } from './graphNodeDetail';
 import { EDGE_KIND_VISUALS } from './edgeKindConfig';
-import { CONNECTABLE_NODE_KINDS, DELETABLE_EDGE_KINDS } from './graphConnectionRules';
+import { CONNECTABLE_NODE_KINDS, DELETABLE_EDGE_KINDS, DELETABLE_NODE_KINDS } from './graphConnectionRules';
 
 /** Edge data payload - `kind` is carried through for any future custom edge rendering. */
 export interface AppFlowEdgeData extends Record<string, unknown> {
@@ -70,11 +70,11 @@ export function toFlowNodes(
       position,
       data,
       // Interactive canvas: only the 4 editable relationship kinds' node
-      // kinds may originate a new connection. Node creation/deletion from
-      // the canvas is still out of scope, so `deletable` stays false for
-      // every kind.
+      // kinds may originate a new connection. Agent/Silo/Skill nodes may
+      // also be deleted outright (backed by their own delete endpoint, with
+      // a confirmation dialog - see AppGraphCanvas's onBeforeDelete).
       connectable: CONNECTABLE_NODE_KINDS.has(node.kind),
-      deletable: false,
+      deletable: DELETABLE_NODE_KINDS.has(node.kind),
     };
   });
 }

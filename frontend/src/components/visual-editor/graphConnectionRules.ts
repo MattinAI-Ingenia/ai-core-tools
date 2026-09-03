@@ -17,6 +17,13 @@ export const DELETABLE_EDGE_KINDS: ReadonlySet<GraphEdgeKind> = new Set([
   'tool',
 ]);
 
+/** Node kinds that may be deleted from the canvas (select + Delete/Backspace). */
+export const DELETABLE_NODE_KINDS: ReadonlySet<GraphNodeKind> = new Set([
+  'agent',
+  'silo',
+  'skill',
+]);
+
 /** Non-agent node kinds that may form an agent-to-resource connection edge. */
 const AGENT_RESOURCE_EDGE_KINDS: ReadonlySet<GraphEdgeKind> = new Set([
   'silo',
