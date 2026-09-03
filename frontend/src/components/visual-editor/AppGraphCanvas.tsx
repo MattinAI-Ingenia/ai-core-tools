@@ -212,7 +212,14 @@ export function AppGraphCanvas({ appId, className, onEditNode }: AppGraphCanvasP
     () =>
       edges.map((edge) =>
         edge.selected
-          ? { ...edge, style: { ...edge.style, stroke: '#2563eb', strokeWidth: 3 } }
+          ? {
+              ...edge,
+              style: { ...edge.style, stroke: '#2563eb', strokeWidth: 3 },
+              markerEnd:
+                typeof edge.markerEnd === 'object' && edge.markerEnd !== null
+                  ? { ...edge.markerEnd, color: '#2563eb' }
+                  : edge.markerEnd,
+            }
           : edge,
       ),
     [edges],
