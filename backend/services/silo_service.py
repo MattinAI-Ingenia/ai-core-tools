@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 import config
 import functools
 import math
@@ -786,7 +786,111 @@ class SiloService:
         Retrieve all silos by app_id
         """
         return SiloRepository.get_by_app_id(app_id, db)
-    
+
+    @staticmethod
+    def resolve_document_by_name(app_id: int, name: str, silo_id: int, db: Session) -> List[int]:
+        """Every resource_id that could plausibly be "the document called *name*".
+
+        Two independent sources, unioned:
+
+        1. Structured metadata (extra_metadata.DescArticulo / .document) — exact
+           product name or document code, e.g. "TERMAT 25" or "CDOC004043".
+        2. The knowledge graph's own extracted entities — LightRAG already found
+           every name a document calls itself BY IN ITS OWN TEXT, which often
+           does not match the structured metadata literally. Confirmed live: a
+           service manual whose DescArticulo is "DUAL CLIMA 12R NE DOMUSA
+           iCONNECT" introduces itself in its own text as "Dual Clima R" — the
+           metadata match alone returns nothing for that name, but the entity
+           "Dual Clima R" exists in the graph with source_id pointing straight
+           back to that document's chunks.
+
+        Returns every match from either source, not just the first — a generic
+        name ("Dual Clima") legitimately matches several real documents (a
+        product family), and silently picking one hides that.
+
+        Deterministic, not a reranker: names/codes are exact strings to match
+        against, unlike the opaque file path (CDOC004043.pdf) that carries no
+        semantic signal a reranker could use.
+        """
+        from models.repository import Repository  # noqa: PLC0415 — avoids import cycle
+
+        rows = (
+            db.query(Resource.resource_id)
+            .join(Repository, Resource.repository_id == Repository.repository_id)
+            .filter(Repository.app_id == app_id)
+            .filter(Repository.silo_id == silo_id)
+            .filter(
+                Resource.extra_metadata["DescArticulo"].as_string().ilike(f"%{name}%")
+                | Resource.extra_metadata["document"].as_string().ilike(f"%{name}%")
+            )
+            .order_by(Resource.resource_id)
+            .all()
+        )
+        resource_ids = {r[0] for r in rows}
+        resource_ids |= set(SiloService._resolve_via_graph_entities(silo_id, name))
+        return sorted(resource_ids)
+
+    @staticmethod
+    def _resolve_via_graph_entities(silo_id: int, name: str) -> List[int]:
+        """resource_id(s) of documents whose knowledge graph contains an entity
+        matching *name* — see resolve_document_by_name's docstring for why this
+        catches names the structured metadata misses.
+
+        Best-effort: Neo4j being unreachable or misconfigured degrades to "no
+        graph matches" rather than failing the caller, matching this service's
+        existing pattern for optional graph access (SiloGraphService).
+        """
+        from services.silo_graph_service import SiloGraphService
+        from tools.vector_stores.lightrag_store import CHUNK_ID_RESOURCE_PAGE_RE
+
+        try:
+            driver = SiloGraphService._neo4j_driver()
+        except RuntimeError:
+            return []
+
+        workspace = SiloGraphService._workspace_name(silo_id)
+        resource_ids: set = set()
+        try:
+            with driver.session() as session:
+                result = session.run(
+                    f"MATCH (n:`{workspace}`) WHERE toLower(n.entity_id) CONTAINS toLower($name) "
+                    "RETURN n.source_id AS source_id",
+                    name=name,
+                )
+                for record in result:
+                    source_id = record["source_id"] or ""
+                    for chunk_id in source_id.split("<SEP>"):
+                        match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id.strip())
+                        if match:
+                            resource_ids.add(int(match.group(1)))
+        except Exception:  # noqa: BLE001 — graph lookup is a best-effort supplement
+            logger.warning("Graph entity lookup failed for name=%r in silo=%s", name, silo_id, exc_info=True)
+            return []
+        finally:
+            driver.close()
+        return list(resource_ids)
+
+    @staticmethod
+    def find_chunks_mentioning(
+        silo_id: int, term: Optional[str], doc_filter: Optional[Union[str, int, List]] = None,
+    ) -> Tuple[dict, bool]:
+        """Delegate to LightRAGStore.find_chunks_mentioning, opening its own session.
+
+        Mirrors get_silo_retriever's structure: capture nothing but plain
+        values from the ORM Silo, so the caller (list_documents_mentioning)
+        never touches the ORM object or does DB work on the event loop.
+        """
+        session = SessionLocal()
+        try:
+            silo = SiloService.get_silo(silo_id, session)
+            if not silo:
+                raise NotFoundError(f"Silo with ID {silo_id} not found", "silo")
+
+            collection_name = COLLECTION_PREFIX + str(silo_id)
+            return _get_vector_store(silo).find_chunks_mentioning(collection_name, term, doc_filter)
+        finally:
+            session.close()
+
     @staticmethod
     def is_lightrag_config_locked(silo_id: Optional[int], db: Session) -> bool:
         """True once the silo's LightRAG extraction config must stop changing.

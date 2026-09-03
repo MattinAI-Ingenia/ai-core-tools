@@ -19,7 +19,7 @@ import logging
 import re
 import time
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForRetrieverRun,
@@ -196,6 +196,40 @@ def _lightrag_doc_id(metadata: dict, content: str) -> str:
     from lightrag.utils import compute_mdhash_id  # noqa: WPS433
 
     return compute_mdhash_id(content, prefix="doc-")
+
+
+# Matches the PARENT doc id (no "-chunk-N" suffix) — see _lightrag_doc_id and
+# CHUNK_ID_RESOURCE_PAGE_RE just above, which matches the CHUNK id instead.
+_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)-p\d+$")
+
+
+def _group_chunk_rows(
+    rows: list[tuple[str, str, str]], per_doc_cap: int = 3,
+) -> dict[str, list[tuple[str, str]]]:
+    """Group (full_doc_id, file_path, content) rows by resource id.
+
+    Rows whose full_doc_id doesn't match the res{N}-p{N} shape (non-PDF
+    sources, e.g. crawled Domain pages — see _lightrag_doc_id's content-hash
+    fallback) are skipped: there is no resource_id to group them under.
+
+    per_doc_cap: at most this many snippets per document — the FIRST match
+    per document already answers "does it appear here", which is the whole
+    point; the rest is round-tripped for content, not to be exhaustive here.
+
+    file_path travels alongside each snippet (not just the content) because
+    Task 3's citation block needs the real "file.pdf p.N" label, not a
+    synthetic one.
+    """
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for full_doc_id, file_path, content in rows:
+        match = _FULL_DOC_ID_RESOURCE_RE.match(full_doc_id)
+        if not match:
+            continue
+        resource_id = match.group(1)
+        snippets = grouped.setdefault(resource_id, [])
+        if len(snippets) < per_doc_cap:
+            snippets.append((file_path, content.strip()))
+    return grouped
 
 
 def documents_to_lightrag_payload(documents) -> Tuple[List[str], List[str], List[str]]:
@@ -1724,6 +1758,65 @@ class LightRAGStore(VectorStoreInterface):
             "Cleaned up PostgreSQL data for workspace '%s': %s",
             collection_name, deleted or "nothing to delete",
         )
+
+    # Defensive ceiling on TOTAL rows scanned per call — not a ranking cut
+    # (there is none here), just a circuit breaker against a pathologically
+    # generic term matching most of the corpus. Far above chunk_top_k=30,
+    # which is the limit this method exists to route around.
+    _COVERAGE_QUERY_ROW_CAP = 2000
+
+    def find_chunks_mentioning(
+        self, collection_name: str, term: Optional[str],
+        doc_filter: Optional[Union[str, int, List[Union[str, int]]]] = None,
+    ) -> tuple[dict[str, list[tuple[str, str]]], bool]:
+        """Every document whose chunks literally contain *term* — no chunk_top_k,
+        no similarity ranking. See _group_chunk_rows for the per-document cap.
+
+        doc_filter: one resource_id, or a list of them, to scope the search —
+        used for "list all X in manual Y" questions (e.g. G07). A list matches
+        an ambiguous name that resolved to several real documents (e.g. a
+        product family) — every one of them is searched, not just the first.
+
+        term: omit (None) to return EVERY chunk of *doc_filter* unfiltered —
+        requires doc_filter, since without a term there is nothing else to
+        scope the query. Used when there is no single literal thing to search
+        for ("list every parameter in manual Z").
+
+        Returns (grouped, cap_hit) — cap_hit is True when the defensive row cap
+        was reached, meaning results may have been silently truncated.
+        """
+        from sqlalchemy import text  # noqa: WPS433
+
+        if term is None and doc_filter is None:
+            raise ValueError("find_chunks_mentioning needs term, doc_filter, or both")
+
+        doc_ids = [doc_filter] if doc_filter is not None and not isinstance(doc_filter, list) else doc_filter
+
+        sql = "SELECT full_doc_id, file_path, content FROM lightrag_doc_chunks WHERE workspace = :ws"
+        params: dict = {"ws": collection_name}
+        if term is not None:
+            sql += " AND content ILIKE :pattern"
+            params["pattern"] = f"%{term}%"
+        if doc_ids:
+            doc_clauses = []
+            for i, doc_id in enumerate(doc_ids):
+                key = f"doc_pattern_{i}"
+                doc_clauses.append(f"full_doc_id LIKE :{key}")
+                params[key] = f"res{doc_id}-p%"
+            sql += " AND (" + " OR ".join(doc_clauses) + ")"
+        sql += f" ORDER BY full_doc_id LIMIT {self._COVERAGE_QUERY_ROW_CAP}"
+
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(text(sql), params).fetchall()
+        cap_hit = len(rows) >= self._COVERAGE_QUERY_ROW_CAP
+        if cap_hit:
+            logger.warning(
+                "find_chunks_mentioning: row cap (%d) hit for term=%r in collection=%r — "
+                "results may be truncated",
+                self._COVERAGE_QUERY_ROW_CAP, term, collection_name,
+            )
+        per_doc_cap = self._COVERAGE_QUERY_ROW_CAP if term is None else 3
+        return _group_chunk_rows([(r[0], r[1], r[2]) for r in rows], per_doc_cap=per_doc_cap), cap_hit
 
     # ------------------------------------------------------------------
 

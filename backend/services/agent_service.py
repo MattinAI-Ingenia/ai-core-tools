@@ -140,6 +140,23 @@ When in doubt, call the tool. An empty result is more honest than a hallucinated
 
 Evaluate in order; take the FIRST match.
 
+**Step 0 — Does the question ask to enumerate EVERY document where something
+appears, or list EVERY instance of something within ONE named document —
+with no request to explain, compare, or synthesize?**
+  → Yes → call `list_documents_mentioning` instead of `retrieve_from_knowledge_base`.
+    `term` is the literal word/phrase to search for; `doc` (optional) scopes the
+    search to one document, by its code OR its commercial product name.
+    - "In which manuals does SG Ready appear?" → `term="SG Ready"`, no `doc`
+      (the THING named is what you search for — never put the manual's own
+      name in `term` unless the manual's name is literally the thing you're
+      searching for).
+    - "List all the parameters documented in manual Dual Clima R" → there is
+      no single literal string that means "a parameter" (P00, P81, C09... share
+      no common substring), so leave `term` empty and pass `doc="Dual Clima R"`
+      instead — this returns the whole document, unfiltered.
+    - "Where is Y mentioned in manual Z?" → `term="Y"`, `doc="Z"` — both.
+  → No → continue to Step 1 below.
+
 **Step 1 — Explicit comparison ("X vs Y", "compare A and B") or explicit demand for exhaustive/complete coverage ("list ALL", "every", "comprehensive")?**
   → Yes → mix (even if it also names a specific entity)
 

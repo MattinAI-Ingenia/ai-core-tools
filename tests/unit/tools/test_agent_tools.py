@@ -122,6 +122,39 @@ async def test_iact_tool_create_uses_sub_agent_rag_config():
 
 
 @pytest.mark.asyncio
+async def test_iact_tool_create_wires_both_tools_for_skill_routed_sub_agent():
+    """A skill-routed sub-agent-as-tool must get BOTH tools that
+    _resolve_and_build_retriever_tool now returns as a list — not the list
+    object itself appended as a single "tool" (which would break sub-agent
+    construction at the langchain layer)."""
+    from types import SimpleNamespace
+
+    agent = _make_agent("Skill-Routed Sub-Agent")
+    agent.silo_id = 99
+    agent.rag_max_retrieval_calls = 3
+
+    sentinel_retriever = MagicMock(name="retriever_tool")
+    sentinel_coverage = MagicMock(name="coverage_tool")
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
+        patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
+        patch(
+            "tools.agentTools._resolve_and_build_retriever_tool",
+            return_value=[sentinel_retriever, sentinel_coverage],
+        ),
+    ):
+        await agentTools.IACTTool.create(agent)
+
+    tools_passed = mock_create.call_args.kwargs["tools"]
+    assert sentinel_retriever in tools_passed
+    assert sentinel_coverage in tools_passed
+    # Neither tool was wrapped inside a nested list.
+    assert not any(isinstance(t, list) for t in tools_passed)
+
+
+@pytest.mark.asyncio
 async def test_iact_tool_create_skips_retriever_without_silo():
     """A sub-agent without a silo builds no retriever tool and never resolves params."""
     agent = _make_agent("No-Silo Sub-Agent")

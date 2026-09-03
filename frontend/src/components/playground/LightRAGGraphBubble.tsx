@@ -200,6 +200,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
               <div className="flex flex-wrap gap-1.5">
                 {chunks.map((c, idx) => {
                   const isOpen = openChunk === idx;
+                  const isCited = citedSet.has(c.id);
                   const srcLabel = c.file_path && c.file_path !== 'unknown_source'
                     ? c.file_path
                     : 'Unknown source';
@@ -208,9 +209,14 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                       key={c.id ?? idx}
                       onClick={(e) => toggleChunk(idx, e)}
                       aria-expanded={isOpen}
+                      title={isCited ? `${srcLabel} (citado en la respuesta)` : srcLabel}
                       className={`inline-flex items-center gap-1 text-xs rounded-full px-2.5 py-1 transition-colors ${isOpen
-                        ? 'bg-indigo-200 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200'
-                        : 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-900/60'
+                        ? isCited
+                          ? 'bg-green-200 dark:bg-green-900/60 text-green-800 dark:text-green-200'
+                          : 'bg-indigo-200 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200'
+                        : isCited
+                          ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-900/60'
+                          : 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-900/60'
                         }`}
                     >
                       <svg className="w-3 h-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">

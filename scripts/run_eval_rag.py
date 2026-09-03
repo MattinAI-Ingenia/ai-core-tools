@@ -32,6 +32,8 @@ import time
 import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_CONTAINER = "mattin-backend"
@@ -80,6 +82,10 @@ _MONITORING_LINE_RE = re.compile(
     r"\[Monitoring\] agent_id=(\d+) \| models=(\[.*?\]) \| "
     r"input_tokens=(\d+) \| output_tokens=(\d+) \| total_tokens=(\d+) \| llm_calls=(\d+)"
 )
+# Matches both retrieve_from_knowledge_base's "route='local'|'global'|'hybrid'|
+# 'mix'|'naive'" and list_documents_mentioning's "route='cobertura'" (see
+# agentTools.py) — same tag format, one regex covers both tools.
+_ROUTE_LINE_RE = re.compile(r"route='([a-z]+)'")
 
 
 def corpus_vocabulary(eval_set: dict) -> list[str]:
@@ -279,6 +285,48 @@ def fetch_monitoring_usage(
     return events + [{}] * (n_calls - len(events))
 
 
+def fetch_routes_used(agent_id: int, since: datetime, n_calls: int) -> list[list[str]]:
+    """Which retrieval route(s) (cobertura/naive/local/global/hybrid/mix) fired
+    per question, read from the same backend logs as fetch_monitoring_usage.
+
+    A tool call always logs its route BEFORE the turn's final [Monitoring]
+    line (see agentTools.py), so bucketing every route line by the next
+    non-duplicate [Monitoring] line reuses that function's own "one event per
+    call, strictly sequential" assumption instead of adding a second one.
+    """
+    since_str = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        out = subprocess.run(
+            ["docker", "logs", BACKEND_CONTAINER, "--since", since_str],
+            capture_output=True, text=True, check=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (no se pudo leer logs de ruta: {exc})", file=sys.stderr)
+        return [[] for _ in range(n_calls)]
+
+    events = []
+    current_routes: list[str] = []
+    last_key = None
+    for line in out.stdout.splitlines() + out.stderr.splitlines():
+        route_match = _ROUTE_LINE_RE.search(line)
+        if route_match:
+            current_routes.append(route_match.group(1))
+            continue
+        m = _MONITORING_LINE_RE.search(line)
+        if not m or int(m.group(1)) != agent_id:
+            continue
+        key = m.groups()
+        if key == last_key:
+            continue  # duplicate log statement, same call — already flushed
+        last_key = key
+        events.append(list(dict.fromkeys(current_routes)))  # de-dup, keep order
+        current_routes = []
+
+    if len(events) >= n_calls:
+        return events[-n_calls:]
+    return events + [[] for _ in range(n_calls - len(events))]
+
+
 def call_agent(base_url: str, app_id: int, agent_id: int, api_key: str, message: str, timeout: int = 120) -> dict:
     url = f"{base_url}/public/v1/app/{app_id}/chat/{agent_id}/call"
     boundary = "----evalragboundary"
@@ -325,7 +373,7 @@ def run_questions(
     return results
 
 
-def retry_failed(args, eval_set: dict, vocab: list[str]) -> int:
+def retry_failed(args, eval_set: dict, vocab: list[str], override_ids: Optional[list[str]] = None) -> int:
     """Re-run only the questions that errored in an existing result file.
 
     Overwrites those entries IN PLACE (same file) and recomputes the file's
@@ -335,10 +383,16 @@ def retry_failed(args, eval_set: dict, vocab: list[str]) -> int:
     out_path = Path(args.retry_failed)
     existing = json.loads(out_path.read_text(encoding="utf-8"))
     by_id = {q["id"]: q for q in eval_set["preguntas"]}
-    failed_ids = [
-        r["id"] for r in existing["resultados"]
-        if r.get("error") or not r.get("respuesta_agente")
-    ]
+    if override_ids is not None:
+        failed_ids = override_ids
+        for i in failed_ids:
+            if i not in by_id:
+                print(f"Aviso: id '{i}' no existe en el eval set — se omite.", file=sys.stderr)
+    else:
+        failed_ids = [
+            r["id"] for r in existing["resultados"]
+            if r.get("error") or not r.get("respuesta_agente")
+        ]
     if not failed_ids:
         print("Nada que reintentar: ninguna pregunta tiene error/respuesta vacia.", file=sys.stderr)
         return 0
@@ -355,8 +409,10 @@ def retry_failed(args, eval_set: dict, vocab: list[str]) -> int:
     usage_events = fetch_monitoring_usage(
         args.agent_id, datetime.now(timezone.utc), len(new_results), input_per_1m, output_per_1m,
     )
-    for r, usage in zip(new_results, usage_events):
+    route_events = fetch_routes_used(args.agent_id, datetime.now(timezone.utc), len(new_results))
+    for r, usage, routes in zip(new_results, usage_events, route_events):
         r["usage"] = usage or None
+        r["routes"] = routes
 
     merged_by_id = {r["id"]: r for r in existing["resultados"]}
     still_failing = []
@@ -364,7 +420,9 @@ def retry_failed(args, eval_set: dict, vocab: list[str]) -> int:
         merged_by_id[r["id"]] = r
         if r.get("error") or not r.get("respuesta_agente"):
             still_failing.append(r["id"])
-    merged_results = [merged_by_id[r["id"]] for r in existing["resultados"]]
+    existing_ids = [r["id"] for r in existing["resultados"]]
+    extra_ids = dict.fromkeys(r["id"] for r in new_results if r["id"] not in existing_ids)
+    merged_results = [merged_by_id[i] for i in existing_ids] + [merged_by_id[i] for i in extra_ids]
 
     existing["resultados"] = merged_results
     existing["doc_recall"] = aggregate_doc_recall(merged_results)
@@ -397,7 +455,22 @@ def main() -> int:
         help="Re-run only the questions that errored in this existing result file, "
              "and overwrite them in place (ignores --limit)",
     )
+    parser.add_argument(
+        "--only-ids", default=None,
+        help="Comma-separated question ids to run against an EXISTING result "
+             "file, overwriting just those entries (e.g. after a code change "
+             "you want to re-measure without paying for a full 97-question run)",
+    )
     args = parser.parse_args()
+
+    if args.only_ids:
+        eval_set = json.loads(Path(args.eval_set).read_text(encoding="utf-8"))
+        vocab = corpus_vocabulary(eval_set)
+        ids = [i.strip() for i in args.only_ids.split(",") if i.strip()]
+        return retry_failed(
+            SimpleNamespace(**{**vars(args), "retry_failed": args.retry_failed}),
+            eval_set, vocab, override_ids=ids,
+        )
 
     if args.retry_failed:
         eval_set = json.loads(Path(args.eval_set).read_text(encoding="utf-8"))
@@ -429,10 +502,12 @@ def main() -> int:
     usage_events = fetch_monitoring_usage(
         args.agent_id, run_started_at, len(results), input_per_1m, output_per_1m,
     )
+    route_events = fetch_routes_used(args.agent_id, run_started_at, len(results))
     total_cost = 0.0
     total_tokens = 0
-    for r, usage in zip(results, usage_events):
+    for r, usage, routes in zip(results, usage_events, route_events):
         r["usage"] = usage or None
+        r["routes"] = routes
         total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
         total_tokens += (usage or {}).get("total_tokens", 0)
 

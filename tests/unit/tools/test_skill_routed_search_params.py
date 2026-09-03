@@ -30,6 +30,7 @@ def _lightrag_agent(**overrides):
     )
     router_skill = SimpleNamespace(skill=SimpleNamespace(name=LIGHTRAG_ROUTER_SKILL_NAME))
     agent = SimpleNamespace(
+        app_id=1,
         silo=silo,
         lightrag_query_mode="skill-routed",
         skill_associations=[router_skill],
@@ -49,13 +50,17 @@ def _lightrag_agent(**overrides):
 def _captured_search_params(agent, caller_search_params=None):
     seen = {}
 
-    def _fake_tool(silo, search_params=None):
+    def _fake_tool(silo, search_params=None, offset=None):
         seen["silo"] = silo
         seen["search_params"] = search_params
         return "tool"
 
-    with patch("tools.agentTools._create_dynamic_lightrag_tool", _fake_tool):
-        assert _resolve_and_build_retriever_tool(agent, caller_search_params) == "tool"
+    with (
+        patch("tools.agentTools._create_dynamic_lightrag_tool", _fake_tool),
+        patch("tools.agentTools._create_coverage_tool", return_value="coverage_tool"),
+    ):
+        result = _resolve_and_build_retriever_tool(agent, caller_search_params)
+    assert result == ["tool", "coverage_tool"]
     return seen["search_params"]
 
 
