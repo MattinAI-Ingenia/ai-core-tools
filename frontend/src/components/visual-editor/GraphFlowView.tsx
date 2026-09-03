@@ -113,6 +113,12 @@ export function GraphFlowView({
         nodesConnectable
         elementsSelectable
         nodesDraggable
+        // react-flow's default (0px) requires the pointer to not move AT ALL
+        // between mousedown and mouseup to register a click - any real input
+        // device (or a remote/forwarded display) almost always introduces a
+        // pixel or two of movement, which silently turns every click attempt
+        // into a no-op "drag" instead of a selection.
+        nodeClickDistance={10}
         nodesFocusable={false}
         edgesReconnectable={false}
         edgesFocusable={false}
