@@ -23,25 +23,12 @@ import { MESSAGES, errorMessage } from '../../constants/messages';
 import type { AppFlowNode } from './EntityNodeCard';
 import type { AppFlowEdge } from './graphAdapter';
 
-/** Node kinds deletable outright from the canvas, and how to delete each. */
-const DELETE_ENTITY_KIND_LABEL: Partial<Record<GraphNodeKind, string>> = {
-  agent: 'agent',
-  silo: 'silo',
-  skill: 'skill',
+/** Node kinds deletable outright from the canvas: display label + delete call for each. */
+const DELETABLE_ENTITY_KINDS: Partial<Record<GraphNodeKind, { label: string; deleteFn: (appId: number, numericId: number) => Promise<void> }>> = {
+  agent: { label: 'agent', deleteFn: apiService.deleteAgent.bind(apiService) },
+  silo: { label: 'silo', deleteFn: apiService.deleteSilo.bind(apiService) },
+  skill: { label: 'skill', deleteFn: apiService.deleteSkill.bind(apiService) },
 };
-
-function deleteEntity(appId: number, kind: GraphNodeKind, numericId: number): Promise<void> {
-  switch (kind) {
-    case 'agent':
-      return apiService.deleteAgent(appId, numericId);
-    case 'silo':
-      return apiService.deleteSilo(appId, numericId);
-    case 'skill':
-      return apiService.deleteSkill(appId, numericId);
-    default:
-      throw new Error(`Node kind "${kind}" is not deletable from the canvas`);
-  }
-}
 
 export interface AppGraphCanvasProps {
   readonly appId: string | number | undefined;
@@ -336,8 +323,9 @@ export function AppGraphCanvas({ appId, className, onEditNode, onRefetchAvailabl
       if (!Number.isNaN(numericAppId)) {
         for (const node of candidateNodes) {
           const { kind, numericId } = parseNodeId(node.id);
-          const label = DELETE_ENTITY_KIND_LABEL[kind];
-          if (!label) continue;
+          const entity = DELETABLE_ENTITY_KINDS[kind];
+          if (!entity) continue;
+          const { label, deleteFn } = entity;
 
           const ok = await confirm({
             title: MESSAGES.CONFIRM_DELETE_TITLE(label),
@@ -349,7 +337,7 @@ export function AppGraphCanvas({ appId, className, onEditNode, onRefetchAvailabl
 
           const result = await mutate(
             async () => {
-              await deleteEntity(numericAppId, kind, numericId);
+              await deleteFn(numericAppId, numericId);
               return true;
             },
             {
