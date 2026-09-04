@@ -39,10 +39,14 @@ export function computeVisibleGraph(
 
   // Adjacency over every non-`tool` edge, used to walk from an expanded
   // agent (or an orphan resource, see below) to its (possibly indirect,
-  // e.g. Silo -> EmbeddingService) resources.
+  // e.g. Silo -> EmbeddingService) resources. `referencedResourceIds`
+  // (every edge target) is collected in the same pass, since it's the same
+  // filtered edge set.
   const adjacency = new Map<string, string[]>();
+  const referencedResourceIds = new Set<string>();
   for (const edge of edges) {
     if (edge.kind === 'tool') continue;
+    referencedResourceIds.add(edge.target);
     const targets = adjacency.get(edge.source);
     if (targets) {
       targets.push(edge.target);
@@ -51,9 +55,6 @@ export function computeVisibleGraph(
     }
   }
 
-  const referencedResourceIds = new Set(
-    edges.filter((edge) => edge.kind !== 'tool').map((edge) => edge.target),
-  );
   const orphanResourceIds = new Set(
     nodes
       .filter((node) => node.kind !== 'agent' && !referencedResourceIds.has(node.id))
