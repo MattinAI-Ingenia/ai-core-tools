@@ -1,5 +1,7 @@
-from typing import List
+from typing import List, Optional, Sequence
 
+from langchain_core.callbacks import Callbacks
+from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 from langchain_classic.retrievers.contextual_compression import (
     ContextualCompressionRetriever,
@@ -15,6 +17,24 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_TOP_N = 5
+
+
+class _LoggingCrossEncoderReranker(CrossEncoderReranker):
+    """CrossEncoderReranker that logs each time it actually reranks a candidate set."""
+
+    def compress_documents(
+        self,
+        documents: Sequence[Document],
+        query: str,
+        callbacks: Optional[Callbacks] = None,
+    ) -> Sequence[Document]:
+        logger.info(
+            "CrossEncoderRerankStrategy: reranking %d candidate(s) for query %r (top_n=%s)",
+            len(documents),
+            query,
+            self.top_n,
+        )
+        return super().compress_documents(documents, query, callbacks)
 
 
 class CrossEncoderRerankStrategy(RetrievalTransformer):
@@ -41,7 +61,7 @@ class CrossEncoderRerankStrategy(RetrievalTransformer):
         params = ctx.params or {}
         top_n = params.get("top_n", DEFAULT_TOP_N)
 
-        compressor = CrossEncoderReranker(model=self._cross_encoder, top_n=top_n)
+        compressor = _LoggingCrossEncoderReranker(model=self._cross_encoder, top_n=top_n)
 
         logger.debug(
             "CrossEncoderRerankStrategy: wrapping base retriever with CrossEncoderReranker (top_n=%s)",

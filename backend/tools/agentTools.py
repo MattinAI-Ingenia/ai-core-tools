@@ -264,15 +264,23 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
             from repositories.silo_repository import SiloRepository
             from models.media import Media
             from db.database import SessionLocal
+            from services.silo_service import resolve_search_params  # noqa: PLC0415 — avoids import cycle
             built = []
             media_found = False
             temp_db = SessionLocal()
             try:
+                # Resolve tuning params (search_method, strategy/reranker, top_n, ...) with
+                # the same caller > agent > server_default precedence used for the agent's
+                # main silo, so playground-uploaded content is reranked the same way.
+                # The pinned filter half is intentionally discarded: it's built from the
+                # agent's *own* silo metadata schema, which doesn't apply to these ad hoc
+                # temp silos.
+                resolved_sp, _resolved_pinned = resolve_search_params(agent, search_params)
                 for idx, temp_silo_id in enumerate(temp_silo_ids):
                     temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
                     if not temp_silo:
                         continue
-                    temp_tool = get_retriever_tool(temp_silo, search_params)
+                    temp_tool = get_retriever_tool(temp_silo, resolved_sp)
                     if not temp_tool:
                         continue
                     temp_tool.name = f"playground_content_retriever_{idx}"
