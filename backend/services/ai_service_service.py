@@ -70,9 +70,10 @@ class AIServiceService:
                 available_providers=providers
             )
         
-        # Existing AI service
-        service = AIServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
-        
+        # Existing AI service (app-owned, or a system/platform service assigned
+        # to one of the app's agents — the list endpoint already surfaces both)
+        service = AIServiceRepository.get_by_id_and_app_id_or_system(db, service_id, app_id)
+
         if not service:
             return None
         

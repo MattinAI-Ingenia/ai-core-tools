@@ -1,14 +1,15 @@
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from models.ai_service import AIService
 from typing import List, Optional
 
 class AIServiceRepository:
-    
+
     @staticmethod
     def get_by_app_id(db: Session, app_id: int) -> List[AIService]:
         """Get all AI services for a specific app"""
         return db.query(AIService).filter(AIService.app_id == app_id).all()
-    
+
     @staticmethod
     def get_by_id(db: Session, service_id: int) -> Optional[AIService]:
         """Get AI service by ID"""
@@ -21,7 +22,15 @@ class AIServiceRepository:
             AIService.service_id == service_id,
             AIService.app_id == app_id
         ).first()
-    
+
+    @staticmethod
+    def get_by_id_and_app_id_or_system(db: Session, service_id: int, app_id: int) -> Optional[AIService]:
+        """Get an AI service by ID if it belongs to the app or is a system/platform service (app_id=NULL)."""
+        return db.query(AIService).filter(
+            AIService.service_id == service_id,
+            or_(AIService.app_id == app_id, AIService.app_id.is_(None))
+        ).first()
+
     @staticmethod
     def create(db: Session, ai_service: AIService) -> AIService:
         """Create a new AI service"""
