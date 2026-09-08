@@ -1,7 +1,6 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres
     environment:
       POSTGRES_DB: ${DATABASE_NAME:-mattin_ai}
       POSTGRES_USER: ${DATABASE_USER:-mattin}
@@ -21,7 +20,6 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: mattin-qdrant
     volumes:
       - qdrant-data:/qdrant/storage
     environment:
@@ -47,7 +45,6 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
-    container_name: mattin-backend
     environment:
       SQLALCHEMY_DATABASE_URI: postgresql://${DATABASE_USER:-mattin}:${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set in .env}@postgres:5432/${DATABASE_NAME:-mattin_ai}
       DATABASE_HOST: postgres
@@ -123,8 +120,13 @@ services:
       OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE: ${OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE:-4}
       OPENSANDBOX_SUPPORTED_LANGUAGES: ${OPENSANDBOX_SUPPORTED_LANGUAGES:-python,bash}
     volumes:
-      - ../backend/data:/aict_backend/data
-      - ../backend/logs:/aict_backend/logs
+      # Por defecto bind mount al repo — comportamiento histórico, intacto para
+      # los despliegues de cliente ya existentes.
+      # En multi-entorno local se apunta al volumen nombrado (BACKEND_DATA=backend-data),
+      # que Compose prefija con el project name: cada entorno tiene sus propios
+      # ficheros de repositorios en vez de compartir un único directorio del host.
+      - ${BACKEND_DATA:-../backend/data}:/aict_backend/data
+      - ${BACKEND_LOGS:-../backend/logs}:/aict_backend/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,7 +143,6 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_API_BASE_URL: ""
-    container_name: mattin-frontend
     environment:
       # SPA and API are same-origin behind Caddy, so the API base is the public
       # FRONTEND_URL. (Empty here would make ConfigService fall back to its
@@ -186,7 +187,6 @@ services:
       dockerfile: Dockerfile
       args:
         OPENSANDBOX_SERVER_VERSION: ${OPENSANDBOX_SERVER_VERSION:-0.1.11}
-    container_name: mattin-opensandbox
     command: ["--config", "/etc/opensandbox/sandbox.toml"]
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/sandbox.toml
@@ -226,14 +226,13 @@ services:
 
   db_test:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres-test
     environment:
       POSTGRES_DB: ${TEST_DB_NAME:-test_db}
       POSTGRES_USER: ${TEST_DB_USER:-test_user}
       POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:-test_pass}  # pragma: allowlist secret
       POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
     ports:
-      - "5433:5432"
+      - "${TEST_DB_PORT:-5433}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     networks:
@@ -248,7 +247,6 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: mattin-caddy
     ports:
       - "${HTTP_PORT:-80}:80"
     volumes:
@@ -275,10 +273,17 @@ networks:
   # "docker_sandbox-workloads" ("docker" is this Compose project's default
   # name, i.e. this directory's basename; see that file's [docker] comment).
   sandbox-workloads:
+    # docker/opensandbox/sandbox.toml hardcodea este nombre en network_mode.
+    # Fijarlo aquí lo desacopla del project name (que ahora varía por entorno).
+    # Para levantar el perfil opensandbox en más de un stack a la vez, dale a
+    # cada uno su SANDBOX_NETWORK_NAME y su copia de sandbox.toml.
+    name: ${SANDBOX_NETWORK_NAME:-docker_sandbox-workloads}
     driver: bridge
 
 volumes:
   postgres-data:
+  backend-data:
+  backend-logs:
   qdrant-data:
   opensandbox-data:
   caddy-data:
