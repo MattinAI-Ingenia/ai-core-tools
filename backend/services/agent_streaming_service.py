@@ -120,11 +120,31 @@ class AgentStreamingService:
                 "metadata",
                 {
                     "conversation_id": ctx.effective_conv_id,
+                    "session_id": ctx.conversation.session_id if ctx.conversation else None,
                     "agent_id": agent_id,
                     "agent_name": ctx.agent.name,
                     "has_memory": ctx.agent.has_memory,
                 },
             )
+
+            # ----------------------------------------------------------------
+            # 3a. Resolve this session's temporary playground silos (uploaded
+            #     media/document retrieval). Computed once here — it does not
+            #     change across the streaming retry loop below — and threaded
+            #     into create_agent() alongside the sandbox handles.
+            # ----------------------------------------------------------------
+            temp_silo_ids = None
+            session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
+            if session_id_for_media and effective_db:
+                try:
+                    from services.playground_media_service import PlaygroundMediaService
+                    media_app_id = user_context.get("app_id") if user_context else None
+                    if media_app_id:
+                        temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
+                            media_app_id, agent_id, session_id_for_media, effective_db
+                        )
+                except Exception as e:
+                    logger.warning("Could not resolve temp playground silos: %s", e)
 
             accumulated_content = ""
             structured_response = None
@@ -145,6 +165,7 @@ class AgentStreamingService:
                     sandbox_provider=ctx.sandbox_provider,
                     sandbox_session_key=ctx.sandbox_session_key,
                     attached_files=ctx.processed_files,
+                    temp_silo_ids=temp_silo_ids or None,
                 )
                 agent_chain, mcp_client = create_agent_result[:2]
 

@@ -1,4 +1,4 @@
-import { FileText, Image, FileType, ArrowDown, FolderOpen, Paperclip, Check, X, Loader2 } from 'lucide-react';
+import { FileText, Image, FileType, ArrowDown, FolderOpen, Paperclip, Check, X, Loader2, Film } from 'lucide-react';
 
 export interface PanelFile {
   id: string;
@@ -41,6 +41,7 @@ function getFileIcon(fileType?: string) {
     case 'text': return <FileType className="w-4 h-4 text-gray-500" />;
     case 'document': return <FileText className="w-4 h-4 text-gray-500" />;
     case 'output': return <ArrowDown className="w-4 h-4 text-gray-500" />;
+    case 'media': return <Film className="w-4 h-4 text-purple-500" />;
     default: return <FolderOpen className="w-4 h-4 text-gray-500" />;
   }
 }
@@ -116,7 +117,12 @@ export default function AttachedFilesPanel({
                   >
                     {getDisplayStatus(file.processing_status) === 'ready' && <><Check className="w-3 h-3 text-green-500" /> Ready</>}
                     {getDisplayStatus(file.processing_status) === 'error' && <><X className="w-3 h-3 text-red-500" /> Error</>}
+                    {getDisplayStatus(file.processing_status) === 'pending' && <><Loader2 className="w-3 h-3 animate-spin" /> Pending</>}
                     {getDisplayStatus(file.processing_status) === 'processing' && <><Loader2 className="w-3 h-3 animate-spin" /> Processing</>}
+                    {getDisplayStatus(file.processing_status) === 'transcribing' && <><Loader2 className="w-3 h-3 animate-spin" /> Transcribing</>}
+                    {getDisplayStatus(file.processing_status) === 'analyzing_video' && <><Loader2 className="w-3 h-3 animate-spin" /> Analyzing video</>}
+                    {getDisplayStatus(file.processing_status) === 'downloading' && <><Loader2 className="w-3 h-3 animate-spin" /> Downloading</>}
+                    {getDisplayStatus(file.processing_status) === 'indexing' && <><Loader2 className="w-3 h-3 animate-spin" /> Indexing</>}
                   </span>
                 )}
               </div>
