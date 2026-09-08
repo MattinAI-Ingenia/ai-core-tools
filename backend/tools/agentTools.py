@@ -2,7 +2,7 @@ from langchain.messages import HumanMessage, SystemMessage, AnyMessage
 from langchain.agents import create_agent as create_langchain_agent, AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from utils.schema_utils import sanitize_identifier, ensure_json_schema_types
-from models.agent import Agent
+from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
 from models.silo import Silo
 from langchain.tools import BaseTool, tool
 from tools.outputParserTools import get_parser_model_by_id
@@ -26,6 +26,7 @@ import mimetypes
 from datetime import datetime
 from urllib.parse import parse_qsl, urlparse
 from utils.logger import get_logger
+from utils.config import get_app_config
 from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_context
 from utils.mcp_ssl_utils import inject_ssl_config
 from tools.skill_tools import create_skill_loader_tool, generate_skills_system_prompt_section
@@ -218,6 +219,8 @@ async def create_agent(
     sandbox_provider: Optional[Any] = None,
     sandbox_session_key: Optional[str] = None,
     sandbox_session_service: Optional[Any] = None,
+    attached_files: Optional[List[Dict]] = None,
+    temp_silo_ids: Optional[List[int]] = None,
 ):
     """Create a new agent instance with cached checkpointer if memory is enabled.
 
@@ -231,6 +234,8 @@ async def create_agent(
         sandbox_provider: Optional provider matching sandbox_handle
         sandbox_session_key: Optional key for sandbox active-use leasing
         sandbox_session_service: Optional service used for sandbox active-use leasing
+        attached_files: Optional list of attached files to pass to the agent chain
+        temp_silo_ids: Optional list of temporary silo IDs (e.g. playground media) to include as extra retrievers
     """
     llm = get_llm(agent)
     if llm is None:
@@ -373,7 +378,7 @@ async def create_agent(
 
     for tool in agent.tool_associations:
         sub_agent = tool.tool
-        tools.append(await IACTTool.create(
+        tools.append(await discover_tool(
             sub_agent,
             user_context=user_context,
             working_dir=working_dir,
@@ -381,6 +386,7 @@ async def create_agent(
             sandbox_provider=sandbox_provider,
             sandbox_session_key=sandbox_session_key,
             sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
         ))
 
     # Base tools — always available for every agent
@@ -397,6 +403,99 @@ async def create_agent(
         )
         if retriever_tool is not None:
             tools.append(retriever_tool)
+
+    # Add temp silo retrievers (e.g. playground media/file uploads)
+    has_temp_retrievers = False
+    has_media_content = False
+    has_file_content = False
+    if temp_silo_ids:
+        def _build_temp_retrievers():
+            """Sync silo/media inspection + retriever build (own DB session).
+
+            Runs off the event loop via ``asyncio.to_thread`` so the synchronous
+            embedding/vector-store setup inside ``get_retriever_tool`` and the
+            Media lookups do not block the loop during chain construction.
+            """
+            from repositories.silo_repository import SiloRepository
+            from models.media import Media
+            from db.database import SessionLocal
+            built = []
+            media_found = False
+            temp_db = SessionLocal()
+            try:
+                for idx, temp_silo_id in enumerate(temp_silo_ids):
+                    temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
+                    if not temp_silo:
+                        continue
+                    temp_tool = get_retriever_tool(temp_silo, search_params)
+                    if not temp_tool:
+                        continue
+                    temp_tool.name = f"playground_content_retriever_{idx}"
+                    temp_tool.description = (
+                        "Use this tool to search for information from content uploaded "
+                        "in this conversation (documents, PDFs, text files, video/audio "
+                        "transcriptions). Always use this when the user asks about "
+                        "attached or uploaded content."
+                    )
+                    built.append(temp_tool)
+
+                    # Check if silo contains media content (for timestamp instructions)
+                    if temp_silo.repository:
+                        repo_list = temp_silo.repository if isinstance(temp_silo.repository, list) else [temp_silo.repository]
+                        for repo in repo_list:
+                            if temp_db.query(Media).filter(Media.repository_id == repo.repository_id).first():
+                                media_found = True
+                                break
+            finally:
+                temp_db.close()
+            return built, media_found
+
+        temp_tools, has_media_content = await asyncio.to_thread(_build_temp_retrievers)
+        for temp_tool in temp_tools:
+            tools.append(temp_tool)
+            has_temp_retrievers = True
+            logger.info(f"Added temp silo retriever for agent {agent.agent_id}")
+
+        # Check if files were vectorized by looking at silo content
+        if has_temp_retrievers:
+            has_file_content = True  # files are always possible when temp retrievers exist
+
+    # Inject timestamp citation instruction when media content is in the silo
+    if has_media_content:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<media_timestamp_instructions>\n"
+            + "The user has uploaded video/audio media. When answering questions about media content, "
+            + "you MUST include timestamps from the retrieved chunks metadata.\n"
+            + "Each retrieved chunk has metadata with the fields 'name' (the media filename), "
+            + "'start_time' and 'end_time' (in seconds).\n"
+            + "When you reference a specific moment, cite it using this EXACT format, including the "
+            + "media filename so the moment is unambiguously tied to its media:\n"
+            + "[<name> @ MM:SS - MM:SS]\n"
+            + "where <name> is the exact 'name' value from that chunk's metadata. Convert start_time "
+            + "and end_time from seconds to MM:SS (or HH:MM:SS when over an hour).\n"
+            + "Example: if a chunk has name=\"lesson.mp4\", start_time=125 and end_time=180, "
+            + "cite it as [lesson.mp4 @ 02:05 - 03:00].\n"
+            + "Only cite timestamps for the specific media you are actually referencing. When multiple "
+            + "media were uploaded, NEVER mix timestamps from one media into a citation for another, and "
+            + "only cite the media that genuinely answer the user's question.\n"
+            + "Always cite the relevant timestamps so the user can navigate to those moments in the media.\n"
+            + "</media_timestamp_instructions>"
+        )
+
+    # Inject file retriever instruction when files have been vectorized
+    if has_file_content:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<uploaded_files_instructions>\n"
+            + "The user has uploaded documents (PDFs, text files) in this conversation. "
+            + "Their content has been indexed for semantic search.\n"
+            + "When the user asks about or references attached files, you MUST use the "
+            + "uploaded-file semantic search retriever tool available in this conversation "
+            + "to search for relevant information.\n"
+            + "Always cite the source filename from the retrieved chunk metadata.\n"
+            + "</uploaded_files_instructions>"
+        )
 
     if agent.enable_code_interpreter and working_dir:
         os.makedirs(working_dir, exist_ok=True)
@@ -416,7 +515,20 @@ async def create_agent(
                 "creating fallback sandbox during tool assembly for agent %s",
                 agent.agent_id,
             )
-            sandbox_handle = sandbox_provider.create_sandbox(working_dir=working_dir)
+            try:
+                sandbox_handle = sandbox_provider.create_sandbox(working_dir=working_dir)
+            except Exception as exc:
+                # A provider that resolves fine but is actually unreachable
+                # (e.g. registered but the backing service isn't running)
+                # must not crash tool assembly — degrade the same way an
+                # unavailable provider does just above.
+                logger.warning(
+                    "Fallback sandbox creation failed for agent %s: %s",
+                    agent.agent_id,
+                    exc,
+                )
+                sandbox_provider = None
+                sandbox_handle = None
         if sandbox_provider is not None and sandbox_handle is not None:
             if sandbox_session_service is None and sandbox_session_key is not None:
                 try:
@@ -726,6 +838,7 @@ class IACTTool(BaseTool):
     sandbox_provider: Any = None
     sandbox_session_key: Optional[str] = None
     sandbox_session_service: Any = None
+    attached_files: Optional[List[Dict]] = None
 
     def __init__(
         self,
@@ -736,6 +849,7 @@ class IACTTool(BaseTool):
         sandbox_provider: Optional[Any] = None,
         sandbox_session_key: Optional[str] = None,
         sandbox_session_service: Optional[Any] = None,
+        attached_files: Optional[List[Dict]] = None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -745,6 +859,7 @@ class IACTTool(BaseTool):
             sandbox_provider=sandbox_provider,
             sandbox_session_key=sandbox_session_key,
             sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
         )
 
         self.agent = agent
@@ -754,6 +869,7 @@ class IACTTool(BaseTool):
         self.sandbox_provider = sandbox_provider
         self.sandbox_session_key = sandbox_session_key
         self.sandbox_session_service = sandbox_session_service
+        self.attached_files = attached_files or []
         self.name = sanitize_identifier(agent.name)
         self.description = agent.description or "Agent tool"
         self.llm = get_llm(agent)
@@ -772,6 +888,7 @@ class IACTTool(BaseTool):
         sandbox_provider: Optional[Any] = None,
         sandbox_session_key: Optional[str] = None,
         sandbox_session_service: Optional[Any] = None,
+        attached_files: Optional[List[Dict]] = None,
     ) -> "IACTTool":
         """Build an agent-as-tool, including the sub-agent's MCP tools.
 
@@ -787,21 +904,14 @@ class IACTTool(BaseTool):
             sandbox_provider=sandbox_provider,
             sandbox_session_key=sandbox_session_key,
             sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
         )
 
         tools = []
         # Add nested tool agents recursively
         for tool in agent.tool_associations:
             sub_agent = tool.tool
-            tools.append(await IACTTool.create(
-                sub_agent,
-                user_context=user_context,
-                working_dir=working_dir,
-                sandbox_handle=sandbox_handle,
-                sandbox_provider=sandbox_provider,
-                sandbox_session_key=sandbox_session_key,
-                sandbox_session_service=sandbox_session_service,
-            ))
+            tools.append(await discover_tool(sub_agent, user_context=user_context, attached_files=attached_files))
 
         # Add base useful tools
         tools.append(fetch_file_in_base64)
@@ -1050,6 +1160,354 @@ class IACTTool(BaseTool):
         except Exception as e:
             logger.error(f"Error executing agent tool {self.name} (async): {str(e)}")
             return f"Error executing agent tool: {str(e)}"
+
+
+async def _execute_tool_agent_ocr(
+    agent_id: int,
+    pdf_path: str,
+    user_context: Dict,
+) -> Dict[str, Any]:
+    """Delegate to AgentExecutionService.execute_agent_ocr synchronously."""
+    from sqlalchemy.orm import Session
+    from db.database import SessionLocal
+    from services.agent_execution_service import AgentExecutionService
+    from fastapi import UploadFile as FastAPIUploadFile
+
+    db: Session = SessionLocal()
+    try:
+        # Wrap pdf_path in an in-memory UploadFile so we can reuse
+        # AgentExecutionService.execute_agent_ocr without duplicating OCR logic.
+        class _PathUploadFile(FastAPIUploadFile):
+            """Thin UploadFile wrapper backed by a file path."""
+            _file: Any = None
+
+            def __init__(self, file_path: str) -> None:
+                super().__init__(
+                    filename=os.path.basename(file_path),
+                    file=open(file_path, "rb"),
+                )
+                self._file = self.file  # keep reference alive
+
+        upload = _PathUploadFile(pdf_path)
+        exec_svc = AgentExecutionService()
+        return await exec_svc.execute_agent_ocr(
+            agent_id=agent_id,
+            pdf_file=upload,
+            user_context=user_context,
+            for_api=True,
+            db=db,
+        )
+    finally:
+        db.close()
+
+        if upload is not None:
+            upload.file.close()
+
+
+class IACTOCRTool(BaseTool):
+    """
+    Tool wrapper for OCR agents.
+
+    PDF documents are discovered automatically from
+    self.attached_files.
+
+    When one or more PDFs are attached, OCR processing is executed.
+    Otherwise the tool falls back to normal chat behaviour.
+    """
+
+    name: str = "ocr_agent_tool"
+    description: str = "OCR agent tool for extracting text from PDF documents"
+    args_schema: Type[BaseModel] = AgentToolInput
+    agent: Agent
+    user_context: Optional[Dict] = None
+    react_agent: Any = None
+    mcp_client: Any = None
+    llm: Any = None
+    has_memory: bool = False
+    memory_max_messages: int = 20
+    memory_max_tokens: int = 4000
+    memory_summarize_threshold: int = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+    output_parser_id: Optional[int] = None
+    temperature: float = DEFAULT_AGENT_TEMPERATURE
+    attached_files: Optional[List[Dict]] = None
+
+    def __init__(
+        self,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        attached_files: Optional[List[Dict]] = None,
+    ) -> None:
+        super().__init__(agent=agent, user_context=user_context)
+        self.agent = agent
+        self.user_context = user_context
+        self.attached_files = attached_files or []
+        self.name = sanitize_identifier(agent.name)
+        self.description = agent.description or "OCR agent tool"
+        try:
+            self.llm = get_llm(agent, is_vision=False)
+        except Exception:
+            self.llm = None
+        if self.llm is None:
+            logger.warning(
+                "OCR agent %s has no configured LLM; OCR will not work until service_id is set",
+                agent.name,
+            )
+        self.react_agent = None
+        self.mcp_client = None
+        self.has_memory = getattr(agent, "has_memory", False) or False
+        self.memory_max_messages = getattr(agent, "memory_max_messages", 20) or 20
+        self.memory_max_tokens = getattr(agent, "memory_max_tokens", 4000)
+        self.memory_summarize_threshold = (
+            getattr(agent, "memory_summarize_threshold", DEFAULT_MEMORY_SUMMARIZE_THRESHOLD)
+            or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+        )
+        self.output_parser_id = getattr(agent, "output_parser_id", None)
+        self.temperature = getattr(agent, "temperature", DEFAULT_AGENT_TEMPERATURE) or DEFAULT_AGENT_TEMPERATURE
+
+    @classmethod
+    async def create(
+        cls,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        attached_files: Optional[List[Dict]] = None,
+    ) -> "IACTOCRTool":
+        """Build an OCR agent-as-tool with MCP support.
+
+        Similar to ``IACTTool.create`` but adds OCR-specific validation
+        and tools.  A failing MCP server degrades the sub-agent but never
+        breaks construction.
+        """
+        instance = cls(agent, user_context=user_context, attached_files=attached_files)
+
+        tools: list = [fetch_file_in_base64]
+
+        # Nested tool agents — only recurse into non-OCR agents, because
+        for t in agent.tool_associations:
+            sub_agent = t.tool
+            nested = await discover_tool(sub_agent, user_context=user_context, attached_files=attached_files)
+            tools.append(nested)
+
+        # MCP tools
+        try:
+            logger.info(f"Starting MCP tools loading for OCR sub-agent {agent.agent_id}...")
+            instance.mcp_client = await MCPClientManager().get_client(agent, user_context)
+            if instance.mcp_client:
+                mcp_tools = await instance.mcp_client.get_tools()
+                logger.info(
+                    f"MCP tools loaded successfully for OCR sub-agent {agent.agent_id}: "
+                    f"{len(mcp_tools)} tools"
+                )
+                if mcp_tools:
+                    tools.extend(mcp_tools)
+        except Exception as e:
+            logger.error(
+                f"Error loading MCP tools for OCR sub-agent {agent.agent_id}: {e}",
+                exc_info=True,
+            )
+            instance.mcp_client = None
+
+        # System prompt — same pattern as IACTTool
+        tool_system_prompt = agent.system_prompt or ""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        tool_system_prompt += f"\n\nToday's date is {current_date}."
+        if agent.system_prompt and hasattr(agent, "skill_associations") and agent.skill_associations:
+            skills_section = generate_skills_system_prompt_section(agent.skill_associations)
+            if skills_section:
+                tool_system_prompt = tool_system_prompt + "\n" + skills_section
+
+        instance.react_agent = create_langchain_agent(
+            model=instance.llm,
+            tools=tools,
+            system_prompt=tool_system_prompt if tool_system_prompt else None,
+        )
+        return instance
+
+    def _run(self, query: str, **kwargs: Any) -> str:
+        """Synchronous execution of the OCR agent tool."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._arun(query=query)
+            )
+        finally:
+            loop.close()
+
+    async def _arun(
+        self,
+        query: str,
+        **kwargs: Any,
+    ) -> str:
+        """Asynchronous execution of the OCR agent tool."""
+
+        if self.react_agent is None:
+            raise RuntimeError(
+                "IACTOCRTool must be built via 'await IACTOCRTool.create(...)' before use."
+            )
+
+        pdf_files = [
+            f for f in self.attached_files
+            if f.get("type") == "pdf"
+        ]
+
+        #
+        # OCR PATH
+        #
+        if pdf_files:
+
+            results = []
+
+            for pdf_file in pdf_files:
+
+                pdf_path = pdf_file.get("file_path")
+                filename = pdf_file.get("filename", "unknown.pdf")
+
+                if not pdf_path:
+                    results.append({
+                        "file": filename,
+                        "error": "PDF file path not found"
+                    })
+                    continue
+
+                if not os.path.isabs(pdf_path):
+                    pdf_path = os.path.join(
+                        get_app_config()["TMP_BASE_FOLDER"],
+                        pdf_path
+                    )
+
+                if not os.path.exists(pdf_path):
+                    results.append({
+                        "file": filename,
+                        "error": f"PDF file not found: {pdf_path}"
+                    })
+                    continue
+
+                try:
+
+                    ocr_result = await _execute_tool_agent_ocr(
+                        agent_id=self.agent.agent_id,
+                        pdf_path=pdf_path,
+                        user_context=self.user_context,
+                    )
+
+                    results.append({
+                        "file": filename,
+                        "content": (
+                            ocr_result.get("content")
+                            if isinstance(ocr_result, dict)
+                            else ocr_result
+                        )
+                    })
+
+                except Exception as exc:
+
+                    logger.exception(
+                        "OCR failed for %s",
+                        filename
+                    )
+
+                    results.append({
+                        "file": filename,
+                        "error": str(exc)
+                    })
+
+            return json.dumps(
+                results,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+
+        #
+        # CHAT FALLBACK PATH
+        #
+        if self.agent.prompt_template:
+            try:
+                formatted_prompt = self.agent.prompt_template.format(
+                    question=query
+                )
+            except KeyError:
+                try:
+                    formatted_prompt = self.agent.prompt_template.format(
+                        query=query
+                    )
+                except KeyError:
+                    logger.warning(
+                        "Could not format prompt_template for OCR agent %s, using query directly",
+                        self.agent.name,
+                    )
+                    formatted_prompt = query
+        else:
+            formatted_prompt = query
+
+        messages = [
+            HumanMessage(content=formatted_prompt)
+        ]
+
+        try:
+
+            result = await self.react_agent.ainvoke(
+                {"messages": messages}
+            )
+
+            if isinstance(result, dict) and "messages" in result:
+
+                messages_list = result["messages"]
+
+                for msg in reversed(messages_list):
+                    if hasattr(msg, "content") and msg.content:
+                        return str(msg.content)
+
+                if messages_list:
+                    last_msg = messages_list[-1]
+
+                    return (
+                        str(last_msg.content)
+                        if hasattr(last_msg, "content")
+                        else str(last_msg)
+                    )
+
+            return str(result)
+
+        except Exception as e:
+
+            logger.error(
+                "Error executing OCR chat fallback: %s",
+                e,
+            )
+
+            return f"Error executing agent tool: {str(e)}"
+
+
+async def discover_tool(
+    agent: Agent,
+    user_context: Optional[Dict] = None,
+    working_dir: Optional[str] = None,
+    sandbox_handle: Optional[Any] = None,
+    sandbox_provider: Optional[Any] = None,
+    sandbox_session_key: Optional[str] = None,
+    sandbox_session_service: Optional[Any] = None,
+    attached_files: Optional[List[Dict]] = None,
+) -> BaseTool:
+    """Return the appropriate tool wrapper for *agent*.
+
+    Routes to :class:`IACTOCRTool` when the agent is an OCR agent
+    (``type == 'ocr_agent'``), otherwise to :class:`IACTTool`. Sandbox
+    parameters are only meaningful for :class:`IACTTool` — OCR agents
+    don't support code interpreter.
+    """
+    if agent.type == "ocr_agent":
+        return await IACTOCRTool.create(agent, user_context=user_context, attached_files=attached_files)
+    return await IACTTool.create(
+        agent,
+        user_context=user_context,
+        working_dir=working_dir,
+        sandbox_handle=sandbox_handle,
+        sandbox_provider=sandbox_provider,
+        sandbox_session_key=sandbox_session_key,
+        sandbox_session_service=sandbox_session_service,
+        attached_files=attached_files,
+    )
+
 
 _SEARCH_ERROR_MSG = "The knowledge base search failed; try rephrasing or removing filters."
 

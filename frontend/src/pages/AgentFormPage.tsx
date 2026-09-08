@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Plus } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Plus, Tv } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
@@ -51,7 +51,15 @@ interface Agent {
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
   rag_fixed_filters?: RagFixedFilter[];
-  ai_services: Array<{ service_id: number; name: string }>;
+  // Media processing configuration (playground media upload)
+  transcription_service_id?: number;
+  video_ai_service_id?: number;
+  media_embedding_service_id?: number;
+  media_forced_language?: string;
+  media_chunk_min_duration?: number;
+  media_chunk_max_duration?: number;
+  media_chunk_overlap?: number;
+  ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
   sandbox_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
@@ -91,6 +99,14 @@ interface AgentFormData {
   rag_score_threshold: number | null;
   rag_max_retrieval_calls: number | null;
   rag_fixed_filters: RagFixedFilter[];
+  // Media processing configuration (playground media upload)
+  transcription_service_id?: number;
+  video_ai_service_id?: number;
+  media_embedding_service_id?: number;
+  media_forced_language?: string;
+  media_chunk_min_duration: number;
+  media_chunk_max_duration: number;
+  media_chunk_overlap: number;
 }
 
 // Output Parser Field Component
@@ -223,11 +239,16 @@ function AgentFormPage() {
     rag_search_type: 'similarity',
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
-    rag_fixed_filters: []
+    rag_fixed_filters: [],
+    media_embedding_service_id: undefined,
+    media_chunk_min_duration: 30,
+    media_chunk_max_duration: 120,
+    media_chunk_overlap: 5
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
   const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
   const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
+  const [embeddingServices, setEmbeddingServices] = useState<Array<{ service_id: number; name: string }>>([]);
 
   // Marketplace state
   const [showMarketplace, setShowMarketplace] = useState(false);
@@ -251,6 +272,31 @@ function AgentFormPage() {
       setLoading(false);
     }
   }, [appId, agentId]);
+
+  // Load the app's embedding services to populate the media embedding selector.
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    apiService
+      .getEmbeddingServices(Number.parseInt(appId))
+      .then((services) => {
+        if (cancelled) return;
+        const list = Array.isArray(services) ? services : [];
+        setEmbeddingServices(
+          list.map((s: { service_id: number; name: string }) => ({
+            service_id: s.service_id,
+            name: s.name,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error('Error loading embedding services:', err);
+        setEmbeddingServices([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
 
   // Load the selected silo's metadata fields to power the fixed-filter editor.
   useEffect(() => {
@@ -320,7 +366,15 @@ function AgentFormPage() {
         rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
           ...f,
           _key: Math.random().toString(36).slice(2),
-        }))
+        })),
+        // Media processing configuration
+        transcription_service_id: response.transcription_service_id || undefined,
+        video_ai_service_id: response.video_ai_service_id || undefined,
+        media_embedding_service_id: response.media_embedding_service_id || undefined,
+        media_forced_language: response.media_forced_language || '',
+        media_chunk_min_duration: response.media_chunk_min_duration ?? 30,
+        media_chunk_max_duration: response.media_chunk_max_duration ?? 120,
+        media_chunk_overlap: response.media_chunk_overlap ?? 5
       });
 
       // Set output parser toggle based on whether agent has an output parser
@@ -491,6 +545,14 @@ function AgentFormPage() {
       return;
     }
 
+    // Mirror the backend invariant: a media embedding service is required so
+    // uploaded media/documents are always vectorized with a valid model.
+    if (!formData.media_embedding_service_id) {
+      setActiveTab('configuration');
+      setError('Select a media embedding service in Media Processing before saving.');
+      return;
+    }
+
     // Drop incomplete filter rows and the editor-only _key; clear the threshold unless the
     // threshold strategy is selected so we never persist a dead value.
     const cleanedFilters: RagFixedFilter[] = formData.rag_fixed_filters
@@ -528,6 +590,14 @@ function AgentFormPage() {
       rag_score_threshold: usesThreshold ? formData.rag_score_threshold : null,
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
       rag_fixed_filters: hasSilo ? cleanedFilters : [],
+      // Media processing configuration
+      transcription_service_id: formData.transcription_service_id,
+      video_ai_service_id: formData.video_ai_service_id,
+      media_embedding_service_id: formData.media_embedding_service_id,
+      media_forced_language: formData.media_forced_language || undefined,
+      media_chunk_min_duration: formData.media_chunk_min_duration,
+      media_chunk_max_duration: formData.media_chunk_max_duration,
+      media_chunk_overlap: formData.media_chunk_overlap,
       app_id: Number.parseInt(appId),
     };
 
@@ -633,7 +703,7 @@ function AgentFormPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                    Nombre *
+                    Name *
                   </label>
                   <input
                     type="text"
@@ -642,7 +712,7 @@ function AgentFormPage() {
                     onChange={(e) => handleInputChange('name', e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                     required
-                    placeholder="Nombre..."
+                    placeholder="Name..."
                   />
                 </div>
 
@@ -663,7 +733,7 @@ function AgentFormPage() {
 
                 <div className="md:col-span-2">
                   <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
-                    Descripción
+                    Description
                   </label>
                   <input
                     type="text"
@@ -671,7 +741,7 @@ function AgentFormPage() {
                     value={formData.description}
                     onChange={(e) => handleInputChange('description', e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    placeholder="Descripción..."
+                    placeholder="Description..."
                   />
                 </div>
               </div>
@@ -727,7 +797,7 @@ function AgentFormPage() {
                       </div>
                       <div className="flex-1">
                         <h3 className="text-lg font-semibold text-gray-900">Memory Management</h3>
-                        <p className="text-sm text-gray-600 mt-1">Configura la estrategia de gestión de memoria del agente</p>
+                        <p className="text-sm text-gray-600 mt-1">Configure the agent's memory management strategy</p>
                       </div>
                     </div>
 
@@ -735,10 +805,10 @@ function AgentFormPage() {
                       <div className="flex items-start">
                         <Info className="w-5 h-5 text-indigo-500 mr-3 shrink-0" />
                         <div>
-                          <p className="text-sm text-indigo-800 font-medium">Estrategia Híbrida Automática</p>
+                          <p className="text-sm text-indigo-800 font-medium">Automatic Hybrid Strategy</p>
                           <p className="text-xs text-indigo-700 mt-1">
-                            El agente aplica automáticamente una estrategia híbrida que elimina mensajes de herramientas, 
-                            recorta el historial y gestiona los límites de tokens para optimizar el rendimiento y los costos.
+                            The agent automatically applies a hybrid strategy that removes tool messages, trims the history,
+                            and manages token limits to optimize performance and costs.
                           </p>
                         </div>
                       </div>
@@ -747,7 +817,7 @@ function AgentFormPage() {
                     <div className="space-y-6">
                       <div>
                         <label htmlFor="memory_max_messages" className="block text-sm font-medium text-gray-700 mb-2">
-                          Máximo de Mensajes
+                          Maximum Messages
                         </label>
                         <input
                           type="number"
@@ -759,13 +829,13 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número máximo de mensajes a mantener en el historial de conversación (recomendado: 20)
+                          Maximum number of messages to keep in the conversation history (recommended: 20)
                         </p>
                       </div>
 
                       <div>
                         <label htmlFor="memory_max_tokens" className="block text-sm font-medium text-gray-700 mb-2">
-                          Límite de Tokens
+                          Token Limit
                         </label>
                         <input
                           type="number"
@@ -778,13 +848,13 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número máximo de tokens para el historial de conversación (recomendado: 4000)
+                          Maximum number of tokens for the conversation history (recommended: 4000)
                         </p>
                       </div>
 
                       <div>
                         <label htmlFor="memory_summarize_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-                          Umbral de Resumen
+                          Summarization Threshold
                         </label>
                         <input
                           type="number"
@@ -796,16 +866,16 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número de mensajes antiguos a partir del cual se considera resumir (futura implementación, recomendado: 10)
+                          Number of old messages at which summarization is considered (future implementation, recommended: 10)
                         </p>
                       </div>
                     </div>
 
                     <div className="mt-6 p-4 bg-gray-50 rounded-xl">
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Configuración Actual:</h4>
+                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Current Configuration:</h4>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
                         <div>
-                          <span className="text-gray-600">Mensajes:</span>
+                          <span className="text-gray-600">Messages:</span>
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_max_messages}</span>
                         </div>
                         <div>
@@ -813,7 +883,7 @@ function AgentFormPage() {
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_max_tokens.toLocaleString()}</span>
                         </div>
                         <div>
-                          <span className="text-gray-600">Umbral:</span>
+                          <span className="text-gray-600">Threshold:</span>
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_summarize_threshold}</span>
                         </div>
                       </div>
@@ -1148,9 +1218,153 @@ function AgentFormPage() {
                       </p>
                     </div>
                   </div>
+
+                  {/* Media Processing Card */}
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                    <div className="flex items-center mb-6">
+                      <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
+                        <Tv className="w-5 h-5 text-purple-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-semibold text-gray-900">Media Processing</h3>
+                        <p className="text-sm text-gray-500">
+                          Default configuration used when uploading audio/video or YouTube URLs in the playground.
+                          Set it here once so uploads only require choosing the file or URL.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mb-6">
+                      <label htmlFor="media_embedding_service" className="block text-sm font-medium text-gray-700 mb-2">
+                        Embedding Service <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        id="media_embedding_service"
+                        required
+                        value={formData.media_embedding_service_id || ''}
+                        onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      >
+                        <option value="">Select Embedding Service</option>
+                        {embeddingServices.map((service) => (
+                          <option key={service.service_id} value={service.service_id}>
+                            {service.name}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Required. Model used to vectorize uploaded media/documents into the conversation's
+                        temporary knowledge base for retrieval.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <label htmlFor="transcription_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Transcription Service
+                        </label>
+                        <select
+                          id="transcription_service"
+                          value={formData.transcription_service_id || ''}
+                          onChange={(e) => handleInputChange('transcription_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">Select Transcription Service</option>
+                          {agent?.ai_services.map((service) => (
+                            <option key={service.service_id} value={service.service_id}>
+                              {service.name}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">Speech-to-text model used to transcribe media.</p>
+                      </div>
+
+                      <div>
+                        <label htmlFor="video_ai_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Video Analysis Service (optional)
+                        </label>
+                        <select
+                          id="video_ai_service"
+                          value={formData.video_ai_service_id || ''}
+                          onChange={(e) => handleInputChange('video_ai_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">None (audio only)</option>
+                          {agent?.ai_services.filter((service) => service.supports_video).map((service) => (
+                            <option key={service.service_id} value={service.service_id}>
+                              {service.name}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">Enables multimodal analysis (visual descriptions from video frames).</p>
+                      </div>
+
+                      <div>
+                        <label htmlFor="media_forced_language" className="block text-sm font-medium text-gray-700 mb-2">
+                          Language
+                        </label>
+                        <select
+                          id="media_forced_language"
+                          value={formData.media_forced_language || ''}
+                          onChange={(e) => handleInputChange('media_forced_language', e.target.value || undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">Auto-detect</option>
+                          <option value="es">Spanish</option>
+                          <option value="en">English</option>
+                          <option value="eu">Basque</option>
+                          <option value="fr">French</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
+                      <div>
+                        <label htmlFor="media_chunk_min_duration" className="block text-sm font-medium text-gray-700 mb-2">
+                          Min Chunk (s)
+                        </label>
+                        <input
+                          id="media_chunk_min_duration"
+                          type="number"
+                          min={10}
+                          max={60}
+                          value={formData.media_chunk_min_duration}
+                          onChange={(e) => handleInputChange('media_chunk_min_duration', Number.parseInt(e.target.value) || 30)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="media_chunk_max_duration" className="block text-sm font-medium text-gray-700 mb-2">
+                          Max Chunk (s)
+                        </label>
+                        <input
+                          id="media_chunk_max_duration"
+                          type="number"
+                          min={60}
+                          max={300}
+                          value={formData.media_chunk_max_duration}
+                          onChange={(e) => handleInputChange('media_chunk_max_duration', Number.parseInt(e.target.value) || 120)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="media_chunk_overlap" className="block text-sm font-medium text-gray-700 mb-2">
+                          Overlap (s)
+                        </label>
+                        <input
+                          id="media_chunk_overlap"
+                          type="number"
+                          min={0}
+                          max={20}
+                          value={formData.media_chunk_overlap}
+                          onChange={(e) => handleInputChange('media_chunk_overlap', Number.parseInt(e.target.value) || 5)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </>
               )}
-
               {/* Configuration for OCR agents */}
               {formData.type === 'ocr_agent' && (
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
@@ -1160,7 +1374,43 @@ function AgentFormPage() {
                     </div>
                     <h3 className="text-xl font-semibold text-gray-900">OCR Configuration</h3>
                   </div>
-                  
+
+                  {/* Agent Capabilities Card for OCR agents — Tool Agent checkbox */}
+                  <div className="bg-gray-50 rounded-xl border border-gray-200 p-6 mb-6">
+                    <div className="flex items-center mb-4">
+                      <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center mr-3">
+                        <Zap className="w-4 h-4 text-green-600" />
+                      </div>
+                      <h4 className="text-base font-semibold text-gray-900">Capabilities</h4>
+                    </div>
+                    <div className="space-y-4">
+                      <div className="flex items-center p-3 bg-white rounded-lg border border-gray-200">
+                        <input
+                          id="is_tool_ocr"
+                          type="checkbox"
+                          checked={formData.is_tool}
+                          onChange={(e) => {
+                            if (!e.target.checked && mcpUsage && mcpUsage.mcp_servers.length > 0) {
+                              setShowMcpWarning(true);
+                            } else {
+                              handleInputChange('is_tool', e.target.checked);
+                            }
+                          }}
+                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <div className="ml-3">
+                          <label htmlFor="is_tool_ocr" className="text-sm font-medium text-gray-900">Tool Agent</label>
+                          <p className="text-xs text-gray-500">Can be used by other agents (including OCR tools)</p>
+                          {mcpUsage && mcpUsage.mcp_servers.length > 0 && formData.is_tool && (
+                            <p className="text-xs text-purple-600 mt-1">
+                              Used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* No AI Services Warning */}
                   {agent?.ai_services.length === 0 && renderNoAIServicesWarning(true)}
 
