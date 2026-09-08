@@ -84,7 +84,7 @@ function ChatInterface({
   const [showMediaUploadModal, setShowMediaUploadModal] = useState(false);
   const [mediaConversationId, setMediaConversationId] = useState<number | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [playgroundMedia, setPlaygroundMedia] = useState<Array<{ media_id: number; name: string; status: string; source_type: string; media_type: string }>>([]);
+  const [playgroundMedia, setPlaygroundMedia] = useState<Array<{ media_id: number; name: string; status: string; source_type: string; media_type: string; error_message?: string | null }>>([]);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -640,6 +640,7 @@ function ChatInterface({
       filename: m.name,
       file_type: 'media' as const,
       processing_status: m.status,
+      error_message: m.error_message ?? undefined,
     })),
   ];
 

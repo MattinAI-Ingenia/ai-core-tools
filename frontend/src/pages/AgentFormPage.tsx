@@ -59,7 +59,7 @@ interface Agent {
   media_chunk_min_duration?: number;
   media_chunk_max_duration?: number;
   media_chunk_overlap?: number;
-  ai_services: Array<{ service_id: number; name: string }>;
+  ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
   sandbox_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
@@ -1290,7 +1290,7 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                         >
                           <option value="">None (audio only)</option>
-                          {agent?.ai_services.map((service) => (
+                          {agent?.ai_services.filter((service) => service.supports_video).map((service) => (
                             <option key={service.service_id} value={service.service_id}>
                               {service.name}
                             </option>

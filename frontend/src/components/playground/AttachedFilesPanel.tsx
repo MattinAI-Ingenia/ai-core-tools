@@ -8,6 +8,7 @@ export interface PanelFile {
   file_size_display?: string;
   has_extractable_content?: boolean;
   content_preview?: string;
+  error_message?: string;
 }
 
 interface AttachedFilesPanelProps {
@@ -143,6 +144,14 @@ export default function AttachedFilesPanel({
                   title={file.content_preview}
                 >
                   {file.content_preview}
+                </p>
+              )}
+              {getDisplayStatus(file.processing_status) === 'error' && file.error_message && (
+                <p
+                  className="text-xs text-red-600 mt-0.5 line-clamp-2"
+                  title={file.error_message}
+                >
+                  {file.error_message}
                 </p>
               )}
             </div>
