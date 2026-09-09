@@ -871,8 +871,64 @@ class SiloService:
         return list(resource_ids)
 
     @staticmethod
+    def resolve_term_variants(silo_id: int, term: str) -> List[str]:
+        """Real on-page spellings of *term*, from the knowledge graph's entity
+        names — e.g. searching "cenicero" also tries "Cenicero Compresor
+        Automatico" and "Estado del cenicero", the entity names LightRAG
+        actually extracted, without needing a synonym dictionary.
+
+        Same CONTAINS/best-effort matching as _resolve_via_graph_entities,
+        just returning the matched entity_id strings instead of resolving
+        them further to resource_ids.
+        """
+        from services.silo_graph_service import SiloGraphService
+
+        try:
+            driver = SiloGraphService._neo4j_driver()
+        except RuntimeError:
+            return []
+
+        workspace = SiloGraphService._workspace_name(silo_id)
+        variants: set = set()
+        try:
+            with driver.session() as session:
+                result = session.run(
+                    f"MATCH (n:`{workspace}`) WHERE toLower(n.entity_id) CONTAINS toLower($term) "
+                    "RETURN n.entity_id AS entity_id",
+                    term=term,
+                )
+                for record in result:
+                    entity_id = record["entity_id"]
+                    if entity_id:
+                        variants.add(entity_id)
+        except Exception:  # noqa: BLE001 — graph lookup is a best-effort supplement
+            logger.warning("Graph term-variant lookup failed for term=%r in silo=%s", term, silo_id, exc_info=True)
+            return []
+        finally:
+            driver.close()
+
+        if not variants:
+            return []
+
+        # Entity names are LLM-paraphrased labels at extraction time, not
+        # guaranteed verbatim page text (confirmed live: an entity like
+        # "Unidad exterior Dual Climatización" existed for a document whose
+        # actual content never says "Dual Clima" anywhere) — using an
+        # unverified variant as a search term would silently pull in
+        # documents that don't really contain it.
+        session = SessionLocal()
+        try:
+            silo = SiloService.get_silo(silo_id, session)
+            if not silo:
+                return []
+            collection_name = COLLECTION_PREFIX + str(silo_id)
+            return _get_vector_store(silo).terms_present_literally(collection_name, list(variants))
+        finally:
+            session.close()
+
+    @staticmethod
     def find_chunks_mentioning(
-        silo_id: int, term: Optional[str], doc_filter: Optional[Union[str, int, List]] = None,
+        silo_id: int, term: Optional[Union[str, List[str]]], doc_filter: Optional[Union[str, int, List]] = None,
     ) -> Tuple[dict, bool]:
         """Delegate to LightRAGStore.find_chunks_mentioning, opening its own session.
 

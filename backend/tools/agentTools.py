@@ -40,7 +40,9 @@ logger = get_logger(__name__)
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
 
 
-def _create_dynamic_lightrag_tool(silo: Silo, search_params=None, offset: Optional[List[int]] = None):
+def _create_dynamic_lightrag_tool(
+    silo: Silo, search_params=None, offset: Optional[List[int]] = None, lock: Optional[asyncio.Lock] = None,
+):
     """Return a retrieve_from_knowledge_base(query, mode) LangChain tool for skill-routed agents."""
     silo_id = silo.silo_id
     VALID_MODES = {"local", "global", "hybrid", "mix", "naive"}
@@ -49,6 +51,9 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None, offset: Option
     # (e.g. _create_coverage_tool) so citations stay globally numbered when
     # both tools fire in one turn.
     _citation_offset: List[int] = offset if offset is not None else [0]
+    # `lock` serializes this tool against a sibling LightRAG tool sharing the
+    # same offset — see the call site in _resolve_and_build_retriever_tool for why.
+    _lock = lock if lock is not None else asyncio.Lock()
 
     @tool(response_format="content_and_artifact")
     async def retrieve_from_knowledge_base(query: str, mode: str) -> tuple:
@@ -66,31 +71,35 @@ def _create_dynamic_lightrag_tool(silo: Silo, search_params=None, offset: Option
             "[skill-routed] route=%r query=%r mode_requested=%r mode_used=%r",
             resolved_mode, query, mode, resolved_mode,
         )
-        retriever = SiloService.get_silo_retriever(
-            silo_id,
-            {**(search_params or {}), "lightrag_query_mode": resolved_mode},
-        )
-        docs = await retriever.ainvoke(query)
-        if not docs:
-            return "No relevant documents found.", []
-        _INTERNAL_META = {"lightrag_raw_data", "lightrag_keywords"}
-        parts = []
-        for doc in docs:
-            meta = {k: v for k, v in (doc.metadata or {}).items() if k not in _INTERNAL_META}
-            metadata_str = json.dumps(meta, ensure_ascii=False) if meta else "{}"
-            parts.append(f"Content: {doc.page_content}\nMetadata: {metadata_str}")
-        # naive has no graph but still returns chunks — surface them so chunk chips
-        # + inline citations work. The frontend hides the "Ver subgrafo" button when
-        # there are no entities/relationships (LightRAGGraphBubble), so naive shows
-        # chunks-only. ponytail: header still reads "Subgrafo · 0 entidades…"; relabel
-        # only if it bothers anyone.
-        content = _append_lightrag_citation_sources("\n\n---\n\n".join(parts), docs, _citation_offset)
-        return content, docs
+        # Serialized against the sibling coverage tool — see call site comment.
+        async with _lock:
+            retriever = SiloService.get_silo_retriever(
+                silo_id,
+                {**(search_params or {}), "lightrag_query_mode": resolved_mode},
+            )
+            docs = await retriever.ainvoke(query)
+            if not docs:
+                return "No relevant documents found.", []
+            _INTERNAL_META = {"lightrag_raw_data", "lightrag_keywords"}
+            parts = []
+            for doc in docs:
+                meta = {k: v for k, v in (doc.metadata or {}).items() if k not in _INTERNAL_META}
+                metadata_str = json.dumps(meta, ensure_ascii=False) if meta else "{}"
+                parts.append(f"Content: {doc.page_content}\nMetadata: {metadata_str}")
+            # naive has no graph but still returns chunks — surface them so chunk chips
+            # + inline citations work. The frontend hides the "Ver subgrafo" button when
+            # there are no entities/relationships (LightRAGGraphBubble), so naive shows
+            # chunks-only. ponytail: header still reads "Subgrafo · 0 entidades…"; relabel
+            # only if it bothers anyone.
+            content = _append_lightrag_citation_sources("\n\n---\n\n".join(parts), docs, _citation_offset)
+            return content, docs
 
     return retrieve_from_knowledge_base
 
 
-def _create_coverage_tool(silo: Silo, app_id: int, offset: Optional[List[int]] = None):
+def _create_coverage_tool(
+    silo: Silo, app_id: int, offset: Optional[List[int]] = None, lock: Optional[asyncio.Lock] = None,
+):
     """Return a list_documents_mentioning(term, doc) tool for skill-routed agents.
 
     Bypasses chunk_top_k entirely (see find_chunks_mentioning) — for
@@ -102,6 +111,9 @@ def _create_coverage_tool(silo: Silo, app_id: int, offset: Optional[List[int]] =
     # (e.g. _create_dynamic_lightrag_tool) so citations stay globally numbered
     # when both tools fire in one turn.
     _citation_offset: List[int] = offset if offset is not None else [0]
+    # `lock` serializes this tool against that sibling tool — see the call
+    # site in _resolve_and_build_retriever_tool for why.
+    _lock = lock if lock is not None else asyncio.Lock()
 
     @tool(response_format="content_and_artifact")
     async def list_documents_mentioning(term: Optional[str] = None, doc: Optional[str] = None) -> tuple:
@@ -121,99 +133,113 @@ def _create_coverage_tool(silo: Silo, app_id: int, offset: Optional[List[int]] =
                  Required when `term` is omitted.
         """
         logger.info("[coverage] route='cobertura' term=%r doc=%r", term, doc)
-        try:
-            from services.silo_service import SiloService
-            from db.database import SessionLocal
+        async with _lock:
+            try:
+                from services.silo_service import SiloService
+                from db.database import SessionLocal
 
-            resolved_doc_filter = None
-            if doc:
-                db = SessionLocal()
-                try:
-                    resource_ids = await asyncio.to_thread(
-                        SiloService.resolve_document_by_name, app_id, doc, silo_id, db,
+                resolved_doc_filter = None
+                if doc:
+                    db = SessionLocal()
+                    try:
+                        resource_ids = await asyncio.to_thread(
+                            SiloService.resolve_document_by_name, app_id, doc, silo_id, db,
+                        )
+                    finally:
+                        db.close()
+                    if not resource_ids:
+                        return f"No se pudo identificar el documento o producto '{doc}'.", []
+                    # Every matching resource, not just the first: a name can
+                    # legitimately resolve to several real documents (a product
+                    # family sharing a name prefix), and picking one arbitrarily
+                    # hides that the others were never searched.
+                    resolved_doc_filter = resource_ids
+
+                if not term and resolved_doc_filter is None:
+                    return "Falta indicar un término a buscar o un documento al que acotar la búsqueda.", []
+
+                search_term = term
+                if term:
+                    # The knowledge graph's entity names are the real on-page
+                    # spelling ("cenicero" -> "Cenicero Compresor Automatico") —
+                    # search every variant too, not just the literal term, since
+                    # ILIKE alone misses phrasing/wording differences.
+                    variants = await asyncio.to_thread(
+                        SiloService.resolve_term_variants, silo_id, term,
                     )
-                finally:
-                    db.close()
-                if not resource_ids:
-                    return f"No se pudo identificar el documento o producto '{doc}'.", []
-                # Every matching resource, not just the first: a name can
-                # legitimately resolve to several real documents (a product
-                # family sharing a name prefix), and picking one arbitrarily
-                # hides that the others were never searched.
-                resolved_doc_filter = resource_ids
+                    if variants:
+                        search_term = [term] + [v for v in variants if v.lower() != term.lower()]
 
-            if not term and resolved_doc_filter is None:
-                return "Falta indicar un término a buscar o un documento al que acotar la búsqueda.", []
+                grouped, cap_hit = await asyncio.to_thread(
+                    SiloService.find_chunks_mentioning, silo_id, search_term, resolved_doc_filter,
+                )
 
-            grouped, cap_hit = await asyncio.to_thread(
-                SiloService.find_chunks_mentioning, silo_id, term, resolved_doc_filter,
-            )
-
-            if not grouped:
-                abstain_term = term or f"el documento '{doc}'"
-                return f"No se encontró ningún documento que mencione {abstain_term}.", []
-            chunks = []
-            if term:
-                # Multi-document mode: one line per DOCUMENT is the useful
-                # enumeration (cobertura/G09-style — "in which documents does
-                # X appear"). Built deterministically, not left to the LLM: a
-                # synthesized answer over a long SOURCES block reliably drops
-                # entries (seen live — 32 documents found, 4 cited in prose).
-                # One line per document with its own citation link cannot be
-                # summarized away.
-                enumerated_lines = []
-                for file_path, content in (snippets[0] for snippets in grouped.values()):
-                    n = _citation_offset[0] + len(chunks) + 1
-                    enumerated_lines.append(f"- {file_path} [{n}](cite://{n})")
-                    chunks.append({"file_path": file_path, "content": content})
-                for snippets in grouped.values():
-                    for file_path, content in snippets[1:]:
-                        chunks.append({"file_path": file_path, "content": content})
-                summary = f"{len(grouped)} documento(s) mencionan '{term}'."
-                instruction = (
-                    "IMPORTANT: reproduce the list below in your answer EXACTLY as given, "
-                    "one line per document, all of them — do not summarize, select a "
-                    "subset, or omit any entry, even if there are many."
+                if not grouped:
+                    abstain_term = term or f"el documento '{doc}'"
+                    return f"No se encontró ningún documento que mencione {abstain_term}.", []
+                chunks = []
+                if term:
+                    # Multi-document mode: one line per DOCUMENT is the useful
+                    # enumeration (cobertura/G09-style — "in which documents does
+                    # X appear"). Built deterministically, not left to the LLM: a
+                    # synthesized answer over a long SOURCES block reliably drops
+                    # entries (seen live — 32 documents found, 4 cited in prose).
+                    # One line per document with its own citation link cannot be
+                    # summarized away.
+                    enumerated_lines = []
+                    for resource_id, snippets in grouped.items():
+                        file_path, content, page = snippets[0]
+                        n = _citation_offset[0] + len(chunks) + 1
+                        enumerated_lines.append(f"- {file_path} [{n}](cite://{n})")
+                        chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
+                    for resource_id, snippets in grouped.items():
+                        for file_path, content, page in snippets[1:]:
+                            chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
+                    summary = f"{len(grouped)} documento(s) mencionan '{term}'."
+                    instruction = (
+                        "IMPORTANT: reproduce the list below in your answer EXACTLY as given, "
+                        "one line per document, all of them — do not summarize, select a "
+                        "subset, or omit any entry, even if there are many."
+                    )
+                    body = "\n".join(enumerated_lines)
+                else:
+                    # Whole-document mode: usually one document, but `doc` can
+                    # resolve to several (an ambiguous/family name) — grouped may
+                    # have more than one key. Either way a per-document list is
+                    # useless here: what needs enumerating is inside the raw
+                    # content itself (e.g. every parameter code in a service
+                    # manual), spread across many chunks. That's genuine
+                    # extraction, not something a pre-built list can shortcut; the
+                    # only lever here is telling the model not to stop early.
+                    for resource_id, snippets in grouped.items():
+                        for file_path, content, page in snippets:
+                            chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
+                    doc_word = "documento" if len(grouped) == 1 else f"{len(grouped)} documentos"
+                    summary = f"Contenido completo del/de los {doc_word} solicitado(s) ({doc}), en {len(chunks)} fragmento(s)."
+                    instruction = (
+                        "IMPORTANT: the sources below are the ENTIRE content of the requested "
+                        "document(s), split across many fragments — read through ALL of them before "
+                        "answering. Extract and list EVERY distinct instance of what was asked "
+                        "(e.g. every parameter code and its value), not just the first few you see."
+                    )
+                    body = None
+                page_content = f"{summary}\n\n{instruction}" + (f"\n\n{body}" if body else "")
+                wrapper_doc = Document(
+                    page_content=page_content,
+                    metadata={"lightrag_raw_data": {"data": {"chunks": chunks}}},
                 )
-                body = "\n".join(enumerated_lines)
-            else:
-                # Whole-document mode: usually one document, but `doc` can
-                # resolve to several (an ambiguous/family name) — grouped may
-                # have more than one key. Either way a per-document list is
-                # useless here: what needs enumerating is inside the raw
-                # content itself (e.g. every parameter code in a service
-                # manual), spread across many chunks. That's genuine
-                # extraction, not something a pre-built list can shortcut; the
-                # only lever here is telling the model not to stop early.
-                for snippets in grouped.values():
-                    for file_path, content in snippets:
-                        chunks.append({"file_path": file_path, "content": content})
-                doc_word = "documento" if len(grouped) == 1 else f"{len(grouped)} documentos"
-                summary = f"Contenido completo del/de los {doc_word} solicitado(s) ({doc}), en {len(chunks)} fragmento(s)."
-                instruction = (
-                    "IMPORTANT: the sources below are the ENTIRE content of the requested "
-                    "document(s), split across many fragments — read through ALL of them before "
-                    "answering. Extract and list EVERY distinct instance of what was asked "
-                    "(e.g. every parameter code and its value), not just the first few you see."
+                content = _append_lightrag_citation_sources(
+                    wrapper_doc.page_content, [wrapper_doc], _citation_offset,
                 )
-                body = None
-            page_content = f"{summary}\n\n{instruction}" + (f"\n\n{body}" if body else "")
-            wrapper_doc = Document(
-                page_content=page_content,
-                metadata={"lightrag_raw_data": {"data": {"chunks": chunks}}},
-            )
-            content = _append_lightrag_citation_sources(
-                wrapper_doc.page_content, [wrapper_doc], _citation_offset,
-            )
-            if cap_hit:
-                content += (
-                    "\n\nNota: la búsqueda encontró más resultados de los que se "
-                    "pudieron procesar; puede haber documentos adicionales no listados."
-                )
-            return content, [wrapper_doc]
-        except Exception as exc:
-            logger.error("[coverage] list_documents_mentioning failed", exc_info=True)
-            return _SEARCH_ERROR_MSG, []
+                if cap_hit:
+                    content += (
+                        "\n\nNota: la búsqueda encontró más resultados de los que se "
+                        "pudieron procesar; puede haber documentos adicionales no listados."
+                    )
+                return content, [wrapper_doc]
+            except Exception as exc:
+                logger.error("[coverage] list_documents_mentioning failed", exc_info=True)
+                return _SEARCH_ERROR_MSG, []
 
     return list_documents_mentioning
 
@@ -817,10 +843,35 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
             # The dynamic tool sets lightrag_query_mode itself, per call. Both
             # tools share ONE citation offset so numbering stays global across
             # a turn that calls both (see _append_lightrag_citation_sources).
+            #
+            # FIXED (2026-09-08): LangGraph's ToolNode runs both tools
+            # CONCURRENTLY when the LLM calls both in one turn (the normal
+            # case for a coverage-router question) — but the shared offset is
+            # claimed in call order while the frontend's merged chunks[] array
+            # (agent_streaming_service.py -> merge_lightrag_graph in
+            # tools/streaming_utils.py) is built in event-ARRIVAL order.
+            # Whichever tool finished first streamed its chunks first, so if
+            # the tool that claimed offset numbers first was the slower one,
+            # its [N](cite://N) markers ended up pointing at the OTHER tool's
+            # chunks once merged. Confirmed live: asked "¿Qué significa P20 en
+            # el manual DUAL CLIMA HT?" (fires both list_documents_mentioning
+            # and retrieve_from_knowledge_base) — citation [4] in the answer
+            # text (about DSAT000120 p.108) opened CDOC004352 p.19 instead.
+            # Fixed by serializing the two tools with a shared asyncio.Lock so
+            # only one can run at a time within a turn — offset-claim order
+            # and chunk-arrival order can no longer diverge.
+            # ponytail: this trades away the parallelism ToolNode normally
+            # gives multi-tool turns — the two LightRAG calls now run back to
+            # back instead of concurrently, adding roughly one call's latency
+            # to a coverage-router turn. Revisit alongside future
+            # inference-time/latency work (e.g. renumber after merge instead
+            # of during execution, to get the parallelism back) if that
+            # latency becomes a problem.
             offset: List[int] = [0]
+            lock = asyncio.Lock()
             return [
-                _create_dynamic_lightrag_tool(silo, resolved_sp, offset),
-                _create_coverage_tool(silo, agent.app_id, offset),
+                _create_dynamic_lightrag_tool(silo, resolved_sp, offset, lock),
+                _create_coverage_tool(silo, agent.app_id, offset, lock),
             ]
         # ponytail: router skill toggled off — fall back transparently to hybrid
         lightrag_mode = "hybrid"
@@ -1197,10 +1248,22 @@ _CITATION_INSTRUCTION = (
     "[N](cite://N), where N is the source number. Cite only sources you actually "
     "used; combine several as [1](cite://1)[2](cite://2) when a sentence draws on "
     "more than one. Do not add a separate reference list at the end. "
+    "In a bulleted or numbered list where every item comes from the same source, "
+    "repeat the FULL [N](cite://N) link on every single item — never shorten it to "
+    "just [N] after the first occurrence, even though it is the same source. A "
+    "bare [N] with no (cite://N) is plain text, not a citation, and will not work. "
     "Each source's label already includes its document name and page number "
     "(e.g. 'CDOC004043.pdf p.63') — when the question asks WHERE something is "
     "documented (which page, which section), state that document name and page "
-    "number explicitly in your answer text, not just as an inline citation marker."
+    "number explicitly in your answer text, not just as an inline citation marker. "
+    "When a question asks for a superlative or single best answer across several "
+    "product families or categories (e.g. 'which has the highest/most/largest...'), "
+    "check every family your sources cover BEFORE writing the answer, then lead "
+    "with whichever one actually wins — never present the first family you happened "
+    "to check as the main answer and mention a bigger or more correct one only in a "
+    "trailing note. If you are genuinely unsure a footnoted alternative should count "
+    "(e.g. a different product line), say so plainly, but do not bury the correct "
+    "winner below an incorrect headline answer."
 )
 
 

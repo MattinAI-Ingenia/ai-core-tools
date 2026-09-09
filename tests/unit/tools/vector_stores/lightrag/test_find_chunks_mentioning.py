@@ -27,9 +27,10 @@ def test_groups_snippets_by_resource_id():
     assert set(grouped.keys()) == {"271", "275"}
     assert len(grouped["271"]) == 2
     assert len(grouped["275"]) == 1
-    # file_path travels with the snippet — Task 3's citations need the real
-    # "file.pdf p.N" label, not just the resource id.
-    assert grouped["271"][0] == ("CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.")
+    # file_path and page travel with the snippet — Task 3's citations need the
+    # real "file.pdf p.N" label, and the frontend's "Open PDF" button needs
+    # the page number, not just the resource id.
+    assert grouped["271"][0] == ("CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.", 10)
 
 
 def test_caps_snippets_per_document():
@@ -113,3 +114,48 @@ def test_doc_filter_accepts_a_list_and_ors_the_conditions():
     assert params["doc_pattern_0"] == "res280-p%"
     assert params["doc_pattern_1"] == "res282-p%"
     assert params["doc_pattern_2"] == "res296-p%"
+
+
+def test_term_matching_is_accent_insensitive():
+    """"anodo" (no accent, what a user/LLM is likely to type) must still find
+    "ánodo" in the indexed text — accent is a spelling difference, not a
+    different word, and the graph already stores the correctly-accented form."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = []
+    store.find_chunks_mentioning("silo_1", term="anodo", doc_filter=None)
+    sql_arg = str(conn.execute.call_args[0][0])
+    assert "unaccent(content)" in sql_arg
+    assert "unaccent(:term_pattern_0)" in sql_arg
+
+
+def test_terms_present_literally_keeps_only_real_matches():
+    """A graph-entity name that isn't actually verbatim page text (e.g. an
+    LLM-paraphrased label) must be dropped, not treated as a real spelling."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    # "Dual Clima R" is found (row returned), "Dual Climatización" is not (None).
+    conn.execute.return_value.fetchone.side_effect = [(1,), None]
+    result = store.terms_present_literally("silo_1", ["Dual Clima R", "Dual Climatización"])
+    assert result == ["Dual Clima R"]
+
+
+def test_terms_present_literally_empty_list_makes_no_query():
+    store = _make_store()
+    assert store.terms_present_literally("silo_1", []) == []
+    store.db.engine.connect.assert_not_called()
+
+
+def test_term_accepts_a_list_and_ors_the_conditions():
+    """Several literal spellings of the same thing (e.g. the caller's term
+    plus graph-entity variants like "Cenicero Compresor Automatico") must all
+    be tried — a document matching any one of them counts as a match."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = []
+    store.find_chunks_mentioning("silo_1", term=["cenicero", "Cenicero Compresor Automatico"])
+    sql_arg = str(conn.execute.call_args[0][0])
+    params = conn.execute.call_args[0][1]
+    assert "OR" in sql_arg
+    assert params["term_pattern_0"] == "%cenicero%"
+    assert params["term_pattern_1"] == "%Cenicero Compresor Automatico%"

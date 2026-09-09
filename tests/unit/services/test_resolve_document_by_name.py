@@ -176,3 +176,62 @@ def test_graph_entity_lookup_degrades_to_empty_when_neo4j_unavailable():
         side_effect=RuntimeError("NEO4J_URI not configured"),
     ):
         assert SiloService._resolve_via_graph_entities(37, "anything") == []
+
+
+def test_resolve_term_variants_returns_real_entity_spellings():
+    """A literal search term (e.g. "cenicero") should surface the real
+    on-page spellings LightRAG extracted as entities (e.g. "Cenicero
+    Compresor Automatico") — confirmed live against Neo4j for this silo."""
+    fake_records = [
+        {"entity_id": "Cenicero Compresor Automatico"},
+        {"entity_id": "Estado del cenicero"},
+    ]
+    fake_session = MagicMock()
+    fake_session.run.return_value = fake_records
+    fake_driver = MagicMock()
+    fake_driver.session.return_value.__enter__.return_value = fake_session
+
+    with (
+        patch("services.silo_graph_service.SiloGraphService._neo4j_driver", return_value=fake_driver),
+        patch("services.silo_service.SiloService.get_silo", return_value=MagicMock()),
+        patch(
+            "services.silo_service._get_vector_store",
+            return_value=MagicMock(terms_present_literally=lambda collection, terms: terms),
+        ),
+    ):
+        result = SiloService.resolve_term_variants(37, "cenicero")
+
+    assert set(result) == {"Cenicero Compresor Automatico", "Estado del cenicero"}
+
+
+def test_resolve_term_variants_drops_entity_names_absent_from_real_content():
+    """A graph entity name is an LLM-generated label at extraction time, not
+    guaranteed verbatim page text (confirmed live: "Unidad exterior Dual
+    Climatización" existed as an entity for a document whose actual content
+    never says "Dual Clima" anywhere) — such variants must not reach the
+    search as if they were real spellings."""
+    fake_records = [{"entity_id": "Dual Climatización"}, {"entity_id": "Dual Clima R"}]
+    fake_session = MagicMock()
+    fake_session.run.return_value = fake_records
+    fake_driver = MagicMock()
+    fake_driver.session.return_value.__enter__.return_value = fake_session
+
+    with (
+        patch("services.silo_graph_service.SiloGraphService._neo4j_driver", return_value=fake_driver),
+        patch("services.silo_service.SiloService.get_silo", return_value=MagicMock()),
+        patch(
+            "services.silo_service._get_vector_store",
+            return_value=MagicMock(terms_present_literally=lambda collection, terms: ["Dual Clima R"]),
+        ),
+    ):
+        result = SiloService.resolve_term_variants(37, "dual clima")
+
+    assert result == ["Dual Clima R"]
+
+
+def test_resolve_term_variants_degrades_to_empty_when_neo4j_unavailable():
+    with patch(
+        "services.silo_graph_service.SiloGraphService._neo4j_driver",
+        side_effect=RuntimeError("NEO4J_URI not configured"),
+    ):
+        assert SiloService.resolve_term_variants(37, "anything") == []

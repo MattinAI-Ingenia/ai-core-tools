@@ -200,12 +200,12 @@ def _lightrag_doc_id(metadata: dict, content: str) -> str:
 
 # Matches the PARENT doc id (no "-chunk-N" suffix) — see _lightrag_doc_id and
 # CHUNK_ID_RESOURCE_PAGE_RE just above, which matches the CHUNK id instead.
-_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)-p\d+$")
+_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)-p(\d+)$")
 
 
 def _group_chunk_rows(
     rows: list[tuple[str, str, str]], per_doc_cap: int = 3,
-) -> dict[str, list[tuple[str, str]]]:
+) -> dict[str, list[tuple[str, str, int]]]:
     """Group (full_doc_id, file_path, content) rows by resource id.
 
     Rows whose full_doc_id doesn't match the res{N}-p{N} shape (non-PDF
@@ -218,17 +218,19 @@ def _group_chunk_rows(
 
     file_path travels alongside each snippet (not just the content) because
     Task 3's citation block needs the real "file.pdf p.N" label, not a
-    synthetic one.
+    synthetic one. page travels too — the frontend's "Open PDF at page N"
+    button needs it (see agentTools.py's chunk dicts), and it was otherwise
+    discarded here despite being right there in full_doc_id.
     """
-    grouped: dict[str, list[tuple[str, str]]] = {}
+    grouped: dict[str, list[tuple[str, str, int]]] = {}
     for full_doc_id, file_path, content in rows:
         match = _FULL_DOC_ID_RESOURCE_RE.match(full_doc_id)
         if not match:
             continue
-        resource_id = match.group(1)
+        resource_id, page = match.group(1), int(match.group(2))
         snippets = grouped.setdefault(resource_id, [])
         if len(snippets) < per_doc_cap:
-            snippets.append((file_path, content.strip()))
+            snippets.append((file_path, content.strip(), page))
     return grouped
 
 
@@ -856,6 +858,25 @@ def _run_async(coro):
 
     If an event loop is already running (e.g. inside an async FastAPI handler),
     offloads to a fresh worker thread instead to avoid blocking.
+
+    KNOWN BUG (2026-09-08, not fixed yet): the "loop already running" branch
+    below spins up a BRAND NEW thread + event loop via asyncio.run() on every
+    call, then closes that loop when done — but the Neo4j driver opened
+    inside it (via rag.initialize_storages(), see _get_rag_instance) stays
+    alive with connections bound to that now-closed loop. When one chat turn
+    calls two LightRAG-touching tools close together (e.g. the coverage
+    router calling list_documents_mentioning + retrieve_from_knowledge_base
+    in the same turn — trivial to trigger, e.g. "Dual Clima 12R cantidad de
+    refrigerante..."), two of these throwaway loops race, and the uvicorn
+    worker process dies with no Python traceback (confirmed live: Caddy logs
+    "reading: unexpected EOF" on /internal/apps/{id}/agents/{id}/chat/stream,
+    backend logs "Child process died" right after "Initializing vector store
+    backend: LIGHTRAG" the second time in one turn). uvicorn auto-respawns
+    the worker, so it silently self-heals, but the in-flight request/stream
+    is lost — surfaces to the user as "network error" in the playground.
+    Needs a real fix (e.g. one persistent loop+thread shared across calls
+    instead of a fresh asyncio.run() per call), not attempted yet — this
+    comment is the tracking note until someone picks it up.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -1766,7 +1787,7 @@ class LightRAGStore(VectorStoreInterface):
     _COVERAGE_QUERY_ROW_CAP = 2000
 
     def find_chunks_mentioning(
-        self, collection_name: str, term: Optional[str],
+        self, collection_name: str, term: Optional[Union[str, List[str]]],
         doc_filter: Optional[Union[str, int, List[Union[str, int]]]] = None,
     ) -> tuple[dict[str, list[tuple[str, str]]], bool]:
         """Every document whose chunks literally contain *term* — no chunk_top_k,
@@ -1780,7 +1801,12 @@ class LightRAGStore(VectorStoreInterface):
         term: omit (None) to return EVERY chunk of *doc_filter* unfiltered —
         requires doc_filter, since without a term there is nothing else to
         scope the query. Used when there is no single literal thing to search
-        for ("list every parameter in manual Z").
+        for ("list every parameter in manual Z"). A list ORs several literal
+        variants together (e.g. the caller's term plus graph-entity spelling
+        variants) — same document, same page, could use any of them verbatim.
+
+        Matching is accent-insensitive (Postgres `unaccent`) so "anodo" finds
+        "ánodo" — this is still exact substring matching, not fuzzy/semantic.
 
         Returns (grouped, cap_hit) — cap_hit is True when the defensive row cap
         was reached, meaning results may have been silently truncated.
@@ -1791,12 +1817,17 @@ class LightRAGStore(VectorStoreInterface):
             raise ValueError("find_chunks_mentioning needs term, doc_filter, or both")
 
         doc_ids = [doc_filter] if doc_filter is not None and not isinstance(doc_filter, list) else doc_filter
+        terms = [term] if term is not None and not isinstance(term, list) else term
 
         sql = "SELECT full_doc_id, file_path, content FROM lightrag_doc_chunks WHERE workspace = :ws"
         params: dict = {"ws": collection_name}
-        if term is not None:
-            sql += " AND content ILIKE :pattern"
-            params["pattern"] = f"%{term}%"
+        if terms:
+            term_clauses = []
+            for i, one_term in enumerate(terms):
+                key = f"term_pattern_{i}"
+                term_clauses.append(f"unaccent(content) ILIKE unaccent(:{key})")
+                params[key] = f"%{one_term}%"
+            sql += " AND (" + " OR ".join(term_clauses) + ")"
         if doc_ids:
             doc_clauses = []
             for i, doc_id in enumerate(doc_ids):
@@ -1817,6 +1848,32 @@ class LightRAGStore(VectorStoreInterface):
             )
         per_doc_cap = self._COVERAGE_QUERY_ROW_CAP if term is None else 3
         return _group_chunk_rows([(r[0], r[1], r[2]) for r in rows], per_doc_cap=per_doc_cap), cap_hit
+
+    def terms_present_literally(self, collection_name: str, terms: List[str]) -> List[str]:
+        """Which of *terms* are an accent-insensitive literal substring of at
+        least one indexed chunk — filters out graph-entity names that are
+        LLM-paraphrased labels, not verbatim page text (confirmed live: an
+        entity like "Unidad exterior Dual Climatización" existed in the graph
+        for a document whose actual content never says "Dual Clima" at all).
+        One small EXISTS-style query per term — the candidate list is always
+        a handful of graph matches, not worth a fancier single-query version.
+        """
+        from sqlalchemy import text  # noqa: WPS433
+
+        if not terms:
+            return []
+
+        sql = (
+            "SELECT 1 FROM lightrag_doc_chunks WHERE workspace = :ws "
+            "AND unaccent(content) ILIKE unaccent(:pattern) LIMIT 1"
+        )
+        present = []
+        with self.db.engine.connect() as conn:
+            for term in terms:
+                row = conn.execute(text(sql), {"ws": collection_name, "pattern": f"%{term}%"}).fetchone()
+                if row is not None:
+                    present.append(term)
+        return present
 
     # ------------------------------------------------------------------
 
