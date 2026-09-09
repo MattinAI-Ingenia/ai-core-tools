@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -327,20 +328,53 @@ def fetch_routes_used(agent_id: int, since: datetime, n_calls: int) -> list[list
     return events + [[] for _ in range(n_calls - len(events))]
 
 
-def call_agent(base_url: str, app_id: int, agent_id: int, api_key: str, message: str, timeout: int = 120) -> dict:
+def call_agent(
+    base_url: str, app_id: int, agent_id: int, api_key: str, message: str,
+    timeout: int = 120, conversation_id: Optional[int] = None,
+) -> dict:
     url = f"{base_url}/public/v1/app/{app_id}/chat/{agent_id}/call"
     boundary = "----evalragboundary"
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="message"\r\n\r\n'
-        f"{message}\r\n"
-        f"--{boundary}--\r\n"
-    ).encode("utf-8")
+    parts = [f'Content-Disposition: form-data; name="message"\r\n\r\n{message}']
+    if conversation_id is not None:
+        parts.append(f'Content-Disposition: form-data; name="conversation_id"\r\n\r\n{conversation_id}')
+    body = ("".join(f"--{boundary}\r\n{p}\r\n" for p in parts) + f"--{boundary}--\r\n").encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("X-API-KEY", api_key)
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def set_agent_memory(agent_id: int, enabled: bool) -> Optional[bool]:
+    """Set Agent.has_memory, returning its PREVIOUS value (None on failure).
+
+    Needed for eval_set.json questions with "sigue_a": <id> — the public API
+    only threads a conversation (and thus lets a question like G03, "¿Y en el
+    manual del NANOCLIMA?", see its predecessor's answer) when the agent has
+    memory enabled. Caller is responsible for restoring the previous value
+    once the run is done — this is a real behavior change on the live agent,
+    not just eval-script state.
+    """
+    snippet = f"""
+import json
+from db.database import SessionLocal
+from models.agent import Agent
+db = SessionLocal()
+agent = db.query(Agent).filter(Agent.agent_id == {agent_id}).one()
+previous = agent.has_memory
+agent.has_memory = {enabled!r}
+db.commit()
+print(json.dumps(previous))
+"""
+    try:
+        out = subprocess.run(
+            ["docker", "exec", BACKEND_CONTAINER, "python", "-c", snippet],
+            capture_output=True, text=True, check=True,
+        )
+        return json.loads(out.stdout.strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (no se pudo cambiar has_memory del agente: {exc})", file=sys.stderr)
+        return None
 
 
 def run_questions(
@@ -351,17 +385,32 @@ def run_questions(
 
     Shared by a full run and a --retry-failed run: identical per-question
     behaviour, only the input list differs.
+
+    A question with "sigue_a": <id> is a genuine conversational follow-up
+    (e.g. G03, "¿Y en el manual del NANOCLIMA?", makes no sense on its own) —
+    it's sent with the predecessor's conversation_id so the agent actually
+    sees that turn, instead of being graded as a stateless non-sequitur.
+    Requires the agent to have memory enabled (see set_agent_memory) — if the
+    predecessor's conversation_id never came back (memory was off, or that
+    call errored), the follow-up just runs standalone, same as before this.
     """
     results = []
+    conversation_ids: dict[str, int] = {}
     for i, q in enumerate(questions, 1):
         print(f"[{i}/{len(questions)}] {q['id']}: {q['pregunta'][:70]}...", file=sys.stderr)
         t0 = time.monotonic()
+        conversation_id = conversation_ids.get(q.get("sigue_a")) if q.get("sigue_a") else None
         try:
-            answer = call_agent(base_url, app_id, agent_id, api_key, q["pregunta"], timeout=timeout)
+            answer = call_agent(
+                base_url, app_id, agent_id, api_key, q["pregunta"],
+                timeout=timeout, conversation_id=conversation_id,
+            )
             error = None
         except Exception as exc:  # noqa: BLE001
             answer = None
             error = str(exc)
+        if answer and answer.get("conversation_id") is not None:
+            conversation_ids[q["id"]] = answer["conversation_id"]
         response_text = answer["response"] if answer else None
         results.append({
             **q,
@@ -370,6 +419,58 @@ def run_questions(
             "latency_s": round(time.monotonic() - t0, 2),
             "doc_recall": score_doc_recall(response_text, q.get("docs_esperados") or [], vocab),
         })
+    return results
+
+
+def run_questions_parallel(
+    questions: list[dict], base_url: str, app_id: int, agent_id: int, api_key: str,
+    timeout: int, vocab: list[str], max_workers: int,
+) -> list[dict]:
+    """Same as run_questions, but fires calls concurrently (max_workers at a
+    time) instead of one at a time.
+
+    Trades away usage/routes: both are read by correlating the Nth backend
+    log line to the Nth question (fetch_monitoring_usage, fetch_routes_used),
+    which only holds when calls are strictly sequential — with concurrent
+    calls those log lines interleave unpredictably and would attribute cost/
+    route to the wrong question. So this path never calls either fetcher;
+    every result carries usage=None, routes=[] instead of a wrong answer.
+    """
+    def _timed_call(pregunta: str) -> tuple[Optional[dict], Optional[str], float]:
+        # Timed HERE, inside the worker thread, not at submission — with
+        # max_workers < len(questions) most calls sit queued for a while
+        # before a thread picks them up, and timing from submission would
+        # count that queue wait as if it were the HTTP call itself.
+        t0 = time.monotonic()
+        try:
+            answer = call_agent(base_url, app_id, agent_id, api_key, pregunta, timeout=timeout)
+            return answer, None, round(time.monotonic() - t0, 2)
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc), round(time.monotonic() - t0, 2)
+
+    results: list[Optional[dict]] = [None] * len(questions)
+    done_count = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_index = {
+            pool.submit(_timed_call, q["pregunta"]): i
+            for i, q in enumerate(questions)
+        }
+        for future in as_completed(future_to_index):
+            i = future_to_index[future]
+            q = questions[i]
+            answer, error, latency_s = future.result()
+            response_text = answer["response"] if answer else None
+            done_count += 1
+            print(f"[{done_count}/{len(questions)}] {q['id']}: {q['pregunta'][:70]}...", file=sys.stderr)
+            results[i] = {
+                **q,
+                "respuesta_agente": response_text,
+                "error": error,
+                "latency_s": latency_s,
+                "doc_recall": score_doc_recall(response_text, q.get("docs_esperados") or [], vocab),
+                "usage": None,
+                "routes": [],
+            }
     return results
 
 
@@ -399,10 +500,19 @@ def retry_failed(args, eval_set: dict, vocab: list[str], override_ids: Optional[
 
     to_retry = [by_id[i] for i in failed_ids if i in by_id]
     print(f"Reintentando {len(to_retry)} pregunta(s) con timeout={args.timeout}s: {failed_ids}", file=sys.stderr)
-    new_results = run_questions(
-        to_retry, args.base_url, args.app_id, args.agent_id, args.api_key,
-        args.timeout, vocab,
-    )
+    # See the same toggle in main(): a "sigue_a" question (e.g. G03) only
+    # gets real conversation memory if both it AND its predecessor are in
+    # this retry batch — otherwise it harmlessly falls back to standalone.
+    needs_memory = any(q.get("sigue_a") for q in to_retry)
+    previous_memory = set_agent_memory(args.agent_id, True) if needs_memory else None
+    try:
+        new_results = run_questions(
+            to_retry, args.base_url, args.app_id, args.agent_id, args.api_key,
+            args.timeout, vocab,
+        )
+    finally:
+        if needs_memory and previous_memory is not None:
+            set_agent_memory(args.agent_id, previous_memory)
 
     config = existing.get("config", {})
     input_per_1m, output_per_1m, _ = resolve_pricing(config.get("llm_model"))
@@ -461,6 +571,14 @@ def main() -> int:
              "file, overwriting just those entries (e.g. after a code change "
              "you want to re-measure without paying for a full 97-question run)",
     )
+    parser.add_argument(
+        "--parallel", type=int, default=None, metavar="N",
+        help="Run N questions concurrently instead of one at a time. Faster, "
+             "but every result's usage/routes come back empty (None/[]) — both "
+             "are read by matching backend log lines to questions in call "
+             "order, which concurrent calls make unreliable. Use the default "
+             "sequential mode when you need cost or route-per-question data.",
+    )
     args = parser.parse_args()
 
     if args.only_ids:
@@ -494,22 +612,37 @@ def main() -> int:
         questions = questions[: args.limit]
 
     run_started_at = datetime.now(timezone.utc)
-    results = run_questions(
-        questions, args.base_url, args.app_id, args.agent_id, args.api_key,
-        args.timeout, vocab,
-    )
-
-    usage_events = fetch_monitoring_usage(
-        args.agent_id, run_started_at, len(results), input_per_1m, output_per_1m,
-    )
-    route_events = fetch_routes_used(args.agent_id, run_started_at, len(results))
     total_cost = 0.0
     total_tokens = 0
-    for r, usage, routes in zip(results, usage_events, route_events):
-        r["usage"] = usage or None
-        r["routes"] = routes
-        total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
-        total_tokens += (usage or {}).get("total_tokens", 0)
+    if args.parallel:
+        results = run_questions_parallel(
+            questions, args.base_url, args.app_id, args.agent_id, args.api_key,
+            args.timeout, vocab, args.parallel,
+        )
+        print(
+            "  (modo paralelo: usage/routes no calculados, ver --help de --parallel)",
+            file=sys.stderr,
+        )
+    else:
+        needs_memory = any(q.get("sigue_a") for q in questions)
+        previous_memory = set_agent_memory(args.agent_id, True) if needs_memory else None
+        try:
+            results = run_questions(
+                questions, args.base_url, args.app_id, args.agent_id, args.api_key,
+                args.timeout, vocab,
+            )
+        finally:
+            if needs_memory and previous_memory is not None:
+                set_agent_memory(args.agent_id, previous_memory)
+        usage_events = fetch_monitoring_usage(
+            args.agent_id, run_started_at, len(results), input_per_1m, output_per_1m,
+        )
+        route_events = fetch_routes_used(args.agent_id, run_started_at, len(results))
+        for r, usage, routes in zip(results, usage_events, route_events):
+            r["usage"] = usage or None
+            r["routes"] = routes
+            total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
+            total_tokens += (usage or {}).get("total_tokens", 0)
 
     today = date.today().isoformat().replace("-", "")
     # The EFFECTIVE value, not the DB one — see introspect_config. A filename
@@ -522,9 +655,13 @@ def main() -> int:
     # 2-question file. The analysis had already been written up, but the raw data
     # was gone. The tag makes the collision impossible rather than merely unlikely.
     smoke_tag = f"_smoke{args.limit}" if args.limit is not None else ""
+    # Same reasoning as smoke_tag: a parallel run's usage/routes are empty,
+    # so it must never land on (and silently pass off as) a sequential run's
+    # filename.
+    parallel_tag = f"_parallel{args.parallel}" if args.parallel else ""
     out_name = (
         f"resultado_chunk{chunk_size}_{chunk_strategy}_{query_mode}_"
-        f"{chunk_top_k_tag}_{rerank_tag}_{model_slug}_{prompt_tag}_{today}{smoke_tag}.json"
+        f"{chunk_top_k_tag}_{rerank_tag}_{model_slug}_{prompt_tag}_{today}{smoke_tag}{parallel_tag}.json"
     )
     out_path = Path(args.out_dir) / out_name
 
