@@ -50,6 +50,17 @@ function isMarkdown(str: string): boolean {
   return markdownPatterns.some(pattern => pattern.test(str));
 }
 
+// Some models (seen with gpt-oss-120b) write the citation instruction's
+// [N](cite://N) using full-width CJK brackets — 【N】(cite://N) — instead of
+// ASCII square brackets. CommonMark link syntax requires literal [...], so
+// remark never parses this as a link: it falls through to plain text and the
+// citation badge (and its "open PDF at this page" button) never renders.
+// Normalizing the bracket pair right before "(cite://" fixes it regardless of
+// which style the model used, without touching any other 【】 in the prose.
+function normalizeCitationBrackets(str: string): string {
+  return str.replace(/【\s*(\d+)\s*】(?=\(cite:\/\/)/g, '[$1]');
+}
+
 function formatJson(jsonStr: string): React.ReactNode {
   try {
     const parsed = JSON.parse(jsonStr);
@@ -214,7 +225,7 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
       );
     }
 
-    const stringContent = content as string;
+    const stringContent = normalizeCitationBrackets(content as string);
 
     const hasFileMarkers = stringContent.includes('](file://');
 
