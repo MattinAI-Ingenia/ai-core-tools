@@ -1460,12 +1460,23 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/graph${query}`);
   }
 
-  async getSiloResourceFile(appId: number, siloId: number, resourceId: number): Promise<Blob> {
+  async getSiloResourceFile(appId: number, siloId: number, resourceId: number, _isRetryAfterRefresh = false): Promise<Blob> {
     const headers = this.buildAuthHeaders('GET', false);
     const response = await fetch(
       `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/resources/${resourceId}/file`,
       { method: 'GET', credentials: 'include', headers },
     );
+    // Unlike this.request(), this bypasses the shared 401-refresh-retry path
+    // (it needs a Blob, not JSON) — so an expired access-token cookie used to
+    // surface as a raw fetch failure instead of transparently refreshing,
+    // like every other endpoint does.
+    if (response.status === 401 && !_isRetryAfterRefresh && _apiAuthMode !== 'oidc') {
+      const refreshed = await this._doRefresh();
+      if (refreshed) {
+        return this.getSiloResourceFile(appId, siloId, resourceId, true);
+      }
+      this.clearClientAuthAndRedirect();
+    }
     if (!response.ok) {
       await this.handleResponseError(response);
     }
