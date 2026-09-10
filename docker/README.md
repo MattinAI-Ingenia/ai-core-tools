@@ -8,7 +8,7 @@ Despliegue con **Caddy** como reverse proxy. Sirve tanto para **desarrollo local
 Usuario
   │
   ▼
-[ Caddy :80 ]  ← único puerto expuesto al host
+[ Caddy :80 ]  ← único puerto pensado para acceso externo
   │
   ├── /internal/*, /public/*, /mcp/*, /docs/*, /scalar, /static/*, /openapi-*.json, /health
   │        └─► backend:8000
@@ -17,9 +17,13 @@ Usuario
            └─► frontend:80
 
 Red interna de Docker (mattin-network):
-  postgres:5432 ← sin publicar al host
+  postgres:5432 ← publicado también en localhost:5434 (acceso directo en dev)
   qdrant:6333   ← sin publicar al host
+  neo4j:7687    ← sin publicar al host (grafo de conocimiento de LightRAG)
 ```
+
+LightRAG (RAG con grafo de conocimiento) usa Neo4j como backend de grafo; se levanta
+siempre junto al resto del stack. Variables en `.env.example` (sección "LightRAG").
 
 Frontend y backend viajan por el mismo origen → **sin CORS**, sin necesidad de rebuildear el frontend entre entornos (`VITE_API_BASE_URL=""` usa rutas relativas).
 
@@ -46,9 +50,9 @@ El tag por defecto es `develop` (último build de la rama `develop`). En servido
 cd docker
 cp .env.example .env
 # Editar .env:
-#   FRONTEND_URL=http://<ip-o-dominio>
-#   DATABASE_PASSWORD=<robusta>
-#   SECRET_KEY=<hex aleatorio>
+#   AICT_PUBLIC_URL=http://<ip-o-dominio>
+#   DATABASE_PASSWORD=<robusta>   # [REQUERIDO] el compose falla si está vacío
+#   SECRET_KEY=<hex aleatorio>    # [REQUERIDO] el compose falla si está vacío
 #   AICT_OMNIADMINS=<emails del cliente>
 #   OPENAI_API_KEY=<...>
 #   IMAGE_TAG=sha-<commit>   # o "develop" para el último
@@ -68,7 +72,8 @@ Pide al administrador de red del cliente que abra el **80/tcp** hacia el servido
 ```bash
 cd docker
 cp .env.example .env
-# Editar .env: OPENAI_API_KEY, AICT_OMNIADMINS, SECRET_KEY, DATABASE_PASSWORD
+# Editar .env: DATABASE_PASSWORD y SECRET_KEY son [REQUERIDOS] (el compose falla
+# si están vacíos); además OPENAI_API_KEY y AICT_OMNIADMINS
 docker compose up -d --build
 ```
 
@@ -106,45 +111,52 @@ docker compose pull backend frontend
 docker compose up -d
 ```
 
-## Primer login (modo FAKE)
+## Primer login y crear un admin (modo LOCAL)
 
-En `AICT_LOGIN=FAKE` el usuario debe existir previamente en la tabla `"User"`.
-La forma soportada de crearlos es el script de seeding, que se ejecuta **dentro
-del contenedor backend** y reutiliza su configuración de base de datos (no
-necesitas Python ni acceso directo a Postgres en el host). Es idempotente: los
-usuarios que ya existan se respetan.
+`AICT_LOGIN=LOCAL` (el default) gestiona usuarios con email+password propios,
+sin IdP externo. No hay ningún usuario admin de fábrica: hay que crearlo y
+**darle contraseña explícitamente**, si no, queda creado pero sin forma de
+loguearse.
 
-### Opción recomendada: script de seeding
+Quién es admin (`OMNIADMIN`) no se guarda en la fila del usuario: se calcula en
+cada request comparando su email contra la lista `AICT_OMNIADMINS` del `.env`.
+Por tanto, para tener un admin funcional hacen falta las dos cosas:
 
-Tras el primer `docker compose up -d`:
+1. Su email está en `AICT_OMNIADMINS` (`.env`).
+2. Existe como `User` en la base de datos **con contraseña**.
 
 ```bash
-# Usuarios por defecto, o los de AICT_DEV_SEED_USERS si lo definiste en .env
-docker compose exec backend python -m utils.seed_dev_users --yes
-
-# Usuarios concretos (CSV "email:Nombre", el nombre es opcional)
+# 1. En .env: AICT_OMNIADMINS=tu@email.com
+# 2. Crear el usuario con contraseña (dentro del contenedor backend):
 docker compose exec backend python -m utils.seed_dev_users --yes \
-  --users "tu@email.com:Tu Nombre,otro@cliente.com:Otro"
+  --users "tu@email.com:Tu Nombre:TuPasswordSegura123!"
+# o con el wrapper:
+./seed-users.sh --users "tu@email.com:Tu Nombre:TuPasswordSegura123!"
+```
+
+Luego logueas en `http://localhost/` (o la URL del servidor) con ese
+email/password — al coincidir con `AICT_OMNIADMINS` obtiene privilegios de
+omniadmin automáticamente, sin pasos adicionales.
+
+El script es idempotente (usuarios existentes no se tocan) y corre **dentro
+del contenedor backend**, reutilizando su config de BD — no hace falta Python
+ni acceso directo a Postgres en el host.
+
+Otros usos:
+
+```bash
+# Usuarios por defecto (admin@example.com, etc. — se crean SIN contraseña,
+# solo sirve si luego usas el flujo de "olvidé mi contraseña")
+docker compose exec backend python -m utils.seed_dev_users --yes
 
 # Ver qué usuarios se crearían sin escribir nada
 docker compose exec backend python -m utils.seed_dev_users --list
 ```
 
-Los wrappers comprueban que el stack esté arrancado y reenvían los argumentos:
+> El script se niega a correr si `AICT_LOGIN` no es `LOCAL` (evita crear
+> usuarios con password en un despliegue OIDC). `--force` lo salta a propósito.
 
-```bash
-# Linux / macOS / servidor
-./seed-users.sh --users "tu@email.com:Tu Nombre"
-
-# Windows (PowerShell)
-.\seed-users.ps1 --users "tu@email.com:Tu Nombre"
-```
-
-> El script solo siembra si `AICT_LOGIN` es `FAKE` o `LOCAL` (evita crear
-> usuarios sin contraseña en un despliegue OIDC). Para forzarlo deliberadamente,
-> añade `--force`.
-
-Para sembrar los usuarios de forma declarativa al desplegar, define
+Para sembrar usuarios de forma declarativa al desplegar, define
 `AICT_DEV_SEED_USERS` en el `.env` (ver `.env.example`) y lanza el script sin
 `--users`.
 
@@ -163,20 +175,19 @@ EOF
 
 ## Acceso a la base de datos desde fuera
 
-Postgres **no** está publicado al host por seguridad. Tres formas de acceder:
+Postgres está publicado en el host en el puerto `5434` (→ 5432 del contenedor).
+Dos formas de acceder:
 
 1. **Desde el servidor, psql del contenedor** (rápido):
    ```bash
    docker exec -it mattin-postgres psql -U mattin -d mattin_ai
    ```
 
-2. **Tunel SSH desde tu equipo** (recomendado para DBeaver/pgAdmin):
-   ```bash
-   ssh -L 5432:localhost:5432 usuario@<ip-servidor>
-   ```
-   Requiere añadir `ports: ["127.0.0.1:5432:5432"]` al servicio postgres del compose.
-
-3. **DBeaver con tunel SSH integrado**: en la conexión Postgres configura la pestaña SSH con el host del servidor. Sin publicar ningún puerto.
+2. **DBeaver/pgAdmin directo**: conecta a `<host-o-ip>:5434` con las
+   credenciales `DATABASE_USER`/`DATABASE_PASSWORD` del `.env`. En un servidor
+   de cliente, si no quieres exponer el 5434 a internet, usa un túnel SSH
+   (`ssh -L 5434:localhost:5434 usuario@<ip-servidor>`) en vez de abrir el
+   puerto en el firewall.
 
 ## Paso a HTTPS
 
