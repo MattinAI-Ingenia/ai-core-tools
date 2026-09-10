@@ -114,22 +114,32 @@ docker compose up -d
 ## Primer login y crear un admin (modo LOCAL)
 
 `AICT_LOGIN=LOCAL` (el default) gestiona usuarios con email+password propios,
-sin IdP externo. No hay ningún usuario admin de fábrica: hay que crearlo y
-**darle contraseña explícitamente**, si no, queda creado pero sin forma de
-loguearse.
+sin IdP externo.
 
 (El modo `FAKE` está retirado; el endpoint de dev-login ya no existe.)
 
 Quién es admin (`OMNIADMIN`) no se guarda en la fila del usuario: se calcula en
 cada request comparando su email contra la lista `AICT_OMNIADMINS` del `.env`.
-Por tanto, para tener un admin funcional hacen falta las dos cosas:
 
-1. Su email está en `AICT_OMNIADMINS` (`.env`).
-2. Existe como `User` en la base de datos **con contraseña**.
+**En el primer arranque el backend provisiona automáticamente** las cuentas de
+`AICT_OMNIADMINS` que aún no existan y publica en el log (nivel WARNING) un
+enlace de alta de contraseña **de un solo uso** y con caducidad
+(`services/auth/omniadmin_bootstrap.py`):
+
+```bash
+docker compose logs backend | grep -A5 "omniadmin_bootstrap: NEW"
+```
+
+Abre ese enlace (`.../set-password?token=...`) para fijar la contraseña
+inicial. Una vez usado, o si caducó, ya no vuelve a aparecer — usa entonces la
+ruta de recuperación de abajo.
+
+Si prefieres no depender del log (o necesitas recrear la contraseña porque el
+enlace ya se usó/caducó), el script de seeding la fija directamente:
 
 ```bash
 # 1. En .env: AICT_OMNIADMINS=tu@email.com
-# 2. Crear el usuario con contraseña (dentro del contenedor backend):
+# 2. Crear/recuperar el usuario con contraseña (dentro del contenedor backend):
 docker compose exec backend python -m utils.seed_dev_users --yes \
   --users "tu@email.com:Tu Nombre:TuPasswordSegura123!"
 # o con el wrapper:
@@ -140,9 +150,9 @@ Luego logueas en `http://localhost/` (o la URL del servidor) con ese
 email/password — al coincidir con `AICT_OMNIADMINS` obtiene privilegios de
 omniadmin automáticamente, sin pasos adicionales.
 
-El script es idempotente (usuarios existentes no se tocan) y corre **dentro
-del contenedor backend**, reutilizando su config de BD — no hace falta Python
-ni acceso directo a Postgres en el host.
+El script es idempotente (usuarios existentes no se tocan si no les pasas
+contraseña) y corre **dentro del contenedor backend**, reutilizando su config
+de BD — no hace falta Python ni acceso directo a Postgres en el host.
 
 Otros usos:
 
