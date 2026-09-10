@@ -28,6 +28,13 @@ async def test_retriever_always_uses_only_need_context():
 
     mock_store = MagicMock()
     mock_store._aget_rag_instance = AsyncMock(return_value=rag_instance)
+    # _aget_relevant_documents dispatches the actual aquery_llm coroutine onto
+    # the collection's dedicated loop (see _arun_on_collection_loop) rather
+    # than awaiting it directly — just run it here to keep this test focused
+    # on QueryParam construction, not the dispatch mechanism itself.
+    async def _fake_arun_on_collection_loop(collection_name, coro):
+        return await coro
+    mock_store._arun_on_collection_loop = AsyncMock(side_effect=_fake_arun_on_collection_loop)
 
     captured_params = []
 

@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 import tempfile
+import weakref
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from langchain_core.callbacks import (
@@ -850,33 +852,31 @@ def reset_lightrag_postgres_pool():
 
 
 def _run_async(coro):
-    """Run an async coroutine from synchronous code.
+    """Run an async coroutine from synchronous code that is NOT bound to a
+    specific LightRAG collection's cached ``rag``/Neo4j-driver instance.
 
     Reuses the current thread's event loop when available, so that Neo4j and
     other async clients that bind futures to a specific loop stay on the same
     loop across multiple calls (avoids "Future attached to a different loop").
 
     If an event loop is already running (e.g. inside an async FastAPI handler),
-    offloads to a fresh worker thread instead to avoid blocking.
+    offloads to a fresh worker thread instead to avoid blocking. That
+    "throwaway loop per call" is fine for the coroutines actually routed
+    through here (e.g. ``_areset_postgres_client_pool``, which resets a
+    library-global client, not anything loop-bound per collection) — but it
+    used to ALSO be how every LightRAG query/insert ran, which was unsafe:
+    the Neo4j driver opened by ``rag.initialize_storages()`` stays alive with
+    connections bound to whichever throwaway loop happened to run it, and a
+    LATER call reusing the cached ``rag`` from a *different* throwaway loop
+    corrupted that driver (confirmed live: two LightRAG-touching tool calls
+    in one chat turn killed the uvicorn worker with no Python traceback).
 
-    KNOWN BUG (2026-09-08, not fixed yet): the "loop already running" branch
-    below spins up a BRAND NEW thread + event loop via asyncio.run() on every
-    call, then closes that loop when done — but the Neo4j driver opened
-    inside it (via rag.initialize_storages(), see _get_rag_instance) stays
-    alive with connections bound to that now-closed loop. When one chat turn
-    calls two LightRAG-touching tools close together (e.g. the coverage
-    router calling list_documents_mentioning + retrieve_from_knowledge_base
-    in the same turn — trivial to trigger, e.g. "Dual Clima 12R cantidad de
-    refrigerante..."), two of these throwaway loops race, and the uvicorn
-    worker process dies with no Python traceback (confirmed live: Caddy logs
-    "reading: unexpected EOF" on /internal/apps/{id}/agents/{id}/chat/stream,
-    backend logs "Child process died" right after "Initializing vector store
-    backend: LIGHTRAG" the second time in one turn). uvicorn auto-respawns
-    the worker, so it silently self-heals, but the in-flight request/stream
-    is lost — surfaces to the user as "network error" in the playground.
-    Needs a real fix (e.g. one persistent loop+thread shared across calls
-    instead of a fresh asyncio.run() per call), not attempted yet — this
-    comment is the tracking note until someone picks it up.
+    FIXED (2026-09-10): every coroutine that touches a cached ``rag``/Neo4j-
+    driver instance now runs on that collection's own dedicated, persistent
+    loop+thread instead (see ``_CollectionEventLoop`` and
+    ``LightRAGStore._run_on_collection_loop`` / ``_arun_on_collection_loop``).
+    This function keeps its old throwaway-loop behavior for the few callers
+    that never touch a per-collection ``rag`` instance.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -903,6 +903,80 @@ def _run_async(coro):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(asyncio.run, coro)
         return future.result()
+
+
+class _CollectionEventLoop:
+    """Owns one persistent background thread + event loop for ONE LightRAG
+    collection (``collection_name`` / silo workspace).
+
+    LightRAG's async storages — the Neo4j driver in particular — bind
+    internal futures/connections to whichever event loop is running when
+    ``rag.initialize_storages()`` executes. Reusing them from a *different*
+    loop later is invalid and (see ``_run_async``'s history) crashes the
+    process. Every coroutine that touches this collection's cached ``rag``
+    instance, for as long as it stays cached, must therefore run on THIS
+    loop — never on a fresh throwaway one.
+
+    Created lazily, once per ``collection_name``, the first time that
+    collection's ``LightRAG`` instance is built (see
+    ``LightRAGStore._get_or_create_collection_loop``). Two different
+    collections never share one, so a hang/crash in one collection's loop
+    cannot affect another collection's searches.
+    """
+
+    def __init__(self, collection_name: str):
+        self.collection_name = collection_name
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(ready,),
+            name=f"lightrag-loop-{collection_name}",
+            daemon=True,
+        )
+        self._thread.start()
+        ready.wait()
+
+    def _run(self, ready: threading.Event) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+
+    def run(self, coro):
+        """Run *coro* on this loop from a SYNC caller (any thread); blocks for the result."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    async def arun(self, coro):
+        """Run *coro* on this loop from an ASYNC caller, without blocking the caller's own loop."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return await asyncio.wrap_future(future)
+
+    def close(self) -> None:
+        """Stop and join the dedicated thread. Safe to call more than once."""
+        if self._loop is None or not self._thread.is_alive():
+            return
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+
+
+def _close_all_collection_loops(loops: Dict[str, "_CollectionEventLoop"]) -> None:
+    """Close every ``_CollectionEventLoop`` in *loops* — used both by
+    ``LightRAGStore.delete_collection`` (one collection) and as the
+    ``weakref.finalize`` callback that tears every remaining one down when a
+    ``LightRAGStore`` itself is garbage collected (it is not a process-wide
+    singleton — see ``VectorStoreFactory``/``SiloService._get_vector_store``,
+    which build a fresh store per call — so without this, each dedicated
+    thread+Neo4j-connection would otherwise leak forever)."""
+    for name, loop in list(loops.items()):
+        try:
+            loop.close()
+        except Exception:
+            logger.warning("Error closing LightRAG collection loop for '%s'", name, exc_info=True)
 
 
 # MAX_TOTAL_TOKENS is passed to LightRAG's own QueryParam, but its entity/
@@ -939,11 +1013,14 @@ class LightRAGRetriever(BaseRetriever):
     surface it as a knowledge-graph bubble in the playground UI.
 
     ``store`` + ``collection_name`` are used instead of a pre-built
-    ``rag_instance`` so that the async path can call ``store._aget_rag_instance``
-    and ensure Neo4j is initialised in the *same* event loop that runs
-    ``aquery()``.  Using a pre-built instance would bind the Neo4j driver to
-    a different loop (the one that ran ``initialize_storages``), causing
-    "Future attached to a different loop" errors on subsequent requests.
+    ``rag_instance`` so every call — sync or async — goes through
+    ``store._get_rag_instance``/``_aget_rag_instance`` and then
+    ``store._run_on_collection_loop``/``_arun_on_collection_loop``, which
+    dispatch onto that collection's own dedicated event loop (see
+    ``_CollectionEventLoop``). Using a pre-built instance directly would risk
+    running ``aquery()`` on a DIFFERENT loop than the one that ran
+    ``initialize_storages()``, causing "Future attached to a different loop"
+    errors (or worse — see ``_run_async``'s history).
     """
 
     store: Any = Field(exclude=True)
@@ -985,7 +1062,11 @@ class LightRAGRetriever(BaseRetriever):
         # aquery_llm returns a dict with both the context string
         # (llm_response.content) and the structured graph data (data.*).
         # The legacy aquery() wrapper discards raw_data, so we can't use it.
-        response = _run_async(rag.aquery_llm(query, param=param))
+        # Dispatched onto this collection's OWN dedicated loop (not the
+        # generic _run_async) — see _CollectionEventLoop.
+        response = self.store._run_on_collection_loop(
+            self.collection_name, rag.aquery_llm(query, param=param)
+        )
         docs = _wrap_query_response(response, self.query_mode)
         _clamp_docs_to_token_budget(docs, self.max_total_tokens)
         logger.debug("[LightRAG retriever] query=%r mode=%s top_k=%d → %d doc(s)", query, self.query_mode, self.top_k, len(docs))
@@ -997,13 +1078,17 @@ class LightRAGRetriever(BaseRetriever):
         *,
         run_manager: Optional[AsyncCallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        # _aget_rag_instance initialises Neo4j in this event loop, ensuring
-        # the driver and aquery() share the same loop on every call.
+        # _aget_rag_instance builds/caches this collection's rag instance (and
+        # its dedicated loop) without blocking this coroutine's own loop.
         rag = await self.store._aget_rag_instance(self.collection_name)
         param = self._query_param()
         # aquery_llm returns both context (llm_response.content) and graph
         # data (data.*); the legacy aquery() wrapper discards raw_data.
-        response = await rag.aquery_llm(query, param=param)
+        # Dispatched onto this collection's OWN dedicated loop (not this
+        # coroutine's own loop) — see _CollectionEventLoop.
+        response = await self.store._arun_on_collection_loop(
+            self.collection_name, rag.aquery_llm(query, param=param)
+        )
         docs = _wrap_query_response(response, self.query_mode)
         _clamp_docs_to_token_budget(docs, self.max_total_tokens)
         logger.debug("[LightRAG retriever] query=%r mode=%s top_k=%d → %d doc(s)", query, self.query_mode, self.top_k, len(docs))
@@ -1260,29 +1345,105 @@ class LightRAGStore(VectorStoreInterface):
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
         self._rag_instances: Dict[str, Any] = {}
-        # Per-collection asyncio locks to prevent concurrent initializations.
-        self._init_locks: Dict[str, asyncio.Lock] = {}
+        # Per-collection reentrant locks guarding "check cache, build+cache if
+        # absent" for BOTH the rag instance and its dedicated event loop below
+        # — reentrant because _get_rag_instance calls
+        # _get_or_create_collection_loop while already holding this same lock.
+        self._init_locks: Dict[str, threading.RLock] = {}
+        # One persistent background thread+loop per collection — see
+        # _CollectionEventLoop. Every coroutine touching a collection's cached
+        # ``rag``/Neo4j-driver instance runs on ITS loop (never a throwaway
+        # one), for as long as that instance stays cached.
+        self._collection_loops: Dict[str, "_CollectionEventLoop"] = {}
+        # This store is not a process-wide singleton (a fresh one is built per
+        # call — see VectorStoreFactory/SiloService._get_vector_store), so
+        # there is no app-shutdown hook to tear these down from. Close every
+        # dedicated loop this store ever created once the store itself is
+        # garbage collected, so a short-lived store (the common case) never
+        # leaks a thread + live Neo4j connection per call.
+        weakref.finalize(self, _close_all_collection_loops, self._collection_loops)
         # Shared temp directory so LightRAG's working_dir requirement is met
         # without polluting the project tree.  The directory is only used for
         # ancillary local caches (e.g. tiktoken); actual data lives in
         # Neo4j / Qdrant / PostgreSQL.
         self._working_dir = tempfile.mkdtemp(prefix="lightrag_")
 
+    def _get_or_create_init_lock(self, collection_name: str) -> threading.RLock:
+        """Return the per-collection lock, creating it race-free if absent.
+
+        ``dict.setdefault`` is a single dict method call, so it's already
+        atomic under the GIL — no extra guard lock needed here (unlike
+        ``_get_or_create_collection_loop`` below, whose value has a real side
+        effect — spawning a thread — so a throwaway one can't just be
+        discarded).
+        """
+        return self._init_locks.setdefault(collection_name, threading.RLock())
+
+    def _get_or_create_collection_loop(self, collection_name: str) -> "_CollectionEventLoop":
+        """Return *collection_name*'s dedicated event loop, creating it
+        race-free (under its per-collection lock) if this is the first touch.
+        """
+        loop = self._collection_loops.get(collection_name)
+        if loop is not None:
+            return loop
+        lock = self._get_or_create_init_lock(collection_name)
+        with lock:
+            loop = self._collection_loops.get(collection_name)
+            if loop is None:
+                loop = _CollectionEventLoop(collection_name)
+                self._collection_loops[collection_name] = loop
+            return loop
+
+    def _run_on_collection_loop(self, collection_name: str, coro):
+        """Run *coro* — built against *collection_name*'s cached ``rag``
+        instance — on that collection's dedicated loop, from a SYNC caller.
+
+        Every coroutine that touches a cached ``rag``/Neo4j-driver instance
+        must go through this (or ``_arun_on_collection_loop``) instead of the
+        generic ``_run_async``, which has no notion of which collection its
+        throwaway loop belongs to — exactly the mismatch this used to crash
+        on.
+        """
+        return self._get_or_create_collection_loop(collection_name).run(coro)
+
+    async def _arun_on_collection_loop(self, collection_name: str, coro):
+        """Async twin of ``_run_on_collection_loop`` — schedules *coro* on the
+        collection's dedicated loop without blocking the caller's own loop."""
+        return await self._get_or_create_collection_loop(collection_name).arun(coro)
+
     def _get_rag_instance(self, collection_name: str):
         """Return a cached ``LightRAG`` instance for *collection_name*.
 
-        Used by synchronous callers (indexing, background threads). Async
-        callers (query path) should use ``_aget_rag_instance`` instead so that
-        Neo4j is initialised in the same event loop that will run ``aquery()``.
+        Thread-safe: checking the cache and, if absent, building the
+        instance, initialising its storages (Neo4j driver included) on its
+        own dedicated loop (see ``_CollectionEventLoop``), and caching both,
+        all happen under that collection's lock — so two threads racing to
+        first-touch the same collection can never both build it, matching
+        ``_aget_rag_instance``'s guarantee (which now simply delegates here).
+
+        Used by synchronous callers (indexing, background threads); async
+        callers should use ``_aget_rag_instance`` instead.
         """
         if collection_name in self._rag_instances:
             return self._rag_instances[collection_name]
 
-        rag = self._build_rag(collection_name)
-        _run_async(rag.initialize_storages())
-        self._rag_instances[collection_name] = rag
-        logger.info("Created LightRAG instance for workspace '%s'", collection_name)
-        return rag
+        lock = self._get_or_create_init_lock(collection_name)
+        with lock:
+            # Re-check after acquiring the lock — another thread may have
+            # built + cached the instance while we were waiting.
+            if collection_name in self._rag_instances:
+                return self._rag_instances[collection_name]
+
+            rag = self._build_rag(collection_name)
+            collection_loop = self._get_or_create_collection_loop(collection_name)
+            # initialize_storages() opens the Neo4j driver — run it on this
+            # collection's OWN dedicated loop so every later call (query,
+            # insert, ...) can keep reusing that same loop instead of a fresh
+            # throwaway one.
+            collection_loop.run(rag.initialize_storages())
+            self._rag_instances[collection_name] = rag
+            logger.info("Created LightRAG instance for workspace '%s'", collection_name)
+            return rag
 
     def _build_rag(self, collection_name: str):
         """Build a fresh (uninitialised) LightRAG instance for *collection_name*."""
@@ -1386,31 +1547,19 @@ class LightRAGStore(VectorStoreInterface):
         return rag
 
     async def _aget_rag_instance(self, collection_name: str):
-        """Async version of _get_rag_instance.
+        """Async twin of ``_get_rag_instance``.
 
-        Initialises LightRAG storages (including the Neo4j driver) in the
-        *caller's* event loop so that subsequent ``aquery()`` calls reuse the
-        same loop. Using _run_async from an async context would offload to a
-        worker thread with a fresh loop, binding the Neo4j driver to a loop
-        that is gone by the next request — triggering "Future attached to a
-        different loop" errors.
+        Delegates the actual build+cache work to ``_get_rag_instance`` via a
+        worker thread (``asyncio.to_thread``), so this coroutine's own event
+        loop is never blocked while Neo4j/Postgres/Qdrant handshake for a
+        brand-new collection. Sharing ``_get_rag_instance``'s per-collection
+        lock this way (instead of a separate lock/code path here) is what
+        guarantees the sync and async entry points can never race each other,
+        or build two different dedicated loops for the same collection_name.
         """
         if collection_name in self._rag_instances:
             return self._rag_instances[collection_name]
-
-        if collection_name not in self._init_locks:
-            self._init_locks[collection_name] = asyncio.Lock()
-
-        async with self._init_locks[collection_name]:
-            # Re-check after acquiring lock (another coroutine may have initialized it).
-            if collection_name in self._rag_instances:
-                return self._rag_instances[collection_name]
-
-            rag = self._build_rag(collection_name)
-            await rag.initialize_storages()
-            self._rag_instances[collection_name] = rag
-            logger.info("Created LightRAG instance (async) for workspace '%s'", collection_name)
-            return rag
+        return await asyncio.to_thread(self._get_rag_instance, collection_name)
 
     # ------------------------------------------------------------------
     # VectorStoreInterface implementation
@@ -1459,7 +1608,10 @@ class LightRAGStore(VectorStoreInterface):
         ctx_token = set_active_accumulator(accumulator)
         t_start = time.perf_counter()
         try:
-            _run_async(_ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option))
+            self._run_on_collection_loop(
+                collection_name,
+                _ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
+            )
         finally:
             reset_active_accumulator(ctx_token)
 
@@ -1522,7 +1674,10 @@ class LightRAGStore(VectorStoreInterface):
             "Enqueuing %d documents into LightRAG workspace '%s' (%d resource(s))",
             len(texts), collection_name, len(doc_ids_by_resource),
         )
-        _run_async(_aenqueue(rag, texts, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option))
+        self._run_on_collection_loop(
+            collection_name,
+            _aenqueue(rag, texts, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
+        )
         return doc_ids_by_resource
 
     def process_enqueued_documents(
@@ -1600,12 +1755,15 @@ class LightRAGStore(VectorStoreInterface):
         ctx_token = set_active_accumulator(accumulator)
         t_start = time.perf_counter()
         try:
-            result = _run_async(_aprocess_enqueued_with_progress(
-                rag, doc_ids_by_resource, progress_callback,
-                should_cancel=should_cancel, retry_failed=retry_failed,
-                feed=feed, window=window,
-                process_options=self._chunk_process_option,
-            ))
+            result = self._run_on_collection_loop(
+                collection_name,
+                _aprocess_enqueued_with_progress(
+                    rag, doc_ids_by_resource, progress_callback,
+                    should_cancel=should_cancel, retry_failed=retry_failed,
+                    feed=feed, window=window,
+                    process_options=self._chunk_process_option,
+                ),
+            )
         finally:
             reset_active_accumulator(ctx_token)
 
@@ -1663,16 +1821,24 @@ class LightRAGStore(VectorStoreInterface):
     ) -> None:
         logger.info("Deleting LightRAG workspace '%s'", collection_name)
 
-        # Remove cached instance first.
-        self._rag_instances.pop(collection_name, None)
-
-        # Best-effort cleanup of the underlying storage backends.
+        # Best-effort cleanup of the underlying storage backends, BEFORE
+        # dropping the cached instance below: _cleanup_qdrant reuses whatever
+        # rag instance (and dedicated loop) is already cached for this
+        # collection — popping first would force it to build (and leak) a
+        # brand-new one just to immediately tear it down again.
         # LightRAG does not expose a single "drop workspace" API so we reach
         # into each backend directly.
         self._cleanup_neo4j(collection_name)
         if self.lightrag_vector_db_type == "QDRANT":
             self._cleanup_qdrant(collection_name)
         self._cleanup_postgres(collection_name)
+
+        # Now drop the cached instance and tear down its dedicated loop/thread.
+        self._rag_instances.pop(collection_name, None)
+        self._init_locks.pop(collection_name, None)
+        collection_loop = self._collection_loops.pop(collection_name, None)
+        if collection_loop is not None:
+            collection_loop.close()
 
     # -- Backend-specific cleanup helpers ---------------------------------
 
@@ -1729,7 +1895,7 @@ class LightRAGStore(VectorStoreInterface):
                             collection_name, result.get("message"),
                         )
 
-            _run_async(_drop_all())
+            self._run_on_collection_loop(collection_name, _drop_all())
             logger.info("Cleaned up Qdrant collections for workspace '%s'", collection_name)
         except Exception as exc:
             logger.warning("Qdrant cleanup for '%s' failed: %s", collection_name, exc)
@@ -1916,7 +2082,7 @@ class LightRAGStore(VectorStoreInterface):
         rag = self._get_rag_instance(collection_name)
         param = QueryParam(mode=mode, top_k=k)
 
-        response = _run_async(rag.aquery(query, param=param))
+        response = self._run_on_collection_loop(collection_name, rag.aquery(query, param=param))
         return _wrap_response(response, mode)
 
     def get_retriever(
@@ -1954,9 +2120,10 @@ class LightRAGStore(VectorStoreInterface):
     ) -> dict:
         """Async: call aquery_llm with only_need_context=True and return normalized graph data.
 
-        Uses _aget_rag_instance so Neo4j is initialised in the *same* event loop
-        that runs aquery_llm — avoids "Future attached to a different loop" errors.
-        Unlike _get_relevant_documents, does NOT discard the result when the LLM
+        Dispatches aquery_llm onto this collection's dedicated loop (see
+        _arun_on_collection_loop / _CollectionEventLoop) — the same loop Neo4j
+        was initialised on — avoiding "Future attached to a different loop"
+        errors. Unlike _get_relevant_documents, does NOT discard the result when the LLM
         context string is empty, so entities/chunks are returned even when LightRAG
         finds no strong keyword match.
         """
@@ -1964,7 +2131,9 @@ class LightRAGStore(VectorStoreInterface):
 
         rag = await self._aget_rag_instance(collection_name)
         param = QueryParam(mode=mode, top_k=top_k, only_need_context=True)
-        response = await rag.aquery_llm(query, param=param)
+        response = await self._arun_on_collection_loop(
+            collection_name, rag.aquery_llm(query, param=param)
+        )
 
         if isinstance(response, dict):
             raw_data = response
