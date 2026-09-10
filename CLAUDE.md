@@ -83,7 +83,7 @@ docker compose down -v           # Parar y borrar volúmenes
   un symlink a él y `.env.example` es la única plantilla.
 - Una variable solo llega al contenedor si `docker-compose.yaml` la declara en el
   `environment:` de ese servicio. Ponerla solo en `.env` no basta.
-- Único puerto publicado al host: 80 (Caddy). Back/front/Postgres/Qdrant solo en red interna.
+- Puerto principal al host: 80 (Caddy). Postgres también se publica en 5434 (acceso directo en dev); front/back/Qdrant/Neo4j solo en red interna.
 - Acceso: `http://localhost/` en local, `http://<ip-servidor>/` en cliente.
 - Swagger: `/docs/internal` y `/docs/public` desde el mismo origen.
 - Utilities aisladas (p. ej. Qdrant + web UI): `docker/utilities/`.
