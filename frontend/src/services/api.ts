@@ -1223,6 +1223,7 @@ class ApiService {
       topN?: number;
       similarityThreshold?: number;
     },
+    _isRetryAfterRefresh = false,
   ): Promise<{ data: unknown; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
     const body = JSON.stringify({
@@ -1246,6 +1247,27 @@ class ApiService {
     });
     const headers = this.buildAuthHeaders('POST', false);
     const response = await fetch(url, { method: 'POST', body, credentials: 'include', headers });
+
+    // Mirror request()'s silent-refresh-and-retry: this method bypasses request()
+    // to read the raw x-server-time-ms header, so it must repeat that 401 handling
+    // itself instead of surfacing a stale-cookie 401 straight to the caller.
+    if (response.status === 401 && _apiAuthMode !== 'oidc' && !_isRetryAfterRefresh) {
+      const refreshed = await this._doRefresh();
+      if (refreshed) {
+        return this.searchSiloDocumentsWithTiming(
+          appId,
+          siloId,
+          query,
+          limit,
+          filterMetadata,
+          searchOptions,
+          true,
+        );
+      }
+      this.clearClientAuthAndRedirect();
+      throw new Error('Authentication required');
+    }
+
     if (!response.ok) {
       await this.handleResponseError(response);
     }
