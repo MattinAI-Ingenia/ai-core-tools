@@ -1,7 +1,6 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres
     environment:
       POSTGRES_DB: ${DATABASE_NAME:-mattin_ai}
       POSTGRES_USER: ${DATABASE_USER:-mattin}
@@ -23,12 +22,16 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: mattin-qdrant
     volumes:
       - qdrant-data:/qdrant/storage
     environment:
       QDRANT__SERVICE__GRPC_PORT: "6334"
       QDRANT__LOG_LEVEL: INFO
+      # Enables Qdrant's own API key check so the QDRANT_API_KEY the backend
+      # sends (see backend service env below) is actually enforced server-side.
+      # Empty by default (no auth) to avoid breaking existing deployments that
+      # don't set QDRANT_API_KEY in .env.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
     networks:
       - mattin-network
     healthcheck:
@@ -44,7 +47,6 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
-    container_name: mattin-backend
     environment:
       SQLALCHEMY_DATABASE_URI: postgresql://${DATABASE_USER:-mattin}:${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set in .env}@postgres:5432/${DATABASE_NAME:-mattin_ai}
       DATABASE_HOST: postgres
@@ -127,9 +129,48 @@ services:
       LIGHTRAG_RERANK_URL: ${LIGHTRAG_RERANK_URL:-}
       LIGHTRAG_RERANK_MODEL: ${LIGHTRAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       LIGHTRAG_RERANK_API_KEY: ${LIGHTRAG_RERANK_API_KEY:-}
+      # Sandbox provider (IT-2). Default must be a provider actually registered
+      # in backend/tools/sandbox/factory.py (opensandbox/daytona/e2b) — 'subprocess'
+      # was removed and is no longer a valid provider name.
+      SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-opensandbox}
+      SANDBOX_ALLOWED_PROVIDERS: ${SANDBOX_ALLOWED_PROVIDERS:-opensandbox,daytona,e2b}
+      # See docker/.env.example for the SSRF trade-off this controls — the
+      # "Test Connection" probe and the save-time endpoint check both refuse
+      # loopback/link-local/private targets by default, which also blocks
+      # OPENSANDBOX_DOMAIN below when it's an internal Docker service name.
+      SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE: ${SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE:-false}
+      OPENSANDBOX_DOMAIN: ${OPENSANDBOX_DOMAIN:-opensandbox:8080}
+      OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
+      OPENSANDBOX_CODE_INTERPRETER_IMAGE: ${OPENSANDBOX_CODE_INTERPRETER_IMAGE:-mattin-code-interpreter:latest}
+      DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
+      DAYTONA_API_URL: ${DAYTONA_API_URL:-}
+      DAYTONA_TARGET: ${DAYTONA_TARGET:-}
+      DAYTONA_IMAGE: ${DAYTONA_IMAGE:-}
+      DAYTONA_SNAPSHOT: ${DAYTONA_SNAPSHOT:-}
+      DAYTONA_WORKSPACE: ${DAYTONA_WORKSPACE:-workspace}
+      DAYTONA_SUPPORTED_LANGUAGES: ${DAYTONA_SUPPORTED_LANGUAGES:-python,bash}
+      DAYTONA_AUTO_STOP_INTERVAL: ${DAYTONA_AUTO_STOP_INTERVAL:-2}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      E2B_TEMPLATE: ${E2B_TEMPLATE:-}
+      E2B_WORKSPACE: ${E2B_WORKSPACE:-/home/user/workspace}
+      E2B_SUPPORTED_LANGUAGES: ${E2B_SUPPORTED_LANGUAGES:-python,javascript,bash}
+      E2B_ALLOW_INTERNET_ACCESS: ${E2B_ALLOW_INTERNET_ACCESS:-true}
+      SANDBOX_CREATE_TIMEOUT_S: ${SANDBOX_CREATE_TIMEOUT_S:-60}
+      SANDBOX_DEFAULT_TIMEOUT_S: ${SANDBOX_DEFAULT_TIMEOUT_S:-30}
+      SANDBOX_SESSION_TTL_H: ${SANDBOX_SESSION_TTL_H:-2}
+      SANDBOX_IDLE_TIMEOUT_S: ${SANDBOX_IDLE_TIMEOUT_S:-120}
+      SANDBOX_REAPER_INTERVAL_S: ${SANDBOX_REAPER_INTERVAL_S:-30}
+      SANDBOX_MAX_EXECUTIONS_PER_TURN: ${SANDBOX_MAX_EXECUTIONS_PER_TURN:-5}
+      OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE: ${OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE:-4}
+      OPENSANDBOX_SUPPORTED_LANGUAGES: ${OPENSANDBOX_SUPPORTED_LANGUAGES:-python,bash}
     volumes:
-      - ../backend/data:/aict_backend/data
-      - ../backend/logs:/aict_backend/logs
+      # Por defecto bind mount al repo — comportamiento histórico, intacto para
+      # los despliegues de cliente ya existentes.
+      # En multi-entorno local se apunta al volumen nombrado (BACKEND_DATA=backend-data),
+      # que Compose prefija con el project name: cada entorno tiene sus propios
+      # ficheros de repositorios en vez de compartir un único directorio del host.
+      - ${BACKEND_DATA:-../backend/data}:/aict_backend/data
+      - ${BACKEND_LOGS:-../backend/logs}:/aict_backend/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,7 +189,6 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_API_BASE_URL: ""
-    container_name: mattin-frontend
     environment:
       # SPA and API are same-origin behind Caddy, so the API base IS the public
       # URL. Both this and the backend's FRONTEND_URL derive ONLY from the
@@ -168,16 +208,79 @@ services:
       - mattin-network
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # OpenSandbox — isolated code execution server (IT-2)
+  # Runs on the internal Docker network only; no port is exposed to the host.
+  # Enable by setting SANDBOX_DEFAULT_PROVIDER=opensandbox in .env.
+  #
+  # Network topology (security-relevant — see sandbox.toml [docker] comment):
+  # This service is dual-homed on purpose:
+  #   - mattin-network: lets `backend` reach opensandbox:8080 to create/manage
+  #     sandboxes.
+  #   - sandbox-workloads: the network spawned sandbox containers run on
+  #     (sandbox.toml [docker].network_mode). The opensandbox server needs to
+  #     be reachable from that network too because it proxies exec/file
+  #     operations into the sandbox containers (use_server_proxy=true in
+  #     backend/tools/sandbox/opensandbox_provider.py).
+  # Spawned sandbox containers themselves are NOT attached to mattin-network,
+  # so LLM-run code inside a sandbox has no route to backend, postgres,
+  # qdrant, caddy, or frontend — only to the opensandbox server on
+  # sandbox-workloads, plus whatever the Docker socket mount lets the
+  # *server* do (not the sandbox itself).
+  # ---------------------------------------------------------------------------
+  opensandbox:
+    image: mattin-opensandbox-server:${OPENSANDBOX_SERVER_VERSION:-0.1.11}
+    build:
+      context: ./opensandbox
+      dockerfile: Dockerfile
+      args:
+        OPENSANDBOX_SERVER_VERSION: ${OPENSANDBOX_SERVER_VERSION:-0.1.11}
+    command: ["--config", "/etc/opensandbox/sandbox.toml"]
+    environment:
+      SANDBOX_CONFIG_PATH: /etc/opensandbox/sandbox.toml
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # The OpenSandbox server has no API key in the checked-in local config.
+      # It is only reachable on the internal Compose network.
+      OPENSANDBOX_INSECURE_SERVER: ${OPENSANDBOX_INSECURE_SERVER:-YES}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./opensandbox/sandbox.toml:/etc/opensandbox/sandbox.toml:ro
+      - opensandbox-data:/var/lib/opensandbox
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - mattin-network
+      - sandbox-workloads
+    restart: unless-stopped
+    profiles:
+      - opensandbox
+
+  # ---------------------------------------------------------------------------
+  # mattin-code-interpreter — custom sandbox container image builder.
+  # Extends opensandbox/code-interpreter:v1.0.2 with a tail wrapper that
+  # starts Jupyter before execd connects, fixing the opensandbox entrypoint
+  # override bug.  This service exits immediately after the image is built;
+  # the built image is used by the opensandbox server when spawning sandboxes.
+  # ---------------------------------------------------------------------------
+  mattin-code-interpreter:
+    image: mattin-code-interpreter:latest
+    build:
+      context: ./opensandbox/code-interpreter
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/true"]
+    restart: no
+    profiles:
+      - opensandbox
+
   db_test:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres-test
     environment:
       POSTGRES_DB: ${TEST_DB_NAME:-test_db}
       POSTGRES_USER: ${TEST_DB_USER:-test_user}
       POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:-test_pass}  # pragma: allowlist secret
       POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
     ports:
-      - "5433:5432"
+      - "${TEST_DB_PORT:-5433}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     networks:
@@ -192,7 +295,6 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: mattin-caddy
     ports:
       - "${HTTP_PORT:-80}:80"
     volumes:
@@ -224,10 +326,29 @@ services:
 networks:
   mattin-network:
     driver: bridge
+  # Isolated network for spawned OpenSandbox sandbox containers (the ones that
+  # actually run LLM-generated code). It carries no route to backend,
+  # postgres, qdrant, caddy, or frontend — only opensandbox itself is
+  # dual-homed onto it (see opensandbox service comment above), so the
+  # server-proxy exec/file path keeps working while code running inside a
+  # sandbox can't reach app or data services on mattin-network.
+  # Referenced from docker/opensandbox/sandbox.toml as
+  # "docker_sandbox-workloads" ("docker" is this Compose project's default
+  # name, i.e. this directory's basename; see that file's [docker] comment).
+  sandbox-workloads:
+    # docker/opensandbox/sandbox.toml hardcodea este nombre en network_mode.
+    # Fijarlo aquí lo desacopla del project name (que ahora varía por entorno).
+    # Para levantar el perfil opensandbox en más de un stack a la vez, dale a
+    # cada uno su SANDBOX_NETWORK_NAME y su copia de sandbox.toml.
+    name: ${SANDBOX_NETWORK_NAME:-docker_sandbox-workloads}
+    driver: bridge
 
 volumes:
   postgres-data:
+  backend-data:
+  backend-logs:
   qdrant-data:
+  opensandbox-data:
   caddy-data:
   caddy-config:
   neo4j-data:

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
@@ -164,6 +164,7 @@ class AgentDetailSchema(BaseModel):
     memory_max_tokens: Optional[int] = 4000
     memory_summarize_threshold: int = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     service_id: Optional[int] = None
+    sandbox_service_id: Optional[int] = None
     silo_id: Optional[int] = None
     output_parser_id: Optional[int] = None
     temperature: float = DEFAULT_AGENT_TEMPERATURE
@@ -178,12 +179,21 @@ class AgentDetailSchema(BaseModel):
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = None
     text_system_prompt: Optional[str] = None
+    # Media processing configuration (playground media upload)
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
+    media_embedding_service_id: Optional[int] = None
+    media_forced_language: Optional[str] = None
+    media_chunk_min_duration: int = 30
+    media_chunk_max_duration: int = 120
+    media_chunk_overlap: int = 5
     # Silo information for playground
     silo: Optional[Dict[str, Any]] = None
     # Output parser information for playground
     output_parser: Optional[Dict[str, Any]] = None
     # Form data for editing
     ai_services: List[Dict[str, Any]]
+    sandbox_services: List[Dict[str, Any]]
     silos: List[Dict[str, Any]]
     output_parsers: List[Dict[str, Any]]
     tools: List[Dict[str, Any]]
@@ -225,6 +235,7 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     memory_max_tokens: Optional[int] = 4000
     memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
     service_id: Optional[int] = None
+    sandbox_service_id: Optional[int] = None
     silo_id: Optional[int] = None
     output_parser_id: Optional[int] = None
     temperature: Optional[float] = DEFAULT_AGENT_TEMPERATURE
@@ -237,6 +248,37 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = None
     text_system_prompt: Optional[str] = None
+    # Media processing configuration (playground media upload)
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
+    # Required: embedding service used to vectorize media/documents into the
+    # session's temp playground silo. No fallback — the agent cannot be
+    # created/updated without it.
+    media_embedding_service_id: Optional[int] = None
+    media_forced_language: Optional[str] = None
+    media_chunk_min_duration: Optional[int] = Field(default=30, ge=1, le=3600)
+    media_chunk_max_duration: Optional[int] = Field(default=120, ge=1, le=3600)
+    media_chunk_overlap: Optional[int] = Field(default=5, ge=0, le=600)
+
+    @model_validator(mode="after")
+    def _validate_media_config(self) -> "CreateUpdateAgentSchema":
+        if self.media_embedding_service_id is None:
+            raise ValueError(
+                "media_embedding_service_id is required: select an embedding "
+                "service for media/document processing."
+            )
+        mn = self.media_chunk_min_duration
+        mx = self.media_chunk_max_duration
+        ov = self.media_chunk_overlap
+        if mn is not None and mx is not None and mn > mx:
+            raise ValueError(
+                "media_chunk_min_duration must not exceed media_chunk_max_duration"
+            )
+        if ov is not None and mx is not None and ov >= mx:
+            raise ValueError(
+                "media_chunk_overlap must be smaller than media_chunk_max_duration"
+            )
+        return self
 
 
 class UpdatePromptSchema(BaseModel):

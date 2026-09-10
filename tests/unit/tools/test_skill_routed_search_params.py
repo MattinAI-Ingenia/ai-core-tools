@@ -50,7 +50,7 @@ def _lightrag_agent(**overrides):
 def _captured_search_params(agent, caller_search_params=None):
     seen = {}
 
-    def _fake_tool(silo, search_params=None, offset=None):
+    def _fake_tool(silo, search_params=None, offset=None, lock=None):
         seen["silo"] = silo
         seen["search_params"] = search_params
         return "tool"

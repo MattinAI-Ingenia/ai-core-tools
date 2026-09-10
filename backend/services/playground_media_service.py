@@ -12,18 +12,17 @@ Files (PDFs, text) are chunked and indexed directly into the same silo.
 
 import os
 import logging
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any
 
 from fastapi import UploadFile, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from models.repository import Repository
 from models.media import Media
-from repositories.repository_repository import RepositoryRepository
+from models.agent import Agent
 from services.repository_service import RepositoryService
 from services.media_service import MediaService
 from services.silo_service import SiloService
-from repositories.embedding_service_repository import EmbeddingServiceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +30,6 @@ TEMP_REPO_PREFIX = "_playground_"
 
 # File types that should be vectorized instead of injected into context
 VECTORIZABLE_FILE_TYPES = {"pdf", "text"}
-
-# In-process cache of file IDs already vectorized per session.
-# Key: (app_id, agent_id, session_id) -> set of file_id strings.
-# Cleared when the playground media is cleaned up.
-_indexed_file_ids_cache: Dict[tuple, Set[str]] = {}
 
 
 def _temp_repo_name(agent_id: int, session_id: str) -> str:
@@ -46,6 +40,58 @@ class PlaygroundMediaService:
     """Manages temporary media repositories for the agent playground."""
 
     @staticmethod
+    def _resolve_media_config(
+        agent_id: int,
+        db: Session,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        forced_language: Optional[str],
+        chunk_min_duration: Optional[int],
+        chunk_max_duration: Optional[int],
+        chunk_overlap: Optional[int],
+    ) -> Dict[str, Any]:
+        """Fill missing media-upload parameters with the agent-level config.
+
+        Media processing is configured once on the agent, so the playground
+        upload only needs the file/URL. Any value explicitly passed in the
+        request still takes precedence over the agent defaults.
+        """
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+
+        return {
+            "transcription_service_id": (
+                transcription_service_id
+                if transcription_service_id is not None
+                else getattr(agent, "transcription_service_id", None)
+            ),
+            "video_ai_service_id": (
+                video_ai_service_id
+                if video_ai_service_id is not None
+                else getattr(agent, "video_ai_service_id", None)
+            ),
+            "forced_language": (
+                forced_language
+                if forced_language is not None
+                else getattr(agent, "media_forced_language", None)
+            ),
+            "chunk_min_duration": (
+                chunk_min_duration
+                if chunk_min_duration is not None
+                else getattr(agent, "media_chunk_min_duration", None)
+            ),
+            "chunk_max_duration": (
+                chunk_max_duration
+                if chunk_max_duration is not None
+                else getattr(agent, "media_chunk_max_duration", None)
+            ),
+            "chunk_overlap": (
+                chunk_overlap
+                if chunk_overlap is not None
+                else getattr(agent, "media_chunk_overlap", None)
+            ),
+        }
+
+    @staticmethod
     def get_temp_repository(
         app_id: int,
         agent_id: int,
@@ -54,8 +100,11 @@ class PlaygroundMediaService:
     ) -> Optional[Repository]:
         """Find the temp playground repository for a given agent + session."""
         name = _temp_repo_name(agent_id, session_id)
-        repos = RepositoryRepository.get_by_app_id(db, app_id)
-        return next((r for r in repos if r.name == name), None)
+        return (
+            db.query(Repository)
+            .filter(Repository.app_id == app_id, Repository.name == name)
+            .first()
+        )
 
     @staticmethod
     def get_or_create_temp_repository(
@@ -76,13 +125,48 @@ class PlaygroundMediaService:
             app_id, agent_id, session_id, db
         )
         if existing:
+            # Keep the temp repo in sync with the latest resolved media config
+            # (e.g. the agent's transcription/video services were configured
+            # after the repo was first created in this session). Only explicit
+            # (non-None) values overwrite existing config — callers that don't
+            # resolve media services (e.g. file vectorization) pass None and
+            # must not wipe an in-flight transcription's service configuration.
+            updated = False
+            if (
+                transcription_service_id is not None
+                and existing.transcription_service_id != transcription_service_id
+            ):
+                existing.transcription_service_id = transcription_service_id
+                updated = True
+            if (
+                video_ai_service_id is not None
+                and existing.video_ai_service_id != video_ai_service_id
+            ):
+                existing.video_ai_service_id = video_ai_service_id
+                updated = True
+            if updated:
+                db.commit()
+                logger.info(
+                    "Updated temp playground repo %s media config "
+                    "(transcription=%s, video=%s)",
+                    existing.repository_id,
+                    transcription_service_id,
+                    video_ai_service_id,
+                )
             return existing
 
-        # Resolve embedding service: explicit > first available in app
+        # Resolve embedding service: explicit request value > the agent's
+        # configured media embedding service. There is NO arbitrary app/system
+        # fallback — the embedding service is required on the agent so media is
+        # never vectorized with a wrong/misconfigured model.
         if not embedding_service_id:
-            app_emb_services = EmbeddingServiceRepository.get_by_app_id(db, app_id)
-            if app_emb_services:
-                embedding_service_id = app_emb_services[0].service_id
+            agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+            embedding_service_id = getattr(agent, "media_embedding_service_id", None)
+        if not embedding_service_id:
+            raise ValueError(
+                "No media embedding service configured for this agent. Set it in "
+                "the agent's Media Processing configuration before uploading media."
+            )
 
         repo = Repository(
             name=_temp_repo_name(agent_id, session_id),
@@ -124,13 +208,24 @@ class PlaygroundMediaService:
         chunk_overlap: Optional[int] = None,
     ) -> Dict[str, Any]:
         
+        cfg = PlaygroundMediaService._resolve_media_config(
+            agent_id,
+            db,
+            transcription_service_id,
+            video_ai_service_id,
+            forced_language,
+            chunk_min_duration,
+            chunk_max_duration,
+            chunk_overlap,
+        )
+
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id,
             agent_id,
             session_id,
             db,
-            transcription_service_id=transcription_service_id,
-            video_ai_service_id=video_ai_service_id,
+            transcription_service_id=cfg["transcription_service_id"],
+            video_ai_service_id=cfg["video_ai_service_id"],
             embedding_service_id=embedding_service_id,
         )
 
@@ -141,10 +236,10 @@ class PlaygroundMediaService:
             db=db,
             background_tasks=background_tasks,
             user_context=None,
-            forced_language=forced_language,
-            chunk_min_duration=chunk_min_duration,
-            chunk_max_duration=chunk_max_duration,
-            chunk_overlap=chunk_overlap,
+            forced_language=cfg["forced_language"],
+            chunk_min_duration=cfg["chunk_min_duration"],
+            chunk_max_duration=cfg["chunk_max_duration"],
+            chunk_overlap=cfg["chunk_overlap"],
         )
 
         return {
@@ -171,13 +266,24 @@ class PlaygroundMediaService:
         chunk_overlap: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Add a YouTube URL to a temp playground repository."""
+        cfg = PlaygroundMediaService._resolve_media_config(
+            agent_id,
+            db,
+            transcription_service_id,
+            video_ai_service_id,
+            forced_language,
+            chunk_min_duration,
+            chunk_max_duration,
+            chunk_overlap,
+        )
+
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id,
             agent_id,
             session_id,
             db,
-            transcription_service_id=transcription_service_id,
-            video_ai_service_id=video_ai_service_id,
+            transcription_service_id=cfg["transcription_service_id"],
+            video_ai_service_id=cfg["video_ai_service_id"],
             embedding_service_id=embedding_service_id,
         )
 
@@ -187,10 +293,10 @@ class PlaygroundMediaService:
             folder_id=None,
             db=db,
             background_tasks=background_tasks,
-            forced_language=forced_language,
-            chunk_min_duration=chunk_min_duration,
-            chunk_max_duration=chunk_max_duration,
-            chunk_overlap=chunk_overlap,
+            forced_language=cfg["forced_language"],
+            chunk_min_duration=cfg["chunk_min_duration"],
+            chunk_max_duration=cfg["chunk_max_duration"],
+            chunk_overlap=cfg["chunk_overlap"],
         )
 
         return {
@@ -263,9 +369,6 @@ class PlaygroundMediaService:
         )
         RepositoryService.delete_repository(repo, db)
 
-        # Clear indexed file IDs cache for this session
-        _indexed_file_ids_cache.pop((app_id, agent_id, session_id), None)
-
         return True
 
     @staticmethod
@@ -290,53 +393,36 @@ class PlaygroundMediaService:
         return []
 
     @staticmethod
-    def vectorize_file_references(
+    def vectorize_uploaded_file(
         app_id: int,
         agent_id: int,
         session_id: str,
-        processed_files: List[Dict[str, Any]],
+        file_id: str,
+        filename: str,
+        file_path: Optional[str],
+        content: str,
         db: Session,
         embedding_service_id: Optional[int] = None,
-    ) -> Set[str]:
-        """Vectorize text-based file references into the shared temp silo.
+    ) -> bool:
+        """Vectorize a single file at upload time into the shared temp silo.
 
-        Only files with ``type`` in VECTORIZABLE_FILE_TYPES (pdf, text) are
-        processed.  Images are left untouched (they use multimodal injection).
-
-        Uses proper LangChain loaders with chunking (1000/200) when the
-        original file is available on disk, falling back to raw content
-        indexing otherwise.
+        Called immediately after a file is uploaded to the playground, so that
+        vectorization happens once and the message hot path never re-processes it.
 
         Args:
             app_id: App ID.
             agent_id: Agent ID.
-            session_id: Conversation session ID.
-            processed_files: Dicts with keys filename, content, type, file_id, file_path.
+            session_id: Conversation session ID (e.g. ``conv_5_abc123``).
+            file_id: Unique file identifier.
+            filename: Original filename.
+            file_path: Relative path to TMP_BASE_FOLDER (may be None).
+            content: Pre-extracted text content (fallback if file_path unavailable).
             db: Database session.
             embedding_service_id: Optional explicit embedding service ID.
 
         Returns:
-            Set of file_id strings that were successfully vectorized.
+            True if file was successfully vectorized.
         """
-        vectorizable = [
-            f for f in processed_files
-            if f.get("type") in VECTORIZABLE_FILE_TYPES and f.get("content")
-        ]
-
-        if not vectorizable:
-            return set()
-
-        # Skip files already indexed in this session to prevent duplicate vectors
-        cache_key = (app_id, agent_id, session_id)
-        already_indexed = _indexed_file_ids_cache.get(cache_key, set())
-        vectorizable = [
-            f for f in vectorizable
-            if f.get("file_id") not in already_indexed
-        ]
-
-        if not vectorizable:
-            return already_indexed
-
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id, agent_id, session_id, db,
             embedding_service_id=embedding_service_id,
@@ -344,73 +430,55 @@ class PlaygroundMediaService:
 
         if not repo or not repo.silo_id:
             logger.warning("Could not create temp repository/silo for file vectorization")
-            return set()
+            return False
 
         from utils.config import get_app_config
         app_config = get_app_config()
         tmp_base = app_config['TMP_BASE_FOLDER']
 
-        vectorized_ids: Set[str] = set()
+        base_metadata = {
+            "file_id": file_id,
+            "filename": filename,
+            "source": "playground_upload",
+        }
 
-        for file_data in vectorizable:
-            try:
-                file_id = file_data.get("file_id", "unknown")
-                filename = file_data.get("filename", "unknown")
-                file_path = file_data.get("file_path")
-                content = file_data.get("content", "")
+        docs_indexed = False
 
-                base_metadata = {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "source": "playground_upload",
-                }
-
-                docs_indexed = False
-
-                # Try file-based extraction with proper loaders/chunking
-                if file_path:
-                    abs_path = os.path.join(tmp_base, file_path)
-                    if os.path.exists(abs_path):
-                        ext = os.path.splitext(filename)[1].lower()
-                        try:
-                            docs = SiloService.extract_documents_from_file(
-                                abs_path, ext, base_metadata
-                            )
-                            if docs:
-                                SiloService.index_multiple_content(
-                                    repo.silo_id,
-                                    [{"content": d.page_content, "metadata": d.metadata} for d in docs],
-                                    db,
-                                )
-                                docs_indexed = True
-                        except Exception as exc:
-                            logger.warning(
-                                "File-based extraction failed for %s, falling back to content: %s",
-                                filename, exc,
-                            )
-
-                # Fallback: use pre-extracted text content
-                if not docs_indexed and content:
-                    SiloService.index_multiple_content(
-                        repo.silo_id,
-                        [{"content": content, "metadata": base_metadata}],
-                        db,
+        # Try file-based extraction with proper loaders/chunking
+        if file_path:
+            abs_path = os.path.join(tmp_base, file_path)
+            if os.path.exists(abs_path):
+                ext = os.path.splitext(filename)[1].lower()
+                try:
+                    docs = SiloService.extract_documents_from_file(
+                        abs_path, ext, base_metadata
                     )
-                    docs_indexed = True
-
-                if docs_indexed:
-                    vectorized_ids.add(file_id)
-                    logger.info(
-                        "Vectorized file %s (%s) into silo %s",
-                        file_id, filename, repo.silo_id,
+                    if docs:
+                        SiloService.index_multiple_content(
+                            repo.silo_id,
+                            [{"content": d.page_content, "metadata": d.metadata} for d in docs],
+                            db,
+                        )
+                        docs_indexed = True
+                except Exception as exc:
+                    logger.warning(
+                        "File-based extraction failed for %s, falling back to content: %s",
+                        filename, exc,
                     )
 
-            except Exception as exc:
-                logger.error("Error vectorizing file %s: %s", file_data.get("filename"), exc)
+        # Fallback: use pre-extracted text content
+        if not docs_indexed and content:
+            SiloService.index_multiple_content(
+                repo.silo_id,
+                [{"content": content, "metadata": base_metadata}],
+                db,
+            )
+            docs_indexed = True
 
-        # Update cache with newly vectorized file IDs
-        if vectorized_ids:
-            _indexed_file_ids_cache.setdefault(cache_key, set()).update(vectorized_ids)
+        if docs_indexed:
+            logger.info(
+                "Vectorized file %s (%s) into silo %s at upload time",
+                file_id, filename, repo.silo_id,
+            )
 
-        # Return all indexed IDs (previously cached + newly vectorized)
-        return already_indexed | vectorized_ids
+        return docs_indexed

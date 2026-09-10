@@ -20,6 +20,7 @@ class EmbeddingProvider(enum.Enum):
     Azure = "Azure"
     Google = "Google"
     GoogleCloud = "GoogleCloud"
+    Bedrock = "Bedrock"
 
 class EmbeddingService(BaseService):
     __tablename__ = 'embedding_service'

@@ -27,6 +27,10 @@ from tools.streaming_utils import (
 )
 from tools.streaming_utils import _extract_text_content as _extract_text, _get_lc_source, _INTERNAL_LC_SOURCES
 from services.agent_execution_service import AgentExecutionService
+from services.agent_cache_service import (
+    CheckpointerCacheService,
+    is_missing_tool_output_error,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -137,6 +141,8 @@ class AgentStreamingService:
         """
         effective_db = db or self.db
         mcp_client = None
+        ctx = None
+        sandbox_turn_active = False
 
         try:
             # ----------------------------------------------------------------
@@ -151,6 +157,10 @@ class AgentStreamingService:
                 conversation_id=conversation_id,
                 db=effective_db,
             )
+            sandbox_turn_active = self.execution_service._begin_sandbox_turn(
+                ctx,
+                db=effective_db,
+            )
 
             # ----------------------------------------------------------------
             # 2. Emit early metadata event so the client has conversation_id
@@ -159,6 +169,7 @@ class AgentStreamingService:
                 "metadata",
                 {
                     "conversation_id": ctx.effective_conv_id,
+                    "session_id": ctx.conversation.session_id if ctx.conversation else None,
                     "agent_id": agent_id,
                     "agent_name": ctx.agent.name,
                     "has_memory": ctx.agent.has_memory,
@@ -166,191 +177,269 @@ class AgentStreamingService:
             )
 
             # ----------------------------------------------------------------
-            # 3. Build agent chain
+            # 3a. Resolve this session's temporary playground silos (uploaded
+            #     media/document retrieval). Computed once here — it does not
+            #     change across the streaming retry loop below — and threaded
+            #     into create_agent() alongside the sandbox handles.
             # ----------------------------------------------------------------
-            # Resolve temporary playground media silos
             temp_silo_ids = None
             session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
             if session_id_for_media and effective_db:
                 try:
                     from services.playground_media_service import PlaygroundMediaService
-                    app_id = user_context.get("app_id") if user_context else None
-                    if app_id:
+                    media_app_id = user_context.get("app_id") if user_context else None
+                    if media_app_id:
                         temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
-                            app_id, agent_id, session_id_for_media, effective_db
+                            media_app_id, agent_id, session_id_for_media, effective_db
                         )
-                except Exception:
-                    pass
-
-            agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
-                ctx.fresh_agent,
-                ctx.search_params,
-                ctx.session_id_for_cache,
-                ctx.user_context,
-                ctx.working_dir,
-            )
-
-            config = prepare_agent_config(ctx.fresh_agent)
-
-            if ctx.fresh_agent.has_memory and ctx.session_id_for_cache:
-                config["configurable"]["thread_id"] = (
-                    f"thread_{ctx.fresh_agent.agent_id}_{ctx.session_id_for_cache}"
-                )
-                logger.info(
-                    "Using session-aware thread_id: %s",
-                    config["configurable"]["thread_id"],
-                )
-            else:
-                config["configurable"]["thread_id"] = (
-                    f"thread_{ctx.fresh_agent.agent_id}"
-                )
-
-            config["configurable"]["question"] = ctx.enhanced_message
-
-            # Attach monitoring callback if enabled
-            if monitoring_handler is not None:
-                config.setdefault("callbacks", []).append(monitoring_handler)
-
-            # ----------------------------------------------------------------
-            # 4. Build the HumanMessage payload (handles multimodal images)
-            # ----------------------------------------------------------------
-            message_payload = build_human_message(
-                ctx.fresh_agent, ctx.enhanced_message, ctx.image_files, ctx.user_context
-            )
-
-            # ----------------------------------------------------------------
-            # 5. Attach LangSmith tracer + metadata when configured
-            # ----------------------------------------------------------------
-            ls_settings = resolve_langsmith_settings(ctx.fresh_agent.app)
-            if ls_settings:
-                tracer, overrides = build_tracing_config(
-                    ls_settings,
-                    agent=ctx.fresh_agent,
-                    user_context=ctx.user_context,
-                    conversation_id=ctx.effective_conv_id,
-                    session_id=ctx.session_id_for_cache,
-                )
-                apply_tracing_to_config(config, tracer, overrides)
-                logger.info(
-                    "LangSmith tracing ENABLED — project='%s' source='%s'",
-                    ls_settings.project_name,
-                    ls_settings.source,
-                )
-
-            # ----------------------------------------------------------------
-            # 6. Streaming loop — the only part that stays in this service
-            # ----------------------------------------------------------------
-            # Return the sync connection to the pool for the duration of the
-            # stream: astream uses the async checkpointer, not this session, so
-            # holding it across LLM I/O would exhaust the pool. ctx objects expire
-            # but stay attached, so _finalize_turn reloads them on demand.
-            if effective_db is not None:
-                effective_db.commit()
+                except Exception as e:
+                    logger.warning("Could not resolve temp playground silos: %s", e)
 
             accumulated_content = ""
+            structured_response = None
             lightrag_graph_data = None
+            rollback_checkpoint_id = None
 
-            if langsmith_config:
-                stream_ctx = ls.tracing_context(
-                    client=langsmith_config["client"],
-                    project_name=langsmith_config["project_name"],
-                    enabled=True,
+            for attempt in range(2):
+                mcp_client = None
+                # ------------------------------------------------------------
+                # 3. Build agent chain
+                # ------------------------------------------------------------
+                agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
+                    ctx.fresh_agent,
+                    ctx.search_params,
+                    ctx.session_id_for_cache,
+                    ctx.user_context,
+                    ctx.working_dir,
+                    sandbox_handle=ctx.sandbox_handle,
+                    sandbox_provider=ctx.sandbox_provider,
+                    sandbox_session_key=ctx.sandbox_session_key,
+                    attached_files=ctx.processed_files,
+                    temp_silo_ids=temp_silo_ids or None,
                 )
-            else:
-                from contextlib import nullcontext
 
-                stream_ctx = nullcontext()
+                config = prepare_agent_config(ctx.fresh_agent)
 
-            # Token buffer: keyed by message id, holds text chunks until we
-            # know whether the message has tool_calls (discard) or not (flush).
-            _token_buf: dict[str, list[str]] = {}
-            _discarded_ids: set[str] = set()
+                if ctx.fresh_agent.has_memory and ctx.session_id_for_cache:
+                    config["configurable"]["thread_id"] = (
+                        f"thread_{ctx.fresh_agent.agent_id}_{ctx.session_id_for_cache}"
+                    )
+                    logger.info(
+                        "Using session-aware thread_id: %s",
+                        config["configurable"]["thread_id"],
+                    )
+                else:
+                    config["configurable"]["thread_id"] = (
+                        f"thread_{ctx.fresh_agent.agent_id}"
+                    )
 
-            with stream_ctx:
-                async for mode, chunk in agent_chain.astream(
-                    {"messages": [message_payload]},
-                    config=config,
-                    stream_mode=["messages", "updates", "custom"],
-                ):
-                    if mode == "messages":
-                        # Buffer tokens instead of emitting immediately so we can
-                        # discard them if this message turns out to have tool_calls.
-                        if not (isinstance(chunk, tuple) and len(chunk) == 2):
-                            continue
-                        msg_chunk, metadata = chunk
-                        if type(msg_chunk).__name__ not in ("AIMessageChunk", "AIMessage"):
-                            continue
-                        if _get_lc_source(metadata) in _INTERNAL_LC_SOURCES:
-                            continue
-                        msg_id = getattr(msg_chunk, "id", None)
-                        if not msg_id:
-                            continue
-                        # If this chunk carries tool_call_chunks, the whole
-                        # message is a tool invocation — discard buffered text.
-                        tool_call_chunks = getattr(msg_chunk, "tool_call_chunks", None) or []
-                        if tool_call_chunks:
-                            _discarded_ids.add(msg_id)
-                            _token_buf.pop(msg_id, None)
-                            continue
-                        if msg_id in _discarded_ids:
-                            continue
-                        text = _extract_text(getattr(msg_chunk, "content", None))
-                        if text:
-                            _token_buf.setdefault(msg_id, []).append(text)
-                        continue
+                config["configurable"]["question"] = ctx.enhanced_message
+                if rollback_checkpoint_id is not None:
+                    config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
 
-                    if mode == "updates":
-                        # Inspect complete messages to flush or discard token buffers.
-                        if isinstance(chunk, dict):
-                            for _node, delta in chunk.items():
-                                if not isinstance(delta, dict):
+                # Attach monitoring callback if enabled
+                if monitoring_handler is not None:
+                    config.setdefault("callbacks", []).append(monitoring_handler)
+
+                # ------------------------------------------------------------
+                # 4. Build the HumanMessage payload (handles multimodal images)
+                # ------------------------------------------------------------
+                message_payload = build_human_message(
+                    ctx.fresh_agent, ctx.enhanced_message, ctx.image_files, ctx.user_context
+                )
+
+                # ------------------------------------------------------------
+                # 5. Attach LangSmith tracer + metadata when configured
+                # ------------------------------------------------------------
+                ls_settings = resolve_langsmith_settings(getattr(ctx.fresh_agent, "app", None))
+                if ls_settings:
+                    tracer, overrides = build_tracing_config(
+                        ls_settings,
+                        agent=ctx.fresh_agent,
+                        user_context=ctx.user_context,
+                        conversation_id=ctx.effective_conv_id,
+                        session_id=ctx.session_id_for_cache,
+                    )
+                    apply_tracing_to_config(config, tracer, overrides)
+                    logger.info(
+                        "LangSmith tracing ENABLED — project='%s' source='%s'",
+                        ls_settings.project_name,
+                        ls_settings.source,
+                    )
+
+                if langsmith_config:
+                    stream_ctx = ls.tracing_context(
+                        client=langsmith_config["client"],
+                        project_name=langsmith_config["project_name"],
+                        enabled=True,
+                    )
+                else:
+                    from contextlib import nullcontext
+
+                    stream_ctx = nullcontext()
+
+                # ------------------------------------------------------------
+                # 6. Streaming loop — the only part that stays in this service
+                # ------------------------------------------------------------
+                # Return the sync connection to the pool for the duration of the
+                # stream: astream uses the async checkpointer, not this session, so
+                # holding it across LLM I/O would exhaust the pool. ctx objects expire
+                # but stay attached, so _finalize_turn reloads them on demand.
+                if effective_db is not None:
+                    effective_db.commit()
+
+                accumulated_content = ""
+                structured_response = None
+                # A retry (attempt > 0) reruns the whole turn from a rolled-back
+                # checkpoint, so any citations/graph data captured on a failed
+                # attempt belong to a generation that's being discarded — reset
+                # here, not carried over, or [N](cite://N) markers in the
+                # retried answer could point at chunks from the abandoned one.
+                # TODO(perf): if attempt 0's LightRAG tool call itself actually
+                # succeeded and the failure came from elsewhere in the graph,
+                # this forces a redundant LightRAG query on the retry — extra
+                # latency, not a correctness issue. Only worth caching if this
+                # shows up as a real cost in practice (retries are rare).
+                lightrag_graph_data = None
+                # Token buffer: keyed by message id, holds text chunks until we
+                # know whether the message has tool_calls (discard) or not (flush).
+                _token_buf: dict[str, list[str]] = {}
+                _discarded_ids: set[str] = set()
+
+                try:
+                    with stream_ctx:
+                        async for mode, chunk in agent_chain.astream(
+                            {"messages": [message_payload]},
+                            config=config,
+                            stream_mode=["messages", "updates", "custom"],
+                        ):
+                            if mode == "messages":
+                                # Buffer tokens instead of emitting immediately so we can
+                                # discard them if this message turns out to have tool_calls.
+                                if not (isinstance(chunk, tuple) and len(chunk) == 2):
                                     continue
-                                msgs = delta.get("messages", [])
-                                if not isinstance(msgs, list):
-                                    msgs = [msgs]
-                                for msg in msgs:
-                                    if msg is None:
-                                        continue
-                                    msg_id = getattr(msg, "id", None)
-                                    if not msg_id:
-                                        continue
-                                    has_tools = bool(getattr(msg, "tool_calls", None))
-                                    if has_tools:
-                                        _discarded_ids.add(msg_id)
-                                        _token_buf.pop(msg_id, None)
-                                    else:
-                                        for text in _token_buf.pop(msg_id, []):
-                                            accumulated_content += text
-                                            yield format_sse_event(SSE_TOKEN, {"content": text})
-                        # Emit non-token events from updates (tool_start, tool_end, etc.)
-                        events = map_stream_event(mode, chunk)
-                        if events:
-                            for event in events:
-                                if event["type"] == "_lightrag_graph":
-                                    lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
-                                elif event["type"] != SSE_TOKEN:
-                                    yield format_sse_event(event["type"], event["data"])
-                        continue
-
-                    # custom mode and anything else
-                    events = map_stream_event(mode, chunk)
-                    if events:
-                        for event in events:
-                            if event["type"] == SSE_TOKEN:
-                                accumulated_content += event["data"].get("content", "")
-                            elif event["type"] == "_lightrag_graph":
-                                lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
+                                msg_chunk, metadata = chunk
+                                if type(msg_chunk).__name__ not in ("AIMessageChunk", "AIMessage"):
+                                    continue
+                                if _get_lc_source(metadata) in _INTERNAL_LC_SOURCES:
+                                    continue
+                                msg_id = getattr(msg_chunk, "id", None)
+                                if not msg_id:
+                                    continue
+                                # If this chunk carries tool_call_chunks, the whole
+                                # message is a tool invocation — discard buffered text.
+                                tool_call_chunks = getattr(msg_chunk, "tool_call_chunks", None) or []
+                                if tool_call_chunks:
+                                    _discarded_ids.add(msg_id)
+                                    _token_buf.pop(msg_id, None)
+                                    continue
+                                if msg_id in _discarded_ids:
+                                    continue
+                                text = _extract_text(getattr(msg_chunk, "content", None))
+                                if text:
+                                    _token_buf.setdefault(msg_id, []).append(text)
                                 continue
-                            else:
-                                yield format_sse_event(event["type"], event["data"])
 
-            # Flush any remaining buffered tokens (e.g. final message with no tool_calls
-            # that never triggered an updates confirmation).
-            for _mid, texts in _token_buf.items():
-                if _mid not in _discarded_ids:
-                    for text in texts:
-                        accumulated_content += text
-                        yield format_sse_event(SSE_TOKEN, {"content": text})
+                            if mode == "updates":
+                                if (
+                                    isinstance(chunk, dict)
+                                    and "model" in chunk
+                                    and isinstance(chunk["model"], dict)
+                                    and "structured_response" in chunk["model"]
+                                ):
+                                    structured_response = chunk["model"]["structured_response"]
+
+                                # Inspect complete messages to flush or discard token buffers.
+                                if isinstance(chunk, dict):
+                                    for _node, delta in chunk.items():
+                                        if not isinstance(delta, dict):
+                                            continue
+                                        msgs = delta.get("messages", [])
+                                        if not isinstance(msgs, list):
+                                            msgs = [msgs]
+                                        for msg in msgs:
+                                            if msg is None:
+                                                continue
+                                            msg_id = getattr(msg, "id", None)
+                                            if not msg_id:
+                                                continue
+                                            has_tools = bool(getattr(msg, "tool_calls", None))
+                                            if has_tools:
+                                                _discarded_ids.add(msg_id)
+                                                _token_buf.pop(msg_id, None)
+                                            else:
+                                                for text in _token_buf.pop(msg_id, []):
+                                                    accumulated_content += text
+                                                    yield format_sse_event(SSE_TOKEN, {"content": text})
+                                # Emit non-token events from updates (tool_start, tool_end, etc.)
+                                events = map_stream_event(mode, chunk)
+                                if events:
+                                    for event in events:
+                                        if event["type"] == "_lightrag_graph":
+                                            lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
+                                        elif event["type"] != SSE_TOKEN:
+                                            yield format_sse_event(event["type"], event["data"])
+                                continue
+
+                            # custom mode and anything else
+                            events = map_stream_event(mode, chunk)
+                            if events:
+                                for event in events:
+                                    if event["type"] == SSE_TOKEN:
+                                        accumulated_content += event["data"].get("content", "")
+                                    elif event["type"] == "_lightrag_graph":
+                                        lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
+                                        continue
+                                    else:
+                                        yield format_sse_event(event["type"], event["data"])
+
+                    # Flush any remaining buffered tokens (e.g. final message with no
+                    # tool_calls that never triggered an updates confirmation).
+                    for _mid, texts in _token_buf.items():
+                        if _mid not in _discarded_ids:
+                            for text in texts:
+                                accumulated_content += text
+                                yield format_sse_event(SSE_TOKEN, {"content": text})
+                    break
+                except Exception as stream_exc:
+                    if (
+                        attempt == 0
+                        and ctx.fresh_agent.has_memory
+                        and ctx.session_id_for_cache
+                        and is_missing_tool_output_error(stream_exc)
+                    ):
+                        # Recover by forking from the last known-good checkpoint
+                        # instead of deleting the whole thread — see the mirrored
+                        # fix in AgentExecutionService's non-streaming path for
+                        # the full rationale (adelete_thread wipes the user's
+                        # entire visible history, not just the broken step).
+                        rollback_checkpoint_id = await CheckpointerCacheService.get_rollback_checkpoint_id(
+                            ctx.fresh_agent.agent_id,
+                            ctx.session_id_for_cache,
+                        )
+                        if rollback_checkpoint_id is None:
+                            logger.warning(
+                                "Incomplete tool-call checkpoint for agent %s session %s "
+                                "has no earlier checkpoint to roll back to; failing the "
+                                "turn instead of retrying",
+                                ctx.fresh_agent.agent_id,
+                                ctx.session_id_for_cache,
+                            )
+                            yield format_sse_event(
+                                "error",
+                                {"message": "Your last message could not be completed. Please resend it."},
+                            )
+                            return
+                        logger.warning(
+                            "Detected incomplete tool-call checkpoint for agent %s "
+                            "session %s; retrying turn from prior checkpoint %s "
+                            "(no history deleted)",
+                            ctx.fresh_agent.agent_id,
+                            ctx.session_id_for_cache,
+                            rollback_checkpoint_id,
+                        )
+                        continue
+                    raise
 
             logger.info("Stream completed — accumulated_content length=%d", len(accumulated_content))
 
@@ -404,8 +493,14 @@ class AgentStreamingService:
                             break
                     _emit_monitoring_log(ctx.fresh_agent.agent_id, monitoring_handler, monitoring_mw_config, logger.info)
 
+                raw_response = (
+                    structured_response
+                    if structured_response is not None
+                    else accumulated_content
+                )
+
                 result = await self.execution_service._finalize_turn(
-                    ctx, accumulated_content, effective_db
+                    ctx, raw_response, effective_db
                 )
 
                 # ----------------------------------------------------------------
@@ -473,9 +568,11 @@ class AgentStreamingService:
                 )
             else:
                 logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
-                yield format_sse_event("error", {"message": str(exc)})
+                yield format_sse_event("error", {"message": "Agent execution failed"})
 
         finally:
+            if ctx is not None and sandbox_turn_active:
+                self.execution_service._end_sandbox_turn(ctx, db=effective_db)
             if mcp_client:
                 logger.info("MCP client will be cleaned up automatically")
 

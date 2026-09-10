@@ -1,14 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { FolderOpen, Tv } from 'lucide-react';
 import Modal from '../ui/Modal';
 import { apiService } from '../../services/api';
-
-interface AIServiceOption {
-  service_id: number;
-  name: string;
-  provider?: string;
-  supports_video?: boolean;
-}
 
 interface MediaUploadModalProps {
   isOpen: boolean;
@@ -33,41 +26,6 @@ function MediaUploadModal({
   const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
-  // AI service selection
-  const [aiServices, setAiServices] = useState<AIServiceOption[]>([]);
-  const [transcriptionServiceId, setTranscriptionServiceId] = useState<number | undefined>();
-  const [videoAiServiceId, setVideoAiServiceId] = useState<number | undefined>();
-  const [servicesLoaded, setServicesLoaded] = useState(false);
-
-  const [mediaConfig, setMediaConfig] = useState({
-    forced_language: '',
-    chunk_min_duration: 30,
-    chunk_max_duration: 120,
-    chunk_overlap: 5,
-  });
-
-  // Load available AI services when modal opens
-  useEffect(() => {
-    if (isOpen && !servicesLoaded) {
-      loadAIServices();
-    }
-  }, [isOpen]);
-
-  const loadAIServices = async () => {
-    try {
-      const services = await apiService.getAIServices(appId);
-      setAiServices(services as AIServiceOption[]);
-
-      // Auto-select first service as transcription if available
-      if (Array.isArray(services) && services.length > 0) {
-        setTranscriptionServiceId((services as AIServiceOption[])[0].service_id);
-      }
-      setServicesLoaded(true);
-    } catch (error) {
-      console.error('Error loading AI services:', error);
-    }
-  };
-
   const handleClose = () => {
     setMediaFiles([]);
     setYoutubeUrl('');
@@ -77,28 +35,16 @@ function MediaUploadModal({
   };
 
   const handleUpload = async () => {
-    if (!transcriptionServiceId) {
-      setErrorMessage('Please select a transcription service.');
-      return;
-    }
-
     setUploading(true);
     setErrorMessage('');
 
     try {
-      const config = {
-        transcription_service_id: transcriptionServiceId,
-        video_ai_service_id: videoAiServiceId,
-        forced_language: mediaConfig.forced_language || undefined,
-        chunk_min_duration: mediaConfig.chunk_min_duration,
-        chunk_max_duration: mediaConfig.chunk_max_duration,
-        chunk_overlap: mediaConfig.chunk_overlap,
-      };
-
+      // Processing configuration (services, language, chunking) is defined at
+      // the agent level, so the upload only needs the file or URL.
       if (uploadType === 'file' && mediaFiles.length > 0) {
-        await apiService.uploadPlaygroundMedia(appId, agentId, sessionId, mediaFiles, config);
+        await apiService.uploadPlaygroundMedia(appId, agentId, sessionId, mediaFiles);
       } else if (uploadType === 'youtube' && youtubeUrl) {
-        await apiService.addPlaygroundYouTube(appId, agentId, sessionId, youtubeUrl, config);
+        await apiService.addPlaygroundYouTube(appId, agentId, sessionId, youtubeUrl);
       }
 
       onUploadComplete?.();
@@ -111,28 +57,8 @@ function MediaUploadModal({
     }
   };
 
-  const videoCapableServices = aiServices.filter((s) => s.supports_video);
-
-  // Detect if only audio files are selected (no video files)
-  const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma']);
-  const hasOnlyAudio =
-    uploadType === 'file' &&
-    mediaFiles.length > 0 &&
-    mediaFiles.every((f) => {
-      const ext = f.name.slice(f.name.lastIndexOf('.')).toLowerCase();
-      return AUDIO_EXTENSIONS.has(ext) || f.type.startsWith('audio/');
-    });
-
-  // Clear video AI service when only audio is selected
-  useEffect(() => {
-    if (hasOnlyAudio && videoAiServiceId) {
-      setVideoAiServiceId(undefined);
-    }
-  }, [hasOnlyAudio]);
-
   const canUpload =
-    !!transcriptionServiceId &&
-    (uploadType === 'file' ? mediaFiles.length > 0 : !!youtubeUrl.trim());
+    uploadType === 'file' ? mediaFiles.length > 0 : !!youtubeUrl.trim();
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} title="Upload Media" size="large">
@@ -207,160 +133,9 @@ function MediaUploadModal({
           </div>
         )}
 
-        {/* AI Service Selection */}
-        <div className="border-t dark:border-gray-700 pt-4">
-          <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-3">AI Services</h3>
-
-          <div className="space-y-3">
-            {/* Transcription Service (required) */}
-            <div>
-              <label
-                htmlFor="pg-transcription-service"
-                className="block text-sm text-gray-700 dark:text-gray-300 mb-1"
-              >
-                Transcription Service <span className="text-red-500">*</span>
-              </label>
-              {aiServices.length === 0 && servicesLoaded ? (
-                <p className="text-sm text-red-600">
-                  No AI services configured. Add one in the app settings.
-                </p>
-              ) : (
-                <select
-                  id="pg-transcription-service"
-                  value={transcriptionServiceId ?? ''}
-                  onChange={(e) =>
-                    setTranscriptionServiceId(e.target.value ? Number(e.target.value) : undefined)
-                  }
-                  className="w-full px-3 py-2 border dark:border-gray-600 rounded-md text-sm
-                             bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                >
-                  <option value="">Select a service...</option>
-                  {aiServices.map((s) => (
-                    <option key={s.service_id} value={s.service_id}>
-                      {s.name} ({s.provider})
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-
-            {/* Video AI Service (optional — hidden for audio-only uploads) */}
-            {videoCapableServices.length > 0 && !hasOnlyAudio && (
-              <div>
-                <label
-                  htmlFor="pg-video-ai-service"
-                  className="block text-sm text-gray-700 dark:text-gray-300 mb-1"
-                >
-                  Video Analysis Service (optional)
-                </label>
-                <select
-                  id="pg-video-ai-service"
-                  value={videoAiServiceId ?? ''}
-                  onChange={(e) =>
-                    setVideoAiServiceId(e.target.value ? Number(e.target.value) : undefined)
-                  }
-                  className="w-full px-3 py-2 border dark:border-gray-600 rounded-md text-sm
-                             bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                >
-                  <option value="">None (audio only)</option>
-                  {videoCapableServices.map((s) => (
-                    <option key={s.service_id} value={s.service_id}>
-                      {s.name} ({s.provider})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  Enables multimodal analysis (visual descriptions from video frames)
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Processing Options */}
-        <div className="border-t dark:border-gray-700 pt-4">
-          <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-3">Processing Options</h3>
-
-          <div className="space-y-3">
-            <div>
-              <label
-                htmlFor="pg-media-language"
-                className="block text-sm text-gray-700 dark:text-gray-300 mb-1"
-              >
-                Language (optional)
-              </label>
-              <select
-                id="pg-media-language"
-                value={mediaConfig.forced_language}
-                onChange={(e) =>
-                  setMediaConfig({ ...mediaConfig, forced_language: e.target.value })
-                }
-                className="w-full px-3 py-2 border dark:border-gray-600 rounded-md text-sm
-                           bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-              >
-                <option value="">Auto-detect</option>
-                <option value="es">Spanish</option>
-                <option value="en">English</option>
-                <option value="eu">Basque</option>
-                <option value="fr">French</option>
-              </select>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label htmlFor="pg-chunk-min" className="block text-xs text-gray-700 dark:text-gray-300 mb-1">
-                  Min Chunk (s)
-                </label>
-                <input
-                  id="pg-chunk-min"
-                  type="number"
-                  value={mediaConfig.chunk_min_duration}
-                  onChange={(e) =>
-                    setMediaConfig({ ...mediaConfig, chunk_min_duration: Number.parseInt(e.target.value) })
-                  }
-                  className="w-full px-2 py-1 border dark:border-gray-600 rounded text-sm
-                             bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                  min="10"
-                  max="60"
-                />
-              </div>
-              <div>
-                <label htmlFor="pg-chunk-max" className="block text-xs text-gray-700 dark:text-gray-300 mb-1">
-                  Max Chunk (s)
-                </label>
-                <input
-                  id="pg-chunk-max"
-                  type="number"
-                  value={mediaConfig.chunk_max_duration}
-                  onChange={(e) =>
-                    setMediaConfig({ ...mediaConfig, chunk_max_duration: Number.parseInt(e.target.value) })
-                  }
-                  className="w-full px-2 py-1 border dark:border-gray-600 rounded text-sm
-                             bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                  min="60"
-                  max="300"
-                />
-              </div>
-              <div>
-                <label htmlFor="pg-chunk-overlap" className="block text-xs text-gray-700 dark:text-gray-300 mb-1">
-                  Overlap (s)
-                </label>
-                <input
-                  id="pg-chunk-overlap"
-                  type="number"
-                  value={mediaConfig.chunk_overlap}
-                  onChange={(e) =>
-                    setMediaConfig({ ...mediaConfig, chunk_overlap: Number.parseInt(e.target.value) })
-                  }
-                  className="w-full px-2 py-1 border dark:border-gray-600 rounded text-sm
-                             bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                  min="0"
-                  max="20"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          Transcription, language and chunking settings are configured on the agent.
+        </p>
 
         {/* Error */}
         {errorMessage && (

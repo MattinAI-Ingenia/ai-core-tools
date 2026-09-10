@@ -124,6 +124,18 @@
          border-emerald-200/50 dark:border-emerald-700/30;
 }
 
+/* Visual grouping for nested sub-agent tool activity */
+.pg-tool-group {
+  @apply inline-flex max-w-full items-center gap-1.5 rounded-full
+         border border-sky-200/70 dark:border-sky-700/40
+         bg-sky-50/80 dark:bg-sky-950/30 px-1.5 py-1;
+}
+
+.pg-tool-group-label {
+  @apply max-w-32 px-1.5 text-[10px] font-semibold uppercase tracking-wide
+         text-sky-700 dark:text-sky-300;
+}
+
 /* Blinking cursor for streaming text */
 .pg-cursor::after {
   content: '▍';
@@ -143,6 +155,16 @@
 /* Conversation sidebar active item */
 .pg-sidebar-active {
   @apply bg-indigo-50 dark:bg-indigo-900/20 border-l-2 border-indigo-500;
+}
+
+.pg-input-container {
+  transition: all 0.2s ease;
+}
+
+.pg-input-container:focus-within {
+  background: rgba(255,255,255,0.9);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 20%, transparent);
 }
 
 /* Login card — animated shimmer border */

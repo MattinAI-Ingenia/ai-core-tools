@@ -43,7 +43,7 @@ async def test_second_tool_continues_numbering_from_shared_offset():
     assert "[1] (source: a.pdf p.1)" in first_content
     assert "[2] (source: a.pdf p.2)" in first_content
 
-    grouped = {"99": [("b.pdf p.5", "tercero")]}
+    grouped = {"99": [("b.pdf p.5", "tercero", 5)]}
     with patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(grouped, False)):
         second_content, _ = await coverage_tool.coroutine(term="tercero")
     # Numbering continues from where the first tool left off — [3], not [1].

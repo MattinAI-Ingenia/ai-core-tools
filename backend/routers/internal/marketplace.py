@@ -31,8 +31,9 @@ from schemas.marketplace_schemas import (
     AgentRatingInputSchema,
     AgentRatingResponseSchema,
     UserRatingResponseSchema,
+    ConversationStarterSchema,
 )
-from schemas.conversation_schemas import ConversationResponse, ConversationWithHistoryResponse
+from schemas.conversation_schemas import ConversationWithHistoryResponse, MarketplaceConversationResponse
 from schemas.chat_schemas import ChatResponseSchema
 from utils.logger import get_logger
 
@@ -152,6 +153,19 @@ async def marketplace_agent_detail(
     return detail
 
 
+@marketplace_router.get(
+    "/agents/{agent_id}/conversation-starters",
+    summary="Get agent conversation starters",
+    response_model=List[ConversationStarterSchema],
+)
+async def get_agent_conversation_starters(
+    agent_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Retrieve the conversation starters for a published marketplace agent."""
+    starters = MarketplaceService.get_agent_conversation_starters(db, agent_id)
+    return starters
+
 # ==================== RATINGS ====================
 
 
@@ -200,7 +214,7 @@ async def get_my_rating(
 @marketplace_router.post(
     "/agents/{agent_id}/conversations",
     summary="Start marketplace conversation",
-    response_model=ConversationResponse,
+    response_model=MarketplaceConversationResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def start_marketplace_conversation(
@@ -350,12 +364,33 @@ async def upload_marketplace_file(
             agent_id=agent.agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
+
+        # Vectorize at upload time if file is vectorizable (pdf, text)
+        vectorized = False
+        from services.playground_media_service import PlaygroundMediaService, VECTORIZABLE_FILE_TYPES
+        if file_ref.file_type in VECTORIZABLE_FILE_TYPES and file_ref.content:
+            try:
+                vectorized = PlaygroundMediaService.vectorize_uploaded_file(
+                    app_id=agent.app_id,
+                    agent_id=agent.agent_id,
+                    session_id=conversation.session_id,
+                    file_id=file_ref.file_id,
+                    filename=file_ref.filename,
+                    file_path=file_ref.file_path,
+                    content=file_ref.content,
+                    db=db,
+                )
+            except Exception as vec_err:
+                logger.warning(f"Marketplace file vectorization at upload failed: {vec_err}")
+
         return {
             "success": True,
             "file_id": file_ref.file_id,
             "filename": file_ref.filename,
             "file_type": file_ref.file_type,
+            "vectorized": vectorized,
             "file_size_bytes": file_ref.file_size_bytes,
             "file_size_display": FileReference.format_file_size(file_ref.file_size_bytes),
             "processing_status": file_ref.processing_status,

@@ -522,6 +522,12 @@ async def find_docs_in_collection(
             query=query,
             filter_metadata=request.filter_metadata,
             limit=request.limit,
+            search_type=request.search_type,
+            score_threshold=request.score_threshold,
+            fetch_k=request.fetch_k,
+            lambda_mult=request.lambda_mult,
+            min_content_length=request.min_content_length,
+            max_content_length=request.max_content_length,
             db=db,
         )
 

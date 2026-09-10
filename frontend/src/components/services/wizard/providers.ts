@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react';
-import { Bot, Cloud, Cpu, Globe, Server, Sparkles, Zap } from 'lucide-react';
+import { Bot, Box, Cloud, Cpu, Globe, Server, Sparkles, Zap } from 'lucide-react';
 import type { ServiceKind } from '../../../types/services';
 
 export type ApiKeyMode = 'required' | 'optional' | 'none';
@@ -22,7 +22,19 @@ export interface ProviderUIDescriptor {
   /** False for providers without a /models endpoint (Azure, GoogleCloud). */
   readonly supportsModelListing: boolean;
   /** Extra fields shown in the credentials step for manual-input providers. */
-  readonly manualFields?: readonly ('api_version' | 'project_id' | 'region')[];
+  readonly manualFields?: readonly (
+    | 'api_version'
+    | 'project_id'
+    | 'region'
+    | 'aws_access_key_id'
+    | 'aws_region'
+    // Sandbox service providers (OpenSandbox / Daytona / E2B) — generic
+    // names mapped to the provider-specific extra_config fields
+    // (opensandbox_image / daytona_target / e2b_template) in ServiceWizard.
+    | 'image'
+    | 'target'
+    | 'template'
+  )[];
   readonly apiKeyPlaceholder: string;
   readonly apiKeyHelp: string;
   /** Optional link to the provider's API key management page. Rendered
@@ -199,6 +211,67 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
     apiKeyHelp: 'Paste the full Service Account JSON key content.',
     apiKeyDocUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     supportedFor: ['ai', 'embedding'],
+  },
+  {
+    // AWS Bedrock. The api_key field carries the AWS Secret Access Key
+    // (so it reuses the masking machinery); the Access Key ID and Region
+    // are collected as dedicated non-secret fields and travel to the
+    // backend in extra_config. Listing works through boto3.
+    value: 'Bedrock',
+    label: 'AWS Bedrock',
+    description: 'Foundation models (Anthropic Claude, Amazon Titan, Cohere, Meta Llama, Mistral) via AWS Bedrock.',
+    Icon: Cloud,
+    apiKey: 'required',
+    needsBaseUrl: false,
+    supportsModelListing: true,
+    manualFields: ['aws_access_key_id', 'aws_region'],
+    apiKeyPlaceholder: 'AWS Secret Access Key',
+    apiKeyHelp: 'Your AWS Secret Access Key. Needs the bedrock:ListFoundationModels and bedrock:InvokeModel permissions.',
+    apiKeyDocUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    supportedFor: ['ai', 'embedding'],
+  },
+  {
+    value: 'opensandbox',
+    label: 'OpenSandbox',
+    description: 'Self-hosted, container-isolated code execution sandbox.',
+    Icon: Box,
+    apiKey: 'optional',
+    needsBaseUrl: true,
+    baseUrlPlaceholder: 'localhost:8080',
+    supportsModelListing: false,
+    manualFields: ['image'],
+    apiKeyPlaceholder: 'optional bearer token',
+    apiKeyHelp: 'Optional. Only needed if your self-hosted OpenSandbox server requires auth.',
+    supportedFor: ['sandbox'],
+  },
+  {
+    value: 'daytona',
+    label: 'Daytona',
+    description: 'Managed SaaS sandbox for isolated code execution.',
+    Icon: Box,
+    apiKey: 'required',
+    needsBaseUrl: true,
+    baseUrlPlaceholder: 'https://app.daytona.io/api',
+    supportsModelListing: false,
+    manualFields: ['target'],
+    apiKeyPlaceholder: 'Daytona API key',
+    apiKeyHelp: 'Find your API key in the Daytona dashboard.',
+    apiKeyDocUrl: 'https://app.daytona.io/',
+    supportedFor: ['sandbox'],
+  },
+  {
+    value: 'e2b',
+    label: 'E2B',
+    description: 'Managed cloud sandbox for isolated code execution.',
+    Icon: Box,
+    apiKey: 'required',
+    needsBaseUrl: false,
+    supportsModelListing: false,
+    manualFields: ['template'],
+    apiKeyPlaceholder: 'e2b_...',
+    apiKeyHelp: 'Find your API key at e2b.dev/dashboard.',
+    apiKeyDocUrl: 'https://e2b.dev/dashboard',
+    supportedFor: ['sandbox'],
   },
 ];
 

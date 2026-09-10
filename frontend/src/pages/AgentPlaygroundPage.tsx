@@ -12,7 +12,7 @@ interface Agent {
   agent_id: number;
   name: string;
   description?: string;
-  status: string;
+  status?: string;
   type: string;
   has_memory?: boolean;
   system_prompt?: string;
@@ -37,6 +37,7 @@ interface Agent {
       name: string;
       type: string;
       description: string;
+      optional?: boolean;
     }>;
   };
 }
@@ -203,9 +204,11 @@ function AgentPlaygroundPage() {
         </h2>
         <div className="flex items-center gap-2 flex-shrink-0">
           <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
-            agent.status === 'active'
-              ? 'bg-green-100/80 text-green-800 dark:bg-green-900/40 dark:text-green-300'
-              : 'bg-yellow-100/80 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300'
+            agent.status !== undefined
+              ? agent.status === 'active'
+                ? 'bg-green-100/80 text-green-800 dark:bg-green-900/40 dark:text-green-300'
+                : 'bg-yellow-100/80 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300'
+              : ''
           }`}>
             {agent.status}
           </span>
@@ -258,7 +261,7 @@ function AgentPlaygroundPage() {
           )}
 
           {/* Main Content Area */}
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 min-h-0 overflow-y-auto">
             {activeTab === 'playground' && (
               <>
                 {isOCRAgent ? (

@@ -172,6 +172,12 @@ pymupdf = "^1.27.2.3"
 # lightrag-hku se instala manualmente en el Dockerfile via pip para evitar
 # el conflicto de dependencias con pgvector entre langchain-postgres (<0.4)
 # y lightrag-hku (>=0.4.2). Ver Dockerfile. Versión actual: 1.5.6.
+langchain-aws = ">=1.0.0,<2.0.0"
+opensandbox = "0.1.7"
+opensandbox-code-interpreter = "0.1.2"
+daytona = "0.173.0"
+e2b-code-interpreter = "2.5.0"
+e2b = "2.7.0"
 
 [tool.poetry.scripts]
 dev = "uvicorn backend.main:app --reload --port 8000"

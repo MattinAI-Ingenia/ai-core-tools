@@ -33,7 +33,6 @@ interface Resource {
 
 interface RepositoryDetail {
   repository_id: number;
-  silo_id?: number;
   name: string;
   created_at: string;
   silo_id?: number | null;
@@ -188,7 +187,7 @@ const RepositoryDetailPage: React.FC = () => {
   const hasCheckedInitialIngestion = useRef(false);
 
   const [reindexingId, setReindexingId] = useState<number | null>(null);
-  const [reindexNotice, setReindexNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [reindexNotice, setReindexNotice] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
 
   // Folder-related state

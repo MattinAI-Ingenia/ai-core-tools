@@ -1,7 +1,7 @@
 """add excluded_count to crawl_job
 
 Revision ID: d3adbeef1234
-Revises: 
+Revises: merge001_userdel_platform_role
 Create Date: 2026-06-25 00:00:00.000000
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'd3adbeef1234'
-down_revision = None
+down_revision = 'merge001_userdel_platform_role'
 branch_labels = None
 depends_on = None
 

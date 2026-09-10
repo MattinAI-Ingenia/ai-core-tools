@@ -62,7 +62,15 @@ PY
 RUN rm -f poetry.lock
 
 # Install production deps. Poetry will generate the lock on the fly from the
-# (now sharepoint-free) pyproject.toml.
+# (now sharepoint-free) pyproject.toml — includes the optional sandbox
+# provider SDKs (opensandbox, daytona, e2b-code-interpreter), now managed
+# directly in pyproject.toml/poetry.lock rather than a separate ad-hoc `pip
+# install` step, so their transitive dependencies are pinned and reproducible.
+# (e2b is pinned explicitly in pyproject.toml because e2b-code-interpreter
+# only declares a loose `e2b>=2.7.0,<3.0.0` — an unpinned resolve previously
+# picked up a newer e2b release that broke `create_code_context()`/
+# `run_code()` with `AttributeError: 'Sandbox' object has no attribute
+# '_transport'`.)
 RUN poetry config virtualenvs.create false && \
     poetry install --no-interaction --no-ansi --no-cache --without dev
 

@@ -65,7 +65,7 @@ function formatJson(jsonStr: string): React.ReactNode {
   try {
     const parsed = JSON.parse(jsonStr);
     return (
-      <pre className="bg-gray-100 p-4 rounded-lg overflow-x-auto">
+      <pre className="bg-gray-100 p-4 rounded-lg whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', wordBreak: 'normal'}}>
         <code className="text-sm">
           {JSON.stringify(parsed, null, 2)}
         </code>
@@ -219,7 +219,7 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
   const renderedContent = useMemo(() => {
     if (typeof content === 'object' && content !== null) {
       return (
-        <pre className="bg-gray-100 p-4 rounded-lg overflow-x-auto">
+        <pre className="bg-gray-100 p-4 rounded-lg whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', wordBreak: 'normal' }}>
           <code className="text-sm">{JSON.stringify(content, null, 2)}</code>
         </pre>
       );
@@ -233,7 +233,7 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
       return formatJson(stringContent);
     } else if (hasFileMarkers || isMarkdown(stringContent)) {
       return (
-        <div className="prose prose-sm dark:prose-invert max-w-none">
+        <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', wordBreak: 'normal' }}>
           <ReactMarkdown
             components={markdownComponents}
             remarkPlugins={[remarkGfm]}
@@ -244,14 +244,14 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
         </div>
       );
     } else {
-      return <div className="whitespace-pre-wrap">{stringContent}</div>;
+      return <div className="whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', wordBreak: 'normal' }}>{stringContent}</div>;
     }
   }, [content, markdownComponents]);
 
   return (
     <ResolveFileUrlContext.Provider value={resolveFileUrl}>
       <CitationChunksContext.Provider value={{ chunks: citationChunks, appId, siloId }}>
-        <div className="text-gray-800 dark:text-gray-200">
+        <div className="text-gray-800 dark:text-gray-200" style={{ overflowWrap: 'anywhere', wordBreak: 'normal' }}>
           {renderedContent}
         </div>
       </CitationChunksContext.Provider>

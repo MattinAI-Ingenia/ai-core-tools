@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, Fragment } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers, Plus, Tv } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { toast } from 'sonner';
@@ -21,7 +21,7 @@ import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
 interface Agent {
   agent_id: number;
   name: string;
-  description: string;
+  description?: string;
   system_prompt: string;
   prompt_template: string;
   type: string;
@@ -32,6 +32,7 @@ interface Agent {
   memory_max_tokens: number;
   memory_summarize_threshold: number;
   service_id?: number;
+  sandbox_service_id?: number;
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
@@ -56,7 +57,16 @@ interface Agent {
   rag_chunk_top_k?: number | null;
   rag_chunk_top_k_deployment_default?: number;
   rag_fixed_filters?: RagFixedFilter[];
-  ai_services: Array<{ service_id: number; name: string }>;
+  // Media processing configuration (playground media upload)
+  transcription_service_id?: number;
+  video_ai_service_id?: number;
+  media_embedding_service_id?: number;
+  media_forced_language?: string;
+  media_chunk_min_duration?: number;
+  media_chunk_max_duration?: number;
+  media_chunk_overlap?: number;
+  ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
+  sandbox_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string; vector_db_type?: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
   lightrag_query_modes?: string[];
@@ -80,6 +90,7 @@ interface AgentFormData {
   memory_max_tokens: number;
   memory_summarize_threshold: number;
   service_id?: number;
+  sandbox_service_id?: number;
   silo_id?: number;
   output_parser_id?: number;
   temperature: number;
@@ -100,6 +111,14 @@ interface AgentFormData {
   rag_max_retrieval_calls: number | null;
   rag_chunk_top_k: number | null;
   rag_fixed_filters: RagFixedFilter[];
+  // Media processing configuration (playground media upload)
+  transcription_service_id?: number;
+  video_ai_service_id?: number;
+  media_embedding_service_id?: number;
+  media_forced_language?: string;
+  media_chunk_min_duration: number;
+  media_chunk_max_duration: number;
+  media_chunk_overlap: number;
 }
 
 // Output Parser Field Component
@@ -178,6 +197,8 @@ function AgentFormPage() {
   const [showMcpWarning, setShowMcpWarning] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('basic');
 
+  const starterRefs = useRef<(HTMLInputElement | null)[]>([]);
+
   // Helper function to render the "No AI Services" warning banner
   const renderNoAIServicesWarning = (isOcrAgent: boolean) => {
     const message = isOcrAgent
@@ -234,11 +255,16 @@ function AgentFormPage() {
     rag_score_threshold: null,
     rag_max_retrieval_calls: 4,
     rag_chunk_top_k: null,
-    rag_fixed_filters: []
+    rag_fixed_filters: [],
+    media_embedding_service_id: undefined,
+    media_chunk_min_duration: 30,
+    media_chunk_max_duration: 120,
+    media_chunk_overlap: 5
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
   const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
   const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
+  const [embeddingServices, setEmbeddingServices] = useState<Array<{ service_id: number; name: string }>>([]);
 
   const selectedSiloIsLightRAG = agent?.silos?.find(
     s => s.silo_id === formData.silo_id
@@ -255,9 +281,8 @@ function AgentFormPage() {
     tags: null,
     icon_url: null,
     cover_image_url: null,
+    conversation_starters: [],
   });
-  const [savingMarketplace, setSavingMarketplace] = useState(false);
-  const [marketplaceSuccess, setMarketplaceSuccess] = useState<string | null>(null);
 
   // Load agent data when component mounts
   useEffect(() => {
@@ -267,6 +292,31 @@ function AgentFormPage() {
       setLoading(false);
     }
   }, [appId, agentId]);
+
+  // Load the app's embedding services to populate the media embedding selector.
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    apiService
+      .getEmbeddingServices(Number.parseInt(appId))
+      .then((services) => {
+        if (cancelled) return;
+        const list = Array.isArray(services) ? services : [];
+        setEmbeddingServices(
+          list.map((s: { service_id: number; name: string }) => ({
+            service_id: s.service_id,
+            name: s.name,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error('Error loading embedding services:', err);
+        setEmbeddingServices([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
 
   // Load the selected silo's metadata fields to power the fixed-filter editor.
   useEffect(() => {
@@ -317,6 +367,7 @@ function AgentFormPage() {
         memory_max_tokens: response.memory_max_tokens || 4000,
         memory_summarize_threshold: response.memory_summarize_threshold || DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
         service_id: response.service_id || undefined,
+        sandbox_service_id: response.sandbox_service_id || undefined,
         silo_id: response.silo_id || undefined,
         output_parser_id: response.output_parser_id || undefined,
         temperature: response.temperature ?? DEFAULT_AGENT_TEMPERATURE,
@@ -339,7 +390,15 @@ function AgentFormPage() {
         rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
           ...f,
           _key: Math.random().toString(36).slice(2),
-        }))
+        })),
+        // Media processing configuration
+        transcription_service_id: response.transcription_service_id || undefined,
+        video_ai_service_id: response.video_ai_service_id || undefined,
+        media_embedding_service_id: response.media_embedding_service_id || undefined,
+        media_forced_language: response.media_forced_language || '',
+        media_chunk_min_duration: response.media_chunk_min_duration ?? 30,
+        media_chunk_max_duration: response.media_chunk_max_duration ?? 120,
+        media_chunk_overlap: response.media_chunk_overlap ?? 5
       });
 
       // Set output parser toggle based on whether agent has an output parser
@@ -354,20 +413,22 @@ function AgentFormPage() {
           console.error('Error loading MCP usage:', usageErr);
         }
 
-        try {
-          const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
-          setMarketplaceProfile({
-            display_name: profile.display_name || null,
-            short_description: profile.short_description || null,
-            long_description: profile.long_description || null,
-            category: profile.category || null,
-            tags: profile.tags || null,
-            icon_url: profile.icon_url || null,
-            cover_image_url: profile.cover_image_url || null,
-          });
-        } catch {
-          // Profile may not exist yet — that's fine
-        }
+          try {
+            const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
+            setMarketplaceProfile({
+              display_name: profile.display_name || null,
+              short_description: profile.short_description || null,
+              long_description: profile.long_description || null,
+              category: profile.category || null,
+              tags: profile.tags || null,
+              icon_url: profile.icon_url || null,
+              cover_image_url: profile.cover_image_url || null,
+              conversation_starters: profile.conversation_starters?.map(s => s.prompt) || [],
+            });
+          } catch {
+            // Profile may not exist yet — that's fine
+          }
+
 
         // Marketplace visibility comes from agent detail
         if (response.marketplace_visibility) {
@@ -530,7 +591,6 @@ function AgentFormPage() {
   const handleMarketplaceProfileChange = useCallback(
     (field: keyof MarketplaceProfileUpdate, value: string | string[] | null) => {
       setMarketplaceProfile(prev => ({ ...prev, [field]: value }));
-      setMarketplaceSuccess(null);
     },
     [],
   );
@@ -538,14 +598,27 @@ function AgentFormPage() {
   const handleSaveMarketplaceProfile = useCallback(async () => {
     if (!appId || !agentId || Number.parseInt(agentId) === 0) return;
 
-    setSavingMarketplace(true);
-    setMarketplaceSuccess(null);
+    const profileToSave: MarketplaceProfileUpdate = {
+      display_name: marketplaceProfile.display_name,
+      short_description: marketplaceProfile.short_description,
+      long_description: marketplaceProfile.long_description,
+      category: marketplaceProfile.category,
+      tags: marketplaceProfile.tags,
+      icon_url: marketplaceProfile.icon_url,
+      cover_image_url: marketplaceProfile.cover_image_url,
+      conversation_starters: (
+        marketplaceProfile.conversation_starters ?? []
+      )
+        .map((starter) => starter.trim())
+        .filter((starter) => starter.length > 0),
+    };
+
     const saved = await mutate(
       () =>
         apiService.updateAgentMarketplaceProfile(
           Number.parseInt(appId),
           Number.parseInt(agentId),
-          marketplaceProfile,
+          profileToSave,
         ),
       {
         loading: MESSAGES.SAVING('marketplace profile'),
@@ -553,7 +626,6 @@ function AgentFormPage() {
         error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('marketplace profile')),
       },
     );
-    setSavingMarketplace(false);
 
     if (saved === undefined) return;
 
@@ -565,14 +637,16 @@ function AgentFormPage() {
       tags: saved.tags || null,
       icon_url: saved.icon_url || null,
       cover_image_url: saved.cover_image_url || null,
+      conversation_starters: saved.conversation_starters?.map(s => s.prompt) || [],
     });
-    setMarketplaceSuccess('Marketplace profile saved successfully');
   }, [appId, agentId, marketplaceProfile, mutate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!appId || !agentId) return;
+
+    handleSaveMarketplaceProfile(); // Save marketplace profile first
 
     const hasSilo = !!formData.silo_id;
     const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
@@ -581,6 +655,14 @@ function AgentFormPage() {
     if (usesThreshold && formData.rag_score_threshold == null) {
       setActiveTab('configuration');
       setError(SCORE_THRESHOLD_REQUIRED_MSG);
+      return;
+    }
+
+    // Mirror the backend invariant: a media embedding service is required so
+    // uploaded media/documents are always vectorized with a valid model.
+    if (!formData.media_embedding_service_id) {
+      setActiveTab('configuration');
+      setError('Select a media embedding service in Media Processing before saving.');
       return;
     }
 
@@ -604,6 +686,7 @@ function AgentFormPage() {
       memory_max_tokens: formData.memory_max_tokens,
       memory_summarize_threshold: formData.memory_summarize_threshold,
       service_id: formData.service_id,
+      sandbox_service_id: formData.enable_code_interpreter ? formData.sandbox_service_id : undefined,
       silo_id: formData.silo_id,
       output_parser_id: formData.output_parser_id,
       temperature: formData.temperature,
@@ -626,6 +709,14 @@ function AgentFormPage() {
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
       rag_chunk_top_k: selectedSiloIsLightRAG ? formData.rag_chunk_top_k : null,
       rag_fixed_filters: hasSilo ? cleanedFilters : [],
+      // Media processing configuration
+      transcription_service_id: formData.transcription_service_id,
+      video_ai_service_id: formData.video_ai_service_id,
+      media_embedding_service_id: formData.media_embedding_service_id,
+      media_forced_language: formData.media_forced_language || undefined,
+      media_chunk_min_duration: formData.media_chunk_min_duration,
+      media_chunk_max_duration: formData.media_chunk_max_duration,
+      media_chunk_overlap: formData.media_chunk_overlap,
       app_id: Number.parseInt(appId),
     };
 
@@ -731,7 +822,7 @@ function AgentFormPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                    Nombre *
+                    Name *
                   </label>
                   <input
                     type="text"
@@ -740,7 +831,7 @@ function AgentFormPage() {
                     onChange={(e) => handleInputChange('name', e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                     required
-                    placeholder="Nombre..."
+                    placeholder="Name..."
                   />
                 </div>
 
@@ -761,7 +852,7 @@ function AgentFormPage() {
 
                 <div className="md:col-span-2">
                   <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
-                    Descripción
+                    Description
                   </label>
                   <input
                     type="text"
@@ -769,7 +860,7 @@ function AgentFormPage() {
                     value={formData.description}
                     onChange={(e) => handleInputChange('description', e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    placeholder="Descripción..."
+                    placeholder="Description..."
                   />
                 </div>
               </div>
@@ -825,7 +916,7 @@ function AgentFormPage() {
                       </div>
                       <div className="flex-1">
                         <h3 className="text-lg font-semibold text-gray-900">Memory Management</h3>
-                        <p className="text-sm text-gray-600 mt-1">Configura la estrategia de gestión de memoria del agente</p>
+                        <p className="text-sm text-gray-600 mt-1">Configure the agent's memory management strategy</p>
                       </div>
                     </div>
 
@@ -833,10 +924,10 @@ function AgentFormPage() {
                       <div className="flex items-start">
                         <Info className="w-5 h-5 text-indigo-500 mr-3 shrink-0" />
                         <div>
-                          <p className="text-sm text-indigo-800 font-medium">Estrategia Híbrida Automática</p>
+                          <p className="text-sm text-indigo-800 font-medium">Automatic Hybrid Strategy</p>
                           <p className="text-xs text-indigo-700 mt-1">
-                            El agente aplica automáticamente una estrategia híbrida que elimina mensajes de herramientas,
-                            recorta el historial y gestiona los límites de tokens para optimizar el rendimiento y los costos.
+                            The agent automatically applies a hybrid strategy that removes tool messages, trims the history,
+                            and manages token limits to optimize performance and costs.
                           </p>
                         </div>
                       </div>
@@ -845,7 +936,7 @@ function AgentFormPage() {
                     <div className="space-y-6">
                       <div>
                         <label htmlFor="memory_max_messages" className="block text-sm font-medium text-gray-700 mb-2">
-                          Máximo de Mensajes
+                          Maximum Messages
                         </label>
                         <input
                           type="number"
@@ -857,13 +948,13 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número máximo de mensajes a mantener en el historial de conversación (recomendado: 20)
+                          Maximum number of messages to keep in the conversation history (recommended: 20)
                         </p>
                       </div>
 
                       <div>
                         <label htmlFor="memory_max_tokens" className="block text-sm font-medium text-gray-700 mb-2">
-                          Límite de Tokens
+                          Token Limit
                         </label>
                         <input
                           type="number"
@@ -876,13 +967,13 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número máximo de tokens para el historial de conversación (recomendado: 4000)
+                          Maximum number of tokens for the conversation history (recommended: 4000)
                         </p>
                       </div>
 
                       <div>
                         <label htmlFor="memory_summarize_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-                          Umbral de Resumen
+                          Summarization Threshold
                         </label>
                         <input
                           type="number"
@@ -894,16 +985,16 @@ function AgentFormPage() {
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                         />
                         <p className="text-xs text-gray-500 mt-2">
-                          Número de mensajes antiguos a partir del cual se considera resumir (futura implementación, recomendado: 10)
+                          Number of old messages at which summarization is considered (future implementation, recommended: 10)
                         </p>
                       </div>
                     </div>
 
                     <div className="mt-6 p-4 bg-gray-50 rounded-xl">
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Configuración Actual:</h4>
+                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Current Configuration:</h4>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
                         <div>
-                          <span className="text-gray-600">Mensajes:</span>
+                          <span className="text-gray-600">Messages:</span>
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_max_messages}</span>
                         </div>
                         <div>
@@ -911,7 +1002,7 @@ function AgentFormPage() {
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_max_tokens.toLocaleString()}</span>
                         </div>
                         <div>
-                          <span className="text-gray-600">Umbral:</span>
+                          <span className="text-gray-600">Threshold:</span>
                           <span className="ml-2 font-medium text-gray-900">{formData.memory_summarize_threshold}</span>
                         </div>
                       </div>
@@ -1146,6 +1237,30 @@ function AgentFormPage() {
                           <p className="text-xs text-gray-500">Allows the agent to execute Python code (pandas, openpyxl, numpy)</p>
                         </div>
                       </div>
+
+                      {formData.enable_code_interpreter && (
+                        <div className="md:col-span-2">
+                          <label htmlFor="sandbox_service" className="block text-sm font-medium text-gray-700 mb-2">
+                            Sandbox Service
+                          </label>
+                          <select
+                            id="sandbox_service"
+                            value={formData.sandbox_service_id || ''}
+                            onChange={(e) => handleInputChange('sandbox_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          >
+                            <option value="">Use app/system default</option>
+                            {agent?.sandbox_services.map((service) => (
+                              <option key={service.service_id} value={service.service_id}>
+                                {service.name}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">
+                            Overrides the sandbox environment used to run this agent's Python code. Leave unset to use the app's default Sandbox Service.
+                          </p>
+                        </div>
+                      )}
                     </div>
 
                     {/* Provider-side Tools */}
@@ -1230,9 +1345,153 @@ function AgentFormPage() {
                       </p>
                     </div>
                   </div>
+
+                  {/* Media Processing Card */}
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                    <div className="flex items-center mb-6">
+                      <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
+                        <Tv className="w-5 h-5 text-purple-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-semibold text-gray-900">Media Processing</h3>
+                        <p className="text-sm text-gray-500">
+                          Default configuration used when uploading audio/video or YouTube URLs in the playground.
+                          Set it here once so uploads only require choosing the file or URL.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mb-6">
+                      <label htmlFor="media_embedding_service" className="block text-sm font-medium text-gray-700 mb-2">
+                        Embedding Service <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        id="media_embedding_service"
+                        required
+                        value={formData.media_embedding_service_id || ''}
+                        onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      >
+                        <option value="">Select Embedding Service</option>
+                        {embeddingServices.map((service) => (
+                          <option key={service.service_id} value={service.service_id}>
+                            {service.name}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Required. Model used to vectorize uploaded media/documents into the conversation's
+                        temporary knowledge base for retrieval.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <label htmlFor="transcription_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Transcription Service
+                        </label>
+                        <select
+                          id="transcription_service"
+                          value={formData.transcription_service_id || ''}
+                          onChange={(e) => handleInputChange('transcription_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">Select Transcription Service</option>
+                          {agent?.ai_services.map((service) => (
+                            <option key={service.service_id} value={service.service_id}>
+                              {service.name}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">Speech-to-text model used to transcribe media.</p>
+                      </div>
+
+                      <div>
+                        <label htmlFor="video_ai_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Video Analysis Service (optional)
+                        </label>
+                        <select
+                          id="video_ai_service"
+                          value={formData.video_ai_service_id || ''}
+                          onChange={(e) => handleInputChange('video_ai_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">None (audio only)</option>
+                          {agent?.ai_services.filter((service) => service.supports_video).map((service) => (
+                            <option key={service.service_id} value={service.service_id}>
+                              {service.name}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">Enables multimodal analysis (visual descriptions from video frames).</p>
+                      </div>
+
+                      <div>
+                        <label htmlFor="media_forced_language" className="block text-sm font-medium text-gray-700 mb-2">
+                          Language
+                        </label>
+                        <select
+                          id="media_forced_language"
+                          value={formData.media_forced_language || ''}
+                          onChange={(e) => handleInputChange('media_forced_language', e.target.value || undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">Auto-detect</option>
+                          <option value="es">Spanish</option>
+                          <option value="en">English</option>
+                          <option value="eu">Basque</option>
+                          <option value="fr">French</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
+                      <div>
+                        <label htmlFor="media_chunk_min_duration" className="block text-sm font-medium text-gray-700 mb-2">
+                          Min Chunk (s)
+                        </label>
+                        <input
+                          id="media_chunk_min_duration"
+                          type="number"
+                          min={10}
+                          max={60}
+                          value={formData.media_chunk_min_duration}
+                          onChange={(e) => handleInputChange('media_chunk_min_duration', Number.parseInt(e.target.value) || 30)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="media_chunk_max_duration" className="block text-sm font-medium text-gray-700 mb-2">
+                          Max Chunk (s)
+                        </label>
+                        <input
+                          id="media_chunk_max_duration"
+                          type="number"
+                          min={60}
+                          max={300}
+                          value={formData.media_chunk_max_duration}
+                          onChange={(e) => handleInputChange('media_chunk_max_duration', Number.parseInt(e.target.value) || 120)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="media_chunk_overlap" className="block text-sm font-medium text-gray-700 mb-2">
+                          Overlap (s)
+                        </label>
+                        <input
+                          id="media_chunk_overlap"
+                          type="number"
+                          min={0}
+                          max={20}
+                          value={formData.media_chunk_overlap}
+                          onChange={(e) => handleInputChange('media_chunk_overlap', Number.parseInt(e.target.value) || 5)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </>
               )}
-
               {/* Configuration for OCR agents */}
               {formData.type === 'ocr_agent' && (
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
@@ -1241,6 +1500,42 @@ function AgentFormPage() {
                       <FileText className="w-5 h-5 text-blue-600" />
                     </div>
                     <h3 className="text-xl font-semibold text-gray-900">OCR Configuration</h3>
+                  </div>
+
+                  {/* Agent Capabilities Card for OCR agents — Tool Agent checkbox */}
+                  <div className="bg-gray-50 rounded-xl border border-gray-200 p-6 mb-6">
+                    <div className="flex items-center mb-4">
+                      <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center mr-3">
+                        <Zap className="w-4 h-4 text-green-600" />
+                      </div>
+                      <h4 className="text-base font-semibold text-gray-900">Capabilities</h4>
+                    </div>
+                    <div className="space-y-4">
+                      <div className="flex items-center p-3 bg-white rounded-lg border border-gray-200">
+                        <input
+                          id="is_tool_ocr"
+                          type="checkbox"
+                          checked={formData.is_tool}
+                          onChange={(e) => {
+                            if (!e.target.checked && mcpUsage && mcpUsage.mcp_servers.length > 0) {
+                              setShowMcpWarning(true);
+                            } else {
+                              handleInputChange('is_tool', e.target.checked);
+                            }
+                          }}
+                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <div className="ml-3">
+                          <label htmlFor="is_tool_ocr" className="text-sm font-medium text-gray-900">Tool Agent</label>
+                          <p className="text-xs text-gray-500">Can be used by other agents (including OCR tools)</p>
+                          {mcpUsage && mcpUsage.mcp_servers.length > 0 && formData.is_tool && (
+                            <p className="text-xs text-purple-600 mt-1">
+                              Used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
                   {/* No AI Services Warning */}
@@ -1341,14 +1636,13 @@ function AgentFormPage() {
 
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {agent.tools.map((tool) => (
-                      <button
+                      <label
                         key={tool.agent_id}
-                        type="button"
-                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.tool_ids.includes(tool.agent_id)
-                          ? 'border-blue-500 bg-blue-50'
-                          : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                          }`}
-                        onClick={() => handleToolToggle(tool.agent_id)}
+                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full block ${
+                          formData.tool_ids.includes(tool.agent_id)
+                            ? 'border-blue-500 bg-blue-50'
+                            : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                        }`}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center">
@@ -1358,12 +1652,19 @@ function AgentFormPage() {
                               onChange={() => handleToolToggle(tool.agent_id)}
                               className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                             />
-                            <span className="ml-3 text-sm font-medium text-gray-900">{tool.name}</span>
+                            <span className="ml-3 text-sm font-medium text-gray-900">
+                              {tool.name}
+                            </span>
                           </div>
-                          <div className={`w-2 h-2 rounded-full ${formData.tool_ids.includes(tool.agent_id) ? 'bg-blue-500' : 'bg-gray-300'
-                            }`} />
+                          <div
+                            className={`w-2 h-2 rounded-full ${
+                            formData.tool_ids.includes(tool.agent_id)
+                              ? 'bg-blue-500'
+                              : 'bg-gray-300'
+                            }`}
+                          />
                         </div>
-                      </button>
+                      </label>
                     ))}
                   </div>
 
@@ -1407,14 +1708,13 @@ function AgentFormPage() {
 
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {agent.mcp_configs.map((mcp) => (
-                          <button
+                          <label
                             key={mcp.config_id}
-                            type="button"
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${formData.mcp_config_ids.includes(mcp.config_id)
-                              ? 'border-purple-500 bg-purple-50'
-                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                              }`}
-                            onClick={() => handleMCPToggle(mcp.config_id)}
+                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
+                              formData.mcp_config_ids.includes(mcp.config_id)
+                                ? 'border-purple-500 bg-purple-50'
+                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                            }`}
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center">
@@ -1429,7 +1729,7 @@ function AgentFormPage() {
                               <div className={`w-2 h-2 rounded-full ${formData.mcp_config_ids.includes(mcp.config_id) ? 'bg-purple-500' : 'bg-gray-300'
                                 }`} />
                             </div>
-                          </button>
+                          </label>
                         ))}
                       </div>
 
@@ -1482,39 +1782,38 @@ function AgentFormPage() {
                         {agent.skills.map((skill) => {
                           const isRouterDisabled = skill.name === ROUTER_SKILL_NAME && !selectedSiloIsLightRAG;
                           return (
-                            <Fragment key={skill.skill_id}>
-                              <button
-                                type="button"
-                                disabled={isRouterDisabled}
-                                className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full ${isRouterDisabled
-                                    ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
-                                    : formData.skill_ids.includes(skill.skill_id)
-                                      ? 'border-purple-500 bg-purple-50 cursor-pointer'
-                                      : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
-                                  }`}
-                                onClick={() => !isRouterDisabled && handleSkillToggle(skill.skill_id)}
-                              >
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center">
-                                    <input
-                                      type="checkbox"
-                                      disabled={isRouterDisabled}
-                                      checked={formData.skill_ids.includes(skill.skill_id)}
-                                      onChange={() => handleSkillToggle(skill.skill_id)}
-                                      className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                    />
-                                    <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
-                                  </div>
-                                  <div className={`w-2 h-2 rounded-full ${formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'}`} />
+                            <label
+                              key={skill.skill_id}
+                              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full block ${
+                                isRouterDisabled
+                                  ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
+                                  : formData.skill_ids.includes(skill.skill_id)
+                                    ? 'border-purple-500 bg-purple-50 cursor-pointer'
+                                    : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <input
+                                    type="checkbox"
+                                    disabled={isRouterDisabled}
+                                    checked={formData.skill_ids.includes(skill.skill_id)}
+                                    onChange={() => handleSkillToggle(skill.skill_id)}
+                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                  />
+                                  <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
                                 </div>
-                                {skill.description && (
-                                  <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
-                                )}
-                                {isRouterDisabled && (
-                                  <p className="mt-2 ml-7 text-xs text-gray-400">Requires a LightRAG silo</p>
-                                )}
-                              </button>
-                            </Fragment>
+                                <div className={`w-2 h-2 rounded-full ${
+                                  formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
+                                }`} />
+                              </div>
+                              {skill.description && (
+                                <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
+                              )}
+                              {isRouterDisabled && (
+                                <p className="mt-2 ml-7 text-xs text-gray-400">Requires a LightRAG silo</p>
+                              )}
+                            </label>
                           );
                         })}
                       </div>
@@ -1746,95 +2045,131 @@ function AgentFormPage() {
                           {marketplaceProfile.short_description?.length ?? 0}/200 characters
                         </div>
                       </div>
-                      <div>
-                        <label htmlFor="marketplace-long-description" className="block text-sm font-medium text-gray-700 mb-2">Long Description</label>
-                        <textarea
-                          id="marketplace-long-description"
-                          value={marketplaceProfile.long_description ?? ''}
-                          onChange={(e) => handleMarketplaceProfileChange('long_description', e.target.value)}
-                          rows={4}
-                          placeholder="Supports Markdown"
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="marketplace-category" className="block text-sm font-medium text-gray-700 mb-2">Category</label>
-                        <select
-                          id="marketplace-category"
-                          value={marketplaceProfile.category ?? ''}
-                          onChange={(e) => handleMarketplaceProfileChange('category', e.target.value)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        >
-                          <option value="">-- Select a category --</option>
-                          {MARKETPLACE_CATEGORIES.map((cat) => (
-                            <option key={cat} value={cat}>{cat}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label htmlFor="marketplace-tags" className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
-                        <TagInput
-                          id="marketplace-tags"
-                          tags={marketplaceProfile.tags ?? []}
-                          onChange={(tags) => handleMarketplaceProfileChange('tags', tags)}
-                          maxTags={5}
-                          placeholder="Add up to 5 tags"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="marketplace-icon-url" className="block text-sm font-medium text-gray-700 mb-2">Icon URL</label>
-                        <input
-                          id="marketplace-icon-url"
-                          type="text"
-                          value={marketplaceProfile.icon_url ?? ''}
-                          onChange={(e) => handleMarketplaceProfileChange('icon_url', e.target.value)}
-                          placeholder="https://..."
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        />
-                        {marketplaceProfile.icon_url && (
-                          <img
-                            src={marketplaceProfile.icon_url}
-                            alt="Icon preview"
-                            className="mt-2 w-10 h-10 rounded"
-                            onError={(e) => (e.currentTarget.style.display = 'none')}
-                          />
-                        )}
-                      </div>
-                      <div>
-                        <label htmlFor="marketplace-cover-image-url" className="block text-sm font-medium text-gray-700 mb-2">Cover Image URL</label>
-                        <input
-                          id="marketplace-cover-image-url"
-                          type="text"
-                          value={marketplaceProfile.cover_image_url ?? ''}
-                          onChange={(e) => handleMarketplaceProfileChange('cover_image_url', e.target.value)}
-                          placeholder="https://..."
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        />
-                        {marketplaceProfile.cover_image_url && (
-                          <img
-                            src={marketplaceProfile.cover_image_url}
-                            alt="Cover preview"
-                            className="mt-2 w-32 h-16 rounded object-cover"
-                            onError={(e) => (e.currentTarget.style.display = 'none')}
-                          />
-                        )}
-                      </div>
-                      <div className="flex items-center gap-4 mt-4">
-                        <button
-                          type="button"
-                          onClick={handleSaveMarketplaceProfile}
-                          className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                          disabled={savingMarketplace}
-                        >
-                          {savingMarketplace ? 'Saving...' : 'Save Marketplace Profile'}
-                        </button>
-                        {marketplaceSuccess && (
-                          <span className="text-sm text-green-600">{marketplaceSuccess}</span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </>
+                  <div>
+                    <label htmlFor="marketplace-long-description" className="block text-sm font-medium text-gray-700 mb-2">Long Description</label>
+                    <textarea
+                      id="marketplace-long-description"
+                      value={marketplaceProfile.long_description ?? ''}
+                      onChange={(e) => handleMarketplaceProfileChange('long_description', e.target.value)}
+                      rows={4}
+                      placeholder="Supports Markdown"
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="marketplace-category" className="block text-sm font-medium text-gray-700 mb-2">Category</label>
+                    <select
+                      id="marketplace-category"
+                      value={marketplaceProfile.category ?? ''}
+                      onChange={(e) => handleMarketplaceProfileChange('category', e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                    >
+                      <option value="">-- Select a category --</option>
+                      {MARKETPLACE_CATEGORIES.map((cat) => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="marketplace-tags" className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
+                    <TagInput
+                      id="marketplace-tags"
+                      tags={marketplaceProfile.tags ?? []}
+                      onChange={(tags) => handleMarketplaceProfileChange('tags', tags)}
+                      maxTags={5}
+                      placeholder="Add up to 5 tags"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="marketplace-icon-url" className="block text-sm font-medium text-gray-700 mb-2">Icon URL</label>
+                    <input
+                      id="marketplace-icon-url"
+                      type="text"
+                      value={marketplaceProfile.icon_url ?? ''}
+                      onChange={(e) => handleMarketplaceProfileChange('icon_url', e.target.value)}
+                      placeholder="https://..."
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                    />
+                    {marketplaceProfile.icon_url && (
+                      <img
+                        src={marketplaceProfile.icon_url}
+                        alt="Icon preview"
+                        className="mt-2 w-10 h-10 rounded"
+                        onError={(e) => (e.currentTarget.style.display = 'none')}
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <label htmlFor="marketplace-cover-image-url" className="block text-sm font-medium text-gray-700 mb-2">Cover Image URL</label>
+                    <input
+                      id="marketplace-cover-image-url"
+                      type="text"
+                      value={marketplaceProfile.cover_image_url ?? ''}
+                      onChange={(e) => handleMarketplaceProfileChange('cover_image_url', e.target.value)}
+                      placeholder="https://..."
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                    />
+                    {marketplaceProfile.cover_image_url && (
+                      <img
+                        src={marketplaceProfile.cover_image_url}
+                        alt="Cover preview"
+                        className="mt-2 w-32 h-16 rounded object-cover"
+                        onError={(e) => (e.currentTarget.style.display = 'none')}
+                      />
+                    )}
+                  </div>
+                   <div>
+                     <label className="block text-sm font-medium text-gray-700 mb-3">Conversation Starters</label>
+                     <p className="text-xs text-gray-500 mb-4">
+                       Suggested opening messages for users. These only appear at the start of a new conversation.
+                     </p>
+                     <div className="space-y-3">
+                       {marketplaceProfile.conversation_starters?.map((starter, idx) => (
+                         <div key={idx} className="flex items-center gap-2">
+                           <input
+                             ref={(el) => {
+                               starterRefs.current[idx] = el;
+                             }}
+                             type="text"
+                             value={starter}
+                             onChange={(e) => {
+                               const newStarters = [...(marketplaceProfile.conversation_starters || [])];
+                               newStarters[idx] = e.target.value;
+                               handleMarketplaceProfileChange('conversation_starters', newStarters);
+                             }}
+                             className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                             placeholder="Enter a starter prompt..."
+                           />
+                           <button
+                             type="button"
+                             onClick={() => {
+                               const newStarters = marketplaceProfile.conversation_starters?.filter((_, i) => i !== idx) || [];
+                               handleMarketplaceProfileChange('conversation_starters', newStarters);
+                             }}
+                             className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                           >
+                             <span className="text-xs font-bold">✕</span>
+                           </button>
+                         </div>
+                       ))}
+                       <button
+                         type="button"
+                         onClick={() => {
+                           const newStarters = [...(marketplaceProfile.conversation_starters || []), ''];
+                           handleMarketplaceProfileChange('conversation_starters', newStarters);
+                           requestAnimationFrame(() => {
+                             starterRefs.current[newStarters.length - 1]?.focus();
+                           });
+                         }}
+                         className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+                       >
+                         <Plus className="w-4 h-4 mr-1" /> Add Starter
+                       </button>
+                     </div>
+                   </div>
+                </div>
+              )}
+              </>
               )}
             </div>
           )}

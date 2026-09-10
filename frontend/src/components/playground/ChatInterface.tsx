@@ -1,12 +1,15 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Timer } from 'lucide-react';
 import { apiService } from '../../services/api';
-import { useStreamingChat } from '../../hooks/useStreamingChat';
+import { StreamingChatError, useStreamingChat } from '../../hooks/useStreamingChat';
+import { formatDuration } from '../../utils/duration';
 import MessageContent from './MessageContent';
 import StreamingMessage from './StreamingMessage';
 import SearchFilters from './SearchFilters';
 import type { SearchFilterMetadataField } from './SearchFilters';
 import AttachedFilesPanel from './AttachedFilesPanel';
 import type { PanelFile } from './AttachedFilesPanel';
+import ToolHistoryPanel from './ToolHistoryPanel';
 import MediaUploadModal from './MediaUploadModal';
 import VideoPlayer from './VideoPlayer';
 import type { VideoTimestamp } from './VideoPlayer';
@@ -20,6 +23,7 @@ interface Message {
   timestamp: Date;
   files?: string[];
   lightragGraph?: LightRAGGraphData | null;
+  elapsedMs?: number;
 }
 
 /** Shape returned by the API for each history message. */
@@ -87,7 +91,7 @@ function ChatInterface({
   const [showMediaUploadModal, setShowMediaUploadModal] = useState(false);
   const [mediaConversationId, setMediaConversationId] = useState<number | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [playgroundMedia, setPlaygroundMedia] = useState<Array<{ media_id: number; name: string; status: string; source_type: string; media_type: string }>>([]);
+  const [playgroundMedia, setPlaygroundMedia] = useState<Array<{ media_id: number; name: string; status: string; source_type: string; media_type: string; error_message?: string | null }>>([]);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -101,14 +105,27 @@ function ChatInterface({
   const lastScrollTopRef = useRef(0);
   const filterPanelId = `metadata-filters-${agentId}`;
 
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
   const playgroundStream = useCallback(
     (message: string, opts: Parameters<typeof apiService.chatWithAgentStream>[3]) =>
       apiService.chatWithAgentStream(appId, agentId, message, opts),
     [appId, agentId],
   );
 
-  const { streamingContent, activeTools, thinkingMessage, isStreaming, hitlInterrupt, sendMessage, abortStream, clearHitlInterrupt } =
-    useStreamingChat(playgroundStream);
+  const {
+    streamingContent,
+    activeTools,
+    thinkingMessage,
+    isStreaming,
+    responseElapsedMs,
+    hitlInterrupt,
+    sendMessage,
+    abortStream,
+    clearHitlInterrupt,
+    toolExecutionHistory,
+    clearToolHistory,
+  } = useStreamingChat(playgroundStream);
 
   // Hold streaming content visible briefly after isStreaming flips to false,
   // so the transition to the final committed message is seamless.
@@ -287,16 +304,25 @@ function ChatInterface({
       return;
     }
 
+    // Cap total polling so a media item stuck in a processing state (e.g. a
+    // dead background task) does not poll forever: 3s interval × 200 = 10 min.
+    const MAX_POLLS = 200;
+    let polls = 0;
+
     // Start polling only when there is processing media and no interval is active
     pollingRef.current = setInterval(async () => {
+      polls += 1;
       try {
         const media = await apiService.listPlaygroundMedia(appId, agentId, currentSessionId);
         const list = Array.isArray(media) ? media : [];
         playgroundMediaRef.current = list;
         setPlaygroundMedia(list);
 
-        // Stop polling if all done
-        if (list.every((m: { status: string }) => m.status === 'ready' || m.status === 'error')) {
+        // Stop polling if all done or the max poll budget is exhausted
+        const allDone = list.every(
+          (m: { status: string }) => m.status === 'ready' || m.status === 'error'
+        );
+        if (allDone || polls >= MAX_POLLS) {
           if (pollingRef.current) {
             clearInterval(pollingRef.current);
             pollingRef.current = null;
@@ -304,6 +330,10 @@ function ChatInterface({
         }
       } catch {
         // keep polling — transient network errors should not kill the status display
+        if (polls >= MAX_POLLS && pollingRef.current) {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+        }
       }
     }, 3000);
 
@@ -400,6 +430,7 @@ function ChatInterface({
         content: responseContent,
         timestamp: new Date(),
         lightragGraph: result.lightragGraph,
+        elapsedMs: result.elapsedMs,
       };
       // Commit the message and release the streaming hold in the same batch
       setMessages((prev) => [...prev, agentMsg]);
@@ -415,6 +446,8 @@ function ChatInterface({
 
       await refreshFileList(result.conversationId || currentConversationId);
       onMessageSent?.();
+
+      textareaRef.current?.focus();
     } catch (error) {
       setHoldStreamingContent(false);
       const errorMsg: Message = {
@@ -422,16 +455,27 @@ function ChatInterface({
         type: 'error',
         content: error instanceof Error ? error.message : 'An error occurred',
         timestamp: new Date(),
+        elapsedMs: error instanceof StreamingChatError ? error.elapsedMs : responseElapsedMs,
       };
       setMessages((prev) => [...prev, errorMsg]);
     }
   };
 
+  useEffect(() => {
+    if (!textareaRef.current) return;
+
+    textareaRef.current.style.height = 'auto';
+    textareaRef.current.style.height = `${Math.min(
+      textareaRef.current.scrollHeight,
+      160
+    )}px`;
+  }, [inputMessage]);
+
   // ─── Reset ───────────────────────────────────────────────────────────────────
 
   const handleResetConversation = async () => {
     try {
-      await apiService.resetAgentConversation(appId, agentId);
+      await apiService.resetAgentConversation(appId, agentId, currentConversationId);
       setMessages([]);
       setPersistentFiles([]);
       setPlaygroundMedia([]);
@@ -439,6 +483,7 @@ function ChatInterface({
       setCurrentSessionId(null);
       setFilterMetadata(undefined);
       setFiltersKey((prev) => prev + 1);
+      clearToolHistory();
       onConversationReset?.();
     } catch (error) {
       console.error('Error resetting conversation:', error);
@@ -451,8 +496,8 @@ function ChatInterface({
     const fileArray = Array.from(files);
     if (fileArray.length === 0) return;
 
-    const existingNames = new Set(persistentFiles.map((f) => f.filename));
-    const newFiles = fileArray.filter((f) => !existingNames.has(f.name));
+    const existingNames = new Set(persistentFiles.map((file) => file.filename));
+    const newFiles = fileArray.filter((file) => !existingNames.has(file.name));
     if (newFiles.length === 0) return;
 
     setIsLoadingFiles(true);
@@ -500,12 +545,12 @@ function ChatInterface({
     event.target.value = '';
   };
 
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const imageFiles = Array.from(e.clipboardData?.files ?? []).filter((f) =>
-      f.type.startsWith('image/')
+  const handlePaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+      file.type.startsWith('image/')
     );
     if (imageFiles.length === 0) return;
-    e.preventDefault();
+    event.preventDefault();
     await uploadFiles(imageFiles);
   };
 
@@ -613,12 +658,6 @@ function ChatInterface({
     try {
       await apiService.deletePlaygroundMedia(appId, agentId, currentSessionId);
       setPlaygroundMedia([]);
-      // Revoke blob URL so the player stops
-      if (videoBlobUrlRef.current) {
-        URL.revokeObjectURL(videoBlobUrlRef.current);
-        videoBlobUrlRef.current = null;
-      }
-      setVideoBlobUrl(null);
     } catch (error) {
       console.error('Error deleting playground media:', error);
     }
@@ -634,7 +673,7 @@ function ChatInterface({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      handleSendMessage();
+      if (canSend) handleSendMessage();
     }
   };
 
@@ -653,6 +692,7 @@ function ChatInterface({
       filename: m.name,
       file_type: 'media' as const,
       processing_status: m.status,
+      error_message: m.error_message ?? undefined,
     })),
   ];
 
@@ -665,14 +705,17 @@ function ChatInterface({
 
   /**
    * Parse timestamp patterns from agent response text.
-   * Matches: [02:05 - 03:00], [02:05-03:00], [02:05], [1:02:05 - 1:03:00]
+   * Matches optional media label prefixes so timestamps can be tied to a
+   * specific video/audio when several media are uploaded:
+   *   [lesson.mp4 @ 02:05 - 03:00], [02:05 - 03:00], [02:05-03:00],
+   *   [lesson.mp4 @ 02:05], [02:05], [1:02:05 - 1:03:00]
    */
   const parseTimestamps = (text: string): VideoTimestamp[] => {
     if (typeof text !== 'string') return [];
-    // Match range patterns: [02:05 - 03:00] or [02:05-03:00]
-    const rangeRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–]\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
-    // Match single timestamp patterns: [02:05]
-    const singleRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    // Optional label prefix "<name> @ " inside the bracket, then a time range.
+    const rangeRegex = /\[(?:\s*([^[\]@]+?)\s*@\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–]\s*(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+    // Optional label prefix, then a single timestamp.
+    const singleRegex = /\[(?:\s*([^[\]@]+?)\s*@\s*)?(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
 
     const results: VideoTimestamp[] = [];
     const seen = new Set<string>();
@@ -683,31 +726,37 @@ function ChatInterface({
       return parts[0] * 60 + parts[1];
     };
 
+    const normalizeLabel = (label?: string) => {
+      const trimmed = label?.trim();
+      return trimmed ? trimmed : undefined;
+    };
+
     // First pass: ranges
     let match: RegExpExecArray | null;
     while ((match = rangeRegex.exec(text)) !== null) {
-      const startStr = match[1];
-      const endStr = match[2];
-      const key = `${startStr}-${endStr}`;
+      const mediaLabel = normalizeLabel(match[1]);
+      const startStr = match[2];
+      const endStr = match[3];
+      const key = `${mediaLabel ?? ''}|${startStr}-${endStr}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      // Also mark individual timestamps as seen so single-pass doesn't duplicate
-      seen.add(startStr);
-      seen.add(endStr);
 
       results.push({
         start_time: toSeconds(startStr),
         end_time: toSeconds(endStr),
         text_preview: '',
         is_agent_cited: true,
+        mediaLabel,
       });
     }
 
     // Second pass: single timestamps not already part of a range
     while ((match = singleRegex.exec(text)) !== null) {
-      const ts = match[1];
-      if (seen.has(ts)) continue;
-      seen.add(ts);
+      const mediaLabel = normalizeLabel(match[1]);
+      const ts = match[2];
+      const key = `${mediaLabel ?? ''}|${ts}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       const secs = toSeconds(ts);
 
       results.push({
@@ -715,6 +764,7 @@ function ChatInterface({
         end_time: secs + 30, // Default 30s window for single timestamps
         text_preview: '',
         is_agent_cited: true,
+        mediaLabel,
       });
     }
 
@@ -723,58 +773,69 @@ function ChatInterface({
     return results;
   };
 
-  // Fetch video blob with auth and create object URL for the <video> element
-  const readyVideoMedia = playgroundMedia.find((m) => m.status === 'ready');
-  const [videoBlobUrl, setVideoBlobUrl] = useState<string | null>(null);
-  const videoBlobUrlRef = useRef<string | null>(null);
+  /**
+   * Associate parsed timestamps to a specific media so each VideoPlayer only
+   * shows the moments the agent actually cited for that video/audio.
+   * - With a single uploaded media, every cited timestamp belongs to it (the
+   *   agent may omit the filename when there is no ambiguity).
+   * - With multiple media, only timestamps explicitly labelled with this
+   *   media's name are attributed to it; ambiguous/unlabelled ones are skipped.
+   */
+  const getTimestampsForMedia = (
+    all: VideoTimestamp[],
+    mediaName: string,
+    readyCount: number,
+  ): VideoTimestamp[] => {
+    if (readyCount <= 1) return all;
 
-  useEffect(() => {
-    if (!readyVideoMedia || !currentSessionId) {
-      // Revoke previous blob URL when media is removed or conversation changes
-      if (videoBlobUrlRef.current) {
-        URL.revokeObjectURL(videoBlobUrlRef.current);
-        videoBlobUrlRef.current = null;
-      }
-      setVideoBlobUrl(null);
-      return;
-    }
+    const name = mediaName.toLowerCase().trim();
+    const nameNoExt = name.replace(/\.[^./\\]+$/, '');
+    return all.filter((t) => {
+      if (t.mediaLabel === undefined) return false;
+      const label = t.mediaLabel.toLowerCase().trim();
+      const labelNoExt = label.replace(/\.[^./\\]+$/, '');
+      return label === name || label === nameNoExt || labelNoExt === nameNoExt || label.includes(name);
+    });
+  };
 
-    let cancelled = false;
-    apiService
-      .fetchPlaygroundMediaBlob(appId, agentId, readyVideoMedia.media_id, currentSessionId)
-      .then((blob) => {
-        if (cancelled) return;
-        // Revoke previous URL if any
-        if (videoBlobUrlRef.current) {
-          URL.revokeObjectURL(videoBlobUrlRef.current);
-        }
-        const url = URL.createObjectURL(blob);
-        videoBlobUrlRef.current = url;
-        setVideoBlobUrl(url);
-      })
-      .catch((err) => {
-        console.error('Failed to fetch media blob:', err);
-        if (!cancelled) setVideoBlobUrl(null);
-      });
+  /**
+   * Remove the media-name prefix from timestamp citations for display, keeping
+   * only the time portion. The raw text still carries the label so the players
+   * can be associated to the right media, but the user sees plain timestamps:
+   *   [lesson.mp4 @ 02:05 - 03:00] -> [02:05 - 03:00]
+   *   [lesson.mp4 @ 02:05]         -> [02:05]
+   */
+  const stripTimestampLabels = (content: string | object): string | object => {
+    if (typeof content !== 'string') return content;
+    return content.replace(
+      /\[\s*[^[\]@]+?\s*@\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?)\]/g,
+      '[$1]',
+    );
+  };
 
-    return () => {
-      cancelled = true;
-    };
-  }, [readyVideoMedia?.media_id, currentSessionId, appId, agentId]);
+  // Direct stream URLs for ready media so the <video>/<audio> element issues
+  // HTTP Range requests for true seeking instead of downloading the whole file
+  // into browser memory. Same-origin requests carry the session cookie.
+  const readyVideoMedias = playgroundMedia.filter((m) => m.status === 'ready');
+  const readyMediaIdsKey = readyVideoMedias.map((m) => m.media_id).join(',');
 
-  // Clean up blob URL on unmount
-  useEffect(() => {
-    return () => {
-      if (videoBlobUrlRef.current) {
-        URL.revokeObjectURL(videoBlobUrlRef.current);
-      }
-    };
-  }, []);
+  const videoStreamUrls = useMemo<Record<number, string>>(() => {
+    if (!currentSessionId) return {};
+    return readyVideoMedias.reduce<Record<number, string>>((map, media) => {
+      map[media.media_id] = apiService.getPlaygroundMediaStreamUrl(
+        appId,
+        agentId,
+        media.media_id,
+        currentSessionId,
+      );
+      return map;
+    }, {});
+  }, [readyMediaIdsKey, currentSessionId, appId, agentId]);
 
   // ─── Render ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full min-h-0 flex-col gap-4">
       {/* Metadata Filters Section */}
       {metadataFields && metadataFields.length > 0 && (
         <div className="pg-glass rounded-xl overflow-hidden">
@@ -925,7 +986,7 @@ function ChatInterface({
                         key={message.id}
                         className="flex justify-end animate-slide-in-right"
                       >
-                        <div className="max-w-[85%] lg:max-w-[75%]">
+                        <div className="max-w-[85%] lg:max-w-[75%] min-w-0">
                           <div className="pg-bubble-user">
                             <MessageContent
                               content={message.content}
@@ -977,7 +1038,7 @@ function ChatInterface({
                         key={message.id}
                         className="flex justify-start animate-slide-in-left"
                       >
-                        <div className="max-w-[85%] lg:max-w-[75%]">
+                        <div className="max-w-[85%] lg:max-w-[75%] min-w-0">
                           <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700/40 text-red-700 dark:text-red-300 rounded-2xl rounded-bl-sm px-4 py-3">
                             <div className="flex items-center gap-2 mb-1">
                               <svg
@@ -1007,6 +1068,12 @@ function ChatInterface({
                                 minute: '2-digit',
                               })}
                             </span>
+                            {message.elapsedMs !== undefined && (
+                              <span className="ml-2 inline-flex items-center gap-1 text-xs tabular-nums text-gray-400 dark:text-gray-500">
+                                <Timer className="h-3 w-3" aria-hidden="true" />
+                                {formatDuration(message.elapsedMs)}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1015,7 +1082,7 @@ function ChatInterface({
 
                   // Agent message — skip entrance animation for the message just committed from streaming
                   const wasStreamed = message.id === lastStreamedMsgIdRef.current;
-                  const msgTimestamps = videoBlobUrl ? parseTimestamps(String(message.content)) : [];
+                  const msgTimestamps = readyVideoMedias.length > 0 ? parseTimestamps(String(message.content)) : [];
                   // Which retrieved chunks did the answer actually cite ([N](cite://N))?
                   // Map those N back to chunk ids so the subgraph can highlight the
                   // entities/relationships that came from them.
@@ -1032,24 +1099,35 @@ function ChatInterface({
                       key={message.id}
                       className={`flex justify-start ${wasStreamed ? '' : 'animate-slide-in-left'}`}
                     >
-                      <div className="max-w-[90%] lg:max-w-[80%]">
+                      <div className="max-w-[90%] lg:max-w-[80%] min-w-0">
                         <div className="pg-bubble-agent text-gray-800 dark:text-gray-100">
                           <MessageContent
-                            content={message.content}
+                            content={stripTimestampLabels(message.content)}
                             resolveFileUrl={resolveFileUrl}
                             citationChunks={message.lightragGraph?.data?.chunks}
                             appId={appId}
                             siloId={siloId}
                           />
                         </div>
-                        {msgTimestamps.length > 0 && videoBlobUrl && (
-                          <VideoPlayer
-                            videoUrl={videoBlobUrl}
-                            timestamps={msgTimestamps}
-                            title={readyVideoMedia?.name}
-                            isAudio={readyVideoMedia?.media_type === 'audio'}
-                          />
-                        )}
+                        {msgTimestamps.length > 0 &&
+                          readyVideoMedias.map((media) => {
+                            const streamUrl = videoStreamUrls[media.media_id];
+                            const mediaTimestamps = getTimestampsForMedia(
+                              msgTimestamps,
+                              media.name,
+                              readyVideoMedias.length,
+                            );
+                            if (!streamUrl || mediaTimestamps.length === 0) return null;
+                            return (
+                              <VideoPlayer
+                                key={media.media_id}
+                                videoUrl={streamUrl}
+                                timestamps={mediaTimestamps}
+                                title={media.name}
+                                isAudio={media.media_type === 'audio'}
+                              />
+                            );
+                          })}
                         {message.lightragGraph && (
                           <LightRAGGraphBubble graphData={message.lightragGraph} citedChunkIds={citedChunkIds} appId={appId} siloId={siloId} />
                         )}
@@ -1060,6 +1138,12 @@ function ChatInterface({
                               minute: '2-digit',
                             })}
                           </span>
+                          {message.elapsedMs !== undefined && (
+                            <span className="ml-2 inline-flex items-center gap-1 text-xs tabular-nums text-gray-400 dark:text-gray-500">
+                              <Timer className="h-3 w-3" aria-hidden="true" />
+                              {formatDuration(message.elapsedMs)}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1071,8 +1155,9 @@ function ChatInterface({
                     keeping content visible until the final message is committed. */}
                 {showStreaming && (
                   <StreamingMessage
-                    content={streamingContent}
+                    content={stripTimestampLabels(streamingContent) as string}
                     isStreaming={isStreaming}
+                    elapsedMs={responseElapsedMs}
                     activeTools={activeTools}
                     thinkingMessage={thinkingMessage}
                   />
@@ -1213,7 +1298,7 @@ function ChatInterface({
 
           {/* Input area */}
           <div className="px-4 pb-4 pt-3 border-t border-white/20 dark:border-gray-700/30">
-            <div className="pg-glass rounded-xl px-3 py-2.5 flex items-end gap-2">
+            <div className="pg-glass pg-input-container rounded-xl px-3 py-2.5 flex items-end gap-2">
               {/* File attach button */}
               <div>
                 <input
@@ -1229,7 +1314,7 @@ function ChatInterface({
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isStreaming}
-                  className="p-1.5 rounded-lg text-gray-400 dark:text-gray-500
+                  className="p-2 rounded-xl text-gray-400 dark:text-gray-500
                              hover:text-indigo-600 dark:hover:text-indigo-400
                              hover:bg-indigo-50 dark:hover:bg-indigo-900/20
                              disabled:opacity-40 disabled:cursor-not-allowed
@@ -1285,25 +1370,21 @@ function ChatInterface({
 
               {/* Textarea */}
               <textarea
+                ref={textareaRef}
                 value={inputMessage}
                 onChange={(e) => setInputMessage(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 placeholder={`Message ${agentName}...`}
                 disabled={isStreaming}
-                className="flex-1 bg-transparent border-none outline-none resize-none
+                className="flex-1 py-2 bg-transparent border-none outline-none resize-none
                            text-sm text-gray-800 dark:text-gray-100
                            placeholder:text-gray-400 dark:placeholder:text-gray-500
                            disabled:opacity-50
+                           focus:outline-none focus:ring-0
                            max-h-40 input-login"
                 rows={1}
                 style={{ minHeight: '1.5rem' }}
-                onInput={(e) => {
-                  // Auto-resize textarea
-                  const target = e.target as HTMLTextAreaElement;
-                  target.style.height = 'auto';
-                  target.style.height = `${Math.min(target.scrollHeight, 160)}px`;
-                }}
               />
 
               {/* Send / Abort button */}
@@ -1331,7 +1412,7 @@ function ChatInterface({
                   type="button"
                   onClick={handleSendMessage}
                   disabled={!canSend}
-                  className="pg-btn-send shrink-0 !p-2"
+                  className="pg-btn-send shrink-0 !p-2 rounded-xl"
                   aria-label="Send message"
                 >
                   <svg
@@ -1365,6 +1446,12 @@ function ChatInterface({
           isLoading={isLoadingFiles}
           onRemoveFile={handleRemovePersistentFile}
           onDownloadFile={handleDownloadFile}
+        />
+
+        {/* Tool Execution History Panel */}
+        <ToolHistoryPanel
+          history={toolExecutionHistory}
+          onClear={clearToolHistory}
         />
       </div>
 

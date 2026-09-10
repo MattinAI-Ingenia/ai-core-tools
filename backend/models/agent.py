@@ -67,6 +67,9 @@ class Agent(Base):
     service_id = Column(Integer,
                         ForeignKey('AIService.service_id', ondelete='SET NULL'),
                         nullable=True)
+    sandbox_service_id = Column(Integer,
+                        ForeignKey('SandboxService.service_id', ondelete='SET NULL'),
+                        nullable=True)
     silo_id = Column(Integer,
                         ForeignKey('Silo.silo_id'),
                         nullable=True)
@@ -112,6 +115,31 @@ class Agent(Base):
     temperature = Column(Float, default=DEFAULT_AGENT_TEMPERATURE, nullable=False)
     is_frozen = Column(Boolean, default=False, nullable=False)
 
+    # Media processing configuration (used by the playground media upload).
+    # Configured once at agent level so uploads only require the file/URL.
+    transcription_service_id = Column(
+        Integer,
+        ForeignKey('AIService.service_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    video_ai_service_id = Column(
+        Integer,
+        ForeignKey('AIService.service_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    # Embedding service used to vectorize media/documents into the session's
+    # temp playground silo. Required at agent level (enforced by the API schema)
+    # so uploads never fall back to an arbitrary/misconfigured app service.
+    media_embedding_service_id = Column(
+        Integer,
+        ForeignKey('embedding_service.service_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    media_forced_language = Column(String(10), nullable=True)
+    media_chunk_min_duration = Column(Integer, default=30, nullable=False, server_default='30')
+    media_chunk_max_duration = Column(Integer, default=120, nullable=False, server_default='120')
+    media_chunk_overlap = Column(Integer, default=5, nullable=False, server_default='5')
+
     marketplace_visibility = Column(
         Enum(MarketplaceVisibility),
         nullable=False,
@@ -120,6 +148,9 @@ class Agent(Base):
 
     ai_service = relationship('AIService',
                            foreign_keys=[service_id])
+
+    sandbox_service = relationship('SandboxService',
+                           foreign_keys=[sandbox_service_id])
 
     silo = relationship('Silo',
                            back_populates='agents',

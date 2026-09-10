@@ -6,6 +6,11 @@ from schemas.agent_schemas import CreateUpdateAgentSchema, AgentDetailSchema
 
 
 def _agent(**kwargs):
+    # media_embedding_service_id is required unconditionally by
+    # CreateUpdateAgentSchema (see _validate_media_config) — unrelated to
+    # what this test file actually exercises (lightrag_query_mode), so just
+    # satisfy it with a placeholder id.
+    kwargs.setdefault("media_embedding_service_id", 1)
     return CreateUpdateAgentSchema(name="test-agent", **kwargs)
 
 

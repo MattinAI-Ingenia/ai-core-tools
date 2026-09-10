@@ -27,6 +27,7 @@ interface SiloGraphData {
     node_count: number;
     edge_count: number;
     total_nodes: number;
+    total_edges: number;
     truncated: boolean;
 }
 

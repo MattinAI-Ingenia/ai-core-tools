@@ -81,3 +81,16 @@ benchmark/
 # Infinity model weights (reranker/embeddings) — GBs of downloaded checkpoints
 docker/utilities/*/hf_cache/
 .worktrees/
+
+# Codex agent system: ship AGENTS.md, .codex/agents and .agents/skills,
+# but keep per-run specs and personal config out of git.
+.codex/specs/
+.codex/config.local.toml
+
+# Entornos Docker locales: un .env por entorno, con secretos. Las plantillas
+# .env.example sí se versionan.
+docker/envs/*.env
+!docker/envs/*.env.example
+
+# Dumps de BD locales (docker/mattin.ps1). Nunca al repo.
+docker/backups/

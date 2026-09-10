@@ -26,6 +26,9 @@ from pydantic import ValidationError
 
 _REQUIRED_CREATE_UPDATE = {
     "name": "test",
+    # Required unconditionally by CreateUpdateAgentSchema's _validate_media_config
+    # — unrelated to what most tests in this file exercise, so just satisfy it.
+    "media_embedding_service_id": 1,
 }
 
 _REQUIRED_CREATE_PUBLIC = {
@@ -74,9 +77,10 @@ class TestRagK:
             schema_fn(rag_k=0)
 
     @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_rag_k_above_max_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_k"):
-            schema_fn(rag_k=101)
+    def test_rag_k_above_max_only_warns(self, schema_fn):
+        """rag_k above the soft max (100) is accepted — logged, not rejected.
+        per_100_chunks scaling can legitimately need a larger k."""
+        schema_fn(rag_k=101)
 
 
 # ---------------------------------------------------------------------------
