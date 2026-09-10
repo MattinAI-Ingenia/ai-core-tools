@@ -1,4 +1,5 @@
 import re
+import threading
 from typing import List
 
 import snowballstemmer
@@ -15,13 +16,24 @@ DEFAULT_K = 30
 DEFAULT_MAX_DOCS = 5000
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
-_stemmer = snowballstemmer.stemmer("english")
+_thread_local = threading.local()
+
+
+def _get_stemmer():
+    """Thread-local stemmer — snowballstemmer mutates internal state while
+    stemming, so a shared instance races when build() runs concurrently on
+    different asyncio.to_thread worker threads (IndexError under concurrent load)."""
+    stemmer = getattr(_thread_local, "stemmer", None)
+    if stemmer is None:
+        stemmer = snowballstemmer.stemmer("english")
+        _thread_local.stemmer = stemmer
+    return stemmer
 
 
 def _preprocess(text: str) -> List[str]:
     """Lowercase, tokenize on word boundaries, and stem — see module docstring."""
     tokens = _WORD_RE.findall(text.lower())
-    return _stemmer.stemWords(tokens)
+    return _get_stemmer().stemWords(tokens)
 
 
 class BM25SearchMethod(SearchMethod):
