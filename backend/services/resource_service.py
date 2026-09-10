@@ -747,7 +747,7 @@ class ResourceService:
                                 feed=_feed_next,
                                 window=INGESTION_FEED_WINDOW,
                             ) or {}
-                        except Exception:
+                        except Exception as exc:
                             # batch_result stays {} — the loop below then falls
                             # back to each row's own live-updated progress to
                             # decide completeness, since this exception wiped
@@ -759,6 +759,43 @@ class ResourceService:
                             # service or call raised it. The full traceback is
                             # what actually pins the cause next time.
                             logger.exception(f"Failed to process enqueued batch for silo {silo_id}")
+
+                            # A crash can happen before ``feed`` is ever called (e.g. an
+                            # eager embedding-service connectivity check) — in that case
+                            # enqueued_resource_ids stays empty and the finalization loop
+                            # below (which only iterates enqueued_resource_ids) never
+                            # touches these rows, leaving them 'pending'/'indexing'
+                            # forever. Sweep the rest of this batch — everything neither
+                            # already resolved by _extract_next/_mark ('ready'/'error')
+                            # nor already handed to the finalization loop below via
+                            # enqueued_resource_ids — and stamp it 'error' too. Skip this
+                            # when the user asked to stop: that is an intentional pause/
+                            # cancel, not a failure, and the parking below is the right
+                            # outcome for those rows.
+                            if not _stop_mode():
+                                unresolved_candidates = [
+                                    rid for rid, _ in resource_snapshots
+                                    if rid not in enqueued_resource_ids
+                                ]
+                                if unresolved_candidates:
+                                    _db_crash = _SessionLocal()
+                                    try:
+                                        unresolved = _db_crash.query(ResourceModel).filter(
+                                            ResourceModel.resource_id.in_(unresolved_candidates),
+                                            ResourceModel.status.in_(('pending', 'indexing')),
+                                        ).all()
+                                        unresolved_ids = [r.resource_id for r in unresolved]
+                                        for r in unresolved:
+                                            r.status = 'error'
+                                            r.error_message = str(exc)
+                                            r.progress_done = r.progress_total
+                                        _db_crash.commit()
+                                    finally:
+                                        _db_crash.close()
+                                    for resource_id in unresolved_ids:
+                                        resource_chunks = chunk_counts.get(resource_id, 1)
+                                        failed += resource_chunks
+                                        cumulative += resource_chunks
 
                         # A stop leaves part of the batch unprocessed, so the
                         # per-resource counts decide the final status. Marking
@@ -854,6 +891,7 @@ class ResourceService:
                                 r = _db3.query(ResourceModel).filter_by(resource_id=resource_id).first()
                                 if r:
                                     r.status = 'error'
+                                    r.error_message = str(e)
                                     r.progress_done = r.progress_total
                                     _db3.commit()
                             finally:
@@ -969,6 +1007,67 @@ class ResourceService:
             # Nothing to resume while a run is alive: it will get to them.
             "resumable": 0 if alive else unfinished,
         }
+
+    @staticmethod
+    def count_failed_resources(db: Session, repository_id: int) -> int:
+        """Number of 'error' resources in this repository's most recent batch.
+
+        Used by the ingestion-progress SSE stream to tell a genuinely finished
+        run from one whose background thread died or crashed mid-batch — both
+        end with no active silo lock, but only the latter leaves 'error' rows.
+
+        Scoped to the latest ``progress_started_at`` stamp (see
+        ``get_indexing_progress``) so a stale 'error' row left over from an
+        older, unrelated run doesn't make a brand-new successful ingestion
+        falsely report failure over SSE.
+        """
+        latest_batch = (
+            db.query(func.max(Resource.progress_started_at))
+            .filter(Resource.repository_id == repository_id)
+            .scalar()
+        )
+        if latest_batch is None:
+            return 0
+        return (
+            db.query(func.count(Resource.resource_id))
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.progress_started_at == latest_batch,
+                Resource.status == 'error',
+            )
+            .scalar()
+        ) or 0
+
+    @staticmethod
+    def get_last_batch_error_message(db: Session, repository_id: int) -> Optional[str]:
+        """One representative error message from this repository's most recent
+        failed batch, for surfacing the real cause alongside
+        ``count_failed_resources`` on the ingestion-progress SSE stream.
+
+        Scoped to the same latest ``progress_started_at`` batch as
+        ``count_failed_resources`` — see that method's docstring.
+        """
+        latest_batch = (
+            db.query(func.max(Resource.progress_started_at))
+            .filter(Resource.repository_id == repository_id)
+            .scalar()
+        )
+        if latest_batch is None:
+            return None
+        row = (
+            db.query(Resource.error_message)
+            .filter(
+                Resource.repository_id == repository_id,
+                Resource.progress_started_at == latest_batch,
+                Resource.status == 'error',
+                Resource.error_message.isnot(None),
+            )
+            # .first(), not .scalar(): a batch commonly has more than one
+            # failed resource, and .scalar() raises MultipleResultsFound
+            # for more than one row.
+            .first()
+        )
+        return row[0] if row else None
 
     # Statuses a stopped-but-not-yet-indexed resource is parked in. Both stop
     # the run; they differ only in whether the UI keeps nudging you to finish

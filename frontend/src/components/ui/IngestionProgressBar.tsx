@@ -26,6 +26,14 @@ interface IngestionProgressBarProps {
   resumable?: number;
   onResume?: () => void;
   resuming?: boolean;
+  /** Called once when the backend reports the run failed, so the parent can
+   * hold onto the message: this component's own `failedMessage` resets as
+   * soon as `sessionId` clears (the 3s poll below does that on its own, once
+   * `is_indexing` goes false — it doesn't wait for `onComplete`). */
+  onFailed?: (message: string) => void;
+  /** The last failure's message, kept by the parent past the `sessionId`
+   * reset above, so the idle "Resume" state can still show why it stopped. */
+  lastFailureMessage?: string | null;
 }
 
 export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
@@ -37,12 +45,22 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   resumable = 0,
   onResume,
   resuming = false,
+  onFailed,
+  lastFailureMessage = null,
 }) => {
-  const { progress, isConnected, isComplete, error } = useIngestionProgress(
+  const { progress, isConnected, isComplete, failedMessage, error } = useIngestionProgress(
     appId,
     repositoryId,
     sessionId,
   );
+
+  const onFailedRef = React.useRef(onFailed);
+  React.useEffect(() => {
+    onFailedRef.current = onFailed;
+  });
+  React.useEffect(() => {
+    if (failedMessage) onFailedRef.current?.(failedMessage);
+  }, [failedMessage]);
 
   // Keep onComplete stable: always call the latest version but only once, when
   // isComplete first becomes true.  Without this, every parent re-render (e.g.
@@ -100,6 +118,22 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   const failed = (mode: 'pause' | 'cancel') =>
     stopState?.mode === mode && stopState.phase === 'failed';
 
+  // Shown on a failed run instead of the auto-dismiss timer: the user decides
+  // when to move on, by resuming, rather than the banner clearing itself.
+  const resumeButton = resumable > 0 && onResume ? (
+    <button
+      type="button"
+      onClick={onResume}
+      disabled={resuming}
+      className={`${stopBtn} text-red-700 border-red-300 bg-white hover:bg-red-50 flex-shrink-0`}
+    >
+      {resuming
+        ? <Loader className="w-4 h-4 animate-spin" />
+        : <RefreshCw className="w-4 h-4" />}
+      {resuming ? 'Resuming…' : `Resume indexing (${resumable})`}
+    </button>
+  ) : null;
+
   const cancelDisclaimer = (
     <ConfirmationModal
       isOpen={confirmCancel}
@@ -154,6 +188,8 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   );
 
   React.useEffect(() => {
+    // A failure stays on screen until the user clicks Resume — no timer,
+    // see resumeButton. Only a genuine success auto-dismisses.
     if (!isComplete) return;
     // Let the user see the "Ingestion Complete" state briefly before the bar
     // is removed.
@@ -196,6 +232,18 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
 
   if (!sessionId) {
     if (!resumable || !onResume) return null;
+    if (lastFailureMessage) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-red-800 font-medium">Ingestion Failed</p>
+            <p className="text-red-700 text-sm">{lastFailureMessage}</p>
+          </div>
+          {resumeButton}
+        </div>
+      );
+    }
     return (
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-center gap-3">
         <PauseCircle className="w-5 h-5 text-amber-600 flex-shrink-0" />
@@ -233,6 +281,20 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
 
   // Waiting for first progress event
   if (!progress) {
+    // Fast failure: the batch ended (with 'error' resources left behind)
+    // before we received any progress data.
+    if (failedMessage) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-red-800 font-medium">Ingestion Failed</p>
+            <p className="text-red-700 text-sm">{failedMessage}</p>
+          </div>
+          {resumeButton}
+        </div>
+      );
+    }
     // Fast completion: indexing finished before we received any progress data
     // (e.g. proxy buffered the SSE stream and delivered all events at once).
     if (isComplete) {
@@ -290,7 +352,9 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          {isComplete ? (
+          {failedMessage ? (
+            <AlertCircle className="w-5 h-5 text-red-600" />
+          ) : isComplete ? (
             cancelled
               ? <StopCircle className="w-5 h-5 text-red-600" />
               : <CheckCircle className="w-5 h-5 text-green-600" />
@@ -298,14 +362,16 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
             <Loader className="w-5 h-5 text-blue-600 animate-spin" />
           )}
           <span className="font-medium text-gray-900">
-            {isComplete ? (cancelled ? 'Ingestion Cancelled' : 'Ingestion Complete') : 'Ingesting Documents'}
+            {failedMessage
+              ? 'Ingestion Failed'
+              : isComplete ? (cancelled ? 'Ingestion Cancelled' : 'Ingestion Complete') : 'Ingesting Documents'}
           </span>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm font-mono text-gray-600">
             {formatPercent(progress.progress_percent)}%
           </span>
-          {!isComplete && stopControls}
+          {!isComplete && !failedMessage && stopControls}
         </div>
       </div>
 
@@ -313,11 +379,18 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
         <div
           className={`h-full transition-all duration-300 ${
-            isComplete ? (cancelled ? 'bg-red-600' : 'bg-green-600') : 'bg-blue-600'
+            failedMessage || (isComplete && cancelled) ? 'bg-red-600' : isComplete ? 'bg-green-600' : 'bg-blue-600'
             }`}
           style={{ width: `${progress.progress_percent}%` }}
         />
       </div>
+
+      {failedMessage && (
+        <div className="bg-red-50 rounded p-2 text-xs text-red-700 flex items-center justify-between gap-3">
+          <span>{failedMessage}</span>
+          {resumeButton}
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-4 text-sm">
@@ -365,7 +438,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       )}
 
       {/* Connection status */}
-      {!isConnected && !isComplete && (
+      {!isConnected && !isComplete && !failedMessage && (
         <div className="text-xs text-amber-600 flex items-center gap-1">
           <div className="w-2 h-2 rounded-full bg-amber-600 animate-pulse" />
           Reconnecting...

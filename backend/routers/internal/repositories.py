@@ -1086,7 +1086,10 @@ async def stream_ingestion_progress(
 
     Events:
     - ``message``: JSON progress payload (emitted on every change)
-    - ``complete``: no resource of this repository is pending/indexing any more
+    - ``complete``: no resource of this repository is pending/indexing any more,
+      and none of them ended up 'error' — a genuinely finished run
+    - ``failed``: no resource of this repository is pending/indexing any more,
+      but the run left one or more resources 'error' behind
     - ``error``: something went wrong (data contains error message)
     """
     async def event_generator():
@@ -1104,6 +1107,21 @@ async def stream_ingestion_progress(
                 return None
             return ResourceService.get_indexing_progress(db, repository_id)
 
+        def _terminal_event():
+            # No active batch any more: tell a genuinely finished run (all
+            # 'ready') apart from a dead one that crashed mid-batch and left
+            # 'error' rows behind — both look identical to plain liveness.
+            failed_count = ResourceService.count_failed_resources(db, repository_id)
+            if failed_count:
+                message = f"{failed_count} file(s) could not be indexed."
+                error_message = ResourceService.get_last_batch_error_message(db, repository_id)
+                if error_message:
+                    message = f"{message} {error_message}"
+                else:
+                    message = f"{message} Check the server logs for details."
+                return f"event: failed\ndata: {json.dumps({'message': message})}\n\n"
+            return "event: complete\ndata: {}\n\n"
+
         try:
             # Emit initial state immediately on connect — no 0.5 s wait.
             # This flushes the response buffer through any intermediate proxy,
@@ -1111,7 +1129,7 @@ async def stream_ingestion_progress(
             # actual data right away instead of staying at "Connecting…".
             initial = _read()
             if initial is None:
-                yield "event: complete\ndata: {}\n\n"
+                yield _terminal_event()
                 return
             yield f"data: {json.dumps(initial)}\n\n"
 
@@ -1121,7 +1139,7 @@ async def stream_ingestion_progress(
 
                 progress = _read()
                 if progress is None:
-                    yield "event: complete\ndata: {}\n\n"
+                    yield _terminal_event()
                     break
 
                 # Emit every tick, not only on chunk changes: the elapsed clock

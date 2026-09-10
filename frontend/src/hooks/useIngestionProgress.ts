@@ -29,6 +29,10 @@ export interface UseIngestionProgressResult {
   progress: IngestionProgressData | null;
   isConnected: boolean;
   isComplete: boolean;
+  /** Set from the server's `failed` event: the batch ended with resources left
+   * in 'error', as opposed to a genuine `complete`. Mutually exclusive with
+   * `isComplete`. */
+  failedMessage: string | null;
   error: string | null;
   startTime: Date | null;
 }
@@ -41,6 +45,7 @@ export function useIngestionProgress(
   const [progress, setProgress] = useState<IngestionProgressData | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
+  const [failedMessage, setFailedMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [startTime] = useState(new Date());
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -57,6 +62,7 @@ export function useIngestionProgress(
     // real, active progress: the effect below opens a fresh EventSource for
     // the new sessionId, but isComplete stayed true from the session before.
     setIsComplete(false);
+    setFailedMessage(null);
     setProgress(null);
     setError(null);
 
@@ -102,6 +108,22 @@ export function useIngestionProgress(
         eventSourceRef.current = null;
       });
 
+      // Batch ended with resources left 'error' — a genuine failure, not the
+      // success the plain 'complete' event signals.
+      eventSource.addEventListener('failed', (event) => {
+        let message = 'Some files could not be indexed.';
+        try {
+          const data = JSON.parse((event as MessageEvent).data) as { message?: string };
+          if (data.message) message = data.message;
+        } catch (_e) {
+          // Fall back to the default message above.
+        }
+        setFailedMessage(message);
+        setIsConnected(false);
+        eventSource.close();
+        eventSourceRef.current = null;
+      });
+
       // Single consolidated error handler.
       // onerror and addEventListener('error') both fire for the same events, so
       // we use only addEventListener to avoid double-handling.
@@ -137,5 +159,5 @@ export function useIngestionProgress(
     };
   }, [appId, repositoryId, sessionId]);
 
-  return { progress, isConnected, isComplete, error, startTime };
+  return { progress, isConnected, isComplete, failedMessage, error, startTime };
 }

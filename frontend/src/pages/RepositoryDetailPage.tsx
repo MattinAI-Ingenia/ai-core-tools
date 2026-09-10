@@ -183,6 +183,9 @@ const RepositoryDetailPage: React.FC = () => {
   const [ingestionSessionId, setIngestionSessionId] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
   const [resumable, setResumable] = useState(0);
+  // Kept past the 3s poll's sessionId reset (see IngestionProgressBar), so the
+  // idle "Resume" strip can still say why the run stopped.
+  const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
   const hasCheckedInitialIngestion = useRef(false);
 
@@ -695,6 +698,7 @@ const RepositoryDetailPage: React.FC = () => {
         setIngestionSessionId(session_id);
         setIsIndexing(true);
         setResumable(0);
+        setLastFailureMessage(null);
       }
       await loadRepository(false);
     } catch (err) {
@@ -1009,7 +1013,7 @@ const RepositoryDetailPage: React.FC = () => {
           isOpen={showImportReviewModal}
           onClose={() => setShowImportReviewModal(false)}
           onJobUpdated={(updated) => { setActiveImportJob(updated); if (!updated) setShowImportReviewModal(false); }}
-          onIngestionStarted={(sessionId) => { setIngestionSessionId(sessionId); setIsIndexing(true); }}
+          onIngestionStarted={(sessionId) => { setIngestionSessionId(sessionId); setIsIndexing(true); setLastFailureMessage(null); }}
         />
       )}
 
@@ -1045,6 +1049,8 @@ const RepositoryDetailPage: React.FC = () => {
             resumable={resumable}
             resuming={resuming}
             onResume={handleResumeIngestion}
+            onFailed={setLastFailureMessage}
+            lastFailureMessage={lastFailureMessage}
             onComplete={() => {
               setIngestionSessionId(null);
               setIsIndexing(false);

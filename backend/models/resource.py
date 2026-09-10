@@ -11,6 +11,7 @@ class Resource(Base):
     uri = Column(String(1000))
     type = Column(String(45))
     status = Column(String(45))
+    error_message = Column(Text, nullable=True)
     repository_id = Column(Integer,
                         ForeignKey('Repository.repository_id'),
                         nullable=True)
