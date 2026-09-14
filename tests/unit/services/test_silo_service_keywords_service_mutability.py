@@ -1,12 +1,14 @@
 """
-Unit tests: keywords_service_id must stay editable after silo creation,
-while extract_service_id/vlm_service_id/indexing_service_id/lightrag_language
-stay immutable.
+Unit tests: keywords_service_id and extract_service_id (plus its legacy alias
+indexing_service_id) must stay editable after silo creation, while
+vlm_service_id/lightrag_language stay immutable.
 
-keywords_service_id only feeds LightRAG's query-time keyword-extraction LLM —
-it never touches already-indexed data, unlike extract/vlm which would mix
-entities extracted with different models in the same graph. lightrag_language
-is immutable too because it drives that same extraction prompt.
+keywords_service_id only feeds LightRAG's query-time keyword-extraction LLM,
+and extract_service_id only shapes extraction for documents indexed from this
+point forward — neither touches already-indexed data. vlm_service_id, by
+contrast, would mix pages extracted with different vision models in the same
+graph, so it stays frozen after creation. lightrag_language is immutable too
+because it drives that same extraction prompt.
 """
 
 from unittest.mock import MagicMock, patch
@@ -53,10 +55,19 @@ def test_keywords_service_id_is_updatable_after_creation():
     assert result.keywords_service_id == 999
 
 
-def test_extract_service_id_stays_immutable_after_creation():
+def test_extract_service_id_is_updatable_after_creation():
     silo = _make_silo()
     result = _call(silo, {"extract_service_id": 999})
-    assert result.extract_service_id == 100
+    assert result.extract_service_id == 999
+    assert result.indexing_service_id == 999  # legacy alias kept in sync
+
+
+def test_indexing_service_id_is_updatable_after_creation():
+    """The legacy alias is also editable, and mirrors back into extract_service_id."""
+    silo = _make_silo()
+    result = _call(silo, {"indexing_service_id": 999})
+    assert result.indexing_service_id == 999
+    assert result.extract_service_id == 999
 
 
 def test_vlm_service_id_stays_immutable_after_creation():

@@ -157,3 +157,48 @@ class TestRepositoryServiceUpdateGuard:
         with patch.object(RepositoryRepository, "update", return_value=repo):
             result = RepositoryService.update_repository(repo, vector_db_type="QDRANT", db=mock_db)
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# indexing_service_id (legacy alias for extract_service_id) must NOT be
+# treated as immutable — unlike embedding_service_id, changing the LightRAG
+# extraction LLM doesn't invalidate anything already indexed. Regression test
+# for a bug where changing a repository's Extract AI Service raised a wrongly
+# worded "embedding_service_id cannot be changed" error.
+# ---------------------------------------------------------------------------
+
+class TestRepositoryServiceIndexingServiceIdEditable:
+
+    def _call_update(self, repository: MagicMock, indexing_service_id: int | None):
+        from services.repository_service import RepositoryService
+        from repositories.repository_repository import RepositoryRepository
+
+        mock_db = MagicMock()
+
+        with patch.object(RepositoryRepository, "update", return_value=repository):
+            return RepositoryService.update_repository(
+                repository,
+                indexing_service_id=indexing_service_id,
+                db=mock_db,
+            )
+
+    def test_changing_indexing_service_id_does_not_raise(self):
+        repo = _make_repository_mock()
+        repo.silo.indexing_service_id = 100
+        result = self._call_update(repo, 999)
+        assert result is not None
+        assert repo.silo.indexing_service_id == 999
+
+    def test_same_indexing_service_id_is_accepted(self):
+        repo = _make_repository_mock()
+        repo.silo.indexing_service_id = 100
+        result = self._call_update(repo, 100)
+        assert result is not None
+        assert repo.silo.indexing_service_id == 100
+
+    def test_omitted_indexing_service_id_is_accepted(self):
+        repo = _make_repository_mock()
+        repo.silo.indexing_service_id = 100
+        result = self._call_update(repo, None)
+        assert result is not None
+        assert repo.silo.indexing_service_id == 100

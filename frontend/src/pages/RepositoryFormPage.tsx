@@ -559,13 +559,14 @@ const RepositoryFormPage: React.FC = () => {
                 const modelName = svc?.description || svc?.model_name || svc?.name;
                 const warning = role !== 'vlm' ? getRoleWarning(role, modelName) : null;
                 const blockingErr = role === 'vlm' ? vlmBlockingError(modelName) : null;
-                // Backend only accepts extract/VLM service on creation
-                // (silo_service.py sets them only `if not silo_id`) — an
-                // update silently drops the change instead of erroring, so
-                // the field must look immutable here too, not just fail
-                // quietly after save. keywords_service_id has no such
-                // restriction and stays editable, matching the backend.
-                const immutableOnUpdate = field !== 'keywords_service_id' && !isNewRepository;
+                // Only VLM is set on creation only (silo_service.py sets it
+                // only `if not silo_id`) — changing it mid-way would mix
+                // pages/entities extracted with different vision models in
+                // the same graph, so it must look immutable here too.
+                // extract_service_id only affects extraction for documents
+                // indexed from this point forward, so it stays editable
+                // after creation, same as keywords_service_id.
+                const immutableOnUpdate = field === 'vlm_service_id' && !isNewRepository;
                 return (
                   <div key={field}>
                     <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-2">

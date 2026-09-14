@@ -186,9 +186,10 @@ class RepositoryService:
             repository.silo.embedding_service_id = embedding_service_id
 
         if repository.silo and indexing_service_id:
-            assert_embedding_service_immutable(
-                repository.silo.indexing_service_id, indexing_service_id, "repository"
-            )
+            # indexing_service_id is a legacy alias for extract_service_id (the
+            # LightRAG extraction LLM), not the embedding model — unlike
+            # embedding_service_id it's genuinely editable after creation, so it
+            # must just be kept in sync here, not validated as frozen.
             repository.silo.indexing_service_id = indexing_service_id
 
         if repository.silo:

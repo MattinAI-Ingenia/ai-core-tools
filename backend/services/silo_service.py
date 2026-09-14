@@ -1118,28 +1118,29 @@ class SiloService:
                 if vlm_service_id:
                     SiloService._validate_vlm_service(int(vlm_service_id), session)
 
-            # extract/vlm/indexing are set on creation only — immutable after,
-            # since changing them mid-way would mix entities extracted with
-            # different models in the same graph. keywords_service_id is
-            # query-time only (never touches indexed data) so it stays
-            # editable on update too.
-            if not silo_id:
-                role_fields = (
-                    'indexing_service_id',
-                    'extract_service_id',
-                    'vlm_service_id',
-                )
-                for field in role_fields:
-                    if silo_data.get(field):
-                        setattr(silo, field, silo_data[field])
+            # vlm is set on creation only — immutable after, since changing it
+            # mid-way would mix entities/pages extracted with different vision
+            # models in the same graph.
+            if not silo_id and silo_data.get('vlm_service_id'):
+                silo.vlm_service_id = silo_data['vlm_service_id']
+
+            # extract_service_id (and its legacy alias indexing_service_id) is
+            # editable at any time, unlike vlm_service_id: it only shapes
+            # extraction for documents indexed from this point forward, so
+            # changing it doesn't invalidate anything already indexed. Both
+            # columns are kept in sync — indexing_service_id is a plain alias.
+            extract_value = silo_data.get('extract_service_id') or silo_data.get('indexing_service_id')
+            if extract_value:
+                silo.extract_service_id = extract_value
+                silo.indexing_service_id = extract_value
 
             if silo_data.get('keywords_service_id'):
                 silo.keywords_service_id = silo_data['keywords_service_id']
 
-            # Compatibility shim: when the UI sent only the new
-            # extract_service_id, mirror it into the legacy column so
-            # downstream code that still reads indexing_service_id keeps
-            # working until it is migrated.
+            # Compatibility shim: an existing silo whose two columns somehow
+            # disagree (e.g. legacy rows written before extract_service_id
+            # existed) still gets reconciled, even when neither was resubmitted
+            # above.
             if silo.extract_service_id and not silo.indexing_service_id:
                 silo.indexing_service_id = silo.extract_service_id
             elif silo.indexing_service_id and not silo.extract_service_id:
