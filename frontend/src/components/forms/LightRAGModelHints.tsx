@@ -13,17 +13,21 @@ import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 // PricingCatalog before trusting these next time providers reprice.
 const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>> = {
   extract: [
-    { provider: 'OpenAI', model: 'GPT-4.1 mini' },
-    { provider: 'Anthropic', model: 'Claude 3.5 Haiku' },
+    // Kept to the SAME generation family as before for every provider where
+    // a same-generation cheaper option existed — extract needs real
+    // quality (structured entity/relationship JSON), so a price cut that
+    // also drops a whole model generation is not worth the risk here.
+    { provider: 'OpenAI', model: 'GPT-5 mini' },
+    { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
     { provider: 'Mistral', model: 'Mistral Small 4' },
-    { provider: 'Google', model: 'Gemini 2.5 Flash-Lite' },
+    { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
     { provider: 'Open-source', model: 'Qwen3-30B-A3B-Instruct' },
   ],
   keywords: [
-    { provider: 'OpenAI', model: 'GPT-5 nano' },
-    { provider: 'Anthropic', model: 'Claude 3 Haiku' },
+    { provider: 'OpenAI', model: 'GPT-5.4 nano' },
+    { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
     { provider: 'Mistral', model: 'Ministral 3-3B' },
-    { provider: 'Google', model: 'Gemini 2.0 Flash' },
+    { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
     { provider: 'Open-source', model: 'Qwen3-4B-Instruct' },
   ],
 };
