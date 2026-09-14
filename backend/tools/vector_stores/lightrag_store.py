@@ -354,7 +354,12 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
             try:
                 done = await _finished_docs() - baseline
                 run_total[0] = await _real_total()
-                progress_callback(max(0, min(run_total[0] - 1, done)), run_total[0])
+                # Offload the (synchronous, DB-writing) callback to a worker
+                # thread — same reason as should_cancel below: a slow/
+                # contended write must not stall this poll's event loop.
+                await asyncio.to_thread(
+                    progress_callback, max(0, min(run_total[0] - 1, done)), run_total[0]
+                )
             except Exception:
                 pass  # polling is best-effort
 
@@ -365,7 +370,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
 
-    progress_callback(run_total[0], run_total[0])
+    await asyncio.to_thread(progress_callback, run_total[0], run_total[0])
 
 
 async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
@@ -628,7 +633,11 @@ async def _aprocess_enqueued_with_progress(
                     if last_done.get(rid, -1) != done:
                         last_done[rid] = done
                         if progress_callback is not None:
-                            progress_callback(rid, done, totals[rid])
+                            # Offload the (synchronous, DB-writing) callback to
+                            # a worker thread — same reason as should_cancel
+                            # below: a slow/contended write must not stall
+                            # this poll's event loop.
+                            await asyncio.to_thread(progress_callback, rid, done, totals[rid])
                 # Stop handling rides this same poll: it is already the loop that
                 # runs beside the long apipeline_process_enqueue_documents call,
                 # in the right process for LightRAG's per-process flag. The DB
@@ -798,57 +807,168 @@ async def _aprocess_enqueued_with_progress(
     final_counts = await _counts()
     if progress_callback is not None:
         for rid, c in final_counts.items():
-            progress_callback(rid, c["processed"] + c["failed"], totals[rid])
+            await asyncio.to_thread(
+                progress_callback, rid, c["processed"] + c["failed"], totals[rid]
+            )
     return {rid: {**c, "total": totals[rid]} for rid, c in final_counts.items()}
 
 
-async def _areset_postgres_client_pool():
-    """Force-close and reset lightrag-hku's process-wide Postgres client pool.
+class _SharedPostgresLoop:
+    """One persistent background thread + event loop for the WHOLE process,
+    dedicated to ``lightrag.kg.postgres_impl.ClientManager``'s Postgres
+    client pool.
 
-    ``lightrag.kg.postgres_impl.ClientManager`` keeps ONE asyncpg pool for the
-    whole process, shared by every workspace, bound forever to whichever event
-    loop first created it ("the first successful initialization defines the
-    pool... for the lifetime of the shared client" — its own docstring). Every
-    indexing job here runs in its own throwaway thread + event loop (see
-    ``resource_service._index_resources_background``), so a pool left over
-    from a *previous* job's now-dead loop makes every LightRAG call in the
-    *next* job fail with "Future attached to a different loop" — 100% of the
-    time, not just under concurrency. Nothing in this codebase ever calls the
-    matching ``ClientManager.release_client``, so the pool is never released
-    on its own either.
-
-    Call this once at the very start of every indexing job, before building
-    any LightRAG instance, while holding the global lock from
-    ``silo_indexing_lock`` (sentinel id) so no other job's loop can be
-    depending on the pool this closes.
+    ``ClientManager`` keeps exactly ONE asyncpg pool for the entire process,
+    shared by every silo/workspace regardless of which vector-db backend that
+    silo uses (kv_storage/doc_status_storage are always Postgres — see
+    ``storage_config.py``), bound forever to whichever event loop first
+    created it ("the first successful initialization defines the pool... for
+    the lifetime of the shared client" — its own docstring). Unlike
+    ``_CollectionEventLoop`` (one per collection, torn down when its
+    ``LightRAGStore`` is garbage-collected), that pool is a library-level
+    singleton, not something we can make per-collection — so instead every
+    caller (any silo, indexing or querying) is routed through this one
+    process-wide loop, created lazily on first use and never closed for the
+    life of the process. See ``_ensure_shared_postgres_loop_patch`` for how
+    every Postgres-touching entry point is dispatched here.
     """
-    from lightrag.kg.postgres_impl import ClientManager  # noqa: WPS433
 
-    async with ClientManager._lock:
-        db = ClientManager._instances["db"]
-        if db is not None and db.pool is not None:
-            try:
-                await db.pool.close()
-            except Exception:
-                # The pool may belong to an already-dead loop from a previous
-                # job's thread — closing it gracefully can itself fail on that
-                # dead loop. Only the reset below is load-bearing (it makes the
-                # next get_client() build a brand new pool); a failed close of
-                # already-broken connections is harmless to ignore.
-                logger.warning("Could not gracefully close stale LightRAG Postgres pool; discarding it anyway.")
-        ClientManager._instances["db"] = None
-        ClientManager._instances["ref_count"] = 0
-        ClientManager._instances["vector_signature"] = None
+    _instance: Optional["_SharedPostgresLoop"] = None
+    _instance_lock = threading.Lock()
+
+    def __init__(self):
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(ready,),
+            name="lightrag-postgres-shared-loop",
+            daemon=True,
+        )
+        self._thread.start()
+        ready.wait()
+
+    def _run(self, ready: threading.Event) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        ready.set()
+        loop.run_forever()  # deliberately never closed — see class docstring
+
+    def run(self, coro):
+        """Run *coro* on this loop from a SYNC caller (any thread); blocks for the result."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    async def arun(self, coro):
+        """Run *coro* on this loop from an ASYNC caller, without blocking the caller's own loop."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return await asyncio.wrap_future(future)
+
+    @classmethod
+    def instance(cls) -> "_SharedPostgresLoop":
+        """Return the process-wide singleton, creating it race-free on first use."""
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
 
 
-def reset_lightrag_postgres_pool():
-    """Sync wrapper for :func:`_areset_postgres_client_pool` — see its docstring.
+_postgres_impl_patch_lock = threading.Lock()
+_postgres_impl_patch_applied = False
 
-    Safe to call even when lightrag-hku has never touched Postgres yet (the
-    pool is simply already ``None``), and safe when lightrag-hku is not
-    installed at all — callers only need this ahead of LightRAG indexing.
+
+def _ensure_shared_postgres_loop_patch() -> None:
+    """Monkeypatch lightrag-hku so its Postgres client-pool entry points always
+    run on the one process-wide :class:`_SharedPostgresLoop`.
+
+    The asyncpg pool ``ClientManager`` builds (via ``PostgreSQLDB.initdb``)
+    binds every subsequent operation to whichever event loop was running when
+    it was created; reusing it from a different loop raises errors like
+    "Future attached to a different loop" or asyncpg's own "connection is
+    bound to a different event loop". Every actual Postgres touch — pool
+    (de)registration and every query/execute — funnels through exactly three
+    seams in ``lightrag.kg.postgres_impl``: ``ClientManager.get_client``,
+    ``ClientManager.release_client``, and ``PostgreSQLDB._run_with_retry``
+    (which ``query``/``execute``/every storage class's DB call ultimately
+    call, and which also lazily (re)builds the pool via ``_ensure_pool``).
+    Routing just those three through the shared loop is therefore enough to
+    guarantee the pool is always created AND used from the same loop, for
+    every silo, whether it's being indexed or queried, concurrently or not —
+    without needing to know which higher-level LightRAG call (insert, query,
+    ``initialize_storages``...) triggered them.
+
+    Idempotent and safe to call repeatedly (e.g. once per ``LightRAGStore``
+    instance) — only the first call actually patches anything, process-wide.
     """
-    _run_async(_areset_postgres_client_pool())
+    global _postgres_impl_patch_applied
+    if _postgres_impl_patch_applied:
+        return
+    with _postgres_impl_patch_lock:
+        if _postgres_impl_patch_applied:
+            return
+
+        from lightrag.kg.postgres_impl import ClientManager, PostgreSQLDB  # noqa: WPS433
+
+        shared_loop = _SharedPostgresLoop.instance()
+
+        _orig_get_client = ClientManager.get_client.__func__
+        _orig_release_client = ClientManager.release_client.__func__
+        _orig_run_with_retry = PostgreSQLDB._run_with_retry
+
+        @classmethod
+        async def _shared_get_client(cls, vector_storage=None):
+            return await shared_loop.arun(_orig_get_client(cls, vector_storage=vector_storage))
+
+        @classmethod
+        async def _shared_release_client(cls, db):
+            return await shared_loop.arun(_orig_release_client(cls, db))
+
+        async def _shared_run_with_retry(
+            self, operation, *, with_age=False, graph_name=None, timing_label=None
+        ):
+            return await shared_loop.arun(
+                _orig_run_with_retry(
+                    self,
+                    operation,
+                    with_age=with_age,
+                    graph_name=graph_name,
+                    timing_label=timing_label,
+                )
+            )
+
+        ClientManager.get_client = _shared_get_client
+        ClientManager.release_client = _shared_release_client
+        PostgreSQLDB._run_with_retry = _shared_run_with_retry
+
+        _postgres_impl_patch_applied = True
+        logger.info(
+            "Patched lightrag ClientManager/PostgreSQLDB: Postgres pool access "
+            "now always routes through one shared, persistent event loop."
+        )
+
+
+async def ashutdown_shared_lightrag_postgres_pool() -> None:
+    """Best-effort close of the shared Postgres pool at app shutdown.
+
+    Not load-bearing for correctness — the shared loop's thread is a daemon
+    thread and would vanish with the process anyway (same as every
+    per-collection ``_CollectionEventLoop``, which this project also never
+    tears down at shutdown). This only saves the DB server a few idle
+    connections on a graceful restart; a hard kill just skips it, same as any
+    other in-flight cleanup. No-op if LightRAG's Postgres pool was never
+    touched (the shared loop is only created lazily, on first use).
+    """
+    if _SharedPostgresLoop._instance is None:
+        return
+    try:
+        from lightrag.kg.postgres_impl import ClientManager  # noqa: WPS433
+
+        db = ClientManager._instances.get("db")
+        if db is not None:
+            await ClientManager.release_client(db)  # patched to the shared loop
+    except Exception:
+        logger.warning("Error closing shared LightRAG Postgres pool at shutdown", exc_info=True)
 
 
 def _run_async(coro):
@@ -861,10 +981,11 @@ def _run_async(coro):
 
     If an event loop is already running (e.g. inside an async FastAPI handler),
     offloads to a fresh worker thread instead to avoid blocking. That
-    "throwaway loop per call" is fine for the coroutines actually routed
-    through here (e.g. ``_areset_postgres_client_pool``, which resets a
-    library-global client, not anything loop-bound per collection) — but it
-    used to ALSO be how every LightRAG query/insert ran, which was unsafe:
+    "throwaway loop per call" is fine for coroutines that touch neither a
+    cached ``rag``/Neo4j-driver instance nor LightRAG's Postgres storage (the
+    latter is now handled separately — see ``_SharedPostgresLoop`` /
+    ``_ensure_shared_postgres_loop_patch``) — but it used to ALSO be how every
+    LightRAG query/insert ran, which was unsafe:
     the Neo4j driver opened by ``rag.initialize_storages()`` stays alive with
     connections bound to whichever throwaway loop happened to run it, and a
     LATER call reusing the cached ``rag`` from a *different* throwaway loop
@@ -1448,6 +1569,13 @@ class LightRAGStore(VectorStoreInterface):
     def _build_rag(self, collection_name: str):
         """Build a fresh (uninitialised) LightRAG instance for *collection_name*."""
         from lightrag import LightRAG  # noqa: WPS433
+
+        # Every silo's kv_storage/doc_status_storage (and vector_storage when
+        # PGVECTOR) is Postgres-backed (see storage_config.py) and shares one
+        # process-wide asyncpg pool — patch it onto the shared loop before
+        # this (or any) collection ever touches it. Idempotent/no-op after
+        # the first call.
+        _ensure_shared_postgres_loop_patch()
 
         from tools.vector_stores.lightrag.adapters import (
             build_embedding_func,

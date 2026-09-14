@@ -95,12 +95,11 @@ class _SyncThread(threading.Thread):
 @pytest.fixture
 def no_op_indexing_plumbing():
     """Deterministic background-thread run: no real thread, no real advisory
-    lock, no real LightRAG postgres pool reset, and no real file extraction
-    for the chunk-count pass (there is no file on disk for these rows)."""
+    lock, and no real file extraction for the chunk-count pass (there is no
+    file on disk for these rows)."""
     with patch("threading.Thread", _SyncThread), \
          patch("services.silo_indexing_lock.acquire", return_value=object()), \
          patch("services.silo_indexing_lock.release"), \
-         patch("tools.vector_stores.lightrag_store.reset_lightrag_postgres_pool"), \
          patch.object(SiloService, "count_resource_chunks", return_value=3):
         yield
 

@@ -185,6 +185,12 @@ async def lifespan(app: FastAPI):
         await CheckpointerCacheService.close_pool()
 
         try:
+            from tools.vector_stores.lightrag_store import ashutdown_shared_lightrag_postgres_pool
+            await ashutdown_shared_lightrag_postgres_pool()
+        except Exception as exc:
+            logger.warning("LightRAG shared Postgres pool shutdown failed: %s", exc)
+
+        try:
             from tools.langsmith_config import flush_langsmith_clients, clear_client_cache
             flush_langsmith_clients()
             clear_client_cache()
