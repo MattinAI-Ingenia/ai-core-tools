@@ -14,8 +14,9 @@ Modules (grown incrementally across the plan's steps):
 - `identity.py` — the FR-4 eligibility predicate and the `MemoryIdentity` /
   scope-namespace builder (AD-2). This is the *only* place a memory
   namespace may be constructed.
+- `resolution.py` — the FR-7 App-level service resolution (AD-5) and the
+  D-24 dimensionality probe/cache. DB reads only, no LangGraph/store import.
 
-Not present yet (later steps, see the plan): `resolution.py` (FR-7 service
-resolution) and `client.py` (the single store seam). Nothing in this package
-imports the LangGraph store.
+Not present yet (a later step, see the plan): `client.py` (the single store
+seam). Nothing in this package imports the LangGraph store.
 """
