@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,7 +38,12 @@ from types import SimpleNamespace
 from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BACKEND_CONTAINER = "mattin-backend"
+# Compose (v2) names containers "<project>-<service>-<n>", project defaulting
+# to the compose file's directory name ("docker/") — not the fixed
+# "mattin-backend" a removed container_name: line used to give it (see
+# docker/docker-compose.yaml git history, "multi-environment local stack").
+# Override via env var if your checkout runs under a different project name.
+BACKEND_CONTAINER = os.environ.get("EVAL_RAG_BACKEND_CONTAINER", "docker-backend-1")
 
 # Verified 2026-08-24 (OpenRouter/Morph/CloudZero) — standard tier, no long-context
 # surcharge, no cache discount. Applied to the FULL per-call token count logged by
