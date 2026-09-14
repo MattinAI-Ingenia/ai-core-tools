@@ -124,3 +124,68 @@ E2B_WORKSPACE = os.getenv('E2B_WORKSPACE', '/home/user/workspace')
 
 # Minutes before a sandbox TTL is proactively renewed.
 SANDBOX_RENEW_MINUTES = int(os.getenv('SANDBOX_RENEW_MINUTES', '30'))
+
+# ---------------------------------------------------------------------------
+# Cross-session user memory configuration (global memory, spec user-memory-mem0)
+# ---------------------------------------------------------------------------
+
+# Deployment-wide kill switch (FR-10). Defaults to enabled (D-9): the real
+# opt-in gate is the per-agent Agent.has_global_memory flag, so a default-on
+# switch is still zero behavior change on upgrade. Tolerant boolean parsing:
+# 'false'/'0'/'no' (case-insensitive) -> disabled, anything else including
+# unset -> enabled.
+GLOBAL_MEMORY_ENABLED = os.getenv('AICT_GLOBAL_MEMORY_ENABLED', 'true').strip().lower() not in (
+    'false', '0', 'no',
+)
+
+# Max facts injected into the read-path context block per turn.
+GLOBAL_MEMORY_TOP_K = int(os.getenv('AICT_GLOBAL_MEMORY_TOP_K', '5'))
+
+# Timeout budgets (seconds) so a memory operation can never block a turn.
+GLOBAL_MEMORY_READ_TIMEOUT_S = float(os.getenv('AICT_GLOBAL_MEMORY_READ_TIMEOUT_S', '1.5'))
+GLOBAL_MEMORY_WRITE_TIMEOUT_S = float(os.getenv('AICT_GLOBAL_MEMORY_WRITE_TIMEOUT_S', '30'))
+
+# Hard character cap on the rendered "remembered context" block (AD-7).
+GLOBAL_MEMORY_CONTEXT_MAX_CHARS = int(os.getenv('AICT_GLOBAL_MEMORY_CONTEXT_MAX_CHARS', '1500'))
+
+# Hard character cap on the extraction input window (FR-5, R-6).
+GLOBAL_MEMORY_EXTRACTION_INPUT_MAX_CHARS = int(
+    os.getenv('AICT_GLOBAL_MEMORY_EXTRACTION_INPUT_MAX_CHARS', '4000')
+)
+
+# Back-pressure bound on concurrent fire-and-forget write tasks (D-6).
+GLOBAL_MEMORY_MAX_INFLIGHT_WRITES = int(os.getenv('AICT_GLOBAL_MEMORY_MAX_INFLIGHT_WRITES', '50'))
+
+# CODE CONSTANT — never an env var (R-25). It participates in every memory
+# namespace (D-2); making it configurable would strand existing facts beyond
+# both enumeration (AD-10) and erasure (FR-8) -- undeletable personal data.
+GLOBAL_MEMORY_NAMESPACE_ROOT = 'user_memory'
+
+# Bounds for the extraction output (FR-5, D-23): caps the number of facts an
+# extraction call may produce and the length of each fact.
+GLOBAL_MEMORY_MAX_FACTS_PER_EXTRACTION = int(os.getenv('AICT_GLOBAL_MEMORY_MAX_FACTS_PER_EXTRACTION', '5'))
+
+# Deployment-wide memory vector width (D-13). Every memory embedding service
+# used on this deployment must match this dimensionality.
+GLOBAL_MEMORY_EMBEDDING_DIMS = int(os.getenv('AICT_GLOBAL_MEMORY_EMBEDDING_DIMS', '1536'))
+
+# Similarity ceiling above which a candidate fact is considered already known
+# and dropped instead of written (D-14 dedup).
+GLOBAL_MEMORY_DEDUP_THRESHOLD = float(os.getenv('AICT_GLOBAL_MEMORY_DEDUP_THRESHOLD', '0.95'))
+
+# Batching trigger (D-15): extraction runs on turn 1 and every Nth turn after.
+GLOBAL_MEMORY_WRITE_EVERY_N_TURNS = int(os.getenv('AICT_GLOBAL_MEMORY_WRITE_EVERY_N_TURNS', '5'))
+
+# Read condition (D-17): for has_memory=True agents, retrieval only runs while
+# turn_index <= this value (later turns already carry the block in-thread).
+GLOBAL_MEMORY_READ_FIRST_N_TURNS = int(os.getenv('AICT_GLOBAL_MEMORY_READ_FIRST_N_TURNS', '2'))
+
+# FR-11 `remember` tool (D-19). Off by default (R-18, a High security finding
+# gated on deliberate per-deployment enablement) -- unlike the feature's own
+# kill switch, which defaults to enabled.
+GLOBAL_MEMORY_TOOL_ENABLED = os.getenv('AICT_GLOBAL_MEMORY_TOOL_ENABLED', 'false').strip().lower() in (
+    'true', '1', 'yes',
+)
+GLOBAL_MEMORY_FACT_MAX_CHARS = int(os.getenv('AICT_GLOBAL_MEMORY_FACT_MAX_CHARS', '300'))
+GLOBAL_MEMORY_TOOL_MAX_WRITES_PER_TURN = int(os.getenv('AICT_GLOBAL_MEMORY_TOOL_MAX_WRITES_PER_TURN', '3'))
+GLOBAL_MEMORY_TOOL_MAX_WRITES_PER_DAY = int(os.getenv('AICT_GLOBAL_MEMORY_TOOL_MAX_WRITES_PER_DAY', '50'))
