@@ -559,6 +559,13 @@ const RepositoryFormPage: React.FC = () => {
                 const modelName = svc?.description || svc?.model_name || svc?.name;
                 const warning = role !== 'vlm' ? getRoleWarning(role, modelName) : null;
                 const blockingErr = role === 'vlm' ? vlmBlockingError(modelName) : null;
+                // Backend only accepts extract/VLM service on creation
+                // (silo_service.py sets them only `if not silo_id`) — an
+                // update silently drops the change instead of erroring, so
+                // the field must look immutable here too, not just fail
+                // quietly after save. keywords_service_id has no such
+                // restriction and stays editable, matching the backend.
+                const immutableOnUpdate = field !== 'keywords_service_id' && !isNewRepository;
                 return (
                   <div key={field}>
                     <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-2">
@@ -571,8 +578,9 @@ const RepositoryFormPage: React.FC = () => {
                         const parsed = e.target.value ? Number.parseInt(e.target.value, 10) : undefined;
                         setFormData(prev => ({ ...prev, [field]: parsed }));
                       }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
                       required={required}
+                      disabled={immutableOnUpdate}
                     >
                       <option value="">{placeholder}</option>
                       {aiServices.map((service) => (
