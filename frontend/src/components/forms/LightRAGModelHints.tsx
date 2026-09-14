@@ -1,25 +1,29 @@
 import { Lightbulb } from 'lucide-react';
 import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 
-// Latest recommended models per provider, per role. Updated June 2026.
+// Latest recommended models per provider, per role. Updated 2026-09-14.
 // ponytail: update inline as providers ship.
 // Open-source picks are backed by a real extraction/keyword benchmark on
 // this repo's own LightRAG prompts — see
 // docs/testing/lightrag_extraction_benchmark_corpus.md and
 // docs/dependencies/lightrag.md#911-recomendación-de-modelos-por-rol.
+// The cloud-provider rows are NOT benchmarked the same way — they're picked
+// for lowest $/1M tokens (per this app's own live PricingCatalog) among
+// models still capable enough for the role, not measured quality. Re-check
+// PricingCatalog before trusting these next time providers reprice.
 const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>> = {
   extract: [
-    { provider: 'OpenAI', model: 'GPT-5.4 mini' },
-    { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
+    { provider: 'OpenAI', model: 'GPT-4.1 mini' },
+    { provider: 'Anthropic', model: 'Claude 3.5 Haiku' },
     { provider: 'Mistral', model: 'Mistral Small 4' },
-    { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
+    { provider: 'Google', model: 'Gemini 2.5 Flash-Lite' },
     { provider: 'Open-source', model: 'Qwen3-30B-A3B-Instruct' },
   ],
   keywords: [
-    { provider: 'OpenAI', model: 'GPT-5.4 nano' },
-    { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
+    { provider: 'OpenAI', model: 'GPT-5 nano' },
+    { provider: 'Anthropic', model: 'Claude 3 Haiku' },
     { provider: 'Mistral', model: 'Ministral 3-3B' },
-    { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
+    { provider: 'Google', model: 'Gemini 2.0 Flash' },
     { provider: 'Open-source', model: 'Qwen3-4B-Instruct' },
   ],
 };
