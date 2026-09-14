@@ -380,6 +380,7 @@ class RepositoryService:
                 "status": resource.status,
                 "progress_done": resource.progress_done,
                 "progress_total": resource.progress_total,
+                "error_message": resource.error_message,
             })
         
         # Get embedding services for form data

@@ -29,6 +29,7 @@ interface Resource {
   status?: string;
   progress_done?: number | null;
   progress_total?: number | null;
+  error_message?: string | null;
 }
 
 interface RepositoryDetail {
@@ -1245,7 +1246,10 @@ const RepositoryDetailPage: React.FC = () => {
                                 )
                               )}
                               {resource.status === 'error' && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                                <span
+                                  title={resource.error_message || undefined}
+                                  className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700"
+                                >
                                   Index failed
                                 </span>
                               )}
