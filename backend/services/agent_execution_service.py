@@ -398,6 +398,7 @@ class AgentExecutionService:
                 sandbox_handle=ctx.sandbox_handle,
                 sandbox_provider=ctx.sandbox_provider,
                 sandbox_session_key=ctx.sandbox_session_key,
+                memory_context=ctx.memory_context,
             )
 
             return await self._finalize_turn(ctx, response, db)
@@ -639,6 +640,127 @@ class AgentExecutionService:
                     sandbox_handle,
                 )
 
+        # 12. Cross-session global user memory — pre-turn activation + bounded
+        #     retrieval (spec `user-memory-mem0`, FR-6, AD-6, AD-7).
+        #
+        # `has_global_memory` (D-3) is an independent opt-in from `has_memory`
+        # (which only governs the in-thread checkpointer + summarization).
+        # `has_memory` is consulted here ONLY to pick the read *frequency*
+        # (D-17, via `should_read`) — never to decide whether memory works at
+        # all: an agent with `has_global_memory=True, has_memory=False` is
+        # still fully active, and in fact reads on EVERY turn, since there is
+        # no thread state to carry a previously injected block forward
+        # (AC-50). Any implementation where `has_memory=False` reduces or
+        # disables memory is wrong.
+        #
+        # The turn index is computed exactly once, here, and carried on the
+        # context as `ctx.memory_turn_index` rather than recomputed later.
+        # The write hook (step_008, `_finalize_turn`) runs AFTER
+        # `Conversation.message_count` has already been incremented for this
+        # turn, so recomputing `turn_index()` there would read one turn
+        # ahead of what this hook saw and silently break the
+        # `turn_index == 1` write trigger (R-16). Reading the value resolved
+        # here removes that hazard rather than relying on step_008 to avoid
+        # it.
+        #
+        # Resolution (identity + services + clients) is gated on activation
+        # being due for EITHER cadence — `should_read` (D-17) OR
+        # `should_write` (D-15) — never on `should_read` alone.
+        # `prepare_turn_memory` implements that union internally. The two
+        # triggers have independent cadences (e.g. with the defaults, a
+        # write is due on turn 5 while a read is not due past turn 2), so
+        # gating resolution on `should_read` alone would leave every
+        # write-only turn with no identity/clients to write with, silently
+        # no-op'ing the batched write (D-15) for the most common agent
+        # configuration. Only the retrieval CALL below stays behind
+        # `should_read` alone (D-17/AC-50) — a write-only turn resolves
+        # clients but injects nothing.
+        #
+        # Every failure here degrades to "no memory context" and never fails
+        # the turn (NFR-4) — the whole step is wrapped in one broad
+        # try/except so a bug in the memory module can never break chat.
+        # This includes the `tools.memory.settings` import and the
+        # `turn_index()` call itself: both used to sit ahead of the
+        # try/except below, so an import-time or config error in the memory
+        # module (e.g. a bad `AICT_GLOBAL_MEMORY_*` env value) would raise
+        # before the fail-soft boundary and break every chat turn — exactly
+        # the NFR-4 guarantee this step exists to uphold. Moved inside the
+        # try so the same failure instead degrades to "no memory context,
+        # turn 1" like every other memory failure mode.
+        global_memory_identity = None
+        global_memory_services = None
+        global_memory_llm = None
+        global_memory_embeddings = None
+        memory_context = None
+        memory_turn_index = 1
+        try:
+            from tools.memory import settings as memory_settings
+            from services.global_memory_service import get_memory_context, prepare_turn_memory
+
+            memory_turn_index = memory_settings.turn_index(conversation)
+
+            (
+                global_memory_identity,
+                global_memory_services,
+                global_memory_llm,
+                global_memory_embeddings,
+            ) = await prepare_turn_memory(
+                db=db,
+                agent=fresh_agent,
+                user_context=user_context,
+                conversation=conversation,
+            )
+
+            if global_memory_identity is not None and global_memory_embeddings is not None:
+                # Release the pooled connection before the network-bound
+                # embedding/search call below (AD-6 step 6). Both callers
+                # already commit again immediately after `_prepare_turn`
+                # returns (`agent_execution_service.py:386-387`,
+                # `agent_streaming_service.py:203-204`), so this only moves
+                # that commit earlier for turns where a memory read actually
+                # runs.
+                if db is not None:
+                    db.commit()
+
+                has_memory_flag = bool(getattr(fresh_agent, "has_memory", False))
+                if memory_settings.should_read(memory_turn_index, has_memory_flag):
+                    embedding_service_id = (
+                        global_memory_services.embedding_service_id
+                        if global_memory_services is not None
+                        else None
+                    )
+                    memory_context = await get_memory_context(
+                        global_memory_identity,
+                        global_memory_embeddings,
+                        embedding_service_id,
+                        enhanced_message,
+                    )
+                # else: this turn is write-due but not read-due (D-15 without
+                # D-17) — clients stay on the context for step_008's write
+                # hook, but no retrieval runs and no block is injected.
+        except Exception:
+            # `exc_info=True` was dropped here (post-audit hardening): both
+            # `prepare_turn_memory` and `get_memory_context` are total today
+            # (they fault-contain and log their own FAIL_*/SKIP_* reason
+            # rather than raising), so nothing currently routes fact text
+            # into an exception that would land in this log line — but a
+            # traceback is exactly the kind of incidental payload
+            # (`log_memory_event`'s closed reason/source allow-list exists
+            # precisely to keep out) that a future change to either function
+            # could accidentally start leaking here. Keeping this the one
+            # place in the memory read path that logs a message without a
+            # traceback closes that gap before it can be opened.
+            logger.warning(
+                "Global memory activation failed for agent %s; proceeding without "
+                "memory context for this turn",
+                agent_id,
+            )
+            global_memory_identity = None
+            global_memory_services = None
+            global_memory_llm = None
+            global_memory_embeddings = None
+            memory_context = None
+
         return AgentExecutionContext(
             agent_id=agent_id,
             agent=agent,
@@ -658,6 +780,12 @@ class AgentExecutionService:
             processed_files=processed_files,
             search_params=search_params,
             user_context=user_context,
+            global_memory_identity=global_memory_identity,
+            global_memory_services=global_memory_services,
+            global_memory_llm=global_memory_llm,
+            global_memory_embeddings=global_memory_embeddings,
+            memory_context=memory_context,
+            memory_turn_index=memory_turn_index,
         )
 
     def _sandbox_turn_expected_seconds(self) -> int:
@@ -1559,6 +1687,7 @@ class AgentExecutionService:
         sandbox_provider: Any = None,
         sandbox_session_key: Optional[str] = None,
         processed_files: List[Dict] = None,
+        memory_context: Optional[str] = None,
     ) -> Any:
         """Execute agent in FastAPI's event loop using shared checkpointer pool.
 
@@ -1603,6 +1732,18 @@ class AgentExecutionService:
             # Build the HumanMessage (handles text-only and multimodal images)
             message_payload = build_human_message(fresh_agent, message, image_files or [], user_context)
 
+            # Cross-session global user memory (FR-6, AD-7): an extra
+            # SystemMessage ahead of the human message, never modifying the
+            # agent's own system prompt, never replacing the user message.
+            # With no memory context the payload is byte-identical to today
+            # (AC-20); with one present it is one extra leading message
+            # (AC-19).
+            from langchain_core.messages import SystemMessage
+
+            graph_messages = (
+                [SystemMessage(content=memory_context)] if memory_context else []
+            ) + [message_payload]
+
             # Attach LangSmith tracer + metadata when configured
             ls_settings = resolve_langsmith_settings(fresh_agent.app)
             if ls_settings:
@@ -1622,7 +1763,7 @@ class AgentExecutionService:
 
             try:
                 result = await agent_chain.ainvoke(
-                    {"messages": [message_payload]},
+                    {"messages": graph_messages},
                     config=config,
                 )
             except Exception as invoke_exc:
@@ -1671,7 +1812,7 @@ class AgentExecutionService:
                     )
                     config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
                     result = await agent_chain.ainvoke(
-                        {"messages": [message_payload]},
+                        {"messages": graph_messages},
                         config=config,
                     )
                 else:

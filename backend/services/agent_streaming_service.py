@@ -10,6 +10,7 @@ and tool events to the client.
 from typing import AsyncGenerator, Dict, List, Any
 
 import psycopg.errors
+from langchain_core.messages import SystemMessage
 from sqlalchemy.orm import Session
 
 from tools.agentTools import create_agent, prepare_agent_config, build_human_message
@@ -174,6 +175,19 @@ class AgentStreamingService:
                     ctx.fresh_agent, ctx.enhanced_message, ctx.image_files, ctx.user_context
                 )
 
+                # Cross-session global user memory (FR-6, AD-7): identical
+                # payload shape to the non-streaming path for the same
+                # inputs (AC-19) — an extra SystemMessage ahead of the human
+                # message when a memory context was resolved by
+                # `_prepare_turn`, byte-identical to today's payload
+                # otherwise (AC-20). `getattr` (not `ctx.memory_context`)
+                # deliberately tolerates a `ctx` stand-in that predates this
+                # field (e.g. an older test double) rather than raising.
+                memory_context = getattr(ctx, "memory_context", None)
+                graph_messages = (
+                    [SystemMessage(content=memory_context)] if memory_context else []
+                ) + [message_payload]
+
                 # ------------------------------------------------------------
                 # 5. Attach LangSmith tracer + metadata when configured
                 # ------------------------------------------------------------
@@ -208,7 +222,7 @@ class AgentStreamingService:
 
                 try:
                     async for mode, chunk in agent_chain.astream(
-                        {"messages": [message_payload]},
+                        {"messages": graph_messages},
                         config=config,
                         stream_mode=["messages", "updates", "custom"],
                     ):

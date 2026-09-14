@@ -106,14 +106,31 @@ class TestDeleteGlobalMemory:
 
     def test_kill_switch_is_never_consulted(self):
         """Erasure must work even when the deployment kill switch is off —
-        `is_global_memory_enabled` must not be called by this module's code
-        at all (docstring prose explaining why is fine and expected)."""
+        `is_global_memory_enabled` must not be called by the erasure
+        functions themselves (docstring prose explaining why is fine and
+        expected).
+
+        Scoped to the three erasure functions specifically, not the whole
+        module: since step_007 this module also hosts the FR-6 read-path
+        policy (`prepare_turn_memory`/`get_memory_context`), which correctly
+        *does* consult the kill switch as its very first check (AD-6 step 1,
+        AC-33) — that is a different code path with a different contract,
+        not a regression of this one.
+        """
         import ast
         import inspect
 
+        erasure_function_names = {
+            "delete_global_memory",
+            "delete_app_global_memory",
+            "delete_user_global_memory",
+        }
         tree = ast.parse(inspect.getsource(global_memory_service))
-        identifiers = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        identifiers |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        identifiers = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in erasure_function_names:
+                identifiers |= {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+                identifiers |= {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
 
         assert "is_global_memory_enabled" not in identifiers
 
