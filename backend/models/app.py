@@ -32,8 +32,14 @@ class App(Base):
     skills = relationship('Skill', back_populates='app', lazy=True)
 
     silos = relationship('Silo', back_populates='app', lazy=True)
-    ai_services = relationship('AIService', back_populates='app', lazy=True)
-    embedding_services = relationship('EmbeddingService', back_populates='app', lazy=True)
+    ai_services = relationship('AIService',
+                        back_populates='app',
+                        foreign_keys='AIService.app_id',
+                        lazy=True)
+    embedding_services = relationship('EmbeddingService',
+                        back_populates='app',
+                        foreign_keys='EmbeddingService.app_id',
+                        lazy=True)
     sandbox_services = relationship('SandboxService',
                         back_populates='app',
                         foreign_keys='SandboxService.app_id',
@@ -61,6 +67,29 @@ class App(Base):
                         nullable=True)
     default_sandbox_service = relationship('SandboxService',
                         foreign_keys=[default_sandbox_service_id])
+
+    # Cross-session global memory: models are configured per App, not per agent.
+    # NULL on either column means memory is INACTIVE here — there is no
+    # system-level fallback. use_alter=True for the same cycle-breaking reason
+    # as default_sandbox_service_id above.
+    memory_extraction_service_id = Column(Integer,
+                        ForeignKey(
+                            'AIService.service_id',
+                            ondelete='SET NULL',
+                            use_alter=True,
+                            name='App_memory_extraction_service_id_fkey',
+                        ),
+                        nullable=True)
+    memory_embedding_service_id = Column(Integer,
+                        ForeignKey(
+                            'embedding_service.service_id',
+                            ondelete='SET NULL',
+                            use_alter=True,
+                            name='App_memory_embedding_service_id_fkey',
+                        ),
+                        nullable=True)
+    memory_extraction_service = relationship('AIService', foreign_keys=[memory_extraction_service_id])
+    memory_embedding_service = relationship('EmbeddingService', foreign_keys=[memory_embedding_service_id])
 
     def get_user_role(self, user_id):
         """Get the role of a user in this app"""

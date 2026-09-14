@@ -70,6 +70,13 @@ def include_name(name, type_, parent_names):
         'checkpoint_blobs',
         'checkpoint_writes',
         'checkpoint_migrations',
+        # LangGraph AsyncPostgresStore (cross-session global memory, D-12/AD-9)
+        # owns and migrates these tables itself; Alembic must never propose
+        # dropping them (see decisions.md FR-1 spike, action item 1).
+        'store',
+        'store_vectors',
+        'store_migrations',
+        'vector_migrations',
     ]
     return name not in ignored_tables
 

@@ -20,4 +20,4 @@ class AIService(BaseService):
     provider = Column(String(45), nullable=False)
     supports_video = Column(Boolean, nullable=False, default=False, server_default='false')
     app_id = Column(Integer, ForeignKey('App.app_id'), nullable=True)  # NULL = system/platform service
-    app = relationship('App', back_populates='ai_services') 
+    app = relationship('App', back_populates='ai_services', foreign_keys=[app_id])

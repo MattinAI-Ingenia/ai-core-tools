@@ -77,6 +77,10 @@ class Agent(Base):
 
     has_memory = Column(Boolean)
     enable_code_interpreter = Column(Boolean, default=False, nullable=False, server_default='false')
+    # Cross-session store-backed user memory (global memory). Independent of
+    # has_memory, which governs only the in-thread checkpointer + summarization.
+    # The models used are configured on the App (D-16), not here.
+    has_global_memory = Column(Boolean, default=False, nullable=False, server_default='false')
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
 
     # RAG retrieval config (step_007 / FR-7); rag_search_type values validated in schemas (step_008).
