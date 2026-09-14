@@ -654,12 +654,13 @@ class ResourceService:
                     enqueued_resource_ids = []
                     queue = list(resource_snapshots)
 
-                    def _mark(resource_id, status):
+                    def _mark(resource_id, status, error_message=None):
                         _db_m = _SessionLocal()
                         try:
                             r = _db_m.query(ResourceModel).filter_by(resource_id=resource_id).first()
                             if r:
                                 r.status = status
+                                r.error_message = error_message
                                 if status != 'indexing':
                                     r.progress_done = r.progress_total
                                 _db_m.commit()
@@ -687,7 +688,7 @@ class ResourceService:
                                 _, docs = SiloService.extract_resource_documents(resource_obj)
                             except Exception as exc:
                                 logger.error(f"Failed to extract resource {resource_id}: {exc}")
-                                _mark(resource_id, 'error')
+                                _mark(resource_id, 'error', error_message=str(exc))
                                 continue
                             if not docs:
                                 # Nothing extractable (empty file, no embedding
