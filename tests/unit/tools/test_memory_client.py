@@ -34,8 +34,10 @@ import tools.memory.client as client_module
 from tools.memory.client import (
     GlobalMemoryPoolService,
     PurgeResult,
+    ScopeListResult,
     _assert_identity,
     _assert_positive_int,
+    list_app_scopes,
     list_user_scopes,
     purge,
 )
@@ -250,14 +252,88 @@ class TestListUserScopes:
         monkeypatch.setattr(client_module, "PostgresStore", lambda conn=None: _FakeListStore())
         monkeypatch.setattr(client_module, "_sync_connection", _fake_sync_connection)
 
-        scopes = list_user_scopes(7)
+        result = list_user_scopes(7)
 
-        resolved = {(scope.app_id, scope.user_id) for scope in scopes}
+        assert result.complete is True
+        resolved = {(scope.app_id, scope.user_id) for scope in result.scopes}
         assert resolved == {(5, 7)}
 
     def test_rejects_non_positive_user_id(self):
-        assert list_user_scopes(-1) == []
-        assert list_user_scopes(True) == []  # bool is an int subclass — must still be rejected
+        assert list_user_scopes(-1) == ScopeListResult(scopes=[], complete=False)
+        # bool is an int subclass — must still be rejected
+        assert list_user_scopes(True) == ScopeListResult(scopes=[], complete=False)
+
+    def test_enumeration_failure_reports_incomplete_not_a_clean_empty_result(self, monkeypatch):
+        """The regression this defect is named after: an enumeration that
+        FAILS must never be indistinguishable from a genuinely empty scope
+        set — both previously returned `[]`."""
+
+        class _FailingListStore:
+            def list_namespaces(self, *, prefix, suffix, max_depth, limit, offset):
+                raise psycopg.OperationalError("store unreachable")
+
+        monkeypatch.setattr(client_module, "PostgresStore", lambda conn=None: _FailingListStore())
+        monkeypatch.setattr(client_module, "_sync_connection", _fake_sync_connection)
+
+        result = list_user_scopes(7)
+
+        assert result.complete is False
+        assert result.scopes == []
+
+    def test_enumeration_failure_on_a_later_page_keeps_scopes_already_collected(self, monkeypatch):
+        class _FlakyListStore:
+            def __init__(self):
+                self.calls = 0
+
+            def list_namespaces(self, *, prefix, suffix, max_depth, limit, offset):
+                self.calls += 1
+                if self.calls == 1:
+                    return [(_ROOT, "5", "7")] * limit
+                raise psycopg.OperationalError("store unreachable mid-page")
+
+        monkeypatch.setattr(client_module, "_LIST_SCOPES_PAGE_SIZE", 1)
+        monkeypatch.setattr(client_module, "PostgresStore", lambda conn=None: _FlakyListStore())
+        monkeypatch.setattr(client_module, "_sync_connection", _fake_sync_connection)
+
+        result = list_user_scopes(7)
+
+        assert result.complete is False
+        assert len(result.scopes) == 1
+
+
+class TestListAppScopes:
+    def test_success_returns_complete_true(self, monkeypatch):
+        class _FakeListStore:
+            def list_namespaces(self, *, prefix, max_depth, limit, offset):
+                if offset > 0:
+                    return []
+                return [(_ROOT, "5", "7"), (_ROOT, "5", "8"), (_ROOT, "50", "1")]
+
+        monkeypatch.setattr(client_module, "PostgresStore", lambda conn=None: _FakeListStore())
+        monkeypatch.setattr(client_module, "_sync_connection", _fake_sync_connection)
+
+        result = list_app_scopes(5)
+
+        assert result.complete is True
+        resolved = {(scope.app_id, scope.user_id) for scope in result.scopes}
+        assert resolved == {(5, 7), (5, 8)}
+
+    def test_rejects_non_positive_app_id(self):
+        assert list_app_scopes(-1) == ScopeListResult(scopes=[], complete=False)
+        assert list_app_scopes(True) == ScopeListResult(scopes=[], complete=False)
+
+    def test_enumeration_failure_reports_incomplete_not_a_clean_empty_result(self, monkeypatch):
+        class _FailingListStore:
+            def list_namespaces(self, *, prefix, max_depth, limit, offset):
+                raise psycopg.OperationalError("store unreachable")
+
+        monkeypatch.setattr(client_module, "PostgresStore", lambda conn=None: _FailingListStore())
+        monkeypatch.setattr(client_module, "_sync_connection", _fake_sync_connection)
+
+        result = list_app_scopes(5)
+
+        assert result.complete is False
+        assert result.scopes == []
 
 
 # ---------------------------------------------------------------------------

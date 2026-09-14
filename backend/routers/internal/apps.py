@@ -42,6 +42,7 @@ from .repositories import repositories_router
 from .folders import folders_router
 from .mcp_servers import mcp_servers_router
 from .skills import skills_router
+from .global_memory import global_memory_router
 
 from utils.logger import get_logger
 
@@ -497,6 +498,7 @@ apps_router.include_router(repositories_router, prefix="/{app_id}/repositories",
 apps_router.include_router(folders_router, prefix="/{app_id}/repositories/{repository_id}/folders", tags=["Folders"])
 apps_router.include_router(mcp_servers_router, prefix="/{app_id}/mcp-servers", tags=["MCP Servers"])
 apps_router.include_router(skills_router, prefix="/{app_id}/skills", tags=["Skills"])
+apps_router.include_router(global_memory_router, prefix="/{app_id}/global-memory", tags=["Global Memory"])
 
 def get_services(db: Session) -> Tuple[AppService, AppCollaborationService]:
     """Return initialised AppService and AppCollaborationService."""
@@ -922,14 +924,27 @@ async def delete_app(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only app owners can delete apps"
         )
-    
-    success = app_service.delete_app(app_id)
+
+    from services.global_memory_service import GlobalMemoryPurgeIncompleteError
+
+    try:
+        success = app_service.delete_app(app_id)
+    except GlobalMemoryPurgeIncompleteError:
+        # Distinct from the generic 500 below (security-audit MEDIUM 2,
+        # `user-memory-mem0` step_006 follow-up): this App still exists and
+        # nothing else was touched, so the caller can simply retry the
+        # deletion rather than investigate the App itself.
+        logger.error(f"delete_app: aborted app_id={app_id} — global memory purge did not complete; retryable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="App deletion could not complete because global memory erasure did not finish. Please retry.",
+        )
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete app"
         )
-    
+
     return MessageResponseSchema(message="App deleted successfully")
 
 

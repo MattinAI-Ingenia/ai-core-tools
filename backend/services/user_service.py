@@ -326,6 +326,53 @@ class UserService:
                             f"absent — treating as concurrently removed and continuing"
                         )
 
+        # Purge this user's global memory across EVERY App it exists in (FR-8/D-8).
+        # Enumerated from the memory store itself by namespace SUFFIX
+        # (`list_user_scopes`/AD-10) — never from `AppCollaborator` rows — so it is
+        # correct under all three modes without depending on membership still
+        # existing: owned apps already had their memory purged by `AppService.
+        # delete_app` above (cascade_apps), a transferred App survives but the
+        # deleted user's memory in it must still go, and a `block`-mode user's
+        # memory in Apps they merely collaborate on is otherwise never touched by
+        # anything above. Runs once, unconditionally, regardless of mode.
+        #
+        # Wrapped in its own try/except: this function's surrounding convention is
+        # roll-back-and-re-raise (see the final `try` block below), but a failed
+        # external store purge must not abort a user deletion mid-way — the
+        # surviving memory remains reachable and re-purgeable via the operator
+        # endpoint, so logging loudly and continuing is strictly safer here than
+        # leaving the user un-deletable.
+        #
+        # Security-audit decision (MEDIUM 2, step_006 follow-up): deliberately
+        # NOT given the same re-raise-and-abort treatment as `AppService.
+        # delete_app`'s step 0. The App rows this user's memory lives in are
+        # untouched by this call (only the User row is about to go), so the
+        # operator erasure endpoint (`DELETE /internal/apps/{app_id}/
+        # global-memory/users/{user_id}`) stays callable per-App afterwards —
+        # it scopes purely by `(app_id, user_id)` and never checks that
+        # `user_id` still exists. That is exactly the recovery path `AppService.
+        # delete_app` loses once the App row itself is gone, which is why that
+        # path re-raises and this one does not.
+        try:
+            from .global_memory_service import delete_user_global_memory
+            memory_result = delete_user_global_memory(db, user_id)
+            if memory_result.complete:
+                logger.info(
+                    f"delete_user: purged {memory_result.deleted} global memory "
+                    f"record(s) for user_id={user_id} across all Apps"
+                )
+            else:
+                logger.error(
+                    f"delete_user: global memory purge for user_id={user_id} did not "
+                    f"complete (partial count={memory_result.deleted}); continuing "
+                    f"user deletion"
+                )
+        except Exception:
+            logger.error(
+                f"delete_user: error purging global memory for user_id={user_id}",
+                exc_info=True,
+            )
+
         try:
             # Re-acquire the row lock. cascade_apps per-app commits released the entry
             # lock and expired `user`; re-locking prevents a delete-races-mutation window.

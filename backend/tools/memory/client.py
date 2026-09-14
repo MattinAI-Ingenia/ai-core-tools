@@ -848,7 +848,50 @@ def _purge_sync(identity: MemoryIdentity) -> int:
     return total
 
 
-def list_app_scopes(app_id: int) -> List[MemoryIdentity]:
+@dataclass(frozen=True)
+class ScopeListResult:
+    """Outcome of `list_app_scopes`/`list_user_scopes` — deliberately not a
+    bare list, mirroring `PurgeResult` one level up the same cascade.
+
+    `scopes` alone cannot distinguish "this app/user genuinely holds no
+    memory scopes" from "enumeration was interrupted before it could find
+    out" — both previously returned `[]` indistinguishably. `complete` makes
+    that distinction explicit:
+
+    - `complete=True`: the namespace prefix/suffix was walked to the end (an
+      empty or short final page). `scopes` is the exact, final list — an
+      empty list here is a legitimate result (a scope-less app/user, AC-28's
+      sibling case at the enumeration level).
+    - `complete=False`: the walk was interrupted — an invalid `app_id`/
+      `user_id`, or an exception raised on any page, **including the
+      first**. `scopes` reflects whatever was collected before the
+      interruption and must never be read as the total. Callers
+      (`delete_app_global_memory`/`delete_user_global_memory`) must fold
+      this into their own aggregate `complete` in addition to each scope's
+      own purge outcome — an enumeration that failed outright (zero scopes
+      collected) must never be reported as a clean, complete erasure of
+      nothing, which is exactly the defect this type exists to close
+      (FR-8/NFR-5).
+    """
+
+    scopes: List[MemoryIdentity]
+    complete: bool
+
+
+class _ScopeListIncomplete(Exception):
+    """Internal signal from `_list_app_scopes_sync`/`_list_user_scopes_sync`
+    that the enumeration walk was interrupted after collecting `scopes` so
+    far. Never escapes `list_app_scopes`/`list_user_scopes` — they always
+    translate this into `ScopeListResult(scopes, complete=False)`.
+    """
+
+    def __init__(self, scopes: List[MemoryIdentity], cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.scopes = scopes
+        self.cause = cause
+
+
+def list_app_scopes(app_id: int) -> ScopeListResult:
     """Enumerate every memory scope under `app_id` that actually holds facts
     (AD-10), paged. Sync, module-level, for the same reason `purge` is (must
     work regardless of the kill switch/pool state).
@@ -869,53 +912,81 @@ def list_app_scopes(app_id: int) -> List[MemoryIdentity]:
     Each returned `MemoryIdentity` carries `agent_id=0`: a scope enumeration
     has no single originating agent (the whole point is it may span many),
     so `0` is a sentinel meaning "not applicable to a purge target" rather
-    than real per-fact provenance. Any failure returns `[]` (NFR-4).
+    than real per-fact provenance.
+
+    Returns a `ScopeListResult`, never a bare list: any failure — an invalid
+    `app_id`, or an exception raised on any page of the walk — returns
+    `ScopeListResult(scopes=<partial>, complete=False)` (NFR-4/NFR-5) rather
+    than an indistinguishable `[]`. Callers must not read `scopes` from an
+    incomplete result as the total.
     """
     try:
         _assert_positive_int(app_id, "app_id")
-        return _list_app_scopes_sync(app_id)
     except Exception:
         log_memory_event(
             "list_scopes", app_id=app_id if isinstance(app_id, int) else None, agent_id=None,
             active=False, reason=FAIL_ERROR, level="warning",
         )
-        return []
+        return ScopeListResult(scopes=[], complete=False)
+
+    try:
+        scopes = _list_app_scopes_sync(app_id)
+        return ScopeListResult(scopes=scopes, complete=True)
+    except _ScopeListIncomplete as exc:
+        log_memory_event(
+            "list_scopes", app_id=app_id, agent_id=None,
+            active=False, count=len(exc.scopes), reason=FAIL_ERROR, level="warning",
+        )
+        return ScopeListResult(scopes=exc.scopes, complete=False)
+    except Exception:
+        log_memory_event(
+            "list_scopes", app_id=app_id, agent_id=None,
+            active=False, reason=FAIL_ERROR, level="warning",
+        )
+        return ScopeListResult(scopes=[], complete=False)
 
 
 def _list_app_scopes_sync(app_id: int) -> List[MemoryIdentity]:
+    """Raises `_ScopeListIncomplete(scopes_so_far, cause)` on any error mid-walk
+    (including on the very first page) so `list_app_scopes` can report a true
+    partial result instead of silently returning `[]`.
+    """
     root = settings.namespace_root()
     prefix = (root, str(app_id))
     scopes: List[MemoryIdentity] = []
-    offset = 0
-    with _sync_connection() as conn:
-        store = PostgresStore(conn=conn)
-        while True:
-            namespaces = store.list_namespaces(
-                prefix=prefix, max_depth=3, limit=_LIST_SCOPES_PAGE_SIZE, offset=offset
-            )
-            if not namespaces:
-                break
-            for ns in namespaces:
-                if len(ns) != 3:
-                    continue
-                ns_root, ns_app_id, ns_user_id = ns
-                if ns_root != root or ns_app_id != str(app_id) or not ns_user_id.isdigit():
-                    continue
-                scopes.append(
-                    MemoryIdentity(
-                        app_id=int(ns_app_id),
-                        user_id=int(ns_user_id),
-                        agent_id=0,
-                        namespace=ns,
-                    )
+    try:
+        offset = 0
+        with _sync_connection() as conn:
+            store = PostgresStore(conn=conn)
+            while True:
+                namespaces = store.list_namespaces(
+                    prefix=prefix, max_depth=3, limit=_LIST_SCOPES_PAGE_SIZE, offset=offset
                 )
-            offset += len(namespaces)
-            if len(namespaces) < _LIST_SCOPES_PAGE_SIZE:
-                break
+                if not namespaces:
+                    break
+                for ns in namespaces:
+                    if len(ns) != 3:
+                        continue
+                    ns_root, ns_app_id, ns_user_id = ns
+                    if ns_root != root or ns_app_id != str(app_id) or not ns_user_id.isdigit():
+                        continue
+                    scopes.append(
+                        MemoryIdentity(
+                            app_id=int(ns_app_id),
+                            user_id=int(ns_user_id),
+                            agent_id=0,
+                            namespace=ns,
+                        )
+                    )
+                offset += len(namespaces)
+                if len(namespaces) < _LIST_SCOPES_PAGE_SIZE:
+                    break
+    except Exception as exc:
+        raise _ScopeListIncomplete(scopes, exc) from exc
     return scopes
 
 
-def list_user_scopes(user_id: int) -> List[MemoryIdentity]:
+def list_user_scopes(user_id: int) -> ScopeListResult:
     """Enumerate every memory scope belonging to `user_id`, across every App
     (AD-10). Sync, module-level, for the same reasons as `list_app_scopes`.
 
@@ -931,48 +1002,69 @@ def list_user_scopes(user_id: int) -> List[MemoryIdentity]:
     `list_app_scopes`'s defence exactly.
 
     Each returned `MemoryIdentity` carries `agent_id=0` (see
-    `list_app_scopes`). Any failure returns `[]` (NFR-4).
+    `list_app_scopes`). Returns a `ScopeListResult`, never a bare list — see
+    `list_app_scopes`'s docstring for why (NFR-4/NFR-5).
     """
     try:
         _assert_positive_int(user_id, "user_id")
-        return _list_user_scopes_sync(user_id)
     except Exception:
         log_memory_event(
             "list_scopes", app_id=None, agent_id=None, active=False, reason=FAIL_ERROR, level="warning"
         )
-        return []
+        return ScopeListResult(scopes=[], complete=False)
+
+    try:
+        scopes = _list_user_scopes_sync(user_id)
+        return ScopeListResult(scopes=scopes, complete=True)
+    except _ScopeListIncomplete as exc:
+        log_memory_event(
+            "list_scopes", app_id=None, agent_id=None,
+            active=False, count=len(exc.scopes), reason=FAIL_ERROR, level="warning",
+        )
+        return ScopeListResult(scopes=exc.scopes, complete=False)
+    except Exception:
+        log_memory_event(
+            "list_scopes", app_id=None, agent_id=None, active=False, reason=FAIL_ERROR, level="warning"
+        )
+        return ScopeListResult(scopes=[], complete=False)
 
 
 def _list_user_scopes_sync(user_id: int) -> List[MemoryIdentity]:
+    """Raises `_ScopeListIncomplete(scopes_so_far, cause)` on any error mid-walk
+    — mirrors `_list_app_scopes_sync` exactly (see that function's docstring).
+    """
     root = settings.namespace_root()
     suffix = (str(user_id),)
     scopes: List[MemoryIdentity] = []
-    offset = 0
-    with _sync_connection() as conn:
-        store = PostgresStore(conn=conn)
-        while True:
-            namespaces = store.list_namespaces(
-                prefix=(root,), suffix=suffix, max_depth=3, limit=_LIST_SCOPES_PAGE_SIZE, offset=offset
-            )
-            if not namespaces:
-                break
-            for ns in namespaces:
-                if len(ns) != 3:
-                    continue
-                ns_root, ns_app_id, ns_user_id = ns
-                if ns_root != root or ns_user_id != str(user_id) or not ns_app_id.isdigit():
-                    continue
-                scopes.append(
-                    MemoryIdentity(
-                        app_id=int(ns_app_id),
-                        user_id=int(ns_user_id),
-                        agent_id=0,
-                        namespace=ns,
-                    )
+    try:
+        offset = 0
+        with _sync_connection() as conn:
+            store = PostgresStore(conn=conn)
+            while True:
+                namespaces = store.list_namespaces(
+                    prefix=(root,), suffix=suffix, max_depth=3, limit=_LIST_SCOPES_PAGE_SIZE, offset=offset
                 )
-            offset += len(namespaces)
-            if len(namespaces) < _LIST_SCOPES_PAGE_SIZE:
-                break
+                if not namespaces:
+                    break
+                for ns in namespaces:
+                    if len(ns) != 3:
+                        continue
+                    ns_root, ns_app_id, ns_user_id = ns
+                    if ns_root != root or ns_user_id != str(user_id) or not ns_app_id.isdigit():
+                        continue
+                    scopes.append(
+                        MemoryIdentity(
+                            app_id=int(ns_app_id),
+                            user_id=int(ns_user_id),
+                            agent_id=0,
+                            namespace=ns,
+                        )
+                    )
+                offset += len(namespaces)
+                if len(namespaces) < _LIST_SCOPES_PAGE_SIZE:
+                    break
+    except Exception as exc:
+        raise _ScopeListIncomplete(scopes, exc) from exc
     return scopes
 
 

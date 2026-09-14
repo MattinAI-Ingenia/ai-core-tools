@@ -19,6 +19,8 @@ Tests run against a real PostgreSQL DB and verify:
 import pytest
 from unittest.mock import patch
 
+from tools.memory.client import PurgeResult
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -448,6 +450,49 @@ class TestDeleteApp:
             headers=owner_headers,
         )
         assert response.status_code == 404
+
+    def test_delete_app_returns_503_and_survives_when_memory_purge_is_incomplete(
+        self, client, fake_user, fake_app, owner_headers, db
+    ):
+        """Regression (security-audit MEDIUM 2, spec `user-memory-mem0`):
+        an incomplete/failed global-memory purge (FR-8's step 0 in
+        `AppService.delete_app`) must abort the deletion — a distinguishable
+        503 (safe to retry), never a 200 that quietly orphaned surviving
+        memory once the App row (and the operator erasure endpoint's only
+        way to reach it) is gone."""
+        # fake_user's platform_role defaults to 'viewer' (column default),
+        # which the unrelated require_editor_for_writes gate blocks from ANY
+        # write regardless of app-level role — pre-existing, unrelated to
+        # this test (see TestAdministratorCollaboratorCanInvite in
+        # tests/integration/test_collaboration_administrator_invite.py for
+        # the same workaround). Bump it so this test isolates MEDIUM 2 only.
+        fake_user.platform_role = 'editor'
+        # Committed, not just flushed: the aborted deletion below calls
+        # `self.db.rollback()` inside `AppService.delete_app` — on this
+        # session's SAVEPOINT-based test transaction (see the `db` fixture),
+        # that would otherwise also discard these still-uncommitted fixture
+        # rows (fake_user included), not just the App's own (nonexistent, at
+        # step 0) mutations.
+        db.commit()
+        app_id = fake_app.app_id
+
+        with patch(
+            "services.global_memory_service.delete_app_global_memory",
+            return_value=PurgeResult(deleted=1, complete=False),
+        ):
+            response = client.delete(
+                f"/internal/apps/{app_id}",
+                headers=owner_headers,
+            )
+
+        assert response.status_code == 503
+
+        # The App must still exist — nothing was actually deleted.
+        response = client.get(
+            f"/internal/apps/{app_id}",
+            headers=owner_headers,
+        )
+        assert response.status_code == 200
 
     def test_delete_app_requires_owner_role(self, client, fake_app, auth_headers, db):
         """Only OWNER can delete app."""

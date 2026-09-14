@@ -135,6 +135,7 @@ async def get_user(
         },
         501: {"description": "Not implemented — transfer_apps stub not yet wired"},
         500: {"description": "Internal server error"},
+        503: {"description": "An owned app's global memory purge did not complete — safe to retry"},
     },
 )
 async def delete_user(
@@ -166,6 +167,7 @@ async def delete_user(
         TierLimitExceededError,
         TransferRecipientInvalidError,
     )
+    from services.global_memory_service import GlobalMemoryPurgeIncompleteError
 
     _VALID_MODES = {"block", "cascade_apps", "transfer_apps"}
     effective_mode: str = "block"
@@ -213,6 +215,21 @@ async def delete_user(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
     except TierLimitExceededError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+    except GlobalMemoryPurgeIncompleteError:
+        # `mode='cascade_apps'` deletes owned apps via `AppService.delete_app`,
+        # which now aborts (rather than logging-and-continuing) on an
+        # incomplete memory purge (security-audit MEDIUM 2). Distinct from the
+        # generic 500 below: the user (and any not-yet-deleted owned apps)
+        # are untouched, so this is safe to retry.
+        logger.error(
+            "delete_user: aborted user_id=%s — an owned app's global memory purge did not complete; retryable",
+            user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="User deletion could not complete because an owned app's global memory erasure "
+                   "did not finish. Please retry.",
+        )
     except NotImplementedError as exc:
         logger.warning(
             "delete_user: transfer_apps stub hit — user_id=%s actor=%s",

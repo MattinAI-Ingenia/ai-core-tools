@@ -213,7 +213,8 @@ class TestListUserScopesNamespaceIsolation:
             # Different app, numeric *suffix* collision: "...3.17" ends in "7".
             store.put((root, "3", "17"), "k3", {"text": "user 17 fact"})
 
-        scopes = list_user_scopes(7)
-        resolved = {(scope.app_id, scope.user_id) for scope in scopes}
+        result = list_user_scopes(7)
+        assert result.complete is True
+        resolved = {(scope.app_id, scope.user_id) for scope in result.scopes}
 
         assert resolved == {(5, 7)}

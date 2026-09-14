@@ -83,6 +83,50 @@ class AppService:
         logger.info(f"Starting cascade deletion for app {app_id}: {app.name}")
         
         try:
+            # 0. Purge global user memory for all scopes this App holds (FR-8/D-8).
+            # Enumerated directly from the memory store (AD-10), never from
+            # AppCollaborator/Conversation rows, so it has no ordering dependency
+            # on agents/collaborators still existing — it goes first only so a
+            # later step's failure cannot skip it. Never touches the checkpointer
+            # (D-8/AC-42): this purges durable memory facts only, not conversation
+            # history.
+            #
+            # Security-audit decision (MEDIUM 2, step_006 follow-up): unlike the
+            # "vectors are orphaned (acceptable for app deletion)" convention this
+            # cascade otherwise follows for non-DB side effects, an incomplete or
+            # failed memory purge here IS re-raised, aborting the deletion. Once
+            # the App row below is actually deleted, the operator erasure endpoint
+            # (`DELETE /internal/apps/{app_id}/global-memory/users/{user_id}`) 404s
+            # — there is no App left to check the ADMINISTRATOR role against —
+            # so any surviving memory becomes reachable ONLY if the affected user
+            # happens to call their own cross-App self-service endpoint. Reporting
+            # a deletion as "successful" while quietly leaving that behind would
+            # violate NFR-5/AC-61. This step runs first, before any row belonging
+            # to this App has been touched, so re-raising is cheap and safe: the
+            # caller simply gets a failed, retryable App deletion — never one that
+            # silently orphaned personal data. `GlobalMemoryPurgeIncompleteError`
+            # is a distinct type (not a bare `RuntimeError`) precisely so the
+            # router can tell "retry, the memory store hiccuped" (503) apart from
+            # an ordinary cascade-deletion bug (500) — see the router for that
+            # mapping.
+            from .global_memory_service import GlobalMemoryPurgeIncompleteError, delete_app_global_memory
+            try:
+                memory_result = delete_app_global_memory(self.db, app_id)
+            except GlobalMemoryPurgeIncompleteError:
+                raise
+            except Exception as memory_exc:
+                raise GlobalMemoryPurgeIncompleteError(
+                    f"Global memory purge for app {app_id} raised an unexpected error: {memory_exc}"
+                ) from memory_exc
+
+            if not memory_result.complete:
+                raise GlobalMemoryPurgeIncompleteError(
+                    f"Global memory purge for app {app_id} did not complete "
+                    f"(partial count={memory_result.deleted})"
+                )
+
+            logger.info(f"Purged {memory_result.deleted} global memory record(s) for app {app_id}")
+
             # Initialize all required services
             repository_service = RepositoryService()
             domain_service = DomainService()
@@ -204,9 +248,20 @@ class AppService:
                 logger.info(f"Successfully deleted app {app_id} and all related data")
             
             return success
-                
+
+        except GlobalMemoryPurgeIncompleteError as e:
+            # Nothing has been mutated for this App yet (this is step 0) — the
+            # rollback below is a no-op for this App's own rows, but re-running
+            # it here is harmless and keeps this branch symmetric with the
+            # generic one. Re-raised (not converted to `return False`) so the
+            # router can answer 503/retryable instead of the generic 500 the
+            # branch below reports for an ordinary cascade bug.
+            logger.error(f"Aborting deletion of app {app_id}: {e}; safe to retry")
+            self.db.rollback()
+            raise
+
         except Exception as e:
             logger.error(f"Error during cascade deletion of app {app_id}: {str(e)}")
             # Rollback the transaction
             self.db.rollback()
-            return False 
+            return False

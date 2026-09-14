@@ -290,11 +290,20 @@ async def require_editor_for_writes(
 
     Exemptions — viewer-legitimate writes:
       - POST .../invitations/{id}/respond  (accept or decline a collaboration invite)
+      - DELETE .../global-memory/me  (erase the caller's own memory, this App)
     """
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return auth_context
     # Viewers may accept/decline their own invitations
     if request.url.path.endswith("/respond"):
+        return auth_context
+    # Viewers may erase their own global memory (AC-44/FR-8(b)). This is a
+    # data-subject erasure right, not a "write" in the sense this gate exists
+    # to protect against — the handler (`erase_my_global_memory`) purges
+    # exclusively the caller's own session identity, never an operator-chosen
+    # target, so it carries none of the risk this gate blocks. Do not
+    # re-tighten this exemption without re-reading that handler's docstring.
+    if request.url.path.endswith("/global-memory/me"):
         return auth_context
     email = auth_context.identity.email
     if _is_omniadmin(email):

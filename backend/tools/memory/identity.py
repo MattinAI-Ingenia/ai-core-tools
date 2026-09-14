@@ -87,6 +87,55 @@ class MemoryIdentity:
                 "ever be built by resolve_identity()."
             )
 
+    @classmethod
+    def for_operator_purge(cls, app_id: int, user_id: int) -> "MemoryIdentity":
+        """Construct a `MemoryIdentity` for **erasure only** (spec `user-memory-mem0`,
+        step_006 decision).
+
+        `MemoryIdentity` is shape-proof, not authorization-proof:
+        `__post_init__` only asserts the namespace matches the `app_id`/
+        `user_id` it was given — it does not, and cannot, prove the caller
+        was ever entitled to that scope. Until FR-8 landed, `resolve_identity`
+        was the *only* constructor, so "the seam only accepts a
+        `MemoryIdentity`" was incidentally also evidence of authorization.
+        That stops being true the moment an operator path legitimately builds
+        an identity from a supplied `(app_id, user_id)` pair — right-to-erasure
+        must succeed for a target who no longer holds *any* role in the App,
+        was never a member of it, or would fail every check in
+        `resolve_identity` (session auth, App membership, non-public-agent
+        audience). A GDPR request cannot be gated on those checks, or it could
+        never be served for exactly the people it exists to protect.
+
+        This constructor therefore carries **no authorization of its own** —
+        it is deliberately named and kept separate from `resolve_identity` so
+        that every call site building an identity outside the normal
+        session-derived turn path is greppable by name. Every caller
+        (`global_memory_service.delete_global_memory`, and — indirectly, via
+        `tools.memory.client.list_app_scopes` / `list_user_scopes` — the
+        cascades in `app_service.py` / `user_service.py`) is solely
+        responsible for having already established that purging this exact
+        `(app_id, user_id)` is authorized: the router's role dependency for
+        the operator endpoint, or the session-derived identity for the
+        self-service ones. **Never call this from the read/write turn
+        path** — use `resolve_identity` there, which does carry the
+        eligibility proof.
+
+        `agent_id` is set to the same `0` sentinel `list_app_scopes`/
+        `list_user_scopes` use for enumerated scopes: an erasure target has no
+        single originating agent, so `0` means "not applicable to a purge
+        target" rather than real per-fact provenance.
+
+        Args:
+            app_id: The exact App scope to purge.
+            user_id: The exact user scope to purge.
+
+        Returns:
+            A `MemoryIdentity` for `(app_id, user_id)`, namespace built the
+            same way `resolve_identity` builds it.
+        """
+        namespace = (settings.namespace_root(), str(app_id), str(user_id))
+        return cls(app_id=app_id, user_id=user_id, agent_id=0, namespace=namespace)
+
 
 def is_eligible_user_id(user_id: Any) -> bool:
     """The single FR-4 predicate for whether a `user_id` shape is eligible.
