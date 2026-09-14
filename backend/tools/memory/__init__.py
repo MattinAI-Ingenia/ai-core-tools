@@ -16,7 +16,14 @@ Modules (grown incrementally across the plan's steps):
   namespace may be constructed.
 - `resolution.py` — the FR-7 App-level service resolution (AD-5) and the
   D-24 dimensionality probe/cache. DB reads only, no LangGraph/store import.
-
-Not present yet (a later step, see the plan): `client.py` (the single store
-seam). Nothing in this package imports the LangGraph store.
+- `client.py` — the single store seam (AD-9): `GlobalMemoryClient` (async
+  `search`/`add`/`similarity`, all `MemoryIdentity`-only) plus the
+  module-level, kill-switch-independent `purge`/`list_app_scopes`/
+  `list_user_scopes` functions (sync, cascade-triggered erasure/enumeration)
+  and `GlobalMemoryPoolService` (the shared `AsyncConnectionPool` + `setup()`
+  lifecycle, wired from `backend/main.py`'s FastAPI lifespan). This is the
+  **only** module in the codebase that may import `langgraph.store`. Every
+  namespace-scoped read/list here re-checks the store's own `LIKE`-based
+  namespace matching for exact equality before trusting it — see that
+  module's docstring.
 """

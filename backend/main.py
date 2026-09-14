@@ -124,6 +124,22 @@ async def lifespan(app: FastAPI):
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.initialize_pool()
 
+        try:
+            from tools.memory.client import GlobalMemoryPoolService
+            await GlobalMemoryPoolService.initialize_pool()
+        except Exception as mem_exc:
+            # Cross-session memory is an optional, kill-switched enhancement
+            # (FR-10) — a failure to initialize its pool/migrations must not
+            # take down the whole application. Memory simply stays inactive
+            # for this process (get_memory_client() fails soft when the pool
+            # was never initialized).
+            logger.error(
+                "Global memory store pool failed to initialize; memory will be "
+                "inactive for this process: %s",
+                mem_exc,
+                exc_info=True,
+            )
+
         # Start crawl workers (job executor + scheduler)
         from services.crawl.worker import start_crawl_workers, stop_crawl_workers
         crawl_tasks = await start_crawl_workers(app)
@@ -161,6 +177,12 @@ async def lifespan(app: FastAPI):
 
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.close_pool()
+
+        try:
+            from tools.memory.client import GlobalMemoryPoolService
+            await GlobalMemoryPoolService.close_pool()
+        except Exception as mem_exc:
+            logger.warning("Global memory pool shutdown failed: %s", mem_exc)
 
         try:
             from tools.langsmith_config import flush_langsmith_clients, clear_client_cache
