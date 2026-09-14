@@ -1,23 +1,28 @@
 import { Lightbulb } from 'lucide-react';
 import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 
-// Latest recommended models per provider, per role. Updated 2026-09-14.
+// Latest recommended models per provider, per role. Reviewed 2026-09-14.
 // ponytail: update inline as providers ship.
 // Open-source picks are backed by a real extraction/keyword benchmark on
 // this repo's own LightRAG prompts — see
 // docs/testing/lightrag_extraction_benchmark_corpus.md and
 // docs/dependencies/lightrag.md#911-recomendación-de-modelos-por-rol.
-// The cloud-provider rows are NOT benchmarked the same way — they're picked
-// for lowest $/1M tokens (per this app's own live PricingCatalog) among
-// models still capable enough for the role, not measured quality. Re-check
-// PricingCatalog before trusting these next time providers reprice.
+// The cloud-provider rows are NOT benchmarked the same way — no measured
+// quality data exists for them except gpt-5.4-mini (see its own comment
+// below). Don't swap any of these for a cheaper sibling on price alone
+// (checked against this app's live PricingCatalog on 2026-09-14) without
+// first checking whether it has any real quality data backing it — a price
+// cut that also drops model generation/capability isn't a safe trade for
+// `extract`, which needs reliable structured JSON output.
 const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>> = {
   extract: [
-    // Kept to the SAME generation family as before for every provider where
-    // a same-generation cheaper option existed — extract needs real
-    // quality (structured entity/relationship JSON), so a price cut that
-    // also drops a whole model generation is not worth the risk here.
-    { provider: 'OpenAI', model: 'GPT-5 mini' },
+    // GPT-5.4 mini is kept over cheaper same-generation siblings (e.g.
+    // GPT-5 mini) on purpose: it's the only cloud model here with REAL
+    // measured extraction quality on this repo's own corpus (see
+    // docs/testing/lightrag_extraction_benchmark_corpus.md — 48.1% non-hub
+    // relationships, on par with the winning Qwen3-30B-A3B pick). A cheaper
+    // untested sibling is a real quality risk, not just a price change.
+    { provider: 'OpenAI', model: 'GPT-5.4 mini' },
     { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
     { provider: 'Mistral', model: 'Mistral Small 4' },
     { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
