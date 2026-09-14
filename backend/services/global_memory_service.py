@@ -49,7 +49,16 @@ functions fold `ScopeListResult.complete` into their own aggregate
 switch -> `has_global_memory` -> the D-17 read condition -> eligibility ->
 service resolution -> client construction), and `get_memory_context` performs
 the bounded, sanitised retrieval `_prepare_turn` injects ahead of the human
-message. The write path (FR-5, step_008) is added separately.
+message.
+
+**Write-path policy (FR-5, AD-8, D-6, D-10, D-15, D-18, D-23, step_008)**
+lives here too, at the bottom of this module: `schedule_write_path` is called
+synchronously (never awaited) from `_finalize_turn` once its own D-15 batch
+trigger has fired, and creates the fire-and-forget task whose body is
+`run_write_path` — bounded extraction (`extract_facts`, over
+`_build_extraction_window`'s cleaned input), our own dedup stage, then a
+persist call carrying only fact strings (AC-16). See `run_write_path`'s own
+docstring for the full stage-by-stage contract.
 
 **Read-path fence (post-audit hardening).** The block injected ahead of the
 human message used to be a hand-rolled text fence delimited by literal
@@ -76,6 +85,7 @@ import re
 import time
 from typing import Any, List, Optional, Tuple
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from tools.memory import settings as memory_settings
@@ -92,10 +102,14 @@ from tools.memory.resolution import ResolvedMemoryServices, build_memory_clients
 from tools.memory.settings import (
     FAIL_ERROR,
     FAIL_TIMEOUT,
+    SKIP_BACKPRESSURE,
+    SKIP_DUPLICATE,
     SKIP_FLAG_OFF,
     SKIP_INELIGIBLE_IDENTITY,
     SKIP_NO_AI_SERVICE,
     SKIP_NO_EMBEDDING_SERVICE,
+    SKIP_NO_FACTS,
+    SKIP_QUOTA,
     SKIP_READ_NOT_DUE,
     SKIP_ZERO_MATCHES,
     log_memory_event,
@@ -705,3 +719,540 @@ async def get_memory_context(
         count=len(facts), elapsed_ms=elapsed_ms, level="info",
     )
     return block
+
+
+# ---------------------------------------------------------------------------
+# Write-path policy (FR-5, AD-8, D-6, D-10, D-15, D-18, D-23, step_008)
+# ---------------------------------------------------------------------------
+#
+# The write path is fire-and-forget: `_finalize_turn` (`agent_execution_service.py`)
+# calls `schedule_write_path` synchronously, once its own D-15 batch trigger
+# has fired, and never awaits the task it creates. `run_write_path` is the
+# body of that task — everything in it happens strictly AFTER the turn's
+# response has already been produced/streamed, and nothing in it may ever
+# raise into the request that scheduled it (D-6, NFR-4).
+
+# D-18: the extraction prompt is a code constant, never App/Agent/
+# SystemSetting-configurable, and never built from any request payload
+# (AC-51). A poorly written, operator-editable prompt over live conversation
+# text is both a data-quality risk (R-6: it could ask for far more than
+# "durable, user-level facts") and a prompt-injection surface pointed
+# directly at persistent storage.
+EXTRACTION_PROMPT = """You extract durable, user-level facts from a short excerpt of a chat between a user and an AI assistant.
+
+A durable fact is something worth remembering about THIS USER across future, unrelated conversations: a stable preference, recurring context (their role, project, tools, constraints), or an identity-level detail they stated about themselves. Prefer facts that look stable across the whole excerpt over a one-off remark made only once.
+
+Do NOT extract:
+- Anything about the current task, request or answer — only lasting facts about the user.
+- Restatements of the conversation itself, or a summary of what was discussed.
+- Anything that came from a tool result, a retrieved document, or a file's contents, even if the assistant repeated it.
+- Sensitive categories (health, finances, legal matters, government IDs, credentials, or anything similar) unless the user is plainly and voluntarily stating it as a durable fact about themselves.
+- Facts about anyone other than this user.
+
+Respond with ONLY a JSON array of short strings, each one a single self-contained fact written in the third person (e.g. "Prefers concise answers", "Works as a backend engineer"). If nothing durable is present, respond with exactly: []
+
+Do not include any text, explanation, or markdown formatting outside the JSON array."""
+
+# Module-level set of in-flight write tasks (R-8, NFR-7): keeps a strong
+# reference so a scheduled task is never garbage-collected mid-flight, and
+# its length is `schedule_write_path`'s back-pressure bound.
+_write_tasks: "set" = set()
+
+
+def _build_extraction_window(
+    original_user_message: str,
+    response_text: str,
+    turn_used_tool_call: bool,
+    turn_had_attachments: bool = False,
+) -> str:
+    """Build FR-5's bounded extraction input (AD-8 stage 1, D-23, AC-60).
+
+    Built from the caller-supplied `original_user_message` — the raw
+    `message` `_prepare_turn` received (`ctx.original_user_message`), captured
+    BEFORE `_prepare_message_with_files` appends the `[Attached files:]`
+    segment / `Files base folder is:` line into `enhanced_message`
+    (`agent_execution_service.py`, `_prepare_message_with_files`). This
+    function must never be called with `ctx.enhanced_message`: a user's
+    uploaded CV, contract or medical report would otherwise be inlined into a
+    prompt that is simultaneously asking for "identity-level details" (R-6).
+    Using the original message makes this exclusion structural — there is no
+    attachment text in it to strip — rather than a substring strip applied
+    after the fact.
+
+    The assistant's reply is included only when BOTH `turn_used_tool_call`
+    and `turn_had_attachments` are `False`. A turn whose response followed a
+    tool call routinely has the assistant quoting retrieved documents or tool
+    output verbatim (R-6, D-23) — that content must never be able to become a
+    stored "fact" about the user. Separately (and just as importantly, since
+    uploading a file is *not* a tool call): a turn with a file attachment has
+    its text inlined into `enhanced_message` and answered inline, so the
+    assistant's reply routinely restates or summarises the attachment's
+    contents (a CV, a medical report, a contract) even though no tool ever
+    ran. Either signal alone is enough to drop the assistant half of the
+    window entirely, rather than merely truncating it.
+
+    This is deliberately just the current turn, never a multi-turn window
+    reconstructed from checkpointer history: doing so would mean either
+    passing the raw message list to the extraction LLM (which FR-5/AC-16
+    forbid as extraction input, not only as the persistence call's input) or
+    re-deriving this same tool-call exclusion for every historical turn with
+    no cheap signal to do so per turn. Batching's benefit (seeing several
+    turns before extracting) instead comes from running less often
+    (`should_write`, D-15), not from a wider single input.
+
+    Args:
+        original_user_message: `ctx.original_user_message` — never
+            `ctx.enhanced_message`.
+        response_text: The turn's flattened assistant reply
+            (`_flatten_response_text_for_memory` in
+            `agent_execution_service.py`), already stripped of `file://`
+            markers.
+        turn_used_tool_call: `ctx.turn_used_tool_call` — whether this turn's
+            graph response included a tool call.
+        turn_had_attachments: `bool(ctx.processed_files)` — whether this
+            turn's request carried at least one file attachment. Uploading a
+            file never sets `turn_used_tool_call` (it is inlined into the
+            prompt, not routed through a tool), so this is a separate,
+            explicit signal rather than something derivable from the other
+            one.
+
+    Returns:
+        A small `"User: ...\\nAssistant: ..."` excerpt (assistant line
+        omitted when `turn_used_tool_call` or `turn_had_attachments` is
+        `True`, or when the reply is empty). May be an empty string if there
+        is nothing to extract from.
+    """
+    parts: List[str] = []
+    user_text = (original_user_message or "").strip()
+    if user_text:
+        parts.append(f"User: {user_text}")
+    if not turn_used_tool_call and not turn_had_attachments:
+        assistant_text = (response_text or "").strip()
+        if assistant_text:
+            parts.append(f"Assistant: {assistant_text}")
+    return "\n".join(parts)
+
+
+def _parse_facts_json(raw_content: Any) -> List[str]:
+    """Defensively parse the extraction LLM's output into a list of fact strings.
+
+    Tolerates a markdown code fence around the JSON (some models wrap their
+    output in one even when told not to). Anything that is not, after that,
+    a JSON array of strings is treated as "no facts" (AC-15) rather than an
+    error — a malformed or off-format response from a cheap extraction model
+    is an expected, normal outcome, not a bug to raise about.
+    """
+    if raw_content is None:
+        return []
+    text = raw_content if isinstance(raw_content, str) else str(raw_content)
+    text = text.strip()
+    if not text:
+        return []
+
+    if text.startswith("```"):
+        text = text.strip("`")
+        newline_idx = text.find("\n")
+        if newline_idx != -1 and text[:newline_idx].strip().isalpha():
+            text = text[newline_idx + 1:]
+        text = text.strip()
+
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    facts: List[str] = []
+    for item in parsed:
+        if isinstance(item, str) and item.strip():
+            facts.append(item.strip())
+    return facts
+
+
+async def extract_facts(llm: Any, window_text: str) -> List[str]:
+    """One bounded LLM call over the extraction window (AD-8 stage 1, FR-5).
+
+    Truncates the input to `settings.extraction_input_max_chars()` before it
+    ever reaches the model. The output is parsed defensively
+    (`_parse_facts_json`) and then capped twice, because an LLM's JSON-array
+    output is otherwise unbounded (R-20 applies here, not only to the FR-11
+    tool): at most `settings.max_facts_per_extraction()` facts survive, and
+    each surviving fact is sanitised (`_sanitise_fact`, shared with the
+    read-render path) and truncated to `settings.fact_max_chars()`.
+
+    Never raises (NFR-4): an LLM error, an empty/unparseable response, or no
+    durable facts at all all return `[]`, which callers treat as a normal,
+    non-error outcome (AC-15).
+
+    Args:
+        llm: The resolved extraction `AIService` LLM (`ctx.global_memory_llm`).
+            `None` returns `[]` immediately.
+        window_text: The bounded window from `_build_extraction_window`.
+
+    Returns:
+        A list of at most `max_facts_per_extraction()` sanitised,
+        length-capped fact strings — possibly empty.
+    """
+    if llm is None or not window_text or not window_text.strip():
+        return []
+
+    truncated_window = window_text[: memory_settings.extraction_input_max_chars()]
+
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        result = await llm.ainvoke(
+            [SystemMessage(content=EXTRACTION_PROMPT), HumanMessage(content=truncated_window)]
+        )
+        raw_content = getattr(result, "content", result)
+    except Exception:
+        # No `exc_info=True` here, deliberately: the exception can wrap the
+        # provider's own echo of the prompt it choked on, which would put
+        # window text (derived from the user's own message) into the log
+        # (NFR-5) — mirrors the same choice already made in
+        # `agent_execution_service.py`'s memory-activation catch block.
+        logger.warning("global_memory extraction LLM call failed")
+        return []
+
+    raw_facts = _parse_facts_json(raw_content)
+    if not raw_facts:
+        return []
+
+    max_facts = memory_settings.max_facts_per_extraction()
+    max_fact_chars = memory_settings.fact_max_chars()
+    bounded_facts = raw_facts[:max_facts] if max_facts > 0 else raw_facts
+
+    capped: List[str] = []
+    for fact in bounded_facts:
+        clean = _sanitise_fact(fact)
+        if not clean:
+            continue
+        if max_fact_chars > 0 and len(clean) > max_fact_chars:
+            clean = clean[:max_fact_chars].rstrip()
+        if clean:
+            capped.append(clean)
+    return capped
+
+
+def _record_usage_sync(user_id: int) -> None:
+    """Blocking body of the D-10 usage-recording step (`run_write_path`).
+
+    Opens its own short-lived session (never the request-scoped `db` — by
+    the time `run_write_path` runs, the request that produced `identity` has
+    already completed), commits before closing (this background task gets no
+    later commit from a request lifecycle the way `_finalize_turn`'s own
+    quota/usage calls do — `UsageRecordRepository.increment` only
+    `flush()`es), and rolls back on failure. Run via `asyncio.to_thread` by
+    its caller: `UsageTrackingService.record_system_llm_call` issues a
+    blocking `SELECT FOR UPDATE`, which must never run directly on the event
+    loop.
+    """
+    from db.database import SessionLocal
+    from services.usage_tracking_service import UsageTrackingService
+
+    usage_session = SessionLocal()
+    try:
+        UsageTrackingService.record_system_llm_call(usage_session, user_id)
+        usage_session.commit()
+    except Exception:
+        usage_session.rollback()
+        raise
+    finally:
+        usage_session.close()
+
+
+async def run_write_path(
+    identity: MemoryIdentity,
+    resolved: Optional[ResolvedMemoryServices],
+    llm: Any,
+    embeddings: Any,
+    embedding_service_id: Optional[int],
+    original_user_message: str,
+    response_text: str,
+    turn_used_tool_call: bool,
+    turn_had_attachments: bool = False,
+) -> None:
+    """The body of the FR-5 fire-and-forget write task (AD-8, D-6, D-10).
+
+    Runs entirely after the turn that scheduled it has already returned its
+    response. Every stage below degrades on failure rather than raising —
+    this coroutine must never surface an exception to `schedule_write_path`'s
+    caller (AC-14); `schedule_write_path` wraps it a second time in its own
+    timeout/exception handling as defence in depth, not because this
+    function is expected to raise.
+
+    Stages (AD-8):
+        0. Usage/quota (D-10) — only when `resolved.extraction_is_system`
+           (mirrors the existing `_finalize_turn` step 6 precedent for the
+           main response LLM, `agent_execution_service.py`): checks the
+           quota in a freshly opened, short-lived session and skips
+           extraction with `SKIP_QUOTA` on exhaustion — never raises into
+           this already-detached turn. **Never uses the request-scoped `db`**
+           (AC-39, R-8): by the time this coroutine runs, the request that
+           produced `identity` has already completed and its session may
+           already be closed.
+        1. Extraction (`extract_facts`) — one LLM call over
+           `_build_extraction_window(...)`. Empty result → `SKIP_NO_FACTS`,
+           a normal outcome (AC-15).
+        1b. Usage recording (D-10) — immediately after `extract_facts`
+           returns, in a second freshly opened session (never the same
+           session the quota check used — already closed by then — and
+           never held open across the LLM call). Recorded unconditionally
+           here, whether or not any facts were found: the extraction LLM
+           call already happened and was billed by the provider regardless
+           of its outcome, so a `SKIP_NO_FACTS` or fully-deduped turn must
+           still consume quota. The session is committed before it is
+           closed — a background task gets no later commit from the
+           request lifecycle the way `_finalize_turn`'s own quota/usage
+           calls do.
+        2. Dedup (D-14) — one `client.similarity` search per candidate fact;
+           anything scoring above `settings.dedup_threshold()` is dropped
+           (`SKIP_DUPLICATE`). A failure in this stage keeps every candidate
+           rather than losing a fact (AC-47).
+        3. Persist (`client.add`) — only fact strings cross this seam
+           (AC-16); `GlobalMemoryClient.add` attaches `agent_id` and a
+           timestamp itself.
+
+    Args:
+        identity: The turn's `MemoryIdentity` (`ctx.global_memory_identity`).
+        resolved: The turn's `ResolvedMemoryServices` snapshot
+            (`ctx.global_memory_services`) — used only for
+            `extraction_is_system` (quota gating). May be `None` (in
+            practice callers never schedule this without one, but this
+            function must not require it).
+        llm: The resolved extraction LLM (`ctx.global_memory_llm`).
+        embeddings: The resolved embeddings client (`ctx.global_memory_embeddings`),
+            used to fetch the cached `GlobalMemoryClient`.
+        embedding_service_id: Cache key for `get_memory_client`
+            (`resolved.embedding_service_id`).
+        original_user_message: `ctx.original_user_message` — see
+            `_build_extraction_window`'s docstring for why this, and never
+            `ctx.enhanced_message`.
+        response_text: The turn's flattened assistant reply.
+        turn_used_tool_call: `ctx.turn_used_tool_call`.
+        turn_had_attachments: `bool(ctx.processed_files)` — see
+            `_build_extraction_window`'s docstring for why this is a
+            separate signal from `turn_used_tool_call` (uploading a file is
+            not a tool call).
+    """
+    app_id = getattr(identity, "app_id", None)
+    agent_id = getattr(identity, "agent_id", None)
+    start = time.monotonic()
+
+    def _check_quota_sync() -> None:
+        # Blocking psycopg calls (session open + query) — run off the event
+        # loop via `asyncio.to_thread` below, never awaited directly.
+        from db.database import SessionLocal
+        from services.tier_enforcement_service import TierEnforcementService
+
+        quota_session = SessionLocal()
+        try:
+            TierEnforcementService.check_system_llm_quota(quota_session, identity.user_id)
+        finally:
+            quota_session.close()
+
+    try:
+        if resolved is not None and resolved.extraction_is_system:
+            try:
+                await asyncio.to_thread(_check_quota_sync)
+            except HTTPException:
+                log_memory_event(
+                    "write", app_id=app_id, agent_id=agent_id, active=False,
+                    reason=SKIP_QUOTA, level="warning",
+                )
+                return
+
+        window_text = _build_extraction_window(
+            original_user_message, response_text, turn_used_tool_call, turn_had_attachments
+        )
+        facts = await extract_facts(llm, window_text)
+
+        # Usage (D-10) is recorded here, immediately after `extract_facts`
+        # returns, regardless of whether it found any facts: any LLM call
+        # that happened was already billed by the provider, so a
+        # `SKIP_NO_FACTS` or fully-deduped turn must still consume quota —
+        # recording it only after a successful `client.add` (as this used to
+        # do) let every such turn run unmetered. Uses a freshly opened
+        # session — never the request-scoped `db` (already closed by the
+        # time this coroutine runs) and never held open across the LLM call
+        # above.
+        if resolved is not None and resolved.extraction_is_system:
+            try:
+                await asyncio.to_thread(_record_usage_sync, identity.user_id)
+            except Exception:
+                logger.warning(
+                    "global_memory failed to record system LLM usage for user_id=%s",
+                    identity.user_id,
+                )
+
+        if not facts:
+            log_memory_event(
+                "write", app_id=app_id, agent_id=agent_id, active=True,
+                count=0, reason=SKIP_NO_FACTS, level="debug",
+            )
+            return
+
+        client = await get_memory_client(embeddings, embedding_service_id)
+
+        # Stage 2 — dedup (AD-8, D-14). A failure here degrades to "write
+        # every candidate" — losing a fact is worse than storing a
+        # near-duplicate.
+        survivors = list(facts)
+        try:
+            if client is not None:
+                threshold = memory_settings.dedup_threshold()
+                deduped: List[str] = []
+                for fact in facts:
+                    score = await client.similarity(identity, fact)
+                    if score is not None and score > threshold:
+                        log_memory_event(
+                            "write", app_id=app_id, agent_id=agent_id, active=True,
+                            reason=SKIP_DUPLICATE, level="debug",
+                        )
+                        continue
+                    deduped.append(fact)
+                survivors = deduped
+        except Exception:
+            logger.warning(
+                "global_memory dedup stage failed for app_id=%s agent_id=%s; "
+                "writing every candidate rather than losing one",
+                app_id, agent_id,
+            )
+            survivors = list(facts)
+
+        if not survivors:
+            # Every candidate deduped away (AC-47) — a normal outcome, not
+            # an error; nothing left to persist.
+            log_memory_event(
+                "write", app_id=app_id, agent_id=agent_id, active=True,
+                count=0, elapsed_ms=(time.monotonic() - start) * 1000, level="debug",
+            )
+            return
+
+        if client is None:
+            log_memory_event(
+                "write", app_id=app_id, agent_id=agent_id, active=False,
+                reason=SKIP_NO_EMBEDDING_SERVICE, level="warning",
+            )
+            return
+
+        written = await client.add(identity, survivors)
+
+        log_memory_event(
+            "write", app_id=app_id, agent_id=agent_id, active=True,
+            count=written, elapsed_ms=(time.monotonic() - start) * 1000, level="info",
+        )
+    except Exception:
+        # No `exc_info=True` (see `extract_facts`'s matching comment): a
+        # traceback here could carry window/fact text through a provider or
+        # DB error message (NFR-5).
+        logger.warning(
+            "global_memory write path failed for app_id=%s agent_id=%s", app_id, agent_id
+        )
+        log_memory_event(
+            "write", app_id=app_id, agent_id=agent_id, active=False,
+            reason=FAIL_ERROR, level="warning",
+        )
+
+
+def schedule_write_path(
+    identity: MemoryIdentity,
+    resolved: Optional[ResolvedMemoryServices],
+    llm: Any,
+    embeddings: Any,
+    embedding_service_id: Optional[int],
+    original_user_message: str,
+    response_text: str,
+    turn_used_tool_call: bool,
+    turn_had_attachments: bool = False,
+) -> None:
+    """Schedule `run_write_path` as a fire-and-forget background task (AD-8, D-6).
+
+    Called synchronously from `_finalize_turn` once its own D-15 trigger has
+    fired; never awaited by the caller (AC-13) — neither the turn's returned
+    response dict nor the streaming path's `done` event waits on the task
+    this creates.
+
+    Back-pressure (R-8, NFR-7): when `settings.max_inflight_writes()`
+    concurrent write tasks are already running, this skips scheduling
+    entirely (logging `SKIP_BACKPRESSURE`) rather than growing the task set
+    without bound under load. Otherwise the task is retained in a
+    module-level set with `add_done_callback` cleanup, so it is never
+    garbage-collected mid-flight — an unreferenced `asyncio.Task` can be
+    collected before it completes, silently dropping the write.
+
+    The task itself is wrapped in `asyncio.wait_for` under
+    `settings.write_timeout_s()`; on timeout the task is simply abandoned
+    with a warning (AC-17). Both the timeout and any other exception
+    escaping the wrapped coroutine are caught here — this function's own
+    scheduling call is additionally wrapped by its caller
+    (`_finalize_turn`) in its own `try/except`, so a bug at any layer of this
+    feature degrades to "no write happened" rather than breaking the turn
+    that already returned (NFR-4).
+
+    Args:
+        identity: `ctx.global_memory_identity`.
+        resolved: `ctx.global_memory_services`.
+        llm: `ctx.global_memory_llm`.
+        embeddings: `ctx.global_memory_embeddings`.
+        embedding_service_id: `resolved.embedding_service_id`, resolved by
+            the caller so this function never has to inspect `resolved`'s
+            shape.
+        original_user_message: `ctx.original_user_message`.
+        response_text: The turn's flattened assistant reply.
+        turn_used_tool_call: `ctx.turn_used_tool_call`.
+        turn_had_attachments: `bool(ctx.processed_files)` — see
+            `_build_extraction_window`'s docstring for why this is a
+            separate signal from `turn_used_tool_call` (uploading a file is
+            not a tool call).
+    """
+    app_id = getattr(identity, "app_id", None)
+    agent_id = getattr(identity, "agent_id", None)
+
+    if len(_write_tasks) >= memory_settings.max_inflight_writes():
+        log_memory_event(
+            "write", app_id=app_id, agent_id=agent_id, active=False,
+            reason=SKIP_BACKPRESSURE, level="warning",
+        )
+        return
+
+    async def _run_with_timeout() -> None:
+        try:
+            await asyncio.wait_for(
+                run_write_path(
+                    identity=identity,
+                    resolved=resolved,
+                    llm=llm,
+                    embeddings=embeddings,
+                    embedding_service_id=embedding_service_id,
+                    original_user_message=original_user_message,
+                    response_text=response_text,
+                    turn_used_tool_call=turn_used_tool_call,
+                    turn_had_attachments=turn_had_attachments,
+                ),
+                timeout=memory_settings.write_timeout_s(),
+            )
+        except asyncio.TimeoutError:
+            log_memory_event(
+                "write", app_id=app_id, agent_id=agent_id, active=False,
+                reason=FAIL_TIMEOUT, level="warning",
+            )
+        except Exception:
+            # Defence in depth only: `run_write_path` already wraps its
+            # entire body in its own try/except (AC-14) and should never
+            # reach here. Guards only against a future edit to that
+            # function forgetting to.
+            logger.warning(
+                "global_memory write task raised unexpectedly for app_id=%s agent_id=%s",
+                app_id, agent_id,
+            )
+            log_memory_event(
+                "write", app_id=app_id, agent_id=agent_id, active=False,
+                reason=FAIL_ERROR, level="warning",
+            )
+
+    task = asyncio.create_task(_run_with_timeout(), name=f"global-memory-write-{agent_id}")
+    _write_tasks.add(task)
+    task.add_done_callback(_write_tasks.discard)

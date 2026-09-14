@@ -38,6 +38,12 @@ SKIP_DUPLICATE = "SKIP_DUPLICATE"
 SKIP_ZERO_MATCHES = "SKIP_ZERO_MATCHES"
 SKIP_WRITE_NOT_DUE = "SKIP_WRITE_NOT_DUE"
 SKIP_READ_NOT_DUE = "SKIP_READ_NOT_DUE"
+# step_008: the fire-and-forget write path's own back-pressure bound
+# (R-8/NFR-7) — scheduling was skipped because `max_inflight_writes()`
+# concurrent write tasks were already running. Kept distinct from
+# `FAIL_ERROR` so an operator can tell "the feature is overloaded" apart
+# from "something raised" in the logs.
+SKIP_BACKPRESSURE = "SKIP_BACKPRESSURE"
 FAIL_TIMEOUT = "FAIL_TIMEOUT"
 FAIL_ERROR = "FAIL_ERROR"
 
@@ -60,6 +66,7 @@ _ALLOWED_REASONS = frozenset({
     SKIP_ZERO_MATCHES,
     SKIP_WRITE_NOT_DUE,
     SKIP_READ_NOT_DUE,
+    SKIP_BACKPRESSURE,
     FAIL_TIMEOUT,
     FAIL_ERROR,
 })

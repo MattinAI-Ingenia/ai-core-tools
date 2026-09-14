@@ -340,6 +340,62 @@ def _inject_file_markers(text: str, files: list) -> str:
     return text
 
 
+def _response_included_tool_call(messages: Optional[List[Any]]) -> bool:
+    """Whether a graph response's message list shows this turn used a tool
+    (spec `user-memory-mem0`, D-23/step_008).
+
+    Mirrors the same two signals `tools/streaming_utils.py::_map_updates_chunk`
+    already uses to emit ``tool_start``/``tool_end`` SSE events: an AI message
+    carrying ``tool_calls``, or a ``ToolMessage`` (by class name or its
+    LangChain ``type`` attribute — some providers return plain dict-like
+    messages without the class). Used only to decide whether the global
+    memory write path may include the assistant's reply in its extraction
+    window (a turn that called a tool routinely has the assistant quoting
+    retrieved/tool content verbatim, which must never become a stored fact).
+    """
+    for msg in messages or []:
+        if getattr(msg, "tool_calls", None):
+            return True
+        msg_type = type(msg).__name__
+        if msg_type == "ToolMessage" or getattr(msg, "type", "") == "tool":
+            return True
+    return False
+
+
+def _flatten_response_text_for_memory(parsed_response: Any) -> str:
+    """Flatten a parsed agent response into plain text for the global-memory
+    write path (spec `user-memory-mem0`, FR-5/step_008).
+
+    Deliberately mirrors — but does not share code with — the text-flattening
+    `_finalize_turn` step 7 already applies for `last_message_preview` (same
+    content-block extraction, same ``file://`` marker substitutions), minus
+    the 200-char truncation used there: `extract_facts`
+    (`services/global_memory_service.py`) applies its own bound
+    (`extraction_input_max_chars()`) later, over the *whole* extraction
+    window, not just the response half of it. Kept as a separate function
+    rather than a shared helper so this new code path can never change step
+    7's existing, already-tested truncation/substitution order.
+    """
+    import re as _re
+
+    if isinstance(parsed_response, list):
+        try:
+            text_parts = [
+                item.get("text", "")
+                for item in parsed_response
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            text = " ".join(text_parts)
+        except Exception:
+            text = str(parsed_response)
+    else:
+        text = parsed_response if isinstance(parsed_response, str) else str(parsed_response)
+
+    text = _re.sub(r'!\[[^\]]*\]\(file://[^\)]*\)', '[imagen]', text)
+    text = _re.sub(r'\[📎[^\]]*\]\(file://[^\)]*\)', '[archivo]', text)
+    return text.strip()
+
+
 class AgentExecutionService:
     """Unified service for agent execution - used by both public and internal APIs"""
     
@@ -399,6 +455,7 @@ class AgentExecutionService:
                 sandbox_provider=ctx.sandbox_provider,
                 sandbox_session_key=ctx.sandbox_session_key,
                 memory_context=ctx.memory_context,
+                ctx=ctx,
             )
 
             return await self._finalize_turn(ctx, response, db)
@@ -786,6 +843,11 @@ class AgentExecutionService:
             global_memory_embeddings=global_memory_embeddings,
             memory_context=memory_context,
             memory_turn_index=memory_turn_index,
+            # FR-5 write path input (step_008): the raw `message` argument,
+            # captured before `_prepare_message_with_files` (step 8 above)
+            # appends any attachment text into `enhanced_message`. See
+            # `AgentExecutionContext.original_user_message`'s own docstring.
+            original_user_message=message,
         )
 
     def _sandbox_turn_expected_seconds(self) -> int:
@@ -1044,6 +1106,79 @@ class AgentExecutionService:
                 conversation_id=ctx.conversation.conversation_id,
                 last_message=last_message_preview,
                 increment_by=2,
+            )
+
+        # 8. Cross-session global user memory — schedule the fire-and-forget
+        #    write path (spec `user-memory-mem0`, FR-5, AD-8, D-15, step_008).
+        #
+        # The batch trigger is evaluated HERE, at scheduling time, using
+        # `ctx.memory_turn_index` — the turn index `_prepare_turn` resolved
+        # and cached on the context BEFORE step 7 above incremented
+        # `Conversation.message_count` for this turn. This method must never
+        # call `memory_settings.turn_index(ctx.conversation)` itself: doing so
+        # here, AFTER step 7's increment, would read one turn ahead of what
+        # `_prepare_turn` saw and silently break the `turn_index == 1` clause
+        # R-16 depends on (see `AgentExecutionContext.memory_turn_index`'s own
+        # docstring and AD-13) — a bug AC-49's exact-turn-set assertion exists
+        # specifically to catch.
+        #
+        # `ctx.global_memory_identity` being set means step_007's activation
+        # (`prepare_turn_memory`, gated on the union of the read/write
+        # cadences — AD-6) already resolved a full identity plus both
+        # services plus both clients for this turn: a turn that is write-due
+        # but not read-due still has everything this hook needs. A turn where
+        # memory is inactive altogether (kill switch off, flag off,
+        # ineligible identity, unresolved services) never sets it, so no task
+        # is ever created and no store/LLM call happens either path (AC-18).
+        #
+        # A stream aborted mid-flight never reaches `_finalize_turn` at all —
+        # `agent_streaming_service.py`'s astream loop re-raises a non-recoverable
+        # error before the post-processing phase runs — so no write is ever
+        # scheduled for a turn whose response was never produced.
+        #
+        # The whole step is wrapped in one broad try/except: a bug in the
+        # memory module must degrade to "no write scheduled this turn", never
+        # fail an already-otherwise-complete turn (NFR-4).
+        try:
+            if ctx.global_memory_identity is not None:
+                from tools.memory import settings as memory_settings
+                from tools.memory.settings import SKIP_WRITE_NOT_DUE, log_memory_event
+
+                if memory_settings.should_write(ctx.memory_turn_index):
+                    response_text = _flatten_response_text_for_memory(parsed_response)
+                    if response_text:
+                        from services.global_memory_service import schedule_write_path
+
+                        embedding_service_id = (
+                            ctx.global_memory_services.embedding_service_id
+                            if ctx.global_memory_services is not None
+                            else None
+                        )
+                        schedule_write_path(
+                            identity=ctx.global_memory_identity,
+                            resolved=ctx.global_memory_services,
+                            llm=ctx.global_memory_llm,
+                            embeddings=ctx.global_memory_embeddings,
+                            embedding_service_id=embedding_service_id,
+                            original_user_message=ctx.original_user_message or "",
+                            response_text=response_text,
+                            turn_used_tool_call=bool(ctx.turn_used_tool_call),
+                            turn_had_attachments=bool(ctx.processed_files),
+                        )
+                else:
+                    log_memory_event(
+                        "write",
+                        app_id=ctx.global_memory_identity.app_id,
+                        agent_id=ctx.global_memory_identity.agent_id,
+                        active=False,
+                        reason=SKIP_WRITE_NOT_DUE,
+                        level="debug",
+                    )
+        except Exception:
+            logger.warning(
+                "Failed to schedule the global-memory write path for agent %s; "
+                "this turn's response is unaffected",
+                ctx.agent_id,
             )
 
         return {
@@ -1688,8 +1823,18 @@ class AgentExecutionService:
         sandbox_session_key: Optional[str] = None,
         processed_files: List[Dict] = None,
         memory_context: Optional[str] = None,
+        ctx: Optional["AgentExecutionContext"] = None,
     ) -> Any:
         """Execute agent in FastAPI's event loop using shared checkpointer pool.
+
+        Args:
+            ctx: Optional execution context. When provided, `ctx.turn_used_tool_call`
+                is set from the graph's response messages before returning
+                (spec `user-memory-mem0`, D-23/step_008) — the global-memory
+                write path in `_finalize_turn` needs to know whether this
+                turn's assistant reply followed a tool call, so it can be
+                excluded from what may become a stored fact. Optional and
+                additive so existing callers/tests are unaffected.
 
         Returns:
             str for plain text responses, dict/Pydantic model for structured output (v1).
@@ -1817,6 +1962,26 @@ class AgentExecutionService:
                     )
                 else:
                     raise
+
+            # Cross-session global user memory (D-23, step_008): record
+            # whether this turn's response involved a tool call, BEFORE any
+            # of the early `return`s below — a retried turn (the branch
+            # above) and a structured-output turn (the branch immediately
+            # below) must be covered just as much as the plain-text path.
+            # `ctx` is optional and additive (see this method's docstring);
+            # `_finalize_turn`'s write-path hook reads it back off `ctx`, not
+            # off this method's return value, so this can never change what
+            # any existing caller receives.
+            if ctx is not None:
+                try:
+                    ctx.turn_used_tool_call = _response_included_tool_call(
+                        result.get("messages") if isinstance(result, dict) else None
+                    )
+                except Exception:
+                    # Never let a defect in this bookkeeping affect the
+                    # turn's own response (NFR-4) — worst case the write
+                    # path later treats the turn as tool-free.
+                    ctx.turn_used_tool_call = False
 
             # LangChain v1: structured output is in 'structured_response' key
             # when create_agent is called with response_format=pydantic_model

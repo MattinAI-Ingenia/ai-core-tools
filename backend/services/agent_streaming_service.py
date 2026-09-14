@@ -24,7 +24,10 @@ from tools.streaming_utils import (
     map_stream_event,
     SSE_TOKEN,
 )
-from services.agent_execution_service import AgentExecutionService
+from services.agent_execution_service import (
+    AgentExecutionService,
+    _response_included_tool_call,
+)
 from services.agent_cache_service import (
     CheckpointerCacheService,
     is_missing_tool_output_error,
@@ -219,6 +222,26 @@ class AgentStreamingService:
 
                 accumulated_content = ""
                 structured_response = None
+                # Cross-session global user memory (D-23, step_008): whether
+                # this attempt's stream included a tool call.
+                #
+                # Deliberately NOT derived from `map_stream_event`'s
+                # `tool_start`/`tool_end` SSE events (a security audit found
+                # that path unreliable as a gating signal): `map_stream_event`
+                # swallows exceptions and returns `None`, skips `tool_start`
+                # when the tool name is empty, and requires `"tool" in
+                # node_name` for `tool_end` — any of those is a false
+                # negative that would let tool/retrieved content leak into
+                # the write path's extraction window. Instead this runs
+                # `_response_included_tool_call` (the same authoritative
+                # check the non-streaming path uses) directly over each node
+                # delta's raw `messages`, in the `mode == "updates"` branch
+                # below, independent of whatever `map_stream_event` does with
+                # the same chunk for presentation purposes. Reset per attempt
+                # (like `accumulated_content` above): a retried turn starts
+                # fresh, and only the attempt that actually completes (`break`
+                # below) is the one whose value reaches `_finalize_turn`.
+                turn_used_tool_call = False
 
                 try:
                     async for mode, chunk in agent_chain.astream(
@@ -227,14 +250,24 @@ class AgentStreamingService:
                         stream_mode=["messages", "updates", "custom"],
                     ):
 
-                        if mode == "updates":
+                        if mode == "updates" and isinstance(chunk, dict):
                             if (
-                                isinstance(chunk, dict)
-                                and "model" in chunk
+                                "model" in chunk
                                 and isinstance(chunk["model"], dict)
                                 and "structured_response" in chunk["model"]
                             ):
                                 structured_response = chunk["model"]["structured_response"]
+
+                            if not turn_used_tool_call:
+                                for state_delta in chunk.values():
+                                    if not isinstance(state_delta, dict):
+                                        continue
+                                    node_messages = state_delta.get("messages")
+                                    if not isinstance(node_messages, list):
+                                        node_messages = [node_messages] if node_messages else []
+                                    if _response_included_tool_call(node_messages):
+                                        turn_used_tool_call = True
+                                        break
 
                         events = map_stream_event(mode, chunk)
                         if events:
@@ -292,6 +325,12 @@ class AgentStreamingService:
                 if structured_response is not None
                 else accumulated_content
             )
+
+            # Cross-session global user memory (D-23, step_008): carry this
+            # turn's tool-call signal onto `ctx` before `_finalize_turn` reads
+            # it to decide whether the assistant's reply may enter the write
+            # path's extraction window.
+            ctx.turn_used_tool_call = turn_used_tool_call
 
             result = await self.execution_service._finalize_turn(
                 ctx, raw_response, effective_db

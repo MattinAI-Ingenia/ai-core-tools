@@ -67,3 +67,29 @@ class AgentExecutionContext:
     # (R-16). Always populated (never None) once `_prepare_turn` returns,
     # independent of whether memory itself is active this turn.
     memory_turn_index: Optional[int] = None
+
+    # FR-5 write path inputs (spec `user-memory-mem0`, step_008, D-23/AC-60).
+    # `original_user_message` is the raw `message` `_prepare_turn` received,
+    # BEFORE `_prepare_message_with_files` appends the `[Attached files:]`
+    # segment / `Files base folder is:` line into `enhanced_message`
+    # (`agent_execution_service.py:1611-1613`). The write path must build its
+    # extraction window from this field, never from `enhanced_message` — see
+    # `global_memory_service._build_extraction_window`'s docstring for why.
+    original_user_message: Optional[str] = None
+    # Whether this turn's agent run included at least one tool call (a
+    # `ToolMessage` in the graph's response, or an AI message with
+    # `tool_calls`). Set by `_execute_agent_async` (non-streaming) or the
+    # `astream` loop (streaming) before `_finalize_turn` runs. The write path
+    # excludes the assistant's reply from the extraction window whenever this
+    # is `True` (D-23): a turn that called a tool routinely has the assistant
+    # quoting retrieved/tool content verbatim, which must never become a
+    # stored "fact" about the user.
+    #
+    # Deliberately NOT the only signal `_finalize_turn` checks before
+    # including the assistant's reply: uploading a file attachment is not a
+    # tool call (its text is inlined into `enhanced_message` and answered
+    # inline), so `_finalize_turn` also passes `turn_had_attachments=
+    # bool(ctx.processed_files)` to `schedule_write_path`, and the assistant
+    # half of the extraction window is dropped whenever EITHER is `True` —
+    # see `global_memory_service._build_extraction_window`'s docstring.
+    turn_used_tool_call: bool = False

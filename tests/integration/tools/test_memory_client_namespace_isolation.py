@@ -198,6 +198,82 @@ class TestPurgeNamespaceIsolation:
         assert result == type(result)(deleted=0, complete=True)
 
 
+class TestAddDeterministicKeyIdempotency:
+    """AC-47 (spec `user-memory-mem0`, step_008): "writing the same fact
+    twice yields one record". This is a property of `GlobalMemoryClient.add`'s
+    own deterministic per-fact key (`_fact_key`, step_005) — the write path's
+    own dedup stage (`run_write_path`'s near-duplicate similarity check,
+    unit-tested with a mocked client in
+    `tests/unit/services/test_global_memory_write_path.py`) sits ON TOP of
+    this and never substitutes for it. Proven here against the real store,
+    not a mock, because the guarantee depends on Postgres's own
+    `INSERT ... ON CONFLICT` semantics inside `aput`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_writing_the_identical_fact_twice_overwrites_not_duplicates(self, memory_client):
+        identity = _make_identity(app_id=6, user_id=11)
+
+        first_written = await memory_client.add(identity, ["Prefers concise answers"])
+        second_written = await memory_client.add(identity, ["Prefers concise answers"])
+
+        assert first_written == 1
+        assert second_written == 1  # `add()` reports 1 write attempted, not 1 new row
+
+        results = await memory_client.search(identity, query="concise", top_k=10)
+        assert results == ["Prefers concise answers"]
+
+        root = memory_settings.namespace_root()
+        with _raw_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) AS n FROM store WHERE prefix = %s",
+                    (f"{root}.6.11",),
+                )
+                row_count = cur.fetchone()["n"]
+        assert row_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_normalised_duplicate_still_overwrites_the_same_row(self, memory_client):
+        """`_fact_key` normalises (lowercases, collapses whitespace) before
+        hashing, so a re-learned fact that differs only in casing/whitespace
+        is still the same row, not a near-duplicate needing the similarity
+        check."""
+        identity = _make_identity(app_id=6, user_id=12)
+
+        await memory_client.add(identity, ["Likes   Pizza"])
+        await memory_client.add(identity, ["likes pizza"])
+
+        root = memory_settings.namespace_root()
+        with _raw_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) AS n FROM store WHERE prefix = %s",
+                    (f"{root}.6.12",),
+                )
+                row_count = cur.fetchone()["n"]
+        assert row_count == 1
+
+    @pytest.mark.asyncio
+    async def test_each_stored_fact_records_its_originating_agent_id(self, memory_client):
+        """FR-4/OQ-9: `agent_id` travels on the identity and is written into
+        every fact's value (never part of the namespace)."""
+        identity = _make_identity(app_id=6, user_id=13, agent_id=42)
+
+        await memory_client.add(identity, ["Works as a backend engineer"])
+
+        root = memory_settings.namespace_root()
+        with _raw_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM store WHERE prefix = %s",
+                    (f"{root}.6.13",),
+                )
+                row = cur.fetchone()
+        assert row is not None
+        assert row["value"]["agent_id"] == 42
+
+
 class TestListUserScopesNamespaceIsolation:
     """AC — enumerating a user's scopes across every App must never surface a
     neighbour matched only because the store's suffix filter is also a LIKE.
