@@ -30,6 +30,16 @@ describe('buildRelationshipChange', () => {
     ).toEqual({ service_id: 2 });
   });
 
+  it('replaces media_embedding_service_id on add (atomic swap)', () => {
+    expect(
+      buildRelationshipChange(
+        agent({ media_embedding_service_id: 1 }),
+        { kind: 'media_embedding', targetNumericId: 2 },
+        'add',
+      ),
+    ).toEqual({ media_embedding_service_id: 2 });
+  });
+
   it('sets silo_id on add', () => {
     expect(buildRelationshipChange(agent(), { kind: 'silo', targetNumericId: 5 }, 'add')).toEqual({
       silo_id: 5,

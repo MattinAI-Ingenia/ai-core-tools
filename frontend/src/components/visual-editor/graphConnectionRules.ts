@@ -8,6 +8,7 @@ export const CONNECTABLE_NODE_KINDS: ReadonlySet<GraphNodeKind> = new Set([
   'silo',
   'skill',
   'mcp',
+  'embedding',
 ]);
 
 /** Edge kinds that may be removed from the canvas (select + Delete/Backspace). */
@@ -26,18 +27,27 @@ export const DELETABLE_NODE_KINDS: ReadonlySet<GraphNodeKind> = new Set([
 ]);
 
 /**
- * Non-agent node kinds that may form an agent-to-resource connection edge.
- * `service` is single-valued like `silo`: connecting a new one doesn't need
- * its own edge deleted first - `buildRelationshipChange` overwrites the
- * agent's `service_id` in place, so dragging a replacement AIService is an
- * atomic swap rather than a remove-then-add.
+ * Non-agent node kinds that may form an agent-to-resource connection edge,
+ * and the edge kind that connection produces. Usually the same string (a
+ * `silo` node produces a `silo` edge), but `embedding` is the one exception:
+ * an EmbeddingService node already produces a `embedding` edge kind for its
+ * (immutable, non-editable) Silo -> EmbeddingService relationship, so the
+ * agent-editable one needs its own distinct kind (`media_embedding`) to
+ * avoid the two colliding under the same `DELETABLE_EDGE_KINDS`/mutation
+ * routing.
+ *
+ * `service`/`media_embedding` are single-valued like `silo`: connecting a
+ * new one doesn't need its own edge deleted first - `buildRelationshipChange`
+ * overwrites the agent's `service_id`/`media_embedding_service_id` in place,
+ * so dragging a replacement is an atomic swap rather than a remove-then-add.
  */
-const AGENT_RESOURCE_EDGE_KINDS: ReadonlySet<GraphEdgeKind> = new Set([
-  'service',
-  'silo',
-  'skill',
-  'mcp',
-]);
+const AGENT_RESOURCE_PAIRS: ReadonlyArray<{ readonly resourceKind: GraphNodeKind; readonly edgeKind: GraphEdgeKind }> = [
+  { resourceKind: 'service', edgeKind: 'service' },
+  { resourceKind: 'silo', edgeKind: 'silo' },
+  { resourceKind: 'skill', edgeKind: 'skill' },
+  { resourceKind: 'mcp', edgeKind: 'mcp' },
+  { resourceKind: 'embedding', edgeKind: 'media_embedding' },
+];
 
 export interface ResolvedConnection {
   readonly kind: GraphEdgeKind;
@@ -87,12 +97,18 @@ export function resolveConnection(
   let agentNode: GraphNode | null = null;
   let edgeKind: GraphEdgeKind | null = null;
 
-  if (sourceNode.kind === 'agent' && AGENT_RESOURCE_EDGE_KINDS.has(targetNode.kind as GraphEdgeKind)) {
-    agentNode = sourceNode;
-    edgeKind = targetNode.kind as GraphEdgeKind;
-  } else if (targetNode.kind === 'agent' && AGENT_RESOURCE_EDGE_KINDS.has(sourceNode.kind as GraphEdgeKind)) {
-    agentNode = targetNode;
-    edgeKind = sourceNode.kind as GraphEdgeKind;
+  if (sourceNode.kind === 'agent') {
+    const pair = AGENT_RESOURCE_PAIRS.find((p) => p.resourceKind === targetNode.kind);
+    if (pair) {
+      agentNode = sourceNode;
+      edgeKind = pair.edgeKind;
+    }
+  } else if (targetNode.kind === 'agent') {
+    const pair = AGENT_RESOURCE_PAIRS.find((p) => p.resourceKind === sourceNode.kind);
+    if (pair) {
+      agentNode = targetNode;
+      edgeKind = pair.edgeKind;
+    }
   }
 
   if (!agentNode || !edgeKind) return null;

@@ -13,8 +13,9 @@ const silo = node('silo:5', 'silo');
 const skill = node('skill:7', 'skill');
 const mcp = node('mcp:9', 'mcp');
 const service = node('service:2', 'service');
+const embedding = node('embedding:4', 'embedding');
 
-const nodes = [agentA, agentB, agentC, silo, skill, mcp, service];
+const nodes = [agentA, agentB, agentC, silo, skill, mcp, service, embedding];
 
 describe('resolveConnection', () => {
   it('resolves agent -> silo', () => {
@@ -70,6 +71,22 @@ describe('resolveConnection', () => {
       kind: 'service',
       agentNumericId: 1,
       targetNumericId: 2,
+    });
+  });
+
+  it('resolves agent -> embedding (replaces the agent media embedding service)', () => {
+    expect(resolveConnection(nodes, { source: 'agent:1', target: 'embedding:4' })).toEqual({
+      kind: 'media_embedding',
+      agentNumericId: 1,
+      targetNumericId: 4,
+    });
+  });
+
+  it('resolves embedding -> agent (reversed drag direction) the same way', () => {
+    expect(resolveConnection(nodes, { source: 'embedding:4', target: 'agent:1' })).toEqual({
+      kind: 'media_embedding',
+      agentNumericId: 1,
+      targetNumericId: 4,
     });
   });
 
