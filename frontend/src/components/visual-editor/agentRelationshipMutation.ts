@@ -6,11 +6,18 @@ export interface RelationshipChange {
   readonly targetNumericId: number;
 }
 
+/**
+ * Agent scalar-relationship fields that clear to `null` on the canvas
+ * (instead of `undefined`, which `Partial<Agent>` would otherwise require) -
+ * defined once so `AgentPatch` below and `useGraphMutations.ts`'s
+ * `workingAgent` accumulator can't drift out of sync with each other, as
+ * they once did when `service_id` was added to only one of the two.
+ */
+export type NullableAgentIdField = 'silo_id' | 'service_id' | 'media_embedding_service_id';
+export type NullableAgentIdOverrides = { [K in NullableAgentIdField]?: number | null };
+
 /** Agent fields that may change when a relationship edge is mutated on the canvas. */
-export type AgentPatch = Omit<Partial<Agent>, 'silo_id' | 'service_id'> & {
-  silo_id?: number | null;
-  service_id?: number | null;
-};
+export type AgentPatch = Omit<Partial<Agent>, NullableAgentIdField> & NullableAgentIdOverrides;
 
 function toggleId(ids: readonly number[] | undefined, targetId: number, mode: 'add' | 'remove'): number[] {
   const current = ids ?? [];
@@ -35,6 +42,8 @@ export function buildRelationshipChange(
   switch (change.kind) {
     case 'service':
       return { service_id: mode === 'add' ? change.targetNumericId : null };
+    case 'media_embedding':
+      return { media_embedding_service_id: mode === 'add' ? change.targetNumericId : null };
     case 'silo':
       return { silo_id: mode === 'add' ? change.targetNumericId : null };
     case 'skill':

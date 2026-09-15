@@ -9,7 +9,7 @@ function node(id: string, kind: GraphNode['kind']): GraphNode {
 const noopOptions = { collapsedAgentIds: new Set<string>(), onToggleCollapse: () => {} };
 
 describe('toFlowNodes connectable flag', () => {
-  it('marks agent, service, silo, skill, mcp nodes connectable', () => {
+  it('marks agent, service, silo, skill, mcp, embedding nodes connectable', () => {
     const nodes = toFlowNodes(
       [
         node('agent:1', 'agent'),
@@ -17,6 +17,7 @@ describe('toFlowNodes connectable flag', () => {
         node('silo:1', 'silo'),
         node('skill:1', 'skill'),
         node('mcp:1', 'mcp'),
+        node('embedding:1', 'embedding'),
       ],
       new Map(),
       noopOptions,
@@ -26,17 +27,12 @@ describe('toFlowNodes connectable flag', () => {
     }
   });
 
-  it('leaves embedding, parser nodes non-connectable', () => {
-    const nodes = toFlowNodes(
-      [node('embedding:1', 'embedding'), node('parser:1', 'parser')],
-      new Map(),
-      noopOptions,
-    );
+  it('leaves parser nodes non-connectable', () => {
+    const nodes = toFlowNodes([node('parser:1', 'parser')], new Map(), noopOptions);
     for (const flowNode of nodes) {
       expect(flowNode.connectable).toBe(false);
     }
   });
-
 });
 
 describe('toFlowNodes deletable flag', () => {
@@ -75,8 +71,8 @@ describe('toFlowEdges deletable flag', () => {
     }
   });
 
-  it('leaves service, embedding, parser edges non-deletable', () => {
-    const edges = toFlowEdges([edge('service'), edge('embedding'), edge('parser')]);
+  it('leaves service, embedding, media_embedding, parser edges non-deletable', () => {
+    const edges = toFlowEdges([edge('service'), edge('embedding'), edge('media_embedding'), edge('parser')]);
     for (const flowEdge of edges) {
       expect(flowEdge.deletable).toBe(false);
     }
