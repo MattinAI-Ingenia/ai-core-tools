@@ -6,10 +6,12 @@ import { AppGraphCanvas } from '../components/visual-editor/AppGraphCanvas';
 import { NODE_KIND_VISUALS } from '../components/visual-editor/nodeKindConfig';
 import Modal from '../components/ui/Modal';
 import SkillForm from '../components/forms/SkillForm';
+import ServiceWizard from '../components/services/wizard/ServiceWizard';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
 import type { GraphNode } from '../hooks/useAppGraph';
 import type { Agent, Silo } from '../services/api';
+import type { ServiceFormData, SandboxServiceFormData } from '../types/services';
 
 interface App {
   app_id: number;
@@ -64,6 +66,7 @@ function VisualEditorPage() {
 
   const [app, setApp] = useState<App | null>(null);
   const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
+  const [openServiceWizardKind, setOpenServiceWizardKind] = useState<'ai' | 'embedding' | null>(null);
 
   // AppGraphCanvas owns the actual graph fetch/refetch; this page only
   // needs to trigger one after an action it handles itself (creating a
@@ -129,6 +132,29 @@ function VisualEditorPage() {
     void refetchGraphRef.current();
   }
 
+  // AI Service and Embedding Service have no dedicated route either (only a
+  // wizard modal on their own settings pages) - `ServiceWizard` is the same
+  // reusable, self-contained wizard those pages already open, so it's
+  // dropped in here the same way.
+  async function handleSaveService(data: ServiceFormData | SandboxServiceFormData) {
+    if (!appId || !openServiceWizardKind) return;
+    const label = openServiceWizardKind === 'ai' ? 'AI service' : 'embedding service';
+    const result = await mutate(
+      () =>
+        openServiceWizardKind === 'ai'
+          ? apiService.createAIService(Number.parseInt(appId), data)
+          : apiService.createEmbeddingService(Number.parseInt(appId), data),
+      {
+        loading: MESSAGES.CREATING(label),
+        success: MESSAGES.CREATED(label),
+        error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED(label)),
+      },
+    );
+    if (result === undefined) return;
+    setOpenServiceWizardKind(null);
+    void refetchGraphRef.current();
+  }
+
   if (!appId) {
     return (
       <div className="space-y-6">
@@ -176,6 +202,12 @@ function VisualEditorPage() {
             { kind: 'agent' as const, label: 'New Agent', onClick: handleCreateAgent },
             { kind: 'silo' as const, label: 'New Silo', onClick: handleCreateSilo },
             { kind: 'skill' as const, label: 'New Skill', onClick: () => setIsSkillModalOpen(true) },
+            { kind: 'service' as const, label: 'New AI Service', onClick: () => setOpenServiceWizardKind('ai') },
+            {
+              kind: 'embedding' as const,
+              label: 'New Embedding Service',
+              onClick: () => setOpenServiceWizardKind('embedding'),
+            },
           ]
         ).map(({ kind, label, onClick }) => {
           const visual = NODE_KIND_VISUALS[kind];
@@ -208,6 +240,17 @@ function VisualEditorPage() {
       >
         <SkillForm skill={null} onSubmit={handleSaveSkill} onCancel={() => setIsSkillModalOpen(false)} />
       </Modal>
+
+      {openServiceWizardKind && (
+        <ServiceWizard
+          isOpen
+          kind={openServiceWizardKind}
+          scope="app"
+          appId={Number.parseInt(appId)}
+          onClose={() => setOpenServiceWizardKind(null)}
+          onSave={handleSaveService}
+        />
+      )}
     </div>
   );
 }
