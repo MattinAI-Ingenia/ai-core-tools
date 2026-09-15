@@ -4,6 +4,7 @@ import { parseNodeId } from '../../hooks/useAppGraph';
 /** Node kinds a new connection may be dragged from/to. */
 export const CONNECTABLE_NODE_KINDS: ReadonlySet<GraphNodeKind> = new Set([
   'agent',
+  'service',
   'silo',
   'skill',
   'mcp',
@@ -24,8 +25,15 @@ export const DELETABLE_NODE_KINDS: ReadonlySet<GraphNodeKind> = new Set([
   'skill',
 ]);
 
-/** Non-agent node kinds that may form an agent-to-resource connection edge. */
+/**
+ * Non-agent node kinds that may form an agent-to-resource connection edge.
+ * `service` is single-valued like `silo`: connecting a new one doesn't need
+ * its own edge deleted first - `buildRelationshipChange` overwrites the
+ * agent's `service_id` in place, so dragging a replacement AIService is an
+ * atomic swap rather than a remove-then-add.
+ */
 const AGENT_RESOURCE_EDGE_KINDS: ReadonlySet<GraphEdgeKind> = new Set([
+  'service',
   'silo',
   'skill',
   'mcp',
@@ -53,8 +61,8 @@ function isToolAgent(node: GraphNode): boolean {
  * Resolves a drag-to-connect gesture into the relationship it represents,
  * normalizing direction so the agent always ends up as `agentNumericId`
  * regardless of which handle the user dragged from. Returns `null` for any
- * pair this canvas doesn't support editing (including out-of-scope kinds
- * like agent<->service, and invalid tool connections).
+ * pair this canvas doesn't support editing (e.g. silo<->skill, or an
+ * agent<->agent drag where the target isn't a tool agent).
  */
 export function resolveConnection(
   nodes: readonly GraphNode[],
