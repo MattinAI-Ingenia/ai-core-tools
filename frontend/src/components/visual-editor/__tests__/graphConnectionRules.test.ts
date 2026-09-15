@@ -65,8 +65,12 @@ describe('resolveConnection', () => {
     expect(resolveConnection(nodes, { source: 'agent:1', target: 'agent:1' })).toBeNull();
   });
 
-  it('rejects an out-of-scope pair (agent -> service)', () => {
-    expect(resolveConnection(nodes, { source: 'agent:1', target: 'service:2' })).toBeNull();
+  it('resolves agent -> service (replaces the agent AIService)', () => {
+    expect(resolveConnection(nodes, { source: 'agent:1', target: 'service:2' })).toEqual({
+      kind: 'service',
+      agentNumericId: 1,
+      targetNumericId: 2,
+    });
   });
 
   it('rejects an unrelated pair (silo -> skill)', () => {
