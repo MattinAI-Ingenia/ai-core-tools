@@ -70,7 +70,8 @@ async function disconnectAgentGroup(
   groupEdges: readonly AppFlowEdge[],
 ): Promise<void> {
   const agent = await apiService.getAgent(numericAppId, agentNumericId);
-  let workingAgent: Omit<Agent, 'silo_id'> & { silo_id?: number | null } = agent;
+  let workingAgent: Omit<Agent, 'silo_id' | 'service_id'> & { silo_id?: number | null; service_id?: number | null } =
+    agent;
   let patch: AgentPatch = {};
 
   for (const edge of groupEdges) {
