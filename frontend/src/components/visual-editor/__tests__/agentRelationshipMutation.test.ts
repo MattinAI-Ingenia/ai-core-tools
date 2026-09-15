@@ -24,6 +24,12 @@ function agent(overrides: Partial<Agent> = {}): Agent {
 }
 
 describe('buildRelationshipChange', () => {
+  it('replaces service_id on add (atomic swap, no prior remove needed)', () => {
+    expect(
+      buildRelationshipChange(agent({ service_id: 1 }), { kind: 'service', targetNumericId: 2 }, 'add'),
+    ).toEqual({ service_id: 2 });
+  });
+
   it('sets silo_id on add', () => {
     expect(buildRelationshipChange(agent(), { kind: 'silo', targetNumericId: 5 }, 'add')).toEqual({
       silo_id: 5,

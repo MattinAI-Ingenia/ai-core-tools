@@ -7,7 +7,10 @@ export interface RelationshipChange {
 }
 
 /** Agent fields that may change when a relationship edge is mutated on the canvas. */
-export type AgentPatch = Omit<Partial<Agent>, 'silo_id'> & { silo_id?: number | null };
+export type AgentPatch = Omit<Partial<Agent>, 'silo_id' | 'service_id'> & {
+  silo_id?: number | null;
+  service_id?: number | null;
+};
 
 function toggleId(ids: readonly number[] | undefined, targetId: number, mode: 'add' | 'remove'): number[] {
   const current = ids ?? [];
@@ -30,6 +33,8 @@ export function buildRelationshipChange(
   mode: 'add' | 'remove',
 ): AgentPatch {
   switch (change.kind) {
+    case 'service':
+      return { service_id: mode === 'add' ? change.targetNumericId : null };
     case 'silo':
       return { silo_id: mode === 'add' ? change.targetNumericId : null };
     case 'skill':

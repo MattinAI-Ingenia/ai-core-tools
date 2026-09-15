@@ -9,9 +9,15 @@ function node(id: string, kind: GraphNode['kind']): GraphNode {
 const noopOptions = { collapsedAgentIds: new Set<string>(), onToggleCollapse: () => {} };
 
 describe('toFlowNodes connectable flag', () => {
-  it('marks agent, silo, skill, mcp nodes connectable', () => {
+  it('marks agent, service, silo, skill, mcp nodes connectable', () => {
     const nodes = toFlowNodes(
-      [node('agent:1', 'agent'), node('silo:1', 'silo'), node('skill:1', 'skill'), node('mcp:1', 'mcp')],
+      [
+        node('agent:1', 'agent'),
+        node('service:1', 'service'),
+        node('silo:1', 'silo'),
+        node('skill:1', 'skill'),
+        node('mcp:1', 'mcp'),
+      ],
       new Map(),
       noopOptions,
     );
@@ -20,9 +26,9 @@ describe('toFlowNodes connectable flag', () => {
     }
   });
 
-  it('leaves service, embedding, parser nodes non-connectable', () => {
+  it('leaves embedding, parser nodes non-connectable', () => {
     const nodes = toFlowNodes(
-      [node('service:1', 'service'), node('embedding:1', 'embedding'), node('parser:1', 'parser')],
+      [node('embedding:1', 'embedding'), node('parser:1', 'parser')],
       new Map(),
       noopOptions,
     );
