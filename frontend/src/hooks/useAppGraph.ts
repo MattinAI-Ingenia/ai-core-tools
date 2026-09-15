@@ -55,7 +55,8 @@ export type GraphEdgeKind =
   | 'skill'
   | 'mcp'
   | 'parser'
-  | 'embedding';
+  | 'embedding'
+  | 'media_embedding';
 
 /**
  * A directed relationship between two graph nodes.
@@ -93,6 +94,7 @@ interface AgentDetailGraphItem {
   readonly service_id?: number;
   readonly silo_id?: number;
   readonly output_parser_id?: number;
+  readonly media_embedding_service_id?: number;
   readonly skill_ids?: number[];
   readonly mcp_config_ids?: number[];
   readonly tool_ids?: number[];
@@ -289,6 +291,19 @@ export function useAppGraph(appId: string | number | undefined): UseAppGraphResu
         if (agent.output_parser_id !== undefined && parserNodeIds.has(agent.output_parser_id)) {
           const target = nodeId('parser', agent.output_parser_id);
           graphEdges.push({ id: edgeId('parser', agentId, target), source: agentId, target, kind: 'parser' });
+        }
+
+        if (
+          agent.media_embedding_service_id !== undefined &&
+          embeddingNodeIds.has(agent.media_embedding_service_id)
+        ) {
+          const target = nodeId('embedding', agent.media_embedding_service_id);
+          graphEdges.push({
+            id: edgeId('media_embedding', agentId, target),
+            source: agentId,
+            target,
+            kind: 'media_embedding',
+          });
         }
 
         for (const skillId of agent.skill_ids ?? []) {
