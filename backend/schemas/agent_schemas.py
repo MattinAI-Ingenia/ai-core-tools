@@ -127,6 +127,7 @@ class AgentDetailSchema(BaseModel):
     type: str
     is_tool: bool
     has_memory: bool
+    has_global_memory: bool = False
     enable_code_interpreter: bool = False
     server_tools: List[str] = []
     memory_max_messages: int = 20
@@ -180,6 +181,7 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     type: str = "agent"  # "agent", "ocr_agent"
     is_tool: bool = False
     has_memory: bool = False
+    has_global_memory: Optional[bool] = None
     enable_code_interpreter: bool = False
     server_tools: Optional[List[str]] = []
     memory_max_messages: Optional[int] = 20
@@ -218,6 +220,7 @@ class PublicAgentSchema(BaseModel):
     status: Optional[str] = None
     is_tool: bool
     has_memory: Optional[bool] = None
+    has_global_memory: bool = False
     create_date: Optional[datetime] = None
     request_count: int
 
@@ -233,6 +236,7 @@ class PublicAgentDetailSchema(BaseModel):
     status: Optional[str] = None
     is_tool: bool
     has_memory: Optional[bool] = None
+    has_global_memory: bool = False
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
     memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
@@ -263,6 +267,7 @@ class CreateAgentRequestSchema(RagConfigFieldsMixin):
     type: Literal["agent"] = "agent"
     is_tool: bool = False
     has_memory: bool = False
+    has_global_memory: Optional[bool] = None
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
     memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
@@ -283,6 +288,7 @@ class CreateOCRAgentRequestSchema(BaseModel):
     description: Optional[str] = ""
     is_tool: bool = False
     has_memory: bool = False
+    has_global_memory: Optional[bool] = None
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
     memory_summarize_threshold: Optional[int] = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
@@ -303,6 +309,7 @@ class UpdateAgentRequestSchema(RagConfigFieldsMixin):
     description: Optional[str] = None
     is_tool: Optional[bool] = None
     has_memory: Optional[bool] = None
+    has_global_memory: Optional[bool] = None
     memory_max_messages: Optional[int] = None
     memory_max_tokens: Optional[int] = None
     memory_summarize_threshold: Optional[int] = None
@@ -323,6 +330,7 @@ class UpdateOCRAgentRequestSchema(BaseModel):
     description: Optional[str] = None
     is_tool: Optional[bool] = None
     has_memory: Optional[bool] = None
+    has_global_memory: Optional[bool] = None
     memory_max_messages: Optional[int] = None
     memory_max_tokens: Optional[int] = None
     memory_summarize_threshold: Optional[int] = None

@@ -8,6 +8,20 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+class MemoryServiceConfigError(ValueError):
+    """Raised only by `_validate_memory_service_ids` (AC-38, AC-46).
+
+    A distinct subclass of `ValueError` — not a bare one — so the
+    `/internal` router can translate *this* failure into a 400 with the
+    (safe, user-facing) message it carries, while any other, unrelated
+    `ValueError` raised elsewhere in `create_or_update_app` still falls
+    through to the router's generic handling instead of being misreported
+    as a memory-configuration problem (security-audit LOW, step_009
+    follow-up).
+    """
+
+
 class AppService:
 
     def __init__(self, db: Session):
@@ -39,13 +53,38 @@ class AppService:
         """Create a new app or update an existing one.
 
         In SaaS mode, enforces the per-user app limit before creation.
+
+        This is a blocking, synchronous method: it may perform a network
+        call (the embedding-dimensionality probe inside
+        `_validate_memory_service_ids`, bounded to a few seconds). Callers
+        reached from an `async def` request handler — e.g.
+        `PUT /internal/apps/{id}` — MUST invoke this via
+        `starlette.concurrency.run_in_threadpool` rather than awaiting it
+        directly, or the network call blocks the whole event loop for every
+        tenant (security-audit HIGH, step_009 follow-up).
+
+        Raises:
+            MemoryServiceConfigError: if `memory_extraction_service_id` or
+                `memory_embedding_service_id` is present in `app_data` and
+                fails validation (AC-38, AC-46). A `ValueError` subclass —
+                callers at the `/internal` boundary translate *this specific
+                type* into a 400.
         """
         app_id = app_data.get('app_id')
+        existing_app = self.app_repo.get_by_id(app_id) if app_id else None
 
-        if app_id:
-            app = self.app_repo.get_by_id(app_id)
-            if app:
-                return self.app_repo.update(app, app_data)
+        if 'memory_extraction_service_id' in app_data or 'memory_embedding_service_id' in app_data:
+            self._validate_memory_service_ids(
+                app_id=app_id,
+                extraction_service_id=app_data.get('memory_extraction_service_id'),
+                embedding_service_id=app_data.get('memory_embedding_service_id'),
+                current_embedding_service_id=(
+                    existing_app.memory_embedding_service_id if existing_app else None
+                ),
+            )
+
+        if existing_app:
+            return self.app_repo.update(existing_app, app_data)
 
         # Enforce app limit (SaaS mode only, no-op in self-managed)
         if user_id is not None:
@@ -54,7 +93,119 @@ class AppService:
 
         # Create new app
         return self.app_repo.create(app_data)
-    
+
+    def _validate_memory_service_ids(
+        self,
+        app_id: Optional[int],
+        extraction_service_id: Optional[int],
+        embedding_service_id: Optional[int],
+        current_embedding_service_id: Optional[int] = None,
+    ) -> None:
+        """Validate the two App-level memory service FKs (D-16, FR-2b, FR-3(b)).
+
+        Mirrors the `default_sandbox_service_id` App-or-system visibility rule:
+        a non-`None` id must load and either belong to this App or be
+        system-level (`app_id IS NULL`); anything else — a nonexistent id or
+        another App's service — is rejected (AC-38). The embedding service is
+        additionally checked against the deployment's fixed vector width
+        (AC-46, D-13); where the width cannot be determined the id is
+        accepted and the runtime guard (`build_memory_clients`) is the
+        backstop (AD-12).
+
+        The dimensionality probe is network-bound (D-13), so it is skipped
+        entirely — not just cached — whenever `embedding_service_id` is
+        unchanged from what is already persisted on the App: an
+        administrator saving an unrelated setting (e.g. `agent_rate_limit`)
+        on every `PUT` must not pay for an outbound call to the embedding
+        provider each time (security-audit HIGH, step_009 follow-up). The
+        ownership/existence check above still always runs — it is a local DB
+        lookup, not a network call.
+
+        Args:
+            app_id: The App these ids are being configured for.
+            extraction_service_id: Candidate `App.memory_extraction_service_id`.
+            embedding_service_id: Candidate `App.memory_embedding_service_id`.
+            current_embedding_service_id: The App's currently persisted
+                `memory_embedding_service_id` (`None` for a new App or when
+                unset). Used only to decide whether the dimensionality probe
+                can be skipped.
+
+        Raises:
+            MemoryServiceConfigError: naming the offending field, on any of
+                the failures above.
+        """
+        from repositories.ai_service_repository import AIServiceRepository
+        from repositories.embedding_service_repository import EmbeddingServiceRepository
+
+        if extraction_service_id is not None:
+            ai_service = AIServiceRepository.get_by_id(self.db, extraction_service_id)
+            if ai_service is None or not (ai_service.app_id == app_id or ai_service.app_id is None):
+                raise MemoryServiceConfigError(
+                    f"memory_extraction_service_id '{extraction_service_id}' does not reference "
+                    "a valid AI service for this app."
+                )
+
+        if embedding_service_id is not None:
+            embedding_service = EmbeddingServiceRepository.get_by_id(self.db, embedding_service_id)
+            if embedding_service is None or not (
+                embedding_service.app_id == app_id or embedding_service.app_id is None
+            ):
+                raise MemoryServiceConfigError(
+                    f"memory_embedding_service_id '{embedding_service_id}' does not reference "
+                    "a valid embedding service for this app."
+                )
+
+            if embedding_service_id == current_embedding_service_id:
+                return
+
+            import config
+            from tools.memory.resolution import probe_embedding_dims_for_config
+
+            dims = probe_embedding_dims_for_config(embedding_service)
+            expected_dims = config.GLOBAL_MEMORY_EMBEDDING_DIMS
+            if dims is not None and dims != expected_dims:
+                raise MemoryServiceConfigError(
+                    f"memory_embedding_service_id '{embedding_service_id}' has an embedding "
+                    f"width of {dims}, but this deployment requires {expected_dims}."
+                )
+
+    def get_memory_service_options(self, app_id: int) -> dict:
+        """Build the App-visible + system-level option lists for the App-settings
+        memory service selectors (FR-3(b)).
+
+        Reuses the same combination and labelling convention as the agent
+        form's `ai_services` list (`AgentRepository.get_form_data_for_agent`):
+        App-scoped services first, then system-level (`app_id IS NULL`)
+        services prefixed with `"[System] "`.
+
+        Args:
+            app_id: The App to build the option lists for.
+
+        Returns:
+            A dict with `'ai_services'` and `'embedding_services'` keys, each a
+            list of `{"service_id": int, "name": str}` dicts.
+        """
+        from repositories.ai_service_repository import AIServiceRepository
+        from repositories.embedding_service_repository import EmbeddingServiceRepository
+
+        ai_services = AIServiceRepository.get_by_app_id(self.db, app_id) + AIServiceRepository.get_system_services(
+            self.db
+        )
+        embedding_services = EmbeddingServiceRepository.get_by_app_id(
+            self.db, app_id
+        ) + EmbeddingServiceRepository.get_system_services(self.db)
+
+        return {
+            'ai_services': [
+                {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+                for s in ai_services
+            ],
+            'embedding_services': [
+                {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+                for s in embedding_services
+            ],
+        }
+
     def delete_app(self, app_id: int) -> bool:
         """Delete an app and all its related data with proper cascade deletion
         

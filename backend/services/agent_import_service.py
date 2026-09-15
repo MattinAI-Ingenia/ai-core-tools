@@ -745,6 +745,9 @@ class AgentImportService:
                 existing_agent.silo_id = silo_id
                 existing_agent.output_parser_id = parser_id
                 existing_agent.has_memory = export_data.agent.has_memory
+                # D-16: memory services are App-level and never travel with the agent —
+                # only the toggle round-trips (AC-8). Omitted on an older export → False.
+                existing_agent.has_global_memory = export_data.agent.has_global_memory or False
                 existing_agent.memory_max_messages = (
                     export_data.agent.memory_max_messages
                 )
@@ -835,6 +838,9 @@ class AgentImportService:
                 silo_id=silo_id,
                 output_parser_id=parser_id,
                 has_memory=export_data.agent.has_memory,
+                # D-16: memory services are App-level and never travel with the agent —
+                # only the toggle round-trips (AC-8). Omitted on an older export → False.
+                has_global_memory=export_data.agent.has_global_memory or False,
                 memory_max_messages=export_data.agent.memory_max_messages,
                 memory_max_tokens=export_data.agent.memory_max_tokens,
                 memory_summarize_threshold=(
@@ -859,6 +865,9 @@ class AgentImportService:
                 silo_id=silo_id,
                 output_parser_id=parser_id,
                 has_memory=export_data.agent.has_memory,
+                # D-16: memory services are App-level and never travel with the agent —
+                # only the toggle round-trips (AC-8). Omitted on an older export → False.
+                has_global_memory=export_data.agent.has_global_memory or False,
                 memory_max_messages=export_data.agent.memory_max_messages,
                 memory_max_tokens=export_data.agent.memory_max_tokens,
                 memory_summarize_threshold=(

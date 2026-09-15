@@ -87,6 +87,10 @@ class AppRepository:
             app.enable_openai_api = data['enable_openai_api']
         if 'default_sandbox_service_id' in data:
             app.default_sandbox_service_id = data['default_sandbox_service_id']
+        if 'memory_extraction_service_id' in data:
+            app.memory_extraction_service_id = data['memory_extraction_service_id']
+        if 'memory_embedding_service_id' in data:
+            app.memory_embedding_service_id = data['memory_embedding_service_id']
         if 'onboarding_dismissed' in data:
             app.onboarding_dismissed = data['onboarding_dismissed']
     

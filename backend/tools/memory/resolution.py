@@ -24,6 +24,7 @@ Three things here are non-obvious:
 
 No provider API key is ever read from the environment in this module (AC-24).
 """
+import concurrent.futures
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -46,6 +47,14 @@ logger = get_logger(__name__)
 # transient provider outage does not permanently disable the dimensionality
 # guard for that service for the lifetime of the process.
 _DIMS_CACHE: Dict[int, int] = {}
+
+# Applied only to the `/internal` App-configuration boundary's probe
+# (`probe_embedding_dims_for_config`), never to the runtime probe inside
+# `build_memory_clients` — a slow/unreachable Custom/Ollama endpoint must not
+# be able to hold an admin's `PUT /internal/apps/{id}` request (and the
+# threadpool worker running it) open indefinitely (security-audit HIGH,
+# step_009 follow-up).
+_CONFIG_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -193,7 +202,9 @@ def resolve_memory_services(db: Session, app: Any) -> ResolvedMemoryServices:
     )
 
 
-def _probe_embedding_dims(embeddings: Any, embedding_service_id: int) -> Optional[int]:
+def _probe_embedding_dims(
+    embeddings: Any, embedding_service_id: int, timeout: Optional[float] = None
+) -> Optional[int]:
     """Probe an embeddings client's output width once, caching it per service id (D-24).
 
     `EmbeddingService` has no dimensionality column (see the module
@@ -206,18 +217,37 @@ def _probe_embedding_dims(embeddings: Any, embedding_service_id: int) -> Optiona
         embeddings: A constructed embeddings client (`get_embeddings_model`
             output).
         embedding_service_id: Cache key.
+        timeout: When given, the underlying `embed_query` call is bounded to
+            this many seconds, run on a throwaway single-worker executor so a
+            hung HTTP call can't block the caller past the deadline (the
+            worker thread itself is not forcibly killed — the executor is
+            shut down without waiting — since plain `concurrent.futures` has
+            no cancellation for a call already in flight). `None` (the
+            default) preserves the original unbounded behaviour used by the
+            runtime probe inside `build_memory_clients`, which must not
+            change (security-audit HIGH, step_009 follow-up).
 
     Returns:
-        The embedding width, or `None` if the probe itself failed (in which
-        case the caller must attempt the operation anyway rather than
-        disabling memory on incomplete metadata — the store's own dimension
-        error is the backstop, per AD-12/D-24).
+        The embedding width, or `None` if the probe itself failed or timed
+        out (in which case the caller must attempt the operation anyway
+        rather than disabling memory on incomplete metadata — the store's
+        own dimension error is the backstop, per AD-12/D-24).
     """
     if embedding_service_id in _DIMS_CACHE:
         return _DIMS_CACHE[embedding_service_id]
 
     try:
-        dims = len(embeddings.embed_query("dimension probe"))
+        if timeout is not None:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(embeddings.embed_query, "dimension probe")
+                dims = len(future.result(timeout=timeout))
+            finally:
+                # wait=False: never block on a still-running probe past the
+                # deadline we just enforced above.
+                executor.shutdown(wait=False)
+        else:
+            dims = len(embeddings.embed_query("dimension probe"))
     except Exception:
         logger.warning(
             "global_memory could not probe embedding dimensionality for embedding_service_id=%s",
@@ -227,6 +257,51 @@ def _probe_embedding_dims(embeddings: Any, embedding_service_id: int) -> Optiona
 
     _DIMS_CACHE[embedding_service_id] = dims
     return dims
+
+
+def probe_embedding_dims_for_config(embedding_service: Any) -> Optional[int]:
+    """Best-effort probe of one `EmbeddingService`'s output width (D-13/AC-46).
+
+    Used by the `/internal` App-configuration boundary (FR-3(b)) to reject a
+    `memory_embedding_service_id` whose width does not match
+    `GLOBAL_MEMORY_EMBEDDING_DIMS` at configuration time, so the mismatch is
+    visible to the administrator instead of silently skipping the turn later.
+    Shares `_DIMS_CACHE` with the runtime probe (D-24), so a service measured
+    here is not re-probed on the next turn and vice versa.
+
+    Never raises: any failure to build the client or to probe it (bad
+    credentials, unreachable provider, etc.) returns `None` so the caller can
+    accept the configuration and let the runtime guard
+    (`build_memory_clients`) be the backstop, per AD-12 — configuration must
+    not be blocked on a transient probe failure or on genuinely
+    undeterminable metadata.
+
+    Bounded to `_CONFIG_PROBE_TIMEOUT_SECONDS` (5s): this is called from the
+    synchronous `AppService._validate_memory_service_ids`, itself run off the
+    event loop via `run_in_threadpool` by `PUT /internal/apps/{id}` — without
+    an explicit deadline here a slow/unreachable Custom/Ollama endpoint could
+    still tie up that threadpool worker for minutes per request
+    (security-audit HIGH, step_009 follow-up).
+
+    Args:
+        embedding_service: The `EmbeddingService` ORM row to probe.
+
+    Returns:
+        The embedding width, or `None` if it could not be determined (which
+        includes timing out).
+    """
+    try:
+        embeddings = get_embeddings_model(embedding_service)
+        return _probe_embedding_dims(
+            embeddings, embedding_service.service_id, timeout=_CONFIG_PROBE_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "global_memory could not probe embedding dimensionality for embedding_service_id=%s "
+            "during App configuration validation",
+            getattr(embedding_service, "service_id", None),
+        )
+        return None
 
 
 def build_memory_clients(

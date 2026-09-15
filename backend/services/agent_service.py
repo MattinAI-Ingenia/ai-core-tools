@@ -100,6 +100,7 @@ class AgentService:
             type=agent.type or "agent",
             is_tool=agent.is_tool or False,
             has_memory=getattr(agent, 'has_memory', False) or False,
+            has_global_memory=getattr(agent, 'has_global_memory', False) or False,
             enable_code_interpreter=getattr(agent, 'enable_code_interpreter', False) or False,
             server_tools=getattr(agent, 'server_tools', None) or [],
             memory_max_messages=getattr(agent, 'memory_max_messages', 20) or 20,
@@ -304,6 +305,20 @@ class AgentService:
             agent.has_memory = has_memory_value
         else:
             agent.has_memory = has_memory_value == 'on'
+
+        # Handle has_global_memory field (D-16, FR-3(a)): the schema declares it
+        # `Optional[bool] = None` precisely so "omitted" and "explicitly False" are
+        # distinguishable — `None` means "leave unchanged" on an update and defaults
+        # to `False` only when creating a new agent (AC-6). A provided value is
+        # coerced the same bool / 'on' form-style way as `has_memory` above.
+        has_global_memory_value = data.get('has_global_memory')
+        if has_global_memory_value is None:
+            if not agent.agent_id:
+                agent.has_global_memory = False
+        elif isinstance(has_global_memory_value, bool):
+            agent.has_global_memory = has_global_memory_value
+        else:
+            agent.has_global_memory = has_global_memory_value == 'on'
 
         enable_ci_value = data.get('enable_code_interpreter', False)
         agent.enable_code_interpreter = bool(enable_ci_value)

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Form, HTTPException, status, UploadFile, File, Query
+from fastapi.concurrency import run_in_threadpool
 from typing import List, Tuple, Optional, Annotated
 from sqlalchemy.orm import Session
 from lks_idprovider.models.auth import AuthContext
@@ -8,7 +9,7 @@ from pydantic import ValidationError
 
 from db.database import get_db
 
-from services.app_service import AppService
+from services.app_service import AppService, MemoryServiceConfigError
 from services.app_collaboration_service import AppCollaborationService
 from services.rate_limit_service import rate_limit_service
 
@@ -651,7 +652,9 @@ async def get_app(
     if app.owner:
         owner_email = app.owner.email
         owner_name = app.owner.name
-    
+
+    memory_service_options = app_service.get_memory_service_options(app_id)
+
     return AppDetailSchema(
         app_id=app.app_id,
         name=app.name,
@@ -667,6 +670,9 @@ async def get_app(
         enable_openai_api=app.enable_openai_api,
         onboarding_dismissed=app.onboarding_dismissed or False,
         default_sandbox_service_id=app.default_sandbox_service_id,
+        memory_extraction_service_id=app.memory_extraction_service_id,
+        memory_embedding_service_id=app.memory_embedding_service_id,
+        **memory_service_options,
         **counts
     )
 
@@ -723,6 +729,7 @@ async def create_app(
     if app.owner:
         owner_email = app.owner.email
         owner_name = app.owner.name
+    memory_service_options = app_service.get_memory_service_options(app.app_id)
     return AppDetailSchema(
         app_id=app.app_id,
         name=app.name,
@@ -736,6 +743,9 @@ async def create_app(
         max_file_size_mb=app.max_file_size_mb or DEFAULT_MAX_FILE_SIZE_MB,
         agent_cors_origins=app.agent_cors_origins,
         default_sandbox_service_id=app.default_sandbox_service_id,
+        memory_extraction_service_id=app.memory_extraction_service_id,
+        memory_embedding_service_id=app.memory_embedding_service_id,
+        **memory_service_options,
     )
 
 
@@ -799,7 +809,34 @@ async def update_app(
         'default_sandbox_service_id': app_data.default_sandbox_service_id,
     }
 
-    updated_app = app_service.create_or_update_app(update_dict)
+    # `memory_extraction_service_id`/`memory_embedding_service_id` (D-16, FR-2b) are
+    # included ONLY when the client actually sent them (`model_fields_set`), not merely
+    # because the schema defaults them to `None` — otherwise any unrelated settings PUT
+    # that omits these two fields would silently clear the App's memory configuration
+    # (security-audit LOW, step_009 follow-up). `AppRepository._update_app_fields`
+    # already only touches keys present in the dict, so omitting the key here leaves the
+    # persisted value untouched; sending an explicit `null` still clears it.
+    if 'memory_extraction_service_id' in app_data.model_fields_set:
+        update_dict['memory_extraction_service_id'] = app_data.memory_extraction_service_id
+    if 'memory_embedding_service_id' in app_data.model_fields_set:
+        update_dict['memory_embedding_service_id'] = app_data.memory_embedding_service_id
+
+    # `memory_extraction_service_id`/`memory_embedding_service_id` validation (AC-38,
+    # AC-46) lives in the service and raises `MemoryServiceConfigError` (a `ValueError`
+    # subclass), translated to 400 here. Any other `ValueError` from
+    # `create_or_update_app` is NOT this — it falls through to the generic 500 handler
+    # so an unrelated bug is never misreported as a memory-configuration problem
+    # (security-audit LOW, step_009 follow-up). Run off the event loop
+    # (`run_in_threadpool`): validation may probe the embedding provider over the
+    # network, which must never block the whole worker for every tenant
+    # (security-audit HIGH, step_009 follow-up).
+    try:
+        updated_app = await run_in_threadpool(app_service.create_or_update_app, update_dict)
+    except MemoryServiceConfigError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
     if langsmith_key_rotated:
         from tools.langsmith_config import clear_client_cache
@@ -809,6 +846,7 @@ async def update_app(
     if updated_app.owner:
         owner_email = updated_app.owner.email
         owner_name = updated_app.owner.name
+    memory_service_options = app_service.get_memory_service_options(app_id)
     return AppDetailSchema(
         app_id=updated_app.app_id,
         name=updated_app.name,
@@ -823,6 +861,9 @@ async def update_app(
         agent_cors_origins=updated_app.agent_cors_origins,
         enable_openai_api=updated_app.enable_openai_api,
         default_sandbox_service_id=updated_app.default_sandbox_service_id,
+        memory_extraction_service_id=updated_app.memory_extraction_service_id,
+        memory_embedding_service_id=updated_app.memory_embedding_service_id,
+        **memory_service_options,
     )
 
 

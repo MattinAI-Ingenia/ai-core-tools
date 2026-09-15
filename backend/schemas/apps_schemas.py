@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, field_validator
-from typing import Literal, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from datetime import datetime
 
 class AppUsageStatsSchema(BaseModel):
@@ -59,6 +59,13 @@ class AppDetailSchema(BaseModel):
     onboarding_dismissed: bool = False
     is_frozen: bool = False
     default_sandbox_service_id: Optional[int] = None  # None = inherit system default
+    # Cross-session user memory (D-16, FR-2b): both NULL = memory inactive for this App
+    memory_extraction_service_id: Optional[int] = None
+    memory_embedding_service_id: Optional[int] = None
+    # Option lists for the App-settings memory service selectors (FR-3(b)); App-visible
+    # plus system-level services, labelled like the agent form's `ai_services` list.
+    ai_services: List[Dict[str, Any]] = []
+    embedding_services: List[Dict[str, Any]] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -90,6 +97,14 @@ class UpdateAppSchema(BaseModel):
     agent_cors_origins: Optional[str] = None
     enable_openai_api: bool = False
     default_sandbox_service_id: Optional[int] = None  # None = inherit system default
+    # Cross-session user memory (D-16, FR-2b): both None = memory inactive for this App,
+    # not "use a default" — there is no system-level fallback (D-21).
+    # NOTE: the `PUT /internal/apps/{id}` handler reads `model_fields_set` for these two
+    # fields specifically, so omitting them in the request body leaves the persisted
+    # value untouched instead of nulling it out (security-audit LOW, step_009
+    # follow-up) — an explicit `null` still clears the configuration.
+    memory_extraction_service_id: Optional[int] = None
+    memory_embedding_service_id: Optional[int] = None
 
     @field_validator("langsmith_api_key", mode="before")
     @classmethod

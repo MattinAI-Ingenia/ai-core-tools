@@ -232,6 +232,7 @@ class MarketplaceService:
             app_id=agent.app.app_id,
             has_knowledge_base=agent.silo_id is not None,
             has_memory=bool(agent.has_memory),
+            has_global_memory=bool(getattr(agent, 'has_global_memory', False)),
             published_at=profile.published_at,
             conversation_count=profile.conversation_count,
             rating_avg=profile.rating_avg,

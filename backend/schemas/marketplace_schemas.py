@@ -134,6 +134,7 @@ class MarketplaceAgentDetailSchema(BaseModel):
     app_id: int
     has_knowledge_base: bool = False
     has_memory: bool = False  # Whether conversations persist
+    has_global_memory: bool = False  # Whether the agent remembers facts across sessions (D-16)
     published_at: Optional[datetime] = None
     conversation_count: int = 0
     rating_avg: Optional[float] = None   # None = no ratings yet
