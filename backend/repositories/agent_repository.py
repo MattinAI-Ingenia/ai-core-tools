@@ -303,7 +303,11 @@ class AgentRepository:
         # Get AI services
         ai_services = AgentRepository.get_ai_services_by_app_id(db, app_id)
         ai_services_list = [
-            {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+            {
+                "service_id": s.service_id,
+                "name": f"[System] {s.name}" if s.app_id is None else s.name,
+                "supports_video": s.supports_video,
+            }
             for s in ai_services
         ]
         

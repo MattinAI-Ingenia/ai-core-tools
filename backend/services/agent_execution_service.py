@@ -386,6 +386,20 @@ class AgentExecutionService:
             if db is not None:
                 db.commit()
 
+            # Resolve temporary playground media/file silos for this session
+            temp_silo_ids = None
+            session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
+            if session_id_for_media and db:
+                try:
+                    from services.playground_media_service import PlaygroundMediaService
+                    app_id = ctx.user_context.get("app_id") if ctx.user_context else None
+                    if app_id:
+                        temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
+                            app_id, agent_id, session_id_for_media, db
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not resolve temp silos: {e}")
+
             response = await self._execute_agent_async(
                 ctx.fresh_agent,
                 ctx.enhanced_message,
@@ -393,10 +407,12 @@ class AgentExecutionService:
                 ctx.session_id_for_cache,
                 ctx.user_context,
                 ctx.image_files,
+                processed_files=ctx.processed_files,
                 working_dir=ctx.working_dir,
                 sandbox_handle=ctx.sandbox_handle,
                 sandbox_provider=ctx.sandbox_provider,
                 sandbox_session_key=ctx.sandbox_session_key,
+                temp_silo_ids=temp_silo_ids or None,
             )
 
             return await self._finalize_turn(ctx, response, db)
@@ -462,28 +478,37 @@ class AgentExecutionService:
                     "file_path": file_ref.file_path,
                 })
 
-        # 6. Validate ownership of any client-supplied conversation, then
-        #    get / create the conversation for memory-enabled agents.
+        # 6. Resolve the conversation for any client-supplied conversation_id,
+        #    then (for memory-enabled agents) derive or auto-create its session.
         #
-        # Ownership must be validated regardless of agent.has_memory: a few
-        # steps below, conversation_id feeds into effective_conv_id, which is
-        # the sole key used for both the sandbox session
-        # (SandboxSessionService.session_key) and the local working directory
-        # — neither of which is otherwise scoped by app_id/user_id. If a
-        # client-supplied conversation_id were allowed to flow through
-        # unchecked for memory-less agents (including shared/marketplace
-        # agents), an attacker could iterate sequential conversation_id
-        # values and attach to another tenant's sandbox/working directory
-        # without ever owning that conversation. Conversations can be
-        # created for any agent — including memory-less ones — via the
-        # dedicated `POST /{agent_id}/conversations` endpoint (see
-        # routers/public/v1/chat.py::create_conversation), so this ownership
-        # check is meaningful in both cases.
+        #    The conversation is fetched — and its ownership validated —
+        #    whenever a conversation_id is provided, regardless of
+        #    agent.has_memory, for two reasons:
+        #
+        #    - Security: a few steps below, conversation_id feeds into
+        #      effective_conv_id, the sole key used for both the sandbox session
+        #      (SandboxSessionService.session_key) and the local working
+        #      directory — neither of which is otherwise scoped by
+        #      app_id/user_id. If a client-supplied conversation_id were allowed
+        #      to flow through unchecked for memory-less agents (including
+        #      shared/marketplace agents), an attacker could iterate sequential
+        #      conversation_id values and attach to another tenant's
+        #      sandbox/working directory without ever owning that conversation.
+        #      Conversations can be created for any agent — including
+        #      memory-less ones — via `POST /{agent_id}/conversations` (see
+        #      routers/public/v1/chat.py::create_conversation), so this check is
+        #      meaningful in both cases.
+        #    - Retrieval: the conversation's session_id is used further down to
+        #      scope this session's temporary playground silos (uploaded
+        #      media/document retrieval).
+        #
+        #    The LangGraph memory session is still only created for
+        #    memory-enabled agents.
         session = None
         conversation = None
-        if conversation_id:
-            from services.conversation_service import ConversationService
+        from services.conversation_service import ConversationService
 
+        if conversation_id:
             conversation = ConversationService.get_conversation(
                 db=db,
                 conversation_id=conversation_id,
@@ -496,17 +521,7 @@ class AgentExecutionService:
                 )
 
         if agent.has_memory:
-            from services.conversation_service import ConversationService
-
-            if conversation is not None:
-                # Already validated above — just derive the session.
-                session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
-                session = await self.session_service.get_user_session(
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    conversation_id=session_suffix,
-                )
-            else:
+            if conversation is None:
                 conversation = ConversationService.create_conversation(
                     db=db,
                     agent_id=agent_id,
@@ -518,20 +533,29 @@ class AgentExecutionService:
                     conversation.conversation_id,
                     agent_id,
                 )
-                session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
-                session = await self.session_service.get_user_session(
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    conversation_id=session_suffix,
-                )
+            session_suffix = conversation.session_id.replace(f"conv_{agent_id}_", "")
+            session = await self.session_service.get_user_session(
+                agent_id=agent_id,
+                user_context=user_context,
+                conversation_id=session_suffix,
+            )
 
         # 7. Re-query agent with all relationships eagerly loaded
         fresh_agent = self.agent_execution_repo.get_agent_with_relationships(db, agent_id)
         if not fresh_agent:
             raise HTTPException(status_code=404, detail="Agent not found in database")
 
-        # 8. Build enhanced message + separate image files
-        enhanced_message, image_files = self._prepare_message_with_files(message, processed_files)
+        # 8. Build enhanced message + separate image files.
+        # Vectorizable files (pdf, text) are excluded from the message context —
+        # every upload path vectorizes them into the session's temp playground
+        # silo at upload time (a silo is always created), so they are retrieved
+        # via RAG instead of being pasted into the prompt.
+        from services.playground_media_service import VECTORIZABLE_FILE_TYPES
+        non_vectorized_files = [
+            f for f in processed_files
+            if f.get("type") not in VECTORIZABLE_FILE_TYPES
+        ]
+        enhanced_message, image_files = self._prepare_message_with_files(message, non_vectorized_files)
 
         session_id_for_cache = session.id if (fresh_agent.has_memory and session) else None
         effective_conv_id = conversation_id or (
@@ -541,12 +565,19 @@ class AgentExecutionService:
         # 9. Resolve working directory
         app_config = get_app_config()
         tmp_base = app_config['TMP_BASE_FOLDER']
+        # Caller identity used to scope both the local workspace and (below,
+        # step 11) the remote sandbox session when there's no conversation_id
+        # to key on (has_memory=False agents, public embeds, marketplace).
+        # Without this, every such caller for a given agent collapsed onto
+        # the same "anon_{agent_id}" sandbox session and shared one remote
+        # container/workspace across unrelated users.
+        user_id = user_context.get('user_id', 'anonymous') if user_context else 'anonymous'
+        app_id_ctx = user_context.get('app_id', 'default') if user_context else 'default'
+        identity_session_id = f"user_{user_id}_app_{app_id_ctx}"
         if effective_conv_id:
             working_dir = os.path.join(tmp_base, "conversations", str(effective_conv_id))
         else:
-            user_id = user_context.get('user_id', 'anonymous') if user_context else 'anonymous'
-            app_id_ctx = user_context.get('app_id', 'default') if user_context else 'default'
-            session_key = f"agent_{agent_id}_user_{user_id}_app_{app_id_ctx}"
+            session_key = f"agent_{agent_id}_{identity_session_id}"
             working_dir = os.path.join(tmp_base, "persistent", session_key)
 
         workspace_paths = _ensure_local_workspace_layout(working_dir)
@@ -611,7 +642,11 @@ class AgentExecutionService:
                 resolved_sandbox_service_id = None
 
             if resolved_sandbox_provider is not None:
-                sandbox_session_key = SandboxSessionService.session_key(agent_id, effective_conv_id)
+                sandbox_session_key = SandboxSessionService.session_key(
+                    agent_id,
+                    effective_conv_id,
+                    session_id=None if effective_conv_id else identity_session_id,
+                )
                 sandbox_handle = _LazySandboxHandle(
                     session_key=sandbox_session_key,
                     provider=resolved_sandbox_provider,
@@ -1023,26 +1058,61 @@ class AgentExecutionService:
             
             # Validate user has access to this agent
             await self._validate_agent_access(agent, user_context)
-            
-            # Reset session if memory enabled
+
+            from services.conversation_service import ConversationService
+
+            conversation_id = user_context.get("conversation_id") if user_context else None
+
+            # Resolve the real conversation up front so memory/checkpointer
+            # operations key off its actual session_id (thread key) rather than
+            # the integer conversation_id, which would generate a non-existent
+            # session and miss both the in-memory reset and the checkpointer.
+            conversation = None
+            if conversation_id and db:
+                conversation = ConversationService.get_conversation(
+                    db, conversation_id, user_context, agent_id
+                )
+
+            # Reset the in-memory session if memory enabled. Use the real session
+            # suffix (conv_{agent_id}_{uuid} -> uuid) so the cached session is hit.
             if agent.has_memory:
-                # Extract conversation_id from user_context if present
-                conversation_id = user_context.get("conversation_id")
-                
-                # IMPORTANT: First get the session to find the session_id before resetting
-                # This ensures we can invalidate the checkpointer for the correct session
                 from services.agent_cache_service import CheckpointerCacheService
-                
-                # Get the session to find the session_id (pass conversation_id explicitly)
-                session = await self.session_service.get_user_session(agent_id, user_context, conversation_id)
+
+                # Rebuild the exact key execution used, so the reset targets the
+                # live in-memory session AND its Postgres checkpointer thread.
+                # For a real conversation that key is the session_id *suffix*
+                # (conv_{agent_id}_{uuid} -> {uuid}); the raw integer
+                # conversation_id would derive a different, unused key and the
+                # reset would silently do nothing (see the note above).
+                memory_context = dict(user_context or {})
+                if conversation is not None and conversation.session_id:
+                    memory_context["conversation_id"] = conversation.session_id.replace(
+                        f"conv_{agent_id}_", ""
+                    )
+                elif conversation_id:
+                    # conversation_id supplied but unresolved for this caller:
+                    # refuse, consistent with _prepare_turn and the sandbox
+                    # teardown below, rather than reset an unrelated session.
+                    raise HTTPException(
+                        status_code=404, detail="Conversation not found or access denied"
+                    )
+                # else: no conversation_id at all (e.g. public API) -> fall back
+                # to the user-derived session key (oauth_/api_).
+
+                session = await self.session_service.get_user_session(
+                    agent_id, memory_context, memory_context.get("conversation_id")
+                )
                 if session:
-                    # Invalidate the checkpointer for this specific session (use async version)
-                    await CheckpointerCacheService.invalidate_checkpointer_async(agent_id, session.id)
-                    logger.info(f"Invalidated checkpointer for agent {agent_id}, session {session.id}")
-                
-                # Reset the session object (clears messages and memory)
-                # This should be done after invalidating checkpointer to ensure we have the session ID
-                await self.session_service.reset_user_session(agent_id, user_context)
+                    await CheckpointerCacheService.invalidate_checkpointer_async(
+                        agent_id, session.id
+                    )
+                    logger.info(
+                        f"Invalidated checkpointer for agent {agent_id}, session {session.id}"
+                    )
+
+                # Drop the in-memory session last, once its checkpointer thread
+                # is gone (reset_user_session regenerates the same key).
+                await self.session_service.reset_user_session(agent_id, memory_context)
 
             # Destroy any active sandbox for this conversation session (IT-1)
             if agent.enable_code_interpreter:
@@ -1098,6 +1168,22 @@ class AgentExecutionService:
                     logger.error(f"Error removing file {file_data['file_id']} during reset: {str(e)}")
             
             logger.info(f"Conversation reset for agent {agent_id} - cleared {len(attached_files)} files")
+
+            # Tear down the conversation: playground temp media (silo + repo +
+            # vectors), the LangGraph checkpointer (keyed by the real session_id),
+            # and the Conversation row — all handled correctly by the service so
+            # the reset path does not duplicate (and mis-key) that logic.
+            if conversation and db:
+                try:
+                    await ConversationService.delete_conversation(
+                        db, conversation_id, user_context
+                    )
+                    logger.info(
+                        f"Deleted conversation {conversation_id} during reset for agent {agent_id}"
+                    )
+                except Exception as e:
+                    logger.error(f"Error deleting conversation during reset: {e}")
+
             return True
 
         except HTTPException:
@@ -1313,7 +1399,7 @@ class AgentExecutionService:
             # Check if PDF has text
             has_text = check_pdf_has_text(pdf_path)
             
-            if has_text:
+            if has_text and False:
                 # Extract text directly
                 text_content = extract_text_from_pdf(pdf_path)
                 logger.info(f"Extracted text from PDF: {len(text_content)} characters")
@@ -1546,6 +1632,8 @@ class AgentExecutionService:
         sandbox_handle: Any = None,
         sandbox_provider: Any = None,
         sandbox_session_key: Optional[str] = None,
+        processed_files: List[Dict] = None,
+        temp_silo_ids: Optional[List[int]] = None,
     ) -> Any:
         """Execute agent in FastAPI's event loop using shared checkpointer pool.
 
@@ -1571,6 +1659,8 @@ class AgentExecutionService:
                 sandbox_handle=sandbox_handle,
                 sandbox_provider=sandbox_provider,
                 sandbox_session_key=sandbox_session_key,
+                attached_files=processed_files,
+                temp_silo_ids=temp_silo_ids,
             )
 
             # Prepare configuration
@@ -1622,16 +1712,40 @@ class AgentExecutionService:
                     and session_id_for_cache
                     and is_missing_tool_output_error(invoke_exc)
                 ):
+                    # Recover by forking from the last known-good checkpoint
+                    # instead of deleting the whole thread: adelete_thread
+                    # wipes the user's entire visible conversation history
+                    # (get_conversation_history reads the same checkpointer),
+                    # not just the broken step. Checkpoints are immutable and
+                    # ordered, so retrying with an earlier checkpoint_id set
+                    # simply forks history forward from there — nothing is
+                    # deleted.
+                    rollback_checkpoint_id = await CheckpointerCacheService.get_rollback_checkpoint_id(
+                        fresh_agent.agent_id,
+                        session_id_for_cache,
+                    )
+                    if rollback_checkpoint_id is None:
+                        logger.warning(
+                            "Incomplete tool-call checkpoint for agent %s session %s "
+                            "has no earlier checkpoint to roll back to; failing the "
+                            "turn instead of retrying",
+                            fresh_agent.agent_id,
+                            session_id_for_cache,
+                        )
+                        raise HTTPException(
+                            status_code=502,
+                            detail="Your last message could not be completed. Please resend it.",
+                        ) from invoke_exc
+
                     logger.warning(
                         "Detected incomplete tool-call checkpoint for agent %s "
-                        "session %s; deleting checkpoint and retrying turn once",
+                        "session %s; retrying turn from prior checkpoint %s "
+                        "(no history deleted)",
                         fresh_agent.agent_id,
                         session_id_for_cache,
+                        rollback_checkpoint_id,
                     )
-                    await CheckpointerCacheService.invalidate_checkpointer_async(
-                        fresh_agent.agent_id,
-                        session_id_for_cache,
-                    )
+                    config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
                     result = await agent_chain.ainvoke(
                         {"messages": [message_payload]},
                         config=config,

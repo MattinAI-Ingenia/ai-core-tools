@@ -1,7 +1,6 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres
     environment:
       POSTGRES_DB: ${DATABASE_NAME:-mattin_ai}
       POSTGRES_USER: ${DATABASE_USER:-mattin}
@@ -21,7 +20,6 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: mattin-qdrant
     volumes:
       - qdrant-data:/qdrant/storage
     environment:
@@ -47,7 +45,6 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
-    container_name: mattin-backend
     environment:
       SQLALCHEMY_DATABASE_URI: postgresql://${DATABASE_USER:-mattin}:${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set in .env}@postgres:5432/${DATABASE_NAME:-mattin_ai}
       DATABASE_HOST: postgres
@@ -100,7 +97,10 @@ services:
       SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE: ${SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE:-false}
       OPENSANDBOX_DOMAIN: ${OPENSANDBOX_DOMAIN:-opensandbox:8080}
       OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
-      OPENSANDBOX_CODE_INTERPRETER_IMAGE: ${OPENSANDBOX_CODE_INTERPRETER_IMAGE:-mattin-code-interpreter:latest}
+      # Defaults to our published GHCR image at the same IMAGE_TAG as
+      # backend/frontend (see the opensandbox/mattin-code-interpreter services
+      # below) so `docker compose pull` is enough — no local build required.
+      OPENSANDBOX_CODE_INTERPRETER_IMAGE: ${OPENSANDBOX_CODE_INTERPRETER_IMAGE:-ghcr.io/lksnext-ai-lab/mattinai-code-interpreter:${IMAGE_TAG:-develop}}
       DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
       DAYTONA_API_URL: ${DAYTONA_API_URL:-}
       DAYTONA_TARGET: ${DAYTONA_TARGET:-}
@@ -123,8 +123,13 @@ services:
       OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE: ${OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE:-4}
       OPENSANDBOX_SUPPORTED_LANGUAGES: ${OPENSANDBOX_SUPPORTED_LANGUAGES:-python,bash}
     volumes:
-      - ../backend/data:/aict_backend/data
-      - ../backend/logs:/aict_backend/logs
+      # Por defecto bind mount al repo — comportamiento histórico, intacto para
+      # los despliegues de cliente ya existentes.
+      # En multi-entorno local se apunta al volumen nombrado (BACKEND_DATA=backend-data),
+      # que Compose prefija con el project name: cada entorno tiene sus propios
+      # ficheros de repositorios en vez de compartir un único directorio del host.
+      - ${BACKEND_DATA:-../backend/data}:/aict_backend/data
+      - ${BACKEND_LOGS:-../backend/logs}:/aict_backend/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,7 +146,6 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_API_BASE_URL: ""
-    container_name: mattin-frontend
     environment:
       # SPA and API are same-origin behind Caddy, so the API base is the public
       # FRONTEND_URL. (Empty here would make ConfigService fall back to its
@@ -164,6 +168,11 @@ services:
   # Runs on the internal Docker network only; no port is exposed to the host.
   # Enable by setting SANDBOX_DEFAULT_PROVIDER=opensandbox in .env.
   #
+  # Image is published to GHCR (see .github/workflows/opensandbox-ci.yml), same
+  # as backend/frontend: `docker compose --profile opensandbox pull && up -d`
+  # is enough in any environment, no need to build locally. `build:` below
+  # stays only as a local-dev override (`--build`).
+  #
   # Network topology (security-relevant — see sandbox.toml [docker] comment):
   # This service is dual-homed on purpose:
   #   - mattin-network: lets `backend` reach opensandbox:8080 to create/manage
@@ -180,13 +189,12 @@ services:
   # *server* do (not the sandbox itself).
   # ---------------------------------------------------------------------------
   opensandbox:
-    image: mattin-opensandbox-server:${OPENSANDBOX_SERVER_VERSION:-0.1.11}
+    image: ghcr.io/lksnext-ai-lab/mattinai-opensandbox-server:${IMAGE_TAG:-develop}
     build:
       context: ./opensandbox
       dockerfile: Dockerfile
       args:
         OPENSANDBOX_SERVER_VERSION: ${OPENSANDBOX_SERVER_VERSION:-0.1.11}
-    container_name: mattin-opensandbox
     command: ["--config", "/etc/opensandbox/sandbox.toml"]
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/sandbox.toml
@@ -211,11 +219,15 @@ services:
   # mattin-code-interpreter — custom sandbox container image builder.
   # Extends opensandbox/code-interpreter:v1.0.2 with a tail wrapper that
   # starts Jupyter before execd connects, fixing the opensandbox entrypoint
-  # override bug.  This service exits immediately after the image is built;
-  # the built image is used by the opensandbox server when spawning sandboxes.
+  # override bug. Published to GHCR (see .github/workflows/opensandbox-ci.yml)
+  # at the same IMAGE_TAG as the other services, so `docker compose pull` fetches
+  # it directly — this service's `build:` only matters when you `--build` for
+  # local dev. Either way it exits immediately after the image is available
+  # locally; the opensandbox server references it via OPENSANDBOX_CODE_INTERPRETER_IMAGE
+  # (backend env above) when spawning sandboxes.
   # ---------------------------------------------------------------------------
   mattin-code-interpreter:
-    image: mattin-code-interpreter:latest
+    image: ghcr.io/lksnext-ai-lab/mattinai-code-interpreter:${IMAGE_TAG:-develop}
     build:
       context: ./opensandbox/code-interpreter
       dockerfile: Dockerfile
@@ -226,14 +238,13 @@ services:
 
   db_test:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres-test
     environment:
       POSTGRES_DB: ${TEST_DB_NAME:-test_db}
       POSTGRES_USER: ${TEST_DB_USER:-test_user}
       POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:-test_pass}  # pragma: allowlist secret
       POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
     ports:
-      - "5433:5432"
+      - "${TEST_DB_PORT:-5433}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     networks:
@@ -248,7 +259,6 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: mattin-caddy
     ports:
       - "${HTTP_PORT:-80}:80"
     volumes:
@@ -275,10 +285,17 @@ networks:
   # "docker_sandbox-workloads" ("docker" is this Compose project's default
   # name, i.e. this directory's basename; see that file's [docker] comment).
   sandbox-workloads:
+    # docker/opensandbox/sandbox.toml hardcodea este nombre en network_mode.
+    # Fijarlo aquí lo desacopla del project name (que ahora varía por entorno).
+    # Para levantar el perfil opensandbox en más de un stack a la vez, dale a
+    # cada uno su SANDBOX_NETWORK_NAME y su copia de sandbox.toml.
+    name: ${SANDBOX_NETWORK_NAME:-docker_sandbox-workloads}
     driver: bridge
 
 volumes:
   postgres-data:
+  backend-data:
+  backend-logs:
   qdrant-data:
   opensandbox-data:
   caddy-data:

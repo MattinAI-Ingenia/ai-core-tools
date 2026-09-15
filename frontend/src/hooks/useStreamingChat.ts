@@ -39,7 +39,19 @@ function buildToolDisplayName(toolName: string, subagentName?: string): string {
 interface StreamResult {
   response: string | Record<string, unknown>;
   conversationId: number | null;
+  sessionId: string | null;
   files: Array<{ file_id: string; filename: string; file_type: string }>;
+  elapsedMs: number;
+}
+
+export class StreamingChatError extends Error {
+  readonly elapsedMs: number;
+
+  constructor(message: string, elapsedMs: number) {
+    super(message);
+    this.name = 'StreamingChatError';
+    this.elapsedMs = elapsedMs;
+  }
 }
 
 export interface StreamFnOptions {
@@ -63,6 +75,7 @@ interface UseStreamingChatReturn {
   readonly activeTools: ActiveTool[];
   readonly thinkingMessage: string | null;
   readonly isStreaming: boolean;
+  readonly responseElapsedMs: number;
   readonly streamError: string | null;
   readonly codeOutputLines: string[];
   readonly isCodeRunning: boolean;
@@ -159,6 +172,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
   const [thinkingMessage, setThinkingMessage] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [responseElapsedMs, setResponseElapsedMs] = useState(0);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [codeOutputLines, setCodeOutputLines] = useState<string[]>([]);
   const [isCodeRunning, setIsCodeRunning] = useState(false);
@@ -175,6 +189,22 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
   const contentRef = useRef('');
   const flushRequestedRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
+  const streamStartedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isStreaming || streamStartedAtRef.current === null) return;
+
+    const updateElapsedTime = () => {
+      const startedAt = streamStartedAtRef.current;
+      if (startedAt !== null) {
+        setResponseElapsedMs(Math.max(0, Math.round(performance.now() - startedAt)));
+      }
+    };
+
+    updateElapsedTime();
+    const intervalId = window.setInterval(updateElapsedTime, 100);
+    return () => window.clearInterval(intervalId);
+  }, [isStreaming]);
 
   const abortStream = useCallback(() => {
     if (abortControllerRef.current) {
@@ -189,6 +219,8 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       setActiveTools([]);
       setThinkingMessage(getStreamingMessage('thinking'));
       setIsStreaming(true);
+      streamStartedAtRef.current = performance.now();
+      setResponseElapsedMs(0);
       setStreamError(null);
       setCodeOutputLines([]);
       setIsCodeRunning(false);
@@ -211,8 +243,15 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       abortControllerRef.current = abortController;
 
       let conversationId: number | null = options?.conversationId ?? null;
+      let sessionId: string | null = null;
       let finalResponse: string | Record<string, unknown> = '';
       let finalFiles: Array<{ file_id: string; filename: string; file_type: string }> = [];
+      let elapsedMs = 0;
+
+      const getElapsedMs = (): number => {
+        const startedAt = streamStartedAtRef.current;
+        return startedAt === null ? 0 : Math.max(0, Math.round(performance.now() - startedAt));
+      };
 
       try {
         await streamFnRef.current(message, {
@@ -357,8 +396,12 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
 
               case 'metadata': {
                 const metaConvId = (event.data as { conversation_id?: number }).conversation_id;
+                const metaSessionId = (event.data as { session_id?: string }).session_id;
                 if (metaConvId) {
                   conversationId = metaConvId;
+                }
+                if (metaSessionId) {
+                  sessionId = metaSessionId;
                 }
                 break;
               }
@@ -401,9 +444,12 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
         } else {
           const errMsg = err instanceof Error ? err.message : 'Streaming failed';
           setStreamError(errMsg);
-          throw err;
+          throw new StreamingChatError(errMsg, getElapsedMs());
         }
       } finally {
+        elapsedMs = getElapsedMs();
+        setResponseElapsedMs(elapsedMs);
+        streamStartedAtRef.current = null;
         if (rafIdRef.current) {
           cancelAnimationFrame(rafIdRef.current);
           rafIdRef.current = null;
@@ -423,7 +469,9 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       return {
         response: finalResponse || contentRef.current,
         conversationId,
+        sessionId,
         files: finalFiles,
+        elapsedMs,
       };
     },
     [],
@@ -434,6 +482,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
     activeTools,
     thinkingMessage,
     isStreaming,
+    responseElapsedMs,
     streamError,
     codeOutputLines,
     isCodeRunning,
