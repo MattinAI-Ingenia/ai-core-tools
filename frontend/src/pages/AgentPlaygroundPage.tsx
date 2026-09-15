@@ -15,6 +15,9 @@ interface Agent {
   status?: string;
   type: string;
   has_memory?: boolean;
+  /** Cross-session user memory (D-3/D-16) — gates the chat UI's self-service
+   * "forget my preferences" erasure action (D-11/FR-8(b)). */
+  has_global_memory?: boolean;
   system_prompt?: string;
   prompt_template?: string;
   silo?: {
@@ -275,6 +278,7 @@ function AgentPlaygroundPage() {
                     onMessageSent={handleMessageSent}
                     metadataFields={agent.silo?.metadata_definition?.fields}
                     vectorDbType={agent.silo?.vector_db_type}
+                    hasGlobalMemory={agent.has_global_memory ?? false}
                   />
                 )}
               </>

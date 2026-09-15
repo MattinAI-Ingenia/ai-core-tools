@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react';
+import { type ReactNode, useId } from 'react';
 import { AlertTriangle, AlertCircle, Info } from 'lucide-react';
 import Modal from './Modal';
 
@@ -21,17 +21,17 @@ const variantStyles: Record<
   { icon: ReactNode; iconBg: string; button: string }
 > = {
   danger: {
-    icon: <AlertTriangle className="w-6 h-6 text-red-600" />,
+    icon: <AlertTriangle className="w-6 h-6 text-red-600" aria-hidden="true" />,
     iconBg: 'bg-red-100',
     button: 'bg-red-600 hover:bg-red-700 focus:ring-red-500',
   },
   warning: {
-    icon: <AlertCircle className="w-6 h-6 text-yellow-600" />,
+    icon: <AlertCircle className="w-6 h-6 text-yellow-600" aria-hidden="true" />,
     iconBg: 'bg-yellow-100',
     button: 'bg-yellow-600 hover:bg-yellow-700 focus:ring-yellow-500',
   },
   info: {
-    icon: <Info className="w-6 h-6 text-blue-600" />,
+    icon: <Info className="w-6 h-6 text-blue-600" aria-hidden="true" />,
     iconBg: 'bg-blue-100',
     button: 'bg-blue-600 hover:bg-blue-700 focus:ring-blue-500',
   },
@@ -49,16 +49,25 @@ function ConfirmationModal({
   onCancel,
 }: ConfirmationModalProps) {
   const styles = variantStyles[variant];
+  const descriptionId = useId();
 
   return (
-    <Modal isOpen={isOpen} onClose={isLoading ? () => {} : onCancel} title={title} size="small">
+    <Modal
+      isOpen={isOpen}
+      onClose={isLoading ? () => {} : onCancel}
+      title={title}
+      size="small"
+      descriptionId={descriptionId}
+    >
       <div className="flex gap-4">
         <div
           className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center ${styles.iconBg}`}
         >
           {styles.icon}
         </div>
-        <div className="flex-1 text-sm text-gray-700 pt-2">{message}</div>
+        <div id={descriptionId} className="flex-1 text-sm text-gray-700 pt-2">
+          {message}
+        </div>
       </div>
       <div className="mt-6 flex justify-end gap-3">
         <button

@@ -7,6 +7,10 @@ interface ModalProps {
   title: string;
   children: ReactNode;
   size?: 'small' | 'medium' | 'large' | 'xlarge';
+  /** Optional id of an element (usually inside `children`) that describes the dialog's
+   * critical content. When provided, it's wired to `aria-describedby` on the dialog so
+   * screen readers announce it alongside the title. */
+  descriptionId?: string;
 }
 
 const FOCUSABLE_SELECTORS = [
@@ -18,7 +22,14 @@ const FOCUSABLE_SELECTORS = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<ModalProps>) {
+function Modal({
+  isOpen,
+  onClose,
+  title,
+  children,
+  size = 'large',
+  descriptionId,
+}: Readonly<ModalProps>) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<Element | null>(null);
@@ -107,6 +118,7 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
+          aria-describedby={descriptionId}
           tabIndex={-1}
           className={`relative bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full overflow-hidden focus:outline-none ${sizeClasses[size]}`}
         >

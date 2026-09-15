@@ -26,6 +26,9 @@ interface Agent {
   type: string;
   is_tool: boolean;
   has_memory: boolean;
+  /** Cross-session user memory (D-3/D-16). Independent of `has_memory`; the models
+   * used are configured on the App, not on the agent. */
+  has_global_memory: boolean;
   enable_code_interpreter: boolean;
   memory_max_messages: number;
   memory_max_tokens: number;
@@ -68,6 +71,7 @@ interface AgentFormData {
   type: string;
   is_tool: boolean;
   has_memory: boolean;
+  has_global_memory: boolean;
   enable_code_interpreter: boolean;
   server_tools: string[];
   memory_max_messages: number;
@@ -210,6 +214,7 @@ function AgentFormPage() {
     type: 'agent',
     is_tool: false,
     has_memory: false,
+    has_global_memory: false,
     enable_code_interpreter: false,
     server_tools: [],
     memory_max_messages: 20,
@@ -295,6 +300,7 @@ function AgentFormPage() {
         type: response.type || 'agent',
         is_tool: response.is_tool || false,
         has_memory: response.has_memory || false,
+        has_global_memory: response.has_global_memory || false,
         enable_code_interpreter: response.enable_code_interpreter || false,
         server_tools: response.server_tools || [],
         memory_max_messages: response.memory_max_messages || 20,
@@ -505,6 +511,7 @@ function AgentFormPage() {
       type: formData.type,
       is_tool: formData.is_tool,
       has_memory: formData.has_memory,
+      has_global_memory: formData.has_global_memory,
       enable_code_interpreter: formData.enable_code_interpreter,
       server_tools: formData.server_tools,
       memory_max_messages: formData.memory_max_messages,
@@ -1023,6 +1030,28 @@ function AgentFormPage() {
                         <div className="ml-3">
                           <label htmlFor="has_memory" className="text-sm font-medium text-gray-900">Conversational</label>
                           <p className="text-xs text-gray-500">Maintains conversation memory</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                        <input
+                          id="has_global_memory"
+                          type="checkbox"
+                          checked={formData.has_global_memory}
+                          onChange={(e) => handleInputChange('has_global_memory', e.target.checked)}
+                          aria-describedby="has_global_memory_help"
+                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <div className="ml-3">
+                          <label htmlFor="has_global_memory" className="text-sm font-medium text-gray-900">Cross-session user memory</label>
+                          <p id="has_global_memory_help" className="text-xs text-gray-500">
+                            Remembers durable facts about each user across different conversations, stored
+                            long-term. Independent from "Conversational" above, which only keeps context
+                            inside one conversation. Memory is shared across every agent in this app that
+                            has this toggle on. Which models do the extraction and embedding work is
+                            configured once for the whole app, under App settings — this toggle does
+                            nothing until those are set there.
+                          </p>
                         </div>
                       </div>
 

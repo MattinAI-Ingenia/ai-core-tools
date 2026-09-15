@@ -298,6 +298,15 @@ export default function MarketplaceAgentDetailPage() {
                 </dd>
               </div>
               <div className="flex justify-between">
+                <dt className="text-gray-500">Cross-session memory</dt>
+                <dd className="font-medium text-gray-900">
+                  {/* D-22: cross-session memory never activates at runtime for marketplace/public
+                      agents, regardless of the agent's raw `has_global_memory` flag. Showing the
+                      raw flag here would be a false privacy disclosure. */}
+                  Disabled (not available for marketplace agents)
+                </dd>
+              </div>
+              <div className="flex justify-between">
                 <dt className="text-gray-500">Knowledge Base</dt>
                 <dd className="font-medium text-gray-900">
                   {agent.has_knowledge_base ? 'Yes' : 'No'}

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { Check, AlertTriangle, Tag, BarChart2, Info, Zap, CheckCircle2, XCircle, WifiOff, HelpCircle, Plug, Shield } from 'lucide-react';
-import { apiService } from '../../services/api';
+import { apiService, ApiError } from '../../services/api';
 import Alert from '../../components/ui/Alert';
 import { useAppRole } from '../../hooks/useAppRole';
 import { AppRole } from '../../types/roles';
@@ -22,6 +22,11 @@ interface SandboxServiceOption {
   readonly is_system?: boolean;
 }
 
+interface MemoryServiceOption {
+  readonly service_id: number;
+  readonly name: string;
+}
+
 function AppSettingsPage() {
   const { appId } = useParams();
   const { hasMinRole, userRole } = useAppRole(appId);
@@ -35,11 +40,19 @@ function AppSettingsPage() {
     agent_cors_origins: '',
     enable_openai_api: false,
     default_sandbox_service_id: null as number | null,  // null = inherit system default
+    // Cross-session user memory (D-16, FR-2b): both null = memory inactive for this
+    // App, not "use a default" — there is no system-level fallback (D-21).
+    memory_extraction_service_id: null as number | null,
+    memory_embedding_service_id: null as number | null,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [memoryEmbeddingError, setMemoryEmbeddingError] = useState<string | null>(null);
+  const [memoryExtractionError, setMemoryExtractionError] = useState<string | null>(null);
+  const [memoryExtractionServices, setMemoryExtractionServices] = useState<MemoryServiceOption[]>([]);
+  const [memoryEmbeddingServices, setMemoryEmbeddingServices] = useState<MemoryServiceOption[]>([]);
   const [langsmithKeyChanged, setLangsmithKeyChanged] = useState(false);
   const [originalLangsmithKey, setOriginalLangsmithKey] = useState('');
   const [testingLangsmith, setTestingLangsmith] = useState(false);
@@ -86,7 +99,11 @@ function AppSettingsPage() {
         agent_cors_origins: app.agent_cors_origins || '',
         enable_openai_api: app.enable_openai_api || false,
         default_sandbox_service_id: app.default_sandbox_service_id ?? null,
+        memory_extraction_service_id: app.memory_extraction_service_id ?? null,
+        memory_embedding_service_id: app.memory_embedding_service_id ?? null,
       });
+      setMemoryExtractionServices(app.ai_services ?? []);
+      setMemoryEmbeddingServices(app.embedding_services ?? []);
       setOriginalLangsmithKey(langsmithKey);
       setLangsmithKeyChanged(false);
     } catch (err) {
@@ -134,6 +151,8 @@ function AppSettingsPage() {
     
     setSaving(true);
     setError(null);
+    setMemoryEmbeddingError(null);
+    setMemoryExtractionError(null);
 
     try {
       await apiService.updateApp(Number.parseInt(appId), {
@@ -144,11 +163,33 @@ function AppSettingsPage() {
         agent_cors_origins: formData.agent_cors_origins,
         enable_openai_api: formData.enable_openai_api,
         default_sandbox_service_id: formData.default_sandbox_service_id,
+        memory_extraction_service_id: formData.memory_extraction_service_id,
+        memory_embedding_service_id: formData.memory_embedding_service_id,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save settings');
+      // AC-46: a bad memory-service config (wrong-dimensionality embeddings, or an
+      // extraction/embedding service id that doesn't belong to this app) is rejected
+      // with a 400 whose detail names the offending field — surface it as a
+      // field-level error next to that selector instead of a generic toast.
+      // `MemoryServiceConfigError` (backend/services/app_service.py) always includes
+      // the field name in its message, so route on that instead of assuming it's
+      // always the embeddings field.
+      if (err instanceof ApiError && err.status === 400) {
+        const message = err.message;
+        if (/memory_embedding_service_id/i.test(message)) {
+          setMemoryEmbeddingError(message);
+        } else if (/memory_extraction_service_id/i.test(message)) {
+          setMemoryExtractionError(message);
+        } else {
+          // Can't tell which memory field it refers to — fall back to the generic
+          // banner instead of guessing wrong and hiding the real cause.
+          setError(message);
+        }
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to save settings');
+      }
       console.error('Error saving app settings:', err);
     } finally {
       setSaving(false);
@@ -485,6 +526,95 @@ function AppSettingsPage() {
                     Leave at "Inherit" to use the system default. Manage available services under{' '}
                     <span className="font-medium">Settings → Sandbox Services</span>.
                   </p>
+                </div>
+
+                {/* Cross-session memory: extraction model */}
+                <div>
+                  <label htmlFor="memory_extraction_service_id" className="block text-sm font-medium text-gray-700 mb-2">
+                    Memory extraction model
+                  </label>
+                  <select
+                    id="memory_extraction_service_id"
+                    name="memory_extraction_service_id"
+                    value={formData.memory_extraction_service_id ?? ''}
+                    onChange={(e) => {
+                      setMemoryExtractionError(null);
+                      setFormData(prev => ({
+                        ...prev,
+                        memory_extraction_service_id: e.target.value ? Number.parseInt(e.target.value) : null,
+                      }));
+                    }}
+                    disabled={!canEdit}
+                    aria-describedby="memory_extraction_service_id_help memory_extraction_service_id_error"
+                    aria-invalid={memoryExtractionError ? true : undefined}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  >
+                    <option value="">None — cross-session memory disabled</option>
+                    {memoryExtractionServices.map((service) => (
+                      <option key={service.service_id} value={service.service_id}>
+                        {service.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p id="memory_extraction_service_id_help" className="mt-1 text-sm text-gray-500">
+                    Cheap/lightweight LLM used to extract durable facts about a user from a conversation, for
+                    cross-session memory. Leaving this empty means memory stays <strong>inactive</strong> for
+                    every agent in this app — there is no automatic fallback. Both this and the embeddings
+                    selector below must be set for the per-agent "Cross-session user memory" toggle to do
+                    anything.
+                  </p>
+                  {memoryExtractionError && (
+                    <p id="memory_extraction_service_id_error" role="alert" className="mt-1 text-sm text-red-600">
+                      {memoryExtractionError}
+                    </p>
+                  )}
+                </div>
+
+                {/* Cross-session memory: embeddings */}
+                <div>
+                  <label htmlFor="memory_embedding_service_id" className="block text-sm font-medium text-gray-700 mb-2">
+                    Memory embeddings
+                  </label>
+                  <select
+                    id="memory_embedding_service_id"
+                    name="memory_embedding_service_id"
+                    value={formData.memory_embedding_service_id ?? ''}
+                    onChange={(e) => {
+                      setMemoryEmbeddingError(null);
+                      setFormData(prev => ({
+                        ...prev,
+                        memory_embedding_service_id: e.target.value ? Number.parseInt(e.target.value) : null,
+                      }));
+                    }}
+                    disabled={!canEdit}
+                    aria-describedby="memory_embedding_service_id_help memory_embedding_service_id_error"
+                    aria-invalid={memoryEmbeddingError ? true : undefined}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  >
+                    <option value="">None — cross-session memory disabled</option>
+                    {memoryEmbeddingServices.map((service) => (
+                      <option key={service.service_id} value={service.service_id}>
+                        {service.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p id="memory_embedding_service_id_help" className="mt-1 text-sm text-gray-500">
+                    Embedding model for cross-session memory vectors. Leaving this empty means memory stays
+                    <strong> inactive</strong> for every agent in this app. This applies to the whole app at
+                    once — every memory-enabled agent here shares it.
+                  </p>
+                  <p className="mt-1 text-sm text-amber-700 flex items-start gap-1">
+                    <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+                    <span>
+                      Changing this after facts have been stored may make previously stored memory
+                      unretrievable — stored memory is not re-embedded.
+                    </span>
+                  </p>
+                  {memoryEmbeddingError && (
+                    <p id="memory_embedding_service_id_error" role="alert" className="mt-1 text-sm text-red-600">
+                      {memoryEmbeddingError}
+                    </p>
+                  )}
                 </div>
               </div>
 

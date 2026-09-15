@@ -82,6 +82,14 @@ export interface App {
   agent_cors_origins?: string;
   enable_openai_api?: boolean;
   default_sandbox_service_id?: number | null;
+  // Cross-session user memory (D-16, FR-2b): both null = memory inactive for this App,
+  // not "use a default" — there is no system-level fallback (D-21).
+  memory_extraction_service_id?: number | null;
+  memory_embedding_service_id?: number | null;
+  // Option lists for the App-settings memory service selectors (FR-3(b)); App-visible
+  // plus system-level services, labelled like the agent form's `ai_services` list.
+  ai_services?: Array<{ service_id: number; name: string }>;
+  embedding_services?: Array<{ service_id: number; name: string }>;
   agent_count: number;
   repository_count: number;
   domain_count: number;
@@ -89,6 +97,11 @@ export interface App {
   collaborator_count: number;
   onboarding_dismissed?: boolean;
   usage_stats?: UsageStats;
+}
+
+/** Response for the self-service global-memory erasure endpoints (D-11, FR-8(b)). */
+export interface GlobalMemoryPurgeResult {
+  purged: number;
 }
 
 /** RAG retrieval-time filter applied on top of an agent's fixed silo. Mirrors RagConfigSection's RagFixedFilter shape. */
@@ -108,6 +121,10 @@ export interface Agent {
   type: string;
   is_tool: boolean;
   has_memory: boolean;
+  /** Cross-session user memory (spec `user-memory-mem0`, D-3/D-16). Independent of
+   * `has_memory` — governs durable, store-backed facts remembered across different
+   * conversations. The models used are configured on the App, not here. */
+  has_global_memory: boolean;
   enable_code_interpreter: boolean;
   status?: string;
   server_tools?: string[];
@@ -639,10 +656,36 @@ class ApiService {
     });
   }
 
-  async updateApp(appId: number, data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string; enable_openai_api?: boolean; default_sandbox_service_id?: number | null }): Promise<App> {
+  async updateApp(appId: number, data: {
+    name: string;
+    langsmith_api_key?: string;
+    agent_rate_limit?: number;
+    max_file_size_mb?: number;
+    agent_cors_origins?: string;
+    enable_openai_api?: boolean;
+    default_sandbox_service_id?: number | null;
+    // Omitting these two leaves the persisted value untouched (the backend reads
+    // `model_fields_set`); send an explicit `null` to clear the configuration (D-21).
+    memory_extraction_service_id?: number | null;
+    memory_embedding_service_id?: number | null;
+  }): Promise<App> {
     return this.request(`/internal/apps/${appId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Self-service erasure of the caller's own cross-session global memory in this App
+   * (spec `user-memory-mem0`, D-11/FR-8(b)). Deliberately takes and sends no `user_id` —
+   * the backend derives identity exclusively from the authenticated session
+   * (`DELETE /internal/apps/{appId}/global-memory/me`). Do NOT "make it symmetric" with
+   * an operator-style call that accepts a user id: that would let a caller purge someone
+   * else's memory (AC-45). Idempotent — a caller with nothing stored gets `purged: 0`.
+   */
+  async eraseMyGlobalMemory(appId: number): Promise<GlobalMemoryPurgeResult> {
+    return this.request(`/internal/apps/${appId}/global-memory/me`, {
+      method: 'DELETE',
     });
   }
 

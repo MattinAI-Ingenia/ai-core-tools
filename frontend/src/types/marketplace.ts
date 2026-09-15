@@ -48,6 +48,9 @@ export interface MarketplaceAgentDetail {
   app_id: number;
   has_knowledge_base: boolean;
   has_memory: boolean;
+  /** Cross-session user memory (D-3/D-16). Note D-22 excludes marketplace-published
+   * (PUBLIC) agents from actually activating memory at runtime regardless of this flag. */
+  has_global_memory: boolean;
   published_at: string | null;
   conversation_count: number;
   rating_avg: number | null;
