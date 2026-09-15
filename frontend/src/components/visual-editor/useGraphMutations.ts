@@ -3,7 +3,12 @@ import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../../constants/messages';
 import { apiService, type Agent } from '../../services/api';
 import { parseNodeId, type GraphNode } from '../../hooks/useAppGraph';
-import { buildRelationshipChange, type AgentPatch } from './agentRelationshipMutation';
+import {
+  buildRelationshipChange,
+  type AgentPatch,
+  type NullableAgentIdField,
+  type NullableAgentIdOverrides,
+} from './agentRelationshipMutation';
 import { toFlowEdges, type AppFlowEdge } from './graphAdapter';
 import { resolveConnection, type ResolvedConnection } from './graphConnectionRules';
 
@@ -70,8 +75,7 @@ async function disconnectAgentGroup(
   groupEdges: readonly AppFlowEdge[],
 ): Promise<void> {
   const agent = await apiService.getAgent(numericAppId, agentNumericId);
-  let workingAgent: Omit<Agent, 'silo_id' | 'service_id'> & { silo_id?: number | null; service_id?: number | null } =
-    agent;
+  let workingAgent: Omit<Agent, NullableAgentIdField> & NullableAgentIdOverrides = agent;
   let patch: AgentPatch = {};
 
   for (const edge of groupEdges) {
