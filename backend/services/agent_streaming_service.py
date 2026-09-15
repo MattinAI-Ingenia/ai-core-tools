@@ -133,14 +133,35 @@ class AgentStreamingService:
                 "metadata",
                 {
                     "conversation_id": ctx.effective_conv_id,
+                    "session_id": ctx.conversation.session_id if ctx.conversation else None,
                     "agent_id": agent_id,
                     "agent_name": ctx.agent.name,
                     "has_memory": ctx.agent.has_memory,
                 },
             )
 
+            # ----------------------------------------------------------------
+            # 3a. Resolve this session's temporary playground silos (uploaded
+            #     media/document retrieval). Computed once here — it does not
+            #     change across the streaming retry loop below — and threaded
+            #     into create_agent() alongside the sandbox handles.
+            # ----------------------------------------------------------------
+            temp_silo_ids = None
+            session_id_for_media = ctx.conversation.session_id if ctx.conversation else None
+            if session_id_for_media and effective_db:
+                try:
+                    from services.playground_media_service import PlaygroundMediaService
+                    media_app_id = user_context.get("app_id") if user_context else None
+                    if media_app_id:
+                        temp_silo_ids = PlaygroundMediaService.get_temp_silo_ids_for_agent(
+                            media_app_id, agent_id, session_id_for_media, effective_db
+                        )
+                except Exception as e:
+                    logger.warning("Could not resolve temp playground silos: %s", e)
+
             accumulated_content = ""
             structured_response = None
+            rollback_checkpoint_id = None
 
             for attempt in range(2):
                 mcp_client = None
@@ -156,6 +177,8 @@ class AgentStreamingService:
                     sandbox_handle=ctx.sandbox_handle,
                     sandbox_provider=ctx.sandbox_provider,
                     sandbox_session_key=ctx.sandbox_session_key,
+                    attached_files=ctx.processed_files,
+                    temp_silo_ids=temp_silo_ids or None,
                 )
                 agent_chain, mcp_client = create_agent_result[:2]
 
@@ -171,6 +194,8 @@ class AgentStreamingService:
                     )
 
                 config["configurable"]["question"] = ctx.enhanced_message
+                if rollback_checkpoint_id is not None:
+                    config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
 
                 # ------------------------------------------------------------
                 # 4. Build the HumanMessage payload (handles multimodal images)
@@ -245,15 +270,35 @@ class AgentStreamingService:
                         # pending approval and the whole thread's memory.
                         and not await _has_pending_interrupt(agent_chain, config)
                     ):
-                        logger.warning(
-                            "Detected incomplete tool-call checkpoint for agent %s "
-                            "session %s; deleting checkpoint and retrying turn once",
+                        # Recover by forking from the last known-good checkpoint
+                        # instead of deleting the whole thread — see the mirrored
+                        # fix in AgentExecutionService's non-streaming path for
+                        # the full rationale (adelete_thread wipes the user's
+                        # entire visible history, not just the broken step).
+                        rollback_checkpoint_id = await CheckpointerCacheService.get_rollback_checkpoint_id(
                             ctx.fresh_agent.agent_id,
                             ctx.session_id_for_cache,
                         )
-                        await CheckpointerCacheService.invalidate_checkpointer_async(
+                        if rollback_checkpoint_id is None:
+                            logger.warning(
+                                "Incomplete tool-call checkpoint for agent %s session %s "
+                                "has no earlier checkpoint to roll back to; failing the "
+                                "turn instead of retrying",
+                                ctx.fresh_agent.agent_id,
+                                ctx.session_id_for_cache,
+                            )
+                            yield format_sse_event(
+                                "error",
+                                {"message": "Your last message could not be completed. Please resend it."},
+                            )
+                            return
+                        logger.warning(
+                            "Detected incomplete tool-call checkpoint for agent %s "
+                            "session %s; retrying turn from prior checkpoint %s "
+                            "(no history deleted)",
                             ctx.fresh_agent.agent_id,
                             ctx.session_id_for_cache,
+                            rollback_checkpoint_id,
                         )
                         continue
                     raise
@@ -372,7 +417,7 @@ class AgentStreamingService:
                 )
             else:
                 logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
-                yield format_sse_event("error", {"message": str(exc)})
+                yield format_sse_event("error", {"message": "Agent execution failed"})
 
         finally:
             if ctx is not None and sandbox_turn_active:

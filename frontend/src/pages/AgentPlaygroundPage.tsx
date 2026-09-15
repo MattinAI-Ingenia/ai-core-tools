@@ -120,6 +120,13 @@ function AgentPlaygroundPage() {
     setConversationReloadTrigger(prev => prev + 1); // Trigger conversation list reload to update message counts
   };
 
+  const handleConversationReset = () => {
+    // Conversation was deleted on the backend — clear current ID and reload sidebar
+    setCurrentConversationId(null);
+    setConversationKey(prev => prev + 1);
+    setConversationReloadTrigger(prev => prev + 1);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -197,9 +204,11 @@ function AgentPlaygroundPage() {
         </h2>
         <div className="flex items-center gap-2 flex-shrink-0">
           <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
-            agent.status === 'active'
-              ? 'bg-green-100/80 text-green-800 dark:bg-green-900/40 dark:text-green-300'
-              : 'bg-yellow-100/80 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300'
+            agent.status !== undefined
+              ? agent.status === 'active'
+                ? 'bg-green-100/80 text-green-800 dark:bg-green-900/40 dark:text-green-300'
+                : 'bg-yellow-100/80 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300'
+              : ''
           }`}>
             {agent.status}
           </span>
@@ -270,6 +279,7 @@ function AgentPlaygroundPage() {
                     agentName={agent.name}
                     conversationId={currentConversationId}
                     onConversationCreated={handleConversationCreated}
+                    onConversationReset={handleConversationReset}
                     onMessageSent={handleMessageSent}
                     metadataFields={agent.silo?.metadata_definition?.fields}
                     vectorDbType={agent.silo?.vector_db_type}

@@ -122,6 +122,7 @@ export interface Agent {
   tool_ids?: number[];
   mcp_config_ids?: number[];
   skill_ids?: number[];
+  middleware_ids?: number[];
   created_at: string;
   request_count: number;
   marketplace_visibility?: MarketplaceVisibility;
@@ -135,6 +136,14 @@ export interface Agent {
   rag_score_threshold?: number | null;
   rag_max_retrieval_calls?: number | null;
   rag_fixed_filters?: AgentRagFixedFilter[];
+  // Media processing configuration (playground media upload)
+  transcription_service_id?: number;
+  video_ai_service_id?: number;
+  media_embedding_service_id?: number;
+  media_forced_language?: string;
+  media_chunk_min_duration?: number;
+  media_chunk_max_duration?: number;
+  media_chunk_overlap?: number;
   ai_service?: { name: string; model_name: string; provider: string };
   ai_services: Array<{ service_id: number; name: string }>;
   silo?: {
@@ -155,6 +164,7 @@ export interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
+  middlewares?: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[]; tool_agent_ids?: number[] }>;
 }
 
 export interface AIService {
@@ -742,8 +752,9 @@ class ApiService {
     });
   }
 
-  async resetAgentConversation(appId: number, agentId: number): Promise<void> {
-    return this.request(`/internal/apps/${appId}/agents/${agentId}/reset`, {
+  async resetAgentConversation(appId: number, agentId: number, conversationId?: number | null): Promise<void> {
+    const params = conversationId ? `?conversation_id=${conversationId}` : '';
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/reset${params}`, {
       method: 'POST',
     });
   }
@@ -1501,6 +1512,94 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media/${mediaId}`, {
       method: 'DELETE',
     })
+  }
+
+  // ==================== PLAYGROUND MEDIA API ====================
+
+  async uploadPlaygroundMedia(appId: number, agentId: number, sessionId: string, files: File[], config?: {
+    transcription_service_id?: number;
+    video_ai_service_id?: number;
+    embedding_service_id?: number;
+    forced_language?: string;
+    chunk_min_duration?: number;
+    chunk_max_duration?: number;
+    chunk_overlap?: number;
+  }) {
+    const formData = new FormData();
+
+    files.forEach(file => formData.append('files', file));
+    formData.append('session_id', sessionId);
+    
+    if (config?.transcription_service_id) formData.append('transcription_service_id', config.transcription_service_id.toString());
+    if (config?.video_ai_service_id) formData.append('video_ai_service_id', config.video_ai_service_id.toString());
+    if (config?.embedding_service_id) formData.append('embedding_service_id', config.embedding_service_id.toString());
+    if (config?.forced_language) formData.append('forced_language', config.forced_language);
+    if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
+    if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
+    if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
+
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media`, {
+      method: 'POST',
+      body: formData,
+    });
+  }
+
+  async addPlaygroundYouTube(appId: number, agentId: number, sessionId: string, url: string, config?: {
+    transcription_service_id?: number;
+    video_ai_service_id?: number;
+    embedding_service_id?: number;
+    forced_language?: string;
+    chunk_min_duration?: number;
+    chunk_max_duration?: number;
+    chunk_overlap?: number;
+  }) {
+    const formData = new FormData();
+
+    formData.append('url', url);
+    formData.append('session_id', sessionId);
+    
+    if (config?.transcription_service_id) formData.append('transcription_service_id', config.transcription_service_id.toString());
+    if (config?.video_ai_service_id) formData.append('video_ai_service_id', config.video_ai_service_id.toString());
+    if (config?.embedding_service_id) formData.append('embedding_service_id', config.embedding_service_id.toString());
+    if (config?.forced_language) formData.append('forced_language', config.forced_language);
+    if (config?.chunk_min_duration) formData.append('chunk_min_duration', config.chunk_min_duration.toString());
+    if (config?.chunk_max_duration) formData.append('chunk_max_duration', config.chunk_max_duration.toString());
+    if (config?.chunk_overlap) formData.append('chunk_overlap', config.chunk_overlap.toString());
+
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media/youtube`, {
+      method: 'POST',
+      body: formData,
+    });
+  }
+
+  async listPlaygroundMedia(appId: number, agentId: number, sessionId: string) {
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media?session_id=${encodeURIComponent(sessionId)}`);
+  }
+
+  async deletePlaygroundMedia(appId: number, agentId: number, sessionId: string) {
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/playground-media?session_id=${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async fetchPlaygroundMediaBlob(appId: number, agentId: number, mediaId: number, sessionId: string): Promise<Blob> {
+    const url = this.getPlaygroundMediaStreamUrl(appId, agentId, mediaId, sessionId);
+    const headers = this.buildAuthHeaders('GET', false);
+    const response = await fetch(url, { headers, credentials: 'include' });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch media: ${response.status}`);
+    }
+    return response.blob();
+  }
+
+  /**
+   * Build the direct stream URL for a playground media item. Used as the
+   * <video>/<audio> `src` so the browser can issue HTTP Range requests for
+   * true seeking instead of downloading the whole file into memory. The
+   * session cookie is sent automatically for same-origin requests.
+   */
+  getPlaygroundMediaStreamUrl(appId: number, agentId: number, mediaId: number, sessionId: string): string {
+    return `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/playground-media/${mediaId}/stream?session_id=${encodeURIComponent(sessionId)}`;
   }
 
   // ==================== SILOS API ====================

@@ -719,6 +719,7 @@ async def list_system_ai_services(
             model_name=svc.description or "",
             api_key=mask_api_key(svc.api_key) if svc.api_key else "",
             base_url=svc.endpoint or "",
+            supports_video=svc.supports_video or False,
             created_at=svc.create_date,
             aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
             aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
@@ -749,6 +750,7 @@ async def get_system_ai_service(
         model_name=svc.description or "",
         api_key=mask_api_key(svc.api_key) if svc.api_key else "",
         base_url=svc.endpoint or "",
+        supports_video=svc.supports_video or False,
         created_at=svc.create_date,
         aws_access_key_id=extra_cfg.get("aws_access_key_id"),
         aws_region=extra_cfg.get("aws_region"),
@@ -775,6 +777,7 @@ async def create_system_ai_service(
     svc.description = body.model_name  # stored in description column
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.supports_video = body.supports_video
     svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc.create_date = datetime.now()
     svc = AIServiceRepository.create(db, svc)
@@ -804,6 +807,7 @@ async def update_system_ai_service(
     if not is_masked_key(body.api_key):
         svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.supports_video = body.supports_video
     svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc = AIServiceRepository.update(db, svc)
     return AIServiceService._to_list_item(svc, is_system=True)
