@@ -2080,6 +2080,38 @@ class LightRAGStore(VectorStoreInterface):
     # which is the limit this method exists to route around.
     _COVERAGE_QUERY_ROW_CAP = 2000
 
+    # Separable Spanish prefixes DOMUSA's manuals hyphenate inconsistently
+    # ("anti-hielo" in most install manuals, "antihielo" in DSAT000008) —
+    # a plain substring match doesn't bridge that gap since the hyphen sits
+    # inside the term itself. Kept short and explicit, not a synonym
+    # dictionary: this only makes the hyphen *optional* right after a known
+    # prefix, it never invents alternate spellings. See _coverage_term_pattern.
+    _SEPARABLE_PREFIXES = ("anti", "auto", "contra", "no", "pre", "re", "semi", "sub")
+
+    @classmethod
+    def _coverage_term_pattern(cls, term: str) -> str:
+        """Build a Postgres ERE pattern for one literal coverage-search term.
+
+        - Anchored at a word start (``\\m``) but not at a word end, so a
+          plural/suffix continuation still matches ("biomasa" -> "biomasas")
+          — only accidental *mid-word* hits are excluded (bug found live:
+          "RITE" matching inside French "SECURITE" via plain ILIKE).
+        - The term is regex-escaped first, since it is free text from the
+          caller/LLM, not a hand-written pattern.
+        - If the term starts with one of _SEPARABLE_PREFIXES, the join
+          becomes an optional hyphen, so "antihielo" also finds "anti-hielo"
+          and vice versa — without touching `content` at all (no corpus-wide
+          transform, no extra per-row cost beyond the regex match itself). An
+          already-hyphenated term ("anti-hielo") is normalized the same way,
+          so both spellings of the caller's own term produce one pattern.
+        """
+        for prefix in cls._SEPARABLE_PREFIXES:
+            if term.lower().startswith(prefix) and len(term) > len(prefix):
+                rest = term[len(prefix):].removeprefix("-")
+                if rest:
+                    return r"\m" + re.escape(term[: len(prefix)]) + "-?" + re.escape(rest)
+        return r"\m" + re.escape(term)
+
     def find_chunks_mentioning(
         self, collection_name: str, term: Optional[Union[str, List[str]]],
         doc_filter: Optional[Union[str, int, List[Union[str, int]]]] = None,
@@ -2100,7 +2132,9 @@ class LightRAGStore(VectorStoreInterface):
         variants) — same document, same page, could use any of them verbatim.
 
         Matching is accent-insensitive (Postgres `unaccent`) so "anodo" finds
-        "ánodo" — this is still exact substring matching, not fuzzy/semantic.
+        "ánodo", and anchored at a word start (see _coverage_term_pattern) so
+        a short term can't hide inside an unrelated longer word — still
+        literal text matching, not fuzzy/semantic.
 
         Returns (grouped, cap_hit) — cap_hit is True when the defensive row cap
         was reached, meaning results may have been silently truncated.
@@ -2119,8 +2153,8 @@ class LightRAGStore(VectorStoreInterface):
             term_clauses = []
             for i, one_term in enumerate(terms):
                 key = f"term_pattern_{i}"
-                term_clauses.append(f"unaccent(content) ILIKE unaccent(:{key})")
-                params[key] = f"%{one_term}%"
+                term_clauses.append(f"unaccent(content) ~* unaccent(:{key})")
+                params[key] = self._coverage_term_pattern(one_term)
             sql += " AND (" + " OR ".join(term_clauses) + ")"
         if doc_ids:
             doc_clauses = []
