@@ -36,6 +36,13 @@ class Config:
         'TMP_EPHEMERAL_ORPHAN_HOURS': '1',
         'TMP_CLEANUP_INTERVAL_MINUTES': '60',
         'TMP_CLEANUP_ENABLED': 'True',
+        # Azure Blob ingestion (anti-SSRF allowlist + batching/streaming tuning).
+        'BLOB_ALLOWED_HOST_SUFFIXES': '.blob.core.windows.net',
+        'BLOB_INGEST_BATCH_SIZE': '20',
+        'BLOB_INGEST_DOWNLOAD_CONCURRENCY': '4',
+        'BLOB_INGEST_DOWNLOAD_TIMEOUT_SECONDS': '120',
+        'BLOB_LIST_PAGE_SIZE': '200',
+        'BLOB_LIST_MAX_ITEMS': '5000',
     }
 
     @staticmethod
