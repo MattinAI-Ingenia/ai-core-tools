@@ -177,6 +177,10 @@ def _run_one_sweep_sync() -> None:
     ephemeral_root = os.path.join(tmp_base, "ephemeral")
     persistent_root = os.path.join(tmp_base, "persistent")
     uploads_root = os.path.join(tmp_base, "uploads")
+    # Per-batch staging dirs for the Azure Blob ingestion service (NFR-2): each
+    # batch removes its own dir when it finishes, this is only the backstop for
+    # one killed mid-run.
+    blob_ingest_staging_root = os.path.join(tmp_base, "blob_ingest_staging")
 
     ephemeral_ttl_seconds = int(cfg['TMP_EPHEMERAL_ORPHAN_HOURS']) * 3600
     persistent_ttl_seconds = int(cfg['TMP_PERSISTENT_TTL_DAYS']) * 86400
@@ -187,16 +191,20 @@ def _run_one_sweep_sync() -> None:
     uploads_removed = _purge_tree_older_than(
         uploads_root, ephemeral_ttl_seconds, label="uploads",
     )
+    blob_ingest_staging_removed = _purge_tree_older_than(
+        blob_ingest_staging_root, ephemeral_ttl_seconds, label="blob_ingest_staging",
+    )
     persistent_removed = _purge_tree_older_than(
         persistent_root, persistent_ttl_seconds, label="persistent",
     )
 
     imports_purged = _purge_abandoned_import_jobs()
 
-    if ephemeral_removed or uploads_removed or persistent_removed or imports_purged:
+    if ephemeral_removed or uploads_removed or blob_ingest_staging_removed or persistent_removed or imports_purged:
         logger.info(
-            "file_cleanup_worker: removed %d ephemeral, %d upload, %d persistent file(s), %d abandoned import job(s)",
-            ephemeral_removed, uploads_removed, persistent_removed, imports_purged,
+            "file_cleanup_worker: removed %d ephemeral, %d upload, %d blob-ingest-staging, "
+            "%d persistent file(s), %d abandoned import job(s)",
+            ephemeral_removed, uploads_removed, blob_ingest_staging_removed, persistent_removed, imports_purged,
         )
 
 

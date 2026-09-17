@@ -8,20 +8,7 @@ from models.import_job_row import ImportJobRow
 from models.enums.import_row_status import ImportRowStatus
 from repositories.repository_repository import RepositoryRepository
 from services.resource_service import ResourceService
-
-
-class _StagedFileAdapter:
-    """Duck-types the file-like object `_process_single_file` expects
-    (`.filename` + `.save(path)`), letting an already-downloaded PDF flow
-    through the exact same resource creation path as a manual upload."""
-
-    def __init__(self, staged_path: str, filename: str):
-        self.filename = filename
-        self._staged_path = staged_path
-
-    def save(self, dest_path: str) -> None:
-        import shutil
-        shutil.move(self._staged_path, dest_path)
+from services.staged_file import StagedFileAdapter as _StagedFileAdapter
 
 
 def _pdf_filename(url: str) -> str:
