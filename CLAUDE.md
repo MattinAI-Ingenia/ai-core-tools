@@ -307,6 +307,7 @@ Local dev: port 5173 (Vite). Docker: port 3000.
 - `docs/CLIENT_SETUP_GUIDE.md` — Client project setup
 - `docs/AUTHENTICATION_MIGRATION_GUIDE.md` — Auth system details
 - `docs/EXTERNAL_MCP_SETUP.md` — MCP integration
+- `docs/AZURE_BLOB_INGESTION.md` — One-shot Azure Blob container ingestion into a Repository (validation tool; idempotency, anti-SSRF, LightRAG validation notes)
 - `docs/dependencies/lightrag.md` — LightRAG integration details (querying, storage, limitations)
 - `docs/testing/` — Full testing guide
 - `.github/copilot-instructions.md` — Comprehensive domain reference and agent conventions
