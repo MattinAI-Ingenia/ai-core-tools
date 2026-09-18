@@ -4,6 +4,7 @@ from langchain_mistralai import MistralAIEmbeddings
 from langchain_azure_ai.embeddings import AzureAIEmbeddingsModel
 from huggingface_hub import InferenceClient
 from models.embedding_service import EmbeddingProvider
+from utils.azure_endpoint import normalize_azure_openai_endpoint
 from utils.logger import get_logger
 import json
 import os
@@ -85,7 +86,7 @@ def _build_azure_embeddings(embedding_service, model_id):
         model_name=model_id,
         api_version=embedding_service.api_version or "2024-02-15-preview",
         credential=embedding_service.api_key,
-        endpoint=embedding_service.endpoint
+        endpoint=normalize_azure_openai_endpoint(embedding_service.endpoint, model_id)
     )
 
 
