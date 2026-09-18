@@ -166,6 +166,26 @@ class TestBuildLlmModelFunc:
 
         assert fake_llm.ainvoke.await_args.kwargs["max_tokens"] == 8192
 
+    async def test_azure_max_tokens_travels_as_model_extras(self):
+        """Reasoning-era Azure OpenAI models reject ``max_tokens`` (they want
+        ``max_completion_tokens``), and the azure-ai-inference SDK has no named
+        parameter for it — only ``model_extras`` reaches the request body. The
+        Azure adapter must never send ``max_tokens`` on the wire."""
+        ai_service = _make_ai_service(provider="Azure")
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=8192)
+            await llm_func("hi")
+
+        kwargs = fake_llm.ainvoke.await_args.kwargs
+        assert kwargs.get("max_tokens") is None
+        assert kwargs["model_extras"] == {"max_completion_tokens": 8192}
+
     async def test_guided_json_only_on_extraction_calls(self):
         """The extract role is reused for plain-text summaries when merging.
 
@@ -199,6 +219,79 @@ class TestBuildLlmModelFunc:
         schema = extraction_kwargs["response_format"]["json_schema"]["schema"]
         assert set(schema["properties"]) == {"entities", "relationships"}
         assert "response_format" not in summary_kwargs
+
+    @pytest.mark.parametrize("metadata", [
+        {"finish_reason": "length"},
+        {"stop_reason": "max_tokens"},
+        {"finish_reason": "MAX_TOKENS"},
+    ], ids=["openai/mistral/azure", "anthropic", "google"])
+    async def test_silent_truncation_is_flagged_as_truncated_response(self, metadata):
+        """Providers cap the output WITHOUT raising (OpenAI/Mistral/Azure emit
+        finish_reason='length', Anthropic stop_reason='max_tokens', Google
+        finish_reason='MAX_TOKENS'). A capped extraction must come back as a
+        TruncatedResponse so LightRAG's cache never stores the partial JSON as
+        a complete result — silent truncation is the bug this whole path
+        exists to prevent."""
+        from lightrag.utils import TruncatedResponse  # noqa: WPS433
+
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content='{"entities": [', response_metadata=metadata)
+        )
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            result = await llm_func("chunk text")
+
+        assert isinstance(result, TruncatedResponse)
+        assert result.content == '{"entities": ['
+
+    async def test_normal_response_is_not_wrapped_as_truncated(self):
+        from lightrag.utils import TruncatedResponse  # noqa: WPS433
+
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(
+            return_value=SimpleNamespace(content='{"entities": []}', response_metadata={})
+        )
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            result = await llm_func("chunk text")
+
+        assert not isinstance(result, TruncatedResponse)
+
+    async def test_guided_json_azure_sends_sdk_object_not_dict(self):
+        """The azure-ai-inference SDK rejects OpenAI-style response_format dicts
+        ("Unsupported `response_format`"), which made every LightRAG extraction
+        call fail on Azure services. Its own JsonSchemaFormat model is accepted,
+        so Azure gets that instead of the dict."""
+        ai_service = _make_ai_service(provider="Azure")
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(
+                ai_service, json_marker="Return one valid JSON object"
+            )
+            await llm_func("chunk text", system_prompt="...Return one valid JSON object...")
+
+        response_format = fake_llm.ainvoke.await_args.kwargs["response_format"]
+        if isinstance(response_format, dict):
+            pytest.skip("azure-ai-inference not importable — dict fallback expected")
+        assert response_format.__class__.__name__ == "JsonSchemaFormat"
+        assert response_format["name"] == "lightrag_entity_extraction"
+        assert set(response_format["schema"]["properties"]) == {"entities", "relationships"}
 
     async def test_no_marker_sends_no_schema(self):
         ai_service = _make_ai_service()

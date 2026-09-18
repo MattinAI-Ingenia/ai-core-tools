@@ -564,6 +564,14 @@ async def _aprocess_enqueued_with_progress(
         page never counts as done and the resource sits at done < total
         forever, even though its content is genuinely indexed (just under the
         other resource's doc_id).
+
+        LightRAG marks a page's content as present elsewhere with either
+        ``Status: processed`` (the other doc existed before this batch) or
+        ``Status: batch_duplicate`` (its twin was processed in this same
+        batch). Both mean the content is indexed, so both count as done;
+        ``Status: failed`` — the only other state a dup row records — means
+        the original document failed and its content is NOT indexed, so it
+        must not count.
         """
         if not file_paths:
             return set()
@@ -580,7 +588,8 @@ async def _aprocess_enqueued_with_progress(
                         "SELECT DISTINCT file_path FROM lightrag_doc_status "
                         "WHERE workspace = :ws AND id LIKE 'dup-%' "
                         "AND file_path = ANY(:paths) "
-                        "AND error_msg LIKE '%Status: processed%'"
+                        "AND (error_msg LIKE '%Status: processed%' "
+                        "OR error_msg LIKE '%Status: batch_duplicate%')"
                     ),
                     {"ws": workspace, "paths": list(file_paths)},
                 ).fetchall()

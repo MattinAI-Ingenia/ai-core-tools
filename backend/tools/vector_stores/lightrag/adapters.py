@@ -333,6 +333,41 @@ def build_role_llm_configs(
     return configs
 
 
+def _extraction_response_format(provider: Optional[str]) -> Any:
+    """The extraction schema in the form the provider's client accepts.
+
+    OpenAI-compatible servers take the raw OpenAI-style dict. The azure-ai-inference
+    SDK behind LangChain's ``AzureAIChatCompletionsModel`` rejects those dicts —
+    ``_patch._get_internal_response_format`` only accepts its own
+    ``JsonSchemaFormat`` model (it raises ``Unsupported response_format``
+    otherwise), so build one; ``langchain-azure-ai`` itself uses the same object
+    for structured output. If the Azure SDK is not importable here, fall back to
+    the dict, whose call-time failure is the same unsupported-response_format
+    error as before.
+    """
+    openai_style = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "lightrag_entity_extraction",
+            "schema": _EXTRACTION_JSON_SCHEMA,
+        },
+    }
+    if provider != "Azure":
+        return openai_style
+    try:
+        from azure.ai.inference.models import JsonSchemaFormat
+    except ImportError:
+        logger.warning(
+            "azure-ai-inference not importable; sending the OpenAI-style "
+            "response_format dict (unsupported by the Azure SDK path)"
+        )
+        return openai_style
+    return JsonSchemaFormat(
+        name="lightrag_entity_extraction",
+        schema=_EXTRACTION_JSON_SCHEMA,
+    )
+
+
 def build_llm_model_func(
     ai_service: AIService,
     *,
@@ -370,6 +405,12 @@ def build_llm_model_func(
 
     llm = create_llm_from_service(ai_service, temperature=temperature)
 
+    extraction_response_format = (
+        _extraction_response_format(getattr(ai_service, 'provider', None))
+        if json_marker else None
+    )
+    is_azure = getattr(ai_service, 'provider', None) == "Azure"
+
     async def llm_model_func(
         prompt: str,
         system_prompt: Optional[str] = None,
@@ -387,15 +428,18 @@ def build_llm_model_func(
         # untagged, the keyword-extraction JSON leaks into the chat stream.
         invoke_kwargs: dict[str, Any] = {}
         if max_tokens:
-            invoke_kwargs["max_tokens"] = max_tokens
+            if is_azure:
+                # Reasoning-era Azure OpenAI models (gpt-5*, o*) reject
+                # ``max_tokens`` ("unsupported_parameter: use
+                # max_completion_tokens"). The azure-ai-inference SDK has no
+                # named parameter for it, but ``model_extras`` is merged into
+                # the request body (with ``extra-parameters: pass-through``),
+                # which is exactly its documented purpose.
+                invoke_kwargs["model_extras"] = {"max_completion_tokens": max_tokens}
+            else:
+                invoke_kwargs["max_tokens"] = max_tokens
         if json_marker and system_prompt and json_marker in system_prompt:
-            invoke_kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "lightrag_entity_extraction",
-                    "schema": _EXTRACTION_JSON_SCHEMA,
-                },
-            }
+            invoke_kwargs["response_format"] = extraction_response_format
         truncated = False
         try:
             response = await llm.ainvoke(
@@ -413,6 +457,28 @@ def build_llm_model_func(
                 "produced before the cut (json_repair recovers the complete records)",
                 max_tokens, len(response.content),
             )
+        else:
+            # Silent truncation: providers cap the output without raising, so
+            # _salvage_length_limit never sees the cut. The partial JSON must
+            # still be flagged: LightRAG wraps a truncated response in
+            # TruncatedResponse so its LLM cache never replays the partial as
+            # a complete result on later runs. Each family reports the cap in
+            # its own field: OpenAI/Mistral/Azure-ai-inference use
+            # finish_reason='length', Anthropic uses stop_reason='max_tokens',
+            # and Google GenAI uses finish_reason='MAX_TOKENS'.
+            response_metadata = getattr(response, 'response_metadata', None) or {}
+            finish_reason = response_metadata.get('finish_reason')
+            if (
+                finish_reason == 'length'
+                or response_metadata.get('stop_reason') == 'max_tokens'
+                or finish_reason == 'MAX_TOKENS'
+            ):
+                truncated = True
+                logger.warning(
+                    "LightRAG extraction finished truncated (max_tokens=%s); "
+                    "keeping the partial output for json_repair",
+                    max_tokens,
+                )
         # LangChain chat models return an AIMessage; fall back to str() for
         # custom wrappers that might return a plain string.
         content = getattr(response, "content", response)
