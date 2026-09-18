@@ -34,6 +34,10 @@ from services.import_job_discard import discard_rows
 from schemas.import_job_schemas import (
     CsvPreviewResponseSchema, ImportJobResponseSchema, ConfirmDiscardRowsSchema, ConfirmRowsResponseSchema,
 )
+from schemas.blob_ingest_schemas import IngestAzureBlobsRequestSchema, IngestAzureBlobsResponseSchema
+from services.azure_blob_ingest_service import AzureBlobIngestService, ConflictError as AzureBlobConflictError
+from services.blob import azure_blob_client
+from utils.blob_url_guard import BlobUrlRejected
 
 # Import database dependency
 from db.database import get_db
@@ -425,6 +429,70 @@ async def estimate_upload_resources(
                 os.remove(p)
             except Exception:
                 pass
+
+
+@repositories_router.post(
+    "/{repository_id}/ingest-azure-blobs",
+    summary="Ingest an Azure Blob Storage container into this repository",
+    tags=["Resources"],
+    response_model=IngestAzureBlobsResponseSchema,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_azure_blobs(
+    app_id: int,
+    repository_id: int,
+    payload: IngestAzureBlobsRequestSchema,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+):
+    """One-shot ingestion of an Azure Blob Storage container into this repository.
+
+    Validation-tool endpoint (see docs/AZURE_BLOB_INGESTION.md): lists the blobs
+    under `container`/`prefix`, skips ones already ingested with a matching
+    ETag, and feeds the rest through the same resource pipeline as a manual
+    upload. The returned `session_id` drives the existing SSE
+    ingestion-progress endpoint for this repository.
+    """
+    _validate_repository_app_ownership(repository_id, app_id, db)
+
+    try:
+        result = await asyncio.to_thread(
+            AzureBlobIngestService.trigger_ingestion, app_id, repository_id, payload.model_dump(), db,
+        )
+    except AzureBlobConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except BlobUrlRejected as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": e.code, "message": e.message},
+        )
+    except azure_blob_client.BlobConnectionError as e:
+        # ACCOUNT_UNREACHABLE/TIMEOUT are upstream connectivity problems (502);
+        # everything else (AUTH_FAILED/CONTAINER_NOT_FOUND/LISTING_FORBIDDEN/
+        # INVALID_CONFIG) is the caller's request being wrong (422). e.message
+        # is already sanitized by azure_blob_client.sanitize_azure_error.
+        status_code = (
+            status.HTTP_502_BAD_GATEWAY
+            if e.code in ("ACCOUNT_UNREACHABLE", "TIMEOUT")
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(status_code=status_code, detail={"code": e.code, "message": e.message})
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        # A transport-layer exception could theoretically carry a SAS-bearing
+        # URL in its message; route it through the same sanitizer as the
+        # BlobConnectionError branch above before it ever reaches a log line.
+        logger.error(
+            "Unexpected error in Azure blob ingestion: %s",
+            azure_blob_client.sanitize_azure_error(e, payload.sas_token),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Azure blob ingestion failed")
+
+    return IngestAzureBlobsResponseSchema(**result)
 
 
 # ==================== CSV IMPORT ====================

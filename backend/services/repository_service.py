@@ -525,6 +525,7 @@ class RepositoryService:
             keywords_service_id=keywords_service_id,
             vlm_service_id=vlm_service_id,
             total_indexing_duration_seconds=total_indexing_duration_seconds,
+            azure_blob_source=getattr(repo, 'azure_blob_source', None),
         )
 
     @staticmethod

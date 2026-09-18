@@ -298,6 +298,35 @@ export interface Repository {
   lightrag_entity_types?: string;
   lightrag_entity_types_mode?: 'infer' | 'manual';
   lightrag_config_locked?: boolean;
+  azure_blob_source?: AzureBlobSource | null;
+}
+
+export interface AzureBlobSource {
+  account_url: string;
+  container: string;
+  prefix?: string | null;
+  auth_mode: 'ANONYMOUS' | 'SAS_TOKEN';
+}
+
+export interface IngestAzureBlobsPayload {
+  account_url: string;
+  container: string;
+  prefix?: string | null;
+  auth_mode: 'ANONYMOUS' | 'SAS_TOKEN';
+  sas_token?: string | null;
+  file_extension_filters?: string[];
+  sample_size?: number;
+  blob_name?: string | null;
+}
+
+export interface IngestAzureBlobsResult {
+  queued: number;
+  skipped_unchanged: number;
+  skipped_unsupported: number;
+  failed: number;
+  session_id?: string | null;
+  total_blobs: number;
+  pending_blobs: number;
 }
 
 export interface UploadResult {
@@ -2028,6 +2057,13 @@ class ApiService {
       `/internal/apps/${appId}/repositories/${repositoryId}/stop-indexing?mode=${mode}`,
       { method: 'POST' },
     );
+  }
+
+  async ingestAzureBlobs(appId: number, repositoryId: number, payload: IngestAzureBlobsPayload): Promise<IngestAzureBlobsResult> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/ingest-azure-blobs`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   async estimateUploadResources(appId: number, repositoryId: number, files: File[], folderId?: number): Promise<CostEstimationResult> {

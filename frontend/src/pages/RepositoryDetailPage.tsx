@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader, PauseCircle, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
+import { ArrowLeft, CheckCircle, Cloud, FolderOpen, Video, FileText, ArrowDownToLine, ArrowLeftRight, Trash2, Tv, Search, Loader, PauseCircle, RefreshCw } from 'lucide-react';
 import { apiService } from '../services/api';
+import type { AzureBlobSource, IngestAzureBlobsResult } from '../services/api';
 import Modal from '../components/ui/Modal';
 import FolderTree from '../components/FolderTree';
 import StatusBadge from '../components/StatusBadge';
@@ -17,6 +19,7 @@ import { CsvImportStepper } from '../components/import/CsvImportStepper';
 import { CsvImportBanner } from '../components/import/CsvImportBanner';
 import { CsvImportReviewModal } from '../components/import/CsvImportReviewModal';
 import { useCsvImportPolling } from '../hooks/useCsvImportPolling';
+import AzureBlobIngestModal, { AZURE_BLOB_SAMPLE_SIZE } from '../components/repository/AzureBlobIngestModal';
 
 interface Resource {
   resource_id: number;
@@ -39,6 +42,7 @@ interface RepositoryDetail {
   silo_id?: number | null;
   vector_db_type?: string | null;
   total_indexing_duration_seconds?: number | null;
+  azure_blob_source?: AzureBlobSource | null;
   resources: Resource[];
   folders: Array<{
     folder_id: number;
@@ -176,6 +180,9 @@ const RepositoryDetailPage: React.FC = () => {
   const [moveToFolderId, setMoveToFolderId] = useState<number | null>(null);
   const [showCsvImportModal, setShowCsvImportModal] = useState(false);
   const [showImportReviewModal, setShowImportReviewModal] = useState(false);
+  const [showAzureBlobModal, setShowAzureBlobModal] = useState(false);
+  const [azureBlobUpdateMode, setAzureBlobUpdateMode] = useState(false);
+  const [azureBlobRunning, setAzureBlobRunning] = useState(false);
   const { job: activeImportJob, setJob: setActiveImportJob } = useCsvImportPolling(
     Number.parseInt(appId!), Number.parseInt(repositoryId!),
   );
@@ -467,6 +474,70 @@ const RepositoryDetailPage: React.FC = () => {
       setError(err.message || 'Failed to upload files');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleAzureBlobIngested = (result: IngestAzureBlobsResult) => {
+    const found = result.total_blobs;
+    if (result.pending_blobs === 0) {
+      toast.success(`Azure Blob: ${found} file(s) found — everything is already up to date.`);
+    } else if (result.failed > 0) {
+      const capNote = result.pending_blobs > AZURE_BLOB_SAMPLE_SIZE
+        ? ` (${AZURE_BLOB_SAMPLE_SIZE} at random per run — use Update for the rest)`
+        : '';
+      toast.warning(
+        `Azure Blob: ${result.queued} file(s) loaded, ${result.failed} could not be indexed.${capNote}`,
+        { duration: 8000 },
+      );
+    } else if (result.pending_blobs > AZURE_BLOB_SAMPLE_SIZE) {
+      toast.success(
+        `Azure Blob: ${found} file(s) found. Loading ${AZURE_BLOB_SAMPLE_SIZE} at random (validation cap). Use Update to pick up the rest.`,
+        { duration: 8000 },
+      );
+    } else {
+      toast.success(`Azure Blob: ${found} file(s) found. Loading ${result.queued} new/updated.`);
+    }
+
+    if (result.session_id) {
+      setIngestionSessionId(result.session_id);
+      setIsIndexing(true);
+    }
+
+    loadRepository(false);
+  };
+
+  const handleAzureBlobUpdate = async () => {
+    const source = repository?.azure_blob_source;
+    if (!source) return;
+
+    if (source.auth_mode === 'SAS_TOKEN') {
+      // The token is never stored, so a SAS-token source always re-asks for
+      // it in the modal before an update can run.
+      setAzureBlobUpdateMode(true);
+      setShowAzureBlobModal(true);
+      return;
+    }
+
+    try {
+      setError(null);
+      setAzureBlobRunning(true);
+      const result = await apiService.ingestAzureBlobs(
+        Number.parseInt(appId!),
+        Number.parseInt(repositoryId!),
+        {
+          account_url: source.account_url,
+          container: source.container,
+          prefix: source.prefix ?? null,
+          auth_mode: source.auth_mode,
+          sample_size: AZURE_BLOB_SAMPLE_SIZE,
+        },
+      );
+      handleAzureBlobIngested(result);
+    } catch (err: any) {
+      console.error('Error updating from Azure Blob:', err);
+      setError(err.message || 'Azure Blob update failed');
+    } finally {
+      setAzureBlobRunning(false);
     }
   };
 
@@ -978,6 +1049,34 @@ const RepositoryDetailPage: React.FC = () => {
                 Import from CSV
               </button>
 
+              <button
+                onClick={() => {
+                  setAzureBlobUpdateMode(false);
+                  setShowAzureBlobModal(true);
+                }}
+                disabled={uploading || indexingInProgress || azureBlobRunning}
+                title={indexingInProgress ? 'Indexing in progress — please wait' : undefined}
+                className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
+              >
+                <Cloud className="w-4 h-4" /> Load from Azure Blob
+              </button>
+
+              {repository?.azure_blob_source && (
+                <button
+                  onClick={handleAzureBlobUpdate}
+                  disabled={uploading || indexingInProgress || azureBlobRunning}
+                  title={indexingInProgress ? 'Indexing in progress — please wait' : undefined}
+                  className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  {azureBlobRunning ? (
+                    <Loader className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                  Update from Azure Blob
+                </button>
+              )}
+
               {!isLightRAG && (
                 <button
                   onClick={() => setShowDeleteAllModal(true)}
@@ -1017,6 +1116,16 @@ const RepositoryDetailPage: React.FC = () => {
           onIngestionStarted={(sessionId) => { setIngestionSessionId(sessionId); setIsIndexing(true); setLastFailureMessage(null); }}
         />
       )}
+
+      <AzureBlobIngestModal
+        isOpen={showAzureBlobModal}
+        onClose={() => setShowAzureBlobModal(false)}
+        appId={Number.parseInt(appId!)}
+        repositoryId={Number.parseInt(repositoryId!)}
+        savedSource={repository?.azure_blob_source ?? null}
+        isUpdate={azureBlobUpdateMode}
+        onIngested={handleAzureBlobIngested}
+      />
 
       {/* Hidden file input */}
       <input

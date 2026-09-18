@@ -161,14 +161,20 @@ class ResourceService:
             raise ValueError(f"Failed to move resource: {str(e)}")
 
     @staticmethod
-    def delete_resource(resource_id: int, db: Session) -> bool:
+    def delete_resource(resource_id: int, db: Session, delete_file: bool = True) -> bool:
         """
-        Delete a resource completely (file, database record, and silo indexing)
-        
+        Delete a resource (database record and silo indexing, file optional)
+
         Args:
             resource_id: The ID of the resource to delete
             db: Database session
-            
+            delete_file: Whether to also remove the backing file from disk.
+                Set False when the path is known to already belong to a
+                different, still-live Resource (e.g. a superseded row whose
+                URI was reused by its replacement) — deleting the DB row and
+                vectors is still correct, but removing the file would destroy
+                the replacement's content.
+
         Returns:
             True if deletion was successful, False if resource not found
         """
@@ -176,25 +182,26 @@ class ResourceService:
         if not resource:
             logger.warning(f"Resource {resource_id} not found for deletion")
             return False
-        
+
         try:
             # Delete from silo first
             SiloService.delete_resource(resource)
             logger.info(f"Resource {resource_id} deleted from silo")
-            
+
             # Delete file from disk
-            file_path = os.path.join(REPO_BASE_FOLDER, str(resource.repository_id), resource.uri)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                logger.info(f"File {file_path} deleted from disk")
-            
+            if delete_file:
+                file_path = os.path.join(REPO_BASE_FOLDER, str(resource.repository_id), resource.uri)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"File {file_path} deleted from disk")
+
             # Delete from database
             ResourceRepository.delete(db, resource)
             ResourceRepository.commit(db)
             logger.info(f"Resource {resource_id} deleted from database")
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error deleting resource {resource_id}: {str(e)}")
             ResourceRepository.rollback(db)
