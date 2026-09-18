@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import relationship
 from db.database import Base
 from datetime import datetime
@@ -33,6 +33,13 @@ class Repository(Base):
     # starts a new job, kept across pause -> resume.
     # See ResourceService.request_ingestion_stop / get_indexing_progress.
     ingestion_elapsed_seconds = Column(Integer, nullable=False, server_default='0')
+
+    # Last successfully-validated Azure Blob source for the "Actualizar" flow:
+    # written after a listing against this container succeeded, so the button
+    # survives page reloads. NON-SECRET ONLY: never stores auth_mode's
+    # sas_token (the same no-persisted-secrets rule the ingestion endpoint
+    # follows) — an SAS-token run must always re-ask for the token in the UI.
+    azure_blob_source = Column(JSON, nullable=True)
 
     # AI service configuration (centralized for all media in this repository)
     transcription_service_id = Column(Integer, ForeignKey('AIService.service_id'), nullable=True)

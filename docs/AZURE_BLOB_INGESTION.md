@@ -6,14 +6,18 @@ A one-shot ingestion endpoint that lists the blobs of an Azure Blob Storage
 container and ingests them into an existing Repository through the **exact
 same pipeline a manual upload uses** (`ResourceService.create_multiple_resources`)
 — PDF extraction, chunking, the per-silo indexing lock, background indexing
-and SSE progress all come for free.
+and SSE progress all come for free. There is also a small validation-phase UI
+on the repository page: a **Load from Azure Blob** button and an **Update from
+Azure Blob** button (see below).
 
 It was built to validate LightRAG with real-world content (a container of
 supplier PDFs) without first building a content-source product. It is
 explicitly **not** one:
 
-- No saved configuration, no CRUD, no "sources" UI. Each call carries
-  everything it needs in its body.
+- No CRUD, no "sources" UI. Each call carries everything it needs in its body;
+  the *last successfully-validated* source is remembered on the Repository
+  (non-secret fields only — see "Updating from the UI") only so the Update
+  button survives page reloads.
 - No scheduled sync. You re-run it by hand; idempotency makes that safe.
 - No S3/GCS/MinIO. Azure Blob only, `ANONYMOUS` and `SAS_TOKEN` auth only
   (no `CONNECTION_STRING`/`ACCOUNT_KEY` in this version).
@@ -35,7 +39,9 @@ Body:
   "prefix": "2026/",
   "auth_mode": "ANONYMOUS",
   "sas_token": null,
-  "file_extension_filters": [".pdf"]
+  "file_extension_filters": [".pdf"],
+  "sample_size": 20,
+  "blob_name": null
 }
 ```
 
@@ -47,6 +53,8 @@ Body:
 | `auth_mode` | no | `ANONYMOUS` (default) or `SAS_TOKEN` |
 | `sas_token` | only if `SAS_TOKEN` | With or without a leading `?` |
 | `file_extension_filters` | no | Defaults to every extension the pipeline supports (`.pdf`, `.docx`, `.txt`, `.md`) |
+| `sample_size` | no | Cap each run to that many **randomly-picked pending blobs** (the frontend sends 20 during validation). `null`/omitted = ingest everything pending |
+| `blob_name` | no | Exact blob name (including its folder path) — ingests only that one, bypassing the sampling cap. Mutually exclusive with `prefix`; "not found" is a 422 |
 
 Response — `202 Accepted`:
 
@@ -56,16 +64,45 @@ Response — `202 Accepted`:
   "skipped_unchanged": 30,
   "skipped_unsupported": 0,
   "failed": 0,
-  "session_id": "a092a1b5-…"
+  "session_id": "a092a1b5-…",
+  "total_blobs": 42,
+  "pending_blobs": 12
 }
 ```
 
+`total_blobs` is how many blobs the listing found (already filtered by the
+extension filters and bounded by `BLOB_LIST_MAX_ITEMS`); `pending_blobs` is
+how many of those the diff marked new/changed **before** the `sample_size`
+cap applied. `queued`/`failed` count the *first batch only* (processed
+synchronously so a real `session_id` can be returned); larger runs continue
+in the background under that same `session_id`, and the whole run is
+summarized in one structured log line (`Azure blob ingestion run finished: …`).
+
 `session_id` feeds the repository's existing progress endpoint:
 `GET /internal/apps/{app_id}/repositories/{repository_id}/ingestion-progress/{session_id}`.
-`queued`/`failed` count the *first batch only* (processed synchronously so a
-real `session_id` can be returned); larger runs continue in the background
-under that same `session_id`, and the whole run is summarized in one
-structured log line (`Azure blob ingestion run finished: …`).
+
+## Updating from the UI (validation phase)
+
+The repository page has two buttons (editors and above, disabled while an
+ingestion is running):
+
+- **Load from Azure Blob** — opens a dialog for `account_url`, `container`,
+  `prefix`, and the auth mode (+ SAS token if chosen), plus an optional
+  **Single file** field: an exact blob name ingests only that one (ignoring
+  the random-20 cap; useful to re-pull a specific changed PDF). It always
+  sends `sample_size: 20`, and a toast reports what was found: *"N file(s)
+  found. Loading 20 at random (validation cap)"* when the cap applies,
+  *"everything is already up to date"* when the diff is empty.
+- **Update from Azure Blob** — appears once a first run has succeeded; it
+  re-lists the container and ingests up to 20 random blobs that are new or
+  changed since the last run. Repeated runs eventually cover the rest.
+
+The last successfully-validated source is stored on the Repository
+(`Repository.azure_blob_source`: `account_url`, `container`, `prefix`,
+`auth_mode`), written right after the container listing succeeded, so the
+Update button survives page reloads. **The SAS token is never persisted** —
+an `SAS_TOKEN` source always re-opens the dialog to ask for a fresh token
+before updating.
 
 ### Errors
 
@@ -97,10 +134,11 @@ Safe to re-run against the same container as often as you like:
 
 ## Security notes
 
-- The `sas_token` is request-scoped only: never persisted (there is no table
-  to persist it to), never returned in a response, and never logged — every
-  error message goes through a sanitizer that strips query strings and
-  redacts `sig=`/`se=`/`SharedAccessSignature=` values.
+- The `sas_token` is request-scoped only: never persisted (the remembered
+  source keeps only `account_url`/`container`/`prefix`/`auth_mode`), never
+  returned in a response, and never logged — every error message goes through
+  a sanitizer that strips query strings and redacts
+  `sig=`/`se=`/`SharedAccessSignature=` values.
 - `account_url` is validated against the anti-SSRF allowlist before any
   outbound call, again inside the SDK wrapper right before each call, and the
   host must resolve exclusively to globally routable addresses (blocks
@@ -162,5 +200,5 @@ Operational caveats learned while validating (apply to real use too):
 A persistent, self-service, multi-tenant version of this (saved sources,
 scheduled sync, UI) should be a **new spec** reusing `azure_blob_client.py`
 and `AzureBlobIngestService`'s batching/idempotency logic — not a retrofit of
-this validation tool. This version's non-goals (no saved configuration, no
-scheduled sync, no UI, no other object-storage providers) still apply to it.
+this validation tool. This version's non-goals (no CRUD for sources, no
+scheduled sync, no other object-storage providers) still apply to it.

@@ -25,6 +25,7 @@ batch) is serialized per repository by a dedicated advisory lock — see
 """
 import hashlib
 import os
+import random
 import shutil
 import threading
 import time
@@ -190,6 +191,25 @@ def classify_blobs(
         else:
             to_ingest.append(PendingBlob(kind='changed', blob=blob, resource_id=resource_id))
     return BlobDiffResult(to_ingest=to_ingest, unchanged_count=unchanged_count, unsupported_count=unsupported_count)
+
+
+def _sample_pendings(
+    pendings: List[PendingBlob], sample_size: Optional[int], rng=random,
+) -> List[PendingBlob]:
+    """Apply the validation-phase cap: at most ``sample_size`` pending blobs, at random.
+
+    The cap applies to the *pending* set (new + changed) — unchanged and
+    unsupported blobs are never candidates — so every run (initial load or
+    "Actualizar") ingests up to ``sample_size`` random not-yet-ingested blobs,
+    and repeated runs eventually cover the rest. ``sample_size=None`` means no
+    cap: everything pending is ingested (the post-validation behavior).
+
+    Pure and injectable via ``rng`` (defaults to the ``random`` module) so
+    tests can seed determinism without monkeypatching module state.
+    """
+    if sample_size is None or len(pendings) <= sample_size:
+        return list(pendings)
+    return rng.sample(pendings, sample_size)
 
 
 def _normalize_extension_filters(raw: Optional[List[str]]) -> set:
@@ -461,9 +481,10 @@ def _log_run_summary(
     """One structured log line per run (NFR-5). Never interpolates a secret."""
     logger.info(
         "Azure blob ingestion run finished: app_id=%s repository_id=%s silo_id=%s listed=%s "
-        "queued=%s skipped_unchanged=%s skipped_unsupported=%s failed=%s cancelled=%s duration_s=%.1f "
-        "session_id=%s",
+        "pending=%s sampled=%s queued=%s skipped_unchanged=%s skipped_unsupported=%s failed=%s cancelled=%s "
+        "duration_s=%.1f session_id=%s",
         app_id, repository_id, silo_id, listed,
+        counters.get('pending', 0), counters.get('sampled', 0),
         counters['queued'], counters['skipped_unchanged'], counters['skipped_unsupported'], counters['failed'],
         counters.get('cancelled', 0), elapsed_seconds, session_id,
     )
@@ -591,6 +612,11 @@ class AzureBlobIngestService:
         if auth_mode == 'ANONYMOUS' and sas_token:
             raise ValidationError("auth_mode=ANONYMOUS must not include a sas_token")
 
+        prefix = data.get('prefix')
+        blob_name = (data.get('blob_name') or '').strip() or None
+        if blob_name and prefix:
+            raise ValidationError("prefix and blob_name are mutually exclusive")
+
         extensions = _normalize_extension_filters(data.get('file_extension_filters'))
 
         # AC-4: reject before any persistence or outbound call. azure_blob_client
@@ -599,7 +625,10 @@ class AzureBlobIngestService:
         cfg = BlobSourceConfig(
             account_url=account_url,
             container=data['container'],
-            prefix=data.get('prefix'),
+            # blob_name doubles as the listing prefix — the cheapest way to
+            # fetch just that blob (and near-miss names, filtered to an exact
+            # match below).
+            prefix=blob_name if blob_name else prefix,
             auth_mode=auth_mode,
             sas_token=sas_token,
         )
@@ -628,7 +657,6 @@ class AzureBlobIngestService:
         handed_off = False
         try:
             start_time = time.monotonic()
-            existing_resources = ResourceService.get_resources_by_repo_id(repository_id, db)
 
             page_size = Config.get_int_env_var('BLOB_LIST_PAGE_SIZE', int(Config.DEFAULTS['BLOB_LIST_PAGE_SIZE']))
             max_items = Config.get_int_env_var('BLOB_LIST_MAX_ITEMS', int(Config.DEFAULTS['BLOB_LIST_MAX_ITEMS']))
@@ -636,28 +664,63 @@ class AzureBlobIngestService:
                 azure_blob_client.list_blobs(cfg, extensions=extensions, page_size=page_size, max_items=max_items)
             )
 
+            if blob_name:
+                # The prefix listing may include near-miss names
+                # ("CDOC004211.pdfx" for "CDOC004211.pdf"); a single-file run
+                # is exact-match only, and "not found" is a caller error.
+                remote_blobs = [blob for blob in remote_blobs if blob.name == blob_name]
+                if not remote_blobs:
+                    raise ValidationError(
+                        f"Blob {blob_name!r} not found in container {cfg.container!r} "
+                        "(or its extension is not supported)"
+                    )
+
+            # The listing succeeded, so this source is proven reachable —
+            # remember it (minus secrets) for the repository's "Actualizar"
+            # button. auth_mode is kept so an SAS_TOKEN source re-asks for the
+            # token in the UI instead of silently downgrading to ANONYMOUS.
+            # The original prefix is persisted, not a single-file run's
+            # blob_name, so Update keeps scanning the whole (prefix-scoped)
+            # container. Commit before any further reads: the commit expires
+            # this session's loaded instances, and the diff below wants a
+            # fresh, cheaply-loaded view of the repository's Resources anyway.
+            repo.azure_blob_source = {
+                'account_url': cfg.account_url,
+                'container': cfg.container,
+                'prefix': prefix,
+                'auth_mode': auth_mode,
+            }
+            db.commit()
+            existing_resources = ResourceService.get_resources_by_repo_id(repository_id, db)
+
             diff = classify_blobs(existing_resources, cfg.account_url, cfg.container, remote_blobs, extensions)
+            sampled_pendings = _sample_pendings(diff.to_ingest, data.get('sample_size'))
             counters = {
                 'queued': 0,
                 'skipped_unchanged': diff.unchanged_count,
                 'skipped_unsupported': diff.unsupported_count,
                 'failed': 0,
                 'cancelled': 0,
+                'pending': len(diff.to_ingest),
+                'sampled': len(sampled_pendings),
             }
 
-            if not diff.to_ingest:
+            if not sampled_pendings:
                 # AC-2: nothing changed — no download, no create_multiple_resources
                 # call, no silo lock ever acquired.
                 elapsed = time.monotonic() - start_time
                 _log_run_summary(app_id, repository_id, silo_id, counters, None, elapsed, len(remote_blobs))
-                # 'cancelled' is internal to the run summary log line only —
-                # IngestAzureBlobsResponseSchema forbids unknown fields.
+                # 'cancelled'/'pending'/'sampled' are internal to the run
+                # summary log line only — IngestAzureBlobsResponseSchema
+                # forbids unknown fields.
                 return {
                     'queued': counters['queued'],
                     'skipped_unchanged': counters['skipped_unchanged'],
                     'skipped_unsupported': counters['skipped_unsupported'],
                     'failed': counters['failed'],
                     'session_id': None,
+                    'total_blobs': len(remote_blobs),
+                    'pending_blobs': counters['pending'],
                 }
 
             max_bytes = _max_file_size_bytes(db, app_id)
@@ -667,20 +730,23 @@ class AzureBlobIngestService:
             concurrency = Config.get_int_env_var(
                 'BLOB_INGEST_DOWNLOAD_CONCURRENCY', int(Config.DEFAULTS['BLOB_INGEST_DOWNLOAD_CONCURRENCY'])
             )
-            batches = [diff.to_ingest[i:i + batch_size] for i in range(0, len(diff.to_ingest), batch_size)]
+            batches = [sampled_pendings[i:i + batch_size] for i in range(0, len(sampled_pendings), batch_size)]
 
             first_outcome = _process_batch(batches[0], db, repository_id, cfg, max_bytes, concurrency)
             counters['queued'] += first_outcome.created_count
             counters['failed'] += len(first_outcome.failed_entries)
             session_id = first_outcome.session_id
-            # 'cancelled' is internal to the run summary log line only —
-            # IngestAzureBlobsResponseSchema forbids unknown fields.
+            # 'cancelled'/'pending'/'sampled' are internal to the run summary
+            # log line only — IngestAzureBlobsResponseSchema forbids unknown
+            # fields.
             response = {
                 'queued': counters['queued'],
                 'skipped_unchanged': counters['skipped_unchanged'],
                 'skipped_unsupported': counters['skipped_unsupported'],
                 'failed': counters['failed'],
                 'session_id': session_id,
+                'total_blobs': len(remote_blobs),
+                'pending_blobs': counters['pending'],
             }
 
             if len(batches) > 1:

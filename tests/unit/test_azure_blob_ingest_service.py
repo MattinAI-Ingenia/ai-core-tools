@@ -20,6 +20,7 @@ from services.azure_blob_ingest_service import (
     PendingBlob,
     _process_batch,
     _resolve_dest_path,
+    _sample_pendings,
     _sanitize_blob_filename,
     classify_blobs,
 )
@@ -268,6 +269,50 @@ class TestSanitizeBlobFilename:
         unconditional hash suffix these would alias onto the same local file,
         corrupting concurrent downloads and cross-blob Resources."""
         assert _sanitize_blob_filename("a/b.pdf") != _sanitize_blob_filename("a__b.pdf")
+
+
+class TestSamplePendings:
+    """The validation cap: at most ``sample_size`` pending blobs, picked at random."""
+
+    def _pendings(self, names):
+        return [PendingBlob(kind='new', blob=_blob(name), resource_id=None) for name in names]
+
+    def test_none_sample_size_returns_everything_in_order(self):
+        pendings = self._pendings([f"b{i}.pdf" for i in range(30)])
+
+        sampled = _sample_pendings(pendings, None)
+
+        assert sampled == pendings
+
+    def test_pending_at_or_under_the_cap_returns_everything(self):
+        pendings = self._pendings(["a.pdf", "b.pdf", "c.pdf"])
+
+        assert _sample_pendings(pendings, 3) == pendings
+        assert _sample_pendings(pendings, 5) == pendings
+
+    def test_over_the_cap_returns_exactly_sample_size_unique_members(self):
+        pendings = self._pendings([f"b{i}.pdf" for i in range(30)])
+
+        sampled = _sample_pendings(pendings, 20)
+
+        assert len(sampled) == 20
+        assert len({p.blob.name for p in sampled}) == 20
+        assert {p.blob.name for p in sampled} <= {p.blob.name for p in pendings}
+        for pending in sampled:
+            assert pending in pendings
+
+    def test_seeded_rng_is_deterministic(self):
+        import random as _random
+
+        pendings = self._pendings([f"b{i}.pdf" for i in range(50)])
+
+        first = _sample_pendings(pendings, 20, rng=_random.Random(1234))
+        second = _sample_pendings(pendings, 20, rng=_random.Random(1234))
+
+        assert first == second
+
+    def test_empty_pending_with_cap_is_empty(self):
+        assert _sample_pendings([], 20) == []
 
 
 class TestResolveDestPath:

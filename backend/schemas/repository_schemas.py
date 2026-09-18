@@ -24,6 +24,21 @@ class RepositoryListItemSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AzureBlobSourceSchema(BaseModel):
+    """The non-secret shape of ``Repository.azure_blob_source``.
+
+    Defining the field explicitly (not as ``Dict[str, Any]``) makes the
+    no-secrets guarantee structural: whatever dict reaches the column, the
+    detail API can only ever serialize these four keys — a stray ``sas_token``
+    cannot leak through.
+    """
+
+    account_url: str
+    container: str
+    prefix: Optional[str] = None
+    auth_mode: str
+
+
 class RepositoryDetailSchema(BaseModel):
     """Schema for detailed repository information"""
     repository_id: int
@@ -64,6 +79,10 @@ class RepositoryDetailSchema(BaseModel):
     lightrag_max_source_ids_per_relation: Optional[int] = None
     lightrag_entity_types: Optional[str] = None
     lightrag_entity_types_mode: Optional[str] = None
+    # Last successfully-validated Azure Blob source (account_url, container,
+    # prefix, auth_mode — never the SAS token) for the "Actualizar desde
+    # Azure Blob" button; None until a first ingestion run has succeeded.
+    azure_blob_source: Optional[AzureBlobSourceSchema] = None
     # True once something has been indexed: the fields above shaped how entities
     # were extracted, so they must stop changing (see is_lightrag_config_locked).
     lightrag_config_locked: bool = False

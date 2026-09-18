@@ -100,7 +100,10 @@ def test_container_with_no_matching_blobs_is_a_noop_202(db, repository, fake_blo
 
     result = trigger_ingestion(repository, db)
 
-    assert result == {"queued": 0, "skipped_unchanged": 0, "skipped_unsupported": 0, "failed": 0, "session_id": None}
+    assert result == {
+        "queued": 0, "skipped_unchanged": 0, "skipped_unsupported": 0, "failed": 0,
+        "session_id": None, "total_blobs": 0, "pending_blobs": 0,
+    }
     assert fake_blob_client.list_calls == 1
     assert fake_blob_client.download_blob_calls == []
     assert resources_of(db, repository) == []
