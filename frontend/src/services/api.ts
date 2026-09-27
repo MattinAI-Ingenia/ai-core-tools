@@ -167,6 +167,98 @@ export interface Agent {
   skills: Array<{ skill_id: number; name: string; description?: string }>;
 }
 
+export type ScheduledTaskVisibility = 'unpublished' | 'private' | 'public';
+
+export interface ScheduledTask {
+  id: number;
+  name: string;
+  description?: string | null;
+  agent_id: number;
+  app_id: number;
+  created_by: number;
+  orchestrator_schedule_name: string;
+  input: Record<string, unknown>;
+  cron_expression: string;
+  timezone: string;
+  conversation_mode: 'new_per_run' | 'continuous' | string;
+  persistent_conversation_id?: number | null;
+  status: 'active' | 'paused' | string;
+  max_concurrent_runs: number;
+  max_runs_retained: number;
+  marketplace_visibility: ScheduledTaskVisibility;
+  created_at: string;
+  updated_at: string;
+  next_run_at?: string | null;
+}
+
+export type ScheduledTaskCreate = Pick<ScheduledTask, 'name' | 'agent_id' | 'input' | 'cron_expression' | 'timezone' | 'conversation_mode' | 'max_concurrent_runs'>
+  & Partial<Pick<ScheduledTask, 'description' | 'max_runs_retained' | 'marketplace_visibility'>>;
+
+export type ScheduledTaskUpdate = Partial<Pick<ScheduledTask,
+  'name' | 'description' | 'input' | 'cron_expression' | 'timezone' | 'max_concurrent_runs' | 'status'
+  | 'max_runs_retained' | 'marketplace_visibility'>>;
+
+export interface ScheduledTaskRunFile {
+  file_id: string;
+  filename: string;
+  file_type?: string | null;
+}
+
+export interface ScheduledTaskRun {
+  id: number;
+  scheduled_task_id: number;
+  conversation_id?: number | null;
+  conversation_anchor_message_id?: number | null;
+  orchestrator_run_id: string;
+  scheduled_time: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  status: string;
+  attempt_count: number;
+  error_summary?: string | null;
+  output_text?: string | null;
+  output_files: ScheduledTaskRunFile[];
+}
+
+export interface ScheduledTaskRunList {
+  items: ScheduledTaskRun[];
+  page: number;
+  per_page: number;
+  total: number;
+}
+
+/** What the marketplace shows of a scheduled task (never its input). */
+export interface MarketplaceScheduledTask {
+  id: number;
+  name: string;
+  description?: string | null;
+  app_id: number;
+  app_name?: string | null;
+  cron_expression: string;
+  timezone: string;
+  conversation_mode: string;
+  status: string;
+  marketplace_visibility: ScheduledTaskVisibility;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_run_status?: string | null;
+  run_count: number;
+}
+
+export interface MarketplaceScheduledTaskCatalog {
+  tasks: MarketplaceScheduledTask[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface ScheduledTaskTriggerResponse {
+  task_id: number;
+  workflow_id: string;
+  status: string;
+}
+
 export interface AIService {
   service_id: number;
   name: string;
@@ -740,6 +832,77 @@ class ApiService {
 
   async getAgentMCPUsage(appId: number, agentId: number): Promise<AgentMCPUsage> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}/mcp-usage`);
+  }
+
+  async getScheduledTasks(appId: number, agentId?: number): Promise<ScheduledTask[]> {
+    const query = agentId === undefined ? '' : `?agent_id=${agentId}`;
+    return this.request(`/internal/apps/${appId}/scheduled-tasks${query}`);
+  }
+
+  async getScheduledTask(appId: number, taskId: number): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`);
+  }
+
+  async createScheduledTask(appId: number, data: ScheduledTaskCreate): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks`, { method: 'POST', body: JSON.stringify(data) });
+  }
+
+  async updateScheduledTask(appId: number, taskId: number, data: ScheduledTaskUpdate): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) });
+  }
+
+  async deleteScheduledTask(appId: number, taskId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`, { method: 'DELETE' });
+  }
+
+  async getScheduledTaskRuns(appId: number, taskId: number, page = 1, perPage = 50): Promise<ScheduledTaskRunList> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs?page=${page}&per_page=${perPage}`);
+  }
+
+  async getScheduledTaskRun(appId: number, taskId: number, runId: number): Promise<ScheduledTaskRun> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}`);
+  }
+
+  async getScheduledTaskRunFileUrl(appId: number, taskId: number, runId: number, fileId: string): Promise<string> {
+    const result: { download_url: string } = await this.request(
+      `/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}/files/${encodeURIComponent(fileId)}/download`,
+    );
+    return result.download_url;
+  }
+
+  async runScheduledTaskNow(appId: number, taskId: number): Promise<ScheduledTaskTriggerResponse> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/run-now`, { method: 'POST' });
+  }
+
+  async getMarketplaceScheduledTasks(
+    params: { search?: string; my_apps_only?: boolean; page?: number; page_size?: number } = {},
+  ): Promise<MarketplaceScheduledTaskCatalog> {
+    const qs = new URLSearchParams();
+    if (params.search) qs.set('search', params.search);
+    if (params.my_apps_only) qs.set('my_apps_only', 'true');
+    if (params.page) qs.set('page', String(params.page));
+    if (params.page_size) qs.set('page_size', String(params.page_size));
+    const query = qs.toString();
+    return this.request(`/internal/marketplace/scheduled-tasks${query ? `?${query}` : ''}`);
+  }
+
+  async getMarketplaceScheduledTask(taskId: number): Promise<MarketplaceScheduledTask> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}`);
+  }
+
+  async getMarketplaceScheduledTaskRuns(taskId: number, page = 1, perPage = 50): Promise<ScheduledTaskRunList> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}/runs?page=${page}&per_page=${perPage}`);
+  }
+
+  async getMarketplaceScheduledTaskRun(taskId: number, runId: number): Promise<ScheduledTaskRun> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}/runs/${runId}`);
+  }
+
+  async getMarketplaceScheduledTaskRunFileUrl(taskId: number, runId: number, fileId: string): Promise<string> {
+    const result: { download_url: string } = await this.request(
+      `/internal/marketplace/scheduled-tasks/${taskId}/runs/${runId}/files/${encodeURIComponent(fileId)}/download`,
+    );
+    return result.download_url;
   }
 
   async updateAgentPrompt(appId: number, agentId: number, promptType: 'system' | 'template', prompt: string): Promise<Agent> {

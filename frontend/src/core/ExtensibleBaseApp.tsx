@@ -21,6 +21,12 @@ import AppsPage from '../pages/AppsPage';
 import AppDashboard from '../pages/AppDashboard';
 import AgentsPage from '../pages/AgentsPage';
 import AgentFormPage from '../pages/AgentFormPage';
+import ScheduledTasksPage from '../pages/ScheduledTasksPage';
+import ScheduledTaskFormPage from '../pages/ScheduledTaskFormPage';
+import ScheduledTaskDetailPage from '../pages/ScheduledTaskDetailPage';
+import ScheduledTaskRunPage from '../pages/ScheduledTaskRunPage';
+import MarketplaceScheduledTaskPage from '../pages/MarketplaceScheduledTaskPage';
+import MarketplaceScheduledTaskRunPage from '../pages/MarketplaceScheduledTaskRunPage';
 import SilosPage from '../pages/SilosPage';
 import SiloFormPage from '../pages/SiloFormPage';
 import SiloPlaygroundPage from '../pages/SiloPlaygroundPage';
@@ -193,6 +199,10 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                   </ProtectedLayoutRoute>
                 } />
 
+                <Route path="/marketplace/scheduled-tasks/:taskId" element={<ProtectedLayoutRoute {...commonLayoutProps}><MarketplaceScheduledTaskPage /></ProtectedLayoutRoute>} />
+                <Route path="/marketplace/scheduled-tasks/:taskId/runs/:runId" element={<ProtectedLayoutRoute {...commonLayoutProps}><MarketplaceScheduledTaskRunPage /></ProtectedLayoutRoute>} />
+                <Route path="/marketplace/scheduled-tasks/:taskId/conversation" element={<ProtectedLayoutRoute {...commonLayoutProps}><MarketplaceScheduledTaskRunPage /></ProtectedLayoutRoute>} />
+
                 <Route path="/marketplace/chat/:conversationId" element={
                   <ProtectedLayoutRoute {...commonLayoutProps}>
                     <MarketplaceChatPage />
@@ -222,6 +232,12 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                       <AgentFormPage />
                   </EditorLayoutRoute>
                 } />
+                <Route path="/apps/:appId/scheduled-tasks" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTasksPage /></ProtectedLayoutRoute>} />
+                <Route path="/apps/:appId/scheduled-tasks/new" element={<EditorLayoutRoute {...commonLayoutProps}><ScheduledTaskFormPage /></EditorLayoutRoute>} />
+                <Route path="/apps/:appId/scheduled-tasks/:taskId/edit" element={<EditorLayoutRoute {...commonLayoutProps}><ScheduledTaskFormPage /></EditorLayoutRoute>} />
+                <Route path="/apps/:appId/scheduled-tasks/:taskId" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTaskDetailPage /></ProtectedLayoutRoute>} />
+                <Route path="/apps/:appId/scheduled-tasks/:taskId/runs/:runId" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTaskRunPage /></ProtectedLayoutRoute>} />
+                <Route path="/apps/:appId/scheduled-tasks/:taskId/conversation" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTaskRunPage /></ProtectedLayoutRoute>} />
 
                 <Route path="/apps/:appId/agents/:agentId/playground" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
