@@ -256,6 +256,199 @@ def documents_to_lightrag_payload(documents) -> Tuple[List[str], List[str], List
     return texts, file_paths, ids
 
 
+def _silo_id_from_collection(collection_name: str) -> Optional[int]:
+    """Extract the silo id from a LightRAG workspace name (``silo_{id}``).
+
+    Returns None for any other collection shape — variant bookkeeping is
+    silo-scoped, so an unmatched collection simply skips persistence.
+    """
+    if not collection_name or not collection_name.startswith("silo_"):
+        return None
+    try:
+        return int(collection_name[len("silo_"):])
+    except ValueError:
+        return None
+
+
+# Display-map cache: per-silo canonical→variant map, refreshed when an
+# indexing run persists (invalidate) or when the TTL lapses. The map lives on
+# the hot RAG query path (every retrieval/graph render), so lookups must not
+# pay a pool checkout each turn.
+_VARIANT_NAME_TTL_SECONDS = 60.0
+_VARIANT_NAME_CACHE_MAX_SILOS = 256
+_VARIANT_NAME_CACHE: Dict[int, tuple] = {}
+_VARIANT_NAME_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_variant_name_cache(silo_id: int) -> None:
+    """Drop the cached display map for *silo_id* — called after a persist."""
+    with _VARIANT_NAME_CACHE_LOCK:
+        _VARIANT_NAME_CACHE.pop(silo_id, None)
+
+
+def _persist_variant_counts(collection_name: str, collector) -> None:
+    """Persist a drained variant collector for one silo. Best-effort.
+
+    A persistence failure must never fail the indexing run: the variant map
+    is presentation bookkeeping (display-name selection), so errors are
+    logged and dropped — the next run re-accumulates what it sees. The
+    session construction is inside the guard too: this runs from the ``finally``
+    of an indexing run, and an escape here would mask the real error (or
+    fail a completed run).
+    """
+    silo_id = _silo_id_from_collection(collection_name)
+    if not silo_id or not collector.has_data():
+        return
+    counts = collector.drain()
+    if not counts:
+        return
+    db = None
+    try:
+        from db.database import SessionLocal  # noqa: WPS433
+        from repositories.entity_name_variant_repository import (
+            EntityNameVariantRepository,
+        )
+        db = SessionLocal()
+        EntityNameVariantRepository.record_mentions(silo_id, counts, db)
+        # The silo's display map just changed — drop its cached copy.
+        invalidate_variant_name_cache(silo_id)
+    except Exception as exc:  # noqa: WPS433 - deliberate: indexing must not fail here
+        logger.warning(
+            "Failed to persist entity-name variants for silo %d: %s",
+            silo_id, exc,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _best_variant_names(collection_name: str, names) -> Dict[str, str]:
+    """Display-name map (canonical → most-mentioned variant) for a graph render.
+
+    Cached per silo with a short TTL: the map only changes when an indexing
+    run persists, yet this lookup runs on every retrieval and graph render —
+    the hot RAG path — so uncached it would cost a pool checkout + query per
+    turn (and 3-4 near-identical queries per agent turn with
+    rag_max_retrieval_calls). Best-effort like the persistence path: an
+    error or empty map degrades gracefully to LightRAG's canonical names.
+    """
+    import time as _time  # noqa: WPS433 - local keeps module import surface stable
+
+    silo_id = _silo_id_from_collection(collection_name)
+    unique_names = {name for name in names if name}
+    if not silo_id or not unique_names:
+        return {}
+
+    now = _time.monotonic()
+    with _VARIANT_NAME_CACHE_LOCK:
+        entry = _VARIANT_NAME_CACHE.get(silo_id)
+        if entry and now < entry[0]:
+            cached = entry[1]
+        else:
+            cached = None
+    if cached is not None:
+        return {k: v for k, v in cached.items() if k in unique_names}
+
+    db = None
+    try:
+        from db.database import SessionLocal  # noqa: WPS433
+        from repositories.entity_name_variant_repository import (
+            EntityNameVariantRepository,
+        )
+        db = SessionLocal()
+        silo_map = EntityNameVariantRepository.best_variant_map(
+            silo_id, sorted(unique_names), db
+        )
+    except Exception as exc:  # noqa: WPS433 - deliberate: rendering must not fail here
+        logger.warning(
+            "Failed to resolve entity display names for silo %d: %s",
+            silo_id, exc,
+        )
+        silo_map = {}
+    finally:
+        if db is not None:
+            db.close()
+
+    # Cache the silo-wide result (not just the requested names) so the next
+    # turn with different entities still hits it; entries expire without a
+    # persist-invalidation so a drift can never outlive _VARIANT_NAME_TTL.
+    with _VARIANT_NAME_CACHE_LOCK:
+        if len(_VARIANT_NAME_CACHE) >= _VARIANT_NAME_CACHE_MAX_SILOS:
+            # Evict expired entries first, then the soonest-to-expire ones,
+            # so an idle burst of silos cannot push out the active working set.
+            now2 = _time.monotonic()
+            expired = [k for k, (exp, _) in _VARIANT_NAME_CACHE.items() if exp <= now2]
+            for k in expired:
+                _VARIANT_NAME_CACHE.pop(k, None)
+            while len(_VARIANT_NAME_CACHE) >= _VARIANT_NAME_CACHE_MAX_SILOS:
+                oldest = min(_VARIANT_NAME_CACHE, key=lambda k: _VARIANT_NAME_CACHE[k][0])
+                _VARIANT_NAME_CACHE.pop(oldest, None)
+        _VARIANT_NAME_CACHE[silo_id] = (
+            now + _VARIANT_NAME_TTL_SECONDS,
+            silo_map,
+        )
+    return {k: v for k, v in silo_map.items() if k in unique_names}
+
+
+def _query_raw_data(response) -> Dict:
+    """Extract the graph payload (``data.*`` holder) from a LightRAG query result.
+
+    ``aquery_llm`` returns a dict carrying everything; the legacy
+    ``QueryResult`` object exposes it under ``raw_data``.
+    """
+    if isinstance(response, dict):
+        return response
+    return getattr(response, "raw_data", None) or {}
+
+
+def _graph_entity_name(entity) -> str:
+    """Entity name from a LightRAG payload entry (single fallback chain).
+
+    Shared by ``_collect_graph_names`` and ``_normalize_lightrag_graph`` so a
+    lightrag-hku upgrade that renames a response key cannot make one copy stop
+    producing names while the other keeps working.
+    """
+    if not isinstance(entity, dict):
+        return ""
+    return entity.get("entity_name") or entity.get("name") or ""
+
+
+def _graph_relation_endpoints(relation) -> tuple:
+    """(source, target) from a LightRAG payload relationship (single fallback chain)."""
+    if not isinstance(relation, dict):
+        return "", ""
+    src = relation.get("src_id") or relation.get("entity1") or relation.get("source") or ""
+    tgt = relation.get("tgt_id") or relation.get("entity2") or relation.get("target") or ""
+    return src, tgt
+
+
+def _collect_graph_names(response) -> set:
+    """Canonical entity names referenced by a LightRAG query result.
+
+    Entities plus BOTH relationship endpoints — LightRAG truncates them by
+    independent token budgets, so endpoints can appear without their node.
+    Used to scope the display-name lookup (canonical → most-mentioned variant).
+    """
+    names = set()
+    payload = _query_raw_data(response)
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return names
+    for e in data.get("entities", []) or []:
+        name = _graph_entity_name(e)
+        if name:
+            names.add(name)
+    for r in data.get("relationships", []) or []:
+        src, tgt = _graph_relation_endpoints(r)
+        names.update(n for n in (src, tgt) if n)
+    return names
+
+
+async def _abest_variant_names(collection_name: str, names) -> Dict[str, str]:
+    """Async twin of ``_best_variant_names`` — keeps the event loop unblocked."""
+    return await asyncio.to_thread(_best_variant_names, collection_name, list(names))
+
+
 async def _ainsert(rag, texts, file_paths=None, ids=None, process_options="F"):
     """Insert documents through LightRAG's modern (non-legacy) chunking router.
 
@@ -1197,7 +1390,13 @@ class LightRAGRetriever(BaseRetriever):
         response = self.store._run_on_collection_loop(
             self.collection_name, rag.aquery_llm(query, param=param)
         )
-        docs = _wrap_query_response(response, self.query_mode)
+        docs = _wrap_query_response(
+            response,
+            self.query_mode,
+            name_map=_best_variant_names(
+                self.collection_name, _collect_graph_names(response)
+            ),
+        )
         _clamp_docs_to_token_budget(docs, self.max_total_tokens)
         logger.debug("[LightRAG retriever] query=%r mode=%s top_k=%d → %d doc(s)", query, self.query_mode, self.top_k, len(docs))
         return docs
@@ -1219,7 +1418,15 @@ class LightRAGRetriever(BaseRetriever):
         response = await self.store._arun_on_collection_loop(
             self.collection_name, rag.aquery_llm(query, param=param)
         )
-        docs = _wrap_query_response(response, self.query_mode)
+        docs = _wrap_query_response(
+            response,
+            self.query_mode,
+            # DB lookup off the loop (asyncio.to_thread) so a slow metadata read
+            # can never stall streaming for the turn.
+            name_map=await _abest_variant_names(
+                self.collection_name, _collect_graph_names(response)
+            ),
+        )
         _clamp_docs_to_token_budget(docs, self.max_total_tokens)
         logger.debug("[LightRAG retriever] query=%r mode=%s top_k=%d → %d doc(s)", query, self.query_mode, self.top_k, len(docs))
         return docs
@@ -1269,7 +1476,7 @@ def _wrap_response(response: str, query_mode: str) -> List[Document]:
     ]
 
 
-def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
+def _wrap_query_response(response: Any, query_mode: str, name_map: Optional[Dict[str, str]] = None) -> List[Document]:
     """Wrap a LightRAG ``aquery_llm`` response into LangChain Documents.
 
     *response* is the dict returned by ``rag.aquery_llm`` — it carries the
@@ -1279,6 +1486,13 @@ def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
     so the streaming layer can surface it as a knowledge-graph bubble in the
     playground UI. A plain ``QueryResult``/string is still accepted as a
     fallback for backward compatibility.
+
+    ``name_map`` (canonical → display variant) is applied to the graph data so
+    the bubble shows the same names the graph explorer shows — and so the
+    streaming layer's ``merge_lightrag_graph`` (which dedups entities by id)
+    keeps treating spelling variants of one entity as ONE node. The LLM's own
+    context string is NOT rewritten: it must keep matching what LightRAG
+    actually indexed.
     """
     if not response:
         return []
@@ -1297,7 +1511,7 @@ def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
         logger.info("[LightRAG] stripped keywords from content (found=%s)", list(keywords.keys()))
     if "high_level_keywords" in raw_content and not keywords:
         logger.warning("[LightRAG] keyword JSON in content but regex did NOT strip it; tail=%r", raw_content[-200:])
-    graph_data = _normalize_lightrag_graph(raw_data)
+    graph_data = _normalize_lightrag_graph(raw_data, name_map)
     graph = graph_data.get("data", {})
     has_graph = bool(graph.get("entities") or graph.get("chunks"))
     if not content:
@@ -1324,12 +1538,16 @@ def _wrap_query_response(response: Any, query_mode: str) -> List[Document]:
     ]
 
 
-def _normalize_lightrag_graph(raw_data: dict) -> dict:
+def _normalize_lightrag_graph(raw_data: dict, name_map: Optional[Dict[str, str]] = None) -> dict:
     """Normalize LightRAG raw_data to the shape expected by the frontend LightRAGGraphData type.
 
     LightRAG returns entity_name/entity_type/description and entity1/entity2 for
     relationships. The frontend expects id/name for entities and id/source/target
     for relationships.
+
+    ``name_map`` (canonical node name → display variant, from the
+    ``entity_name_variant`` table) rewrites names for presentation ONLY — the
+    graph node identity stays the canonical merge key LightRAG fused on.
     """
     if not isinstance(raw_data, dict):
         return {}
@@ -1340,10 +1558,16 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
         except TypeError:
             logger.warning("[LightRAG] _normalize: cannot coerce %s to dict", type(data).__name__)
             return {}
+
+    def display(name: str) -> str:
+        if name_map:
+            return name_map.get(name, name)
+        return name
+
     entities = []
     known = set()
     for e in data.get("entities", []):
-        name = e.get("entity_name") or e.get("name") or ""
+        name = display(_graph_entity_name(e))
         if name:
             known.add(name)
         entities.append({
@@ -1359,8 +1583,9 @@ def _normalize_lightrag_graph(raw_data: dict) -> dict:
 
     relationships = []
     for i, r in enumerate(data.get("relationships", [])):
-        src = r.get("src_id") or r.get("entity1") or r.get("source") or ""
-        tgt = r.get("tgt_id") or r.get("entity2") or r.get("target") or ""
+        raw_src, raw_tgt = _graph_relation_endpoints(r)
+        src = display(raw_src)
+        tgt = display(raw_tgt)
         relationships.append({
             "id": r.get("id") or f"rel_{i}",
             "source": src,
@@ -1586,6 +1811,15 @@ class LightRAGStore(VectorStoreInterface):
         # the first call.
         _ensure_shared_postgres_loop_patch()
 
+        # Fold entity names ("MCF-40"/"mcf 40"/"Mcf 40") into one canonical
+        # merge key so LightRAG fuses them natively, and count the raw
+        # spellings for display-name selection (see §6.1 of
+        # docs/dependencies/lightrag.md). Idempotent global patch.
+        from tools.vector_stores.lightrag.entity_name_normalization import (
+            ensure_entity_name_normalization_patch,
+        )
+        ensure_entity_name_normalization_patch()
+
         from tools.vector_stores.lightrag.adapters import (
             build_embedding_func,
             build_llm_model_func,
@@ -1740,9 +1974,16 @@ class LightRAGStore(VectorStoreInterface):
             set_active_accumulator,
             reset_active_accumulator,
         )
+        from tools.vector_stores.lightrag.entity_name_normalization import (
+            EntityNameVariantCollector,
+            reset_active_variant_collector,
+            set_active_variant_collector,
+        )
 
         accumulator = IndexingTokenAccumulator()
+        variant_collector = EntityNameVariantCollector()
         ctx_token = set_active_accumulator(accumulator)
+        variant_token = set_active_variant_collector(variant_collector)
         t_start = time.perf_counter()
         try:
             self._run_on_collection_loop(
@@ -1750,7 +1991,11 @@ class LightRAGStore(VectorStoreInterface):
                 _ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
             )
         finally:
+            reset_active_variant_collector(variant_token)
             reset_active_accumulator(ctx_token)
+            # Drain last: the pipeline coroutine is complete, so no further
+            # mentions can be recorded. Best-effort persistence.
+            _persist_variant_counts(collection_name, variant_collector)
 
         duration = time.perf_counter() - t_start
         totals = accumulator.totals()
@@ -1879,6 +2124,11 @@ class LightRAGStore(VectorStoreInterface):
             set_active_accumulator,
             reset_active_accumulator,
         )
+        from tools.vector_stores.lightrag.entity_name_normalization import (
+            EntityNameVariantCollector,
+            reset_active_variant_collector,
+            set_active_variant_collector,
+        )
 
         logger.info(
             "Processing documents in LightRAG workspace '%s' "
@@ -1889,7 +2139,9 @@ class LightRAGStore(VectorStoreInterface):
         )
 
         accumulator = IndexingTokenAccumulator()
+        variant_collector = EntityNameVariantCollector()
         ctx_token = set_active_accumulator(accumulator)
+        variant_token = set_active_variant_collector(variant_collector)
         t_start = time.perf_counter()
         try:
             result = self._run_on_collection_loop(
@@ -1902,7 +2154,11 @@ class LightRAGStore(VectorStoreInterface):
                 ),
             )
         finally:
+            reset_active_variant_collector(variant_token)
             reset_active_accumulator(ctx_token)
+            # Drain last (see index_documents); a cancelled run persists the
+            # mentions it already produced — they are incremental counts.
+            _persist_variant_counts(collection_name, variant_collector)
 
         duration = time.perf_counter() - t_start
         usage = accumulator.totals()
@@ -2311,7 +2567,12 @@ class LightRAGStore(VectorStoreInterface):
         else:
             raw_data = getattr(response, "raw_data", None) or {}
 
-        return _normalize_lightrag_graph(raw_data)
+        # Presentation map: canonical node name → most-mentioned raw spelling
+        # (DB read off the loop). Unknown names fall back to the canonical key.
+        name_map = await _abest_variant_names(
+            collection_name, _collect_graph_names(raw_data)
+        )
+        return _normalize_lightrag_graph(raw_data, name_map)
 
     def collection_exists(self, collection_name: str) -> bool:
         try:

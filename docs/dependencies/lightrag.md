@@ -330,16 +330,110 @@ LightRAG fusiona entidades por **coincidencia exacta de `entity_name`** tras
 normalizarlo con `normalize_entity_name()` → `normalize_extracted_info()`
 (`utils.py`): limpieza de tags HTML, caracteres chinos full-width → ASCII,
 comillas envolventes, NBSP, y filtrado de nombres puramente numéricos cortos
-(`< 3` dígitos, o patrones `x.y.z` de `< 6` caracteres). **No hay lowercase,
-fuzzy matching, embeddings ni ninguna resolución de entidades real** — dos
-nombres que difieren en mayúsculas, tildes, o forma (acrónimo vs. nombre
-completo) quedan como nodos separados. El merge en sí ocurre en
-`_merge_nodes_then_upsert()` (`operate.py`): funde `source_id`s, vota el
-`entity_type` mayoritario, dedupea descripciones exactas y, si hay varias
-descripciones distintas, dispara un resumen vía LLM
-(`_handle_entity_relation_summary`) — pero solo entre nodos que ya
-coincidían carácter a carácter. El repo no añade ninguna capa propia de
-dedup/resolución encima de esto; se hereda el comportamiento nativo tal cual.
+(`< 3` dígitos, o patrones `x.y.z` de `< 6` caracteres). Sin la capa del repo
+(descrita abajo) **no hay lowercase, fuzzy matching, embeddings ni ninguna
+resolución de entidades real** — dos nombres que difieren en mayúsculas,
+tildes, o forma (acrónimo vs. nombre completo) quedan como nodos separados. El
+merge en sí ocurre en `_merge_nodes_then_upsert()` (`operate.py`): funde
+`source_id`s, vota el `entity_type` mayoritario, dedupea descripciones exactas
+y, si hay varias descripciones distintas, dispara un resumen vía LLM
+(`_handle_entity_relation_summary`) — pero solo entre nodos que ya coincidían
+carácter a carácter.
+
+**Resolución de variantes de spelling — IMPLEMENTADO (2026-09-30).** El repo
+pliega el nombre a una **clave canónica de fusión** en
+`tools/vector_stores/lightrag/entity_name_normalization.py`:
+
+- `canonicalize_entity_name()`: NFKC → NFKD + strip de marcas de acento →
+  NFC → casefold → guiones separadores (`-`, en/em dash, soft hyphen) →
+  espacio → colapso de espacios. Determinista, sin estado. Así
+  `MCF-40`, `mcf 40` y `Mcf 40` llegan a LightRAG con el MISMO
+  `entity_name` y su `_merge_nodes_then_upsert()` nativo los funde — no se
+  parchea el merge de la librería, solo el punto donde se calcula el nombre.
+- El patch (idempotente, instalado en `LightRAGStore._build_rag`) reescribe
+  `lightrag.utils.normalize_entity_name` **y** `lightrag.operate.
+  normalize_entity_name` (operate lo importa por nombre; rebindear solo
+  utils no basta). Conserva el contrato de limpieza de LightRAG: nombres
+  puramente numéricos cortos siguen devolviendo `""` y el caller los
+  descarta igual que antes.
+- `MCF40` (sin separador) **no** se funde con `MCF-40`: el plegado unifica
+  variantes del mismo nombre escrito distinto, no formas compactas.
+- **Display name = variante más frecuente.** El patch cuenta cada llamada
+  como una *mención* (un registro de entidad + un endpoint de relación
+  cuentan por separado — sesgo aceptable: ambas formas salen de la misma
+  extracción) en un `EntityNameVariantCollector` por corrida, con el mismo
+  patrón contextvar que el acumulador de tokens. Al terminar la corrida
+  (`index_documents` y `process_enqueued_documents`) el wrapper drena el
+  collector y persiste en la tabla `entity_name_variant`
+  (`silo_id, canonical_name, variant, mention_count`, upsert que SUMA al
+  conflicto, silo con CASCADE). Persistencia best-effort: si falla, la
+  indexación sigue y la próxima corrida re-acumula.
+- En el render del grafo (`aretrieve_graph_context` →
+  `_normalize_lightrag_graph(raw_data, name_map)`) cada nombre canónico se
+  muestra como su variante más mencionada (empate: primera vista; sin
+  filas: se muestra la clave canónica tal cual). Solo presentación — la
+  identidad del nodo sigue siendo la clave canónica.
+- **La búsqueda del explorador de grafo también pliega el término**
+  (`SiloGraphService._build_search_clause`): además de las condiciones
+  originales (spelling crudo, para descripciones —que son prosa con
+  tildes— y nodos legacy), añade `n.entity_id CONTAINS $canonical_search`
+  con el término plegado, así "MCF-40" llega al nodo `mcf 40`. El match de
+  descripciones queda tal cual (los textos sí llevan tildes). Y el
+  explorador reescribe ids/aristas con el mismo mapa de display que la
+  burbuja (`get_silo_graph(..., db=...)`) — sin eso, tras reindexar el
+  explorador mostraría claves canónicas mientras la burbuja muestra
+  variantes. Aprovechando la revisión del fichero se cerró además una
+  **inyección Cypher pre-existente**: `node_label` se interpolaba sin
+  validar y ahora pasa por whitelist (`^[A-Za-z0-9_\- ]{1,64}$`,
+  ValueError → 422).
+- **La burbuja de grafo del playground también usa el display**: el
+  retriever aplica el mapa al `lightrag_raw_data` que viaja al frontend
+  (`_wrap_query_response(..., name_map=...)`). Importante porque
+  `merge_lightrag_graph` (streaming) deduplica entidades **por id**, y sin
+  el mapa la burbuja mostraría las claves canónicas del LLM-context en vez
+  de las variantes que muestra el explorador. El string de contexto que ve
+  el LLM **no** se reescribe: sigue reflejando lo que LightRAG indexó
+  (nombres canónicos — cambio cosmético asumido en los prompts).
+- El patch rebinds cualquier módulo `lightrag.*` ya importado cuyo
+  atributo apunte al original (escaneo de `sys.modules`), no solo
+  `operate.py` — sobrevive a upgrades que muevan el punto de importación;
+  verificar igualmente al subir de versión. Instalación con lock
+  (`_INSTALL_LOCK`) y `utils` rebindeado primero, así una importación que
+  ocurra durante el patch ya recibe el wrapper.
+- La clave canónica se recorta al límite de nombre de LightRAG
+  (`DEFAULT_ENTITY_NAME_MAX_LENGTH` = 256 chars — la librería trunca tras
+  normalizar), para que las filas de variantes apunten al nombre real del
+  nodo, no a una versión más larga que jamás existirá.
+- El display **sigue la frecuencia, sin pinado**: si una variante supera
+  estrictamente a la vigente, el nombre visible cambia (empate: primera
+  vista). El churn cosmético entre turnos se asume; pinar al incumbent
+  exigiría estado adicional sin beneficio claro.
+- **La tabla `entity_name_variant` no lleva índices extra**: la constraint
+  única `(silo_id, canonical_name, variant)` ya cubre el upsert, el scan de
+  cascade del FK y el lookup de display (prefijo `(silo_id, canonical_name)`;
+  el sort por `mention_count DESC` ordena un puñado de filas por grupo).
+- El mapa de display se consulta con **cache por silo (TTL 60 s)**,
+  invalidada al persistir una corrida — el lookup está en el hot path de
+  query, y sin cache serían 3-4 pool checkouts por turno de agente.
+- **Edge cases asumidos**: los conteos son menciones (registro de entidad +
+  endpoints de relación); `MCF40` compacto ≠ `MCF-40`; dos nombres > 500
+  chars con el mismo prefijo plegado colisionarían (impráctico — el write
+  trunca); corridas concurrentes sobre el mismo silo componen SIN perder
+  conteos (el `ON CONFLICT` suma atómicamente; ojo: la serialización del
+  pipeline por silo es otro asunto pre-existente — varios paths de ingesta
+  no pasan por `silo_indexing_lock`); un crash a mitad de corrida pierde
+  las menciones de esa corrida (cosmético); grafos legacy conservan nombres
+  bonitos hasta reindex/limpieza retroactiva.
+- **Limitaciones**: grafo indexado ANTES de este cambio conserva los
+  nombres no canónicos (los duplicados legacy siguen ahí hasta reindex o
+  limpieza retroactiva vía Cypher — mejora futura). Los contadores se
+  pierden si el proceso muere a mitad de corrida (cosmético).
+
+**Pendiente (subsunción, NO es canónicación)**: `mcf 40` ⊂ `quemador mcf
+40` requiere clasificación variant/hyponym/noise — ver
+`scripts/analyze_entity_fragmentation.py` y recomendación 5 del benchmark de
+JSON/tope de tokens. Si la muestra sale mayormente *noise*, el arreglo es en
+la extracción, no en el grafo.
 
 **Mejora de implementación pendiente (no urgente)**: el filtro numérico
 nativo (`< 3` dígitos puros) es limitado y deja pasar valores técnicos con

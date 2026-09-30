@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Canonical LightRAG entity merge keys**: entity names extracted from documents are folded (Unicode NFKC, accents stripped, case-folded, hyphens/whitespace collapsed) into a single merge key before LightRAG's node merge, so "MCF-40", "mcf 40" and "Mcf 40" fuse into one graph node instead of three. Raw spelling variants are counted per silo in the new `entity_name_variant` table (migration `entvar001`), and graph surfaces (playground bubble, graph explorer) display the most-mentioned variant — e.g. "MCF-40" — while node identity stays canonical. The graph explorer's search also folds the term, so searching a pretty spelling finds the canonical node.
+
 ### Changed
 
 - **Release image tagging**: The backend/frontend CI now tags `develop` builds with a moving `nightly` alias, and builds stable images when a **GitHub Release is published** — tagged `X.Y.Z`, `X.Y` and `latest` (the leading `v` is dropped; pre-releases are excluded from `latest`). Pushing to `main` no longer builds an image.

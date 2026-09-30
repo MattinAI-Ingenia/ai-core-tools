@@ -39,6 +39,7 @@ from .user_credential import UserCredential
 from .pricing_catalog import PricingCatalog
 from .indexing_metric import IndexingMetric
 from .entity_type_inference_job import EntityTypeInferenceJob
+from .entity_name_variant import EntityNameVariant
 from .refresh_token import RefreshToken
 
 __all__ = [
@@ -60,6 +61,7 @@ __all__ = [
     'PricingCatalog',
     'IndexingMetric',
     'EntityTypeInferenceJob',
+    'EntityNameVariant',
     'RefreshToken',
     'SandboxService',
 ]

@@ -126,6 +126,7 @@ Each LightRAG silo maintains strict data isolation:
 - **Document metadata updates** — `update_documents_metadata()` is limited; re-indexing is recommended for metadata changes.
 - **Model requirements** — GPT-4o-mini minimum for indexing; GPT-4o recommended for quality extraction.
 - **Neo4j required** — LightRAG silos cannot be created if Neo4j is not deployed.
+- **Legacy graphs keep pre-canonicalization names** — silos indexed before the entity-name canonicalization still contain spelling-variant duplicates (`MCF-40` next to `mcf 40`); a reindex merges them going forward, but old nodes are not merged retroactively.
 
 ## See Also
 
@@ -190,6 +191,10 @@ GET /internal/apps/{app_id}/silos/{silo_id}/graph
 ```
 
 **Isolation guarantee**: every node and relationship in Neo4j carries a `workspace` property set to `silo_{silo_id}`. The endpoint enforces `WHERE n.workspace = $ws` on every query path — cross-silo data leakage is impossible.
+
+### Entity name canonicalization
+
+Entity names are folded into a canonical merge key before LightRAG merges them — differences in case, accents, spaces and hyphens (`MCF-40` / `mcf 40` / `Mcf 40`) land on a **single node** instead of three. The node's identity is the canonical key; what the graph explorer and the playground's graph bubble *display* is the most frequently seen spelling, and the explorer's search box folds what you type too, so searching `MCF-40` finds the `mcf 40` node. Note: graphs indexed **before** this feature keep their original non-canonical names — reindex the silo to benefit (see [docs/dependencies/lightrag.md §6.1](../dependencies/lightrag.md) for the full design).
 
 ### Frontend
 

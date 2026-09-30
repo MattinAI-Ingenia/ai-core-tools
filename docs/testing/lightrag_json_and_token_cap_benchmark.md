@@ -146,8 +146,14 @@ El tope de 4096 sobre esa página deja **0 relaciones**, coherente con el punto 
    habría que derivarlo de esa guía o duplicar la lista: si se desincronizan, el
    esquema rechaza un tipo que el prompt sí permite y rompe la extracción entera.
    Cambia un problema del 2,4% por un modo de fallo del 100%.
-5. **Pendiente**: normalizar nombres antes de fusionar, o al menos medirlo: 127-145
-   pares subsumidos por corpus es ruido estructural que LightRAG no resuelve.
+5. **Parcialmente abordado (2026-09-30)**: la canónicación de spelling
+   (mayúsculas, tildes, espacios, guiones) está implementada como clave de
+   fusión con mapa de variantes para el display — ver §6.1 de
+   `docs/dependencies/lightrag.md`. Lo que sigue pendiente es la
+   **subsunción** (`mcf 40` ⊂ `quemador mcf 40`): 127-145 pares por corpus
+   es ruido estructural que LightRAG no resuelve; clasificar variantes
+   (`scripts/analyze_entity_fragmentation.py`) antes de decidir si fusionar
+   o limpiar en la extracción.
 6. **Sobre el modelo de extracción**: si el criterio es calidad de grafo por euro
    de cómputo, mini gana con claridad en este corpus. Qwen aporta exhaustividad
    real (+55% entidades) pero en forma de hojas, no de conectividad.

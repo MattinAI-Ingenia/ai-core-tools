@@ -10,7 +10,18 @@ is impossible by construction.
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# Labels cannot be parameterized in a Cypher MATCH — they are interpolated
+# into a backtick-quoted label expression, so any backtick in the query param
+# breaks out of it and can append arbitrary Cypher (cross-tenant reads, or
+# DETACH DELETE across every workspace). Entity-type labels are identifiers,
+# so this whitelist covers the real ones and rejects everything else.
+_NODE_LABEL_RE = re.compile(r"^[A-Za-z0-9_\- ]{1,64}$")
 
 
 class SiloGraphService:
@@ -58,15 +69,26 @@ class SiloGraphService:
         max_depth: int = 2,
         node_label: Optional[str] = None,
         search: Optional[str] = None,
+        db=None,
     ) -> Dict[str, Any]:
         """Fetch the knowledge graph for *silo_id* and return a dict matching
         :class:`~schemas.silo_graph_schemas.SiloGraphResponse`.
 
+        ``db`` (optional request-scoped session) enables display-name mapping:
+        LightRAG node names are the canonical merge keys (accent/case/space/
+        hyphen-folded), so nodes are rewritten to their most-mentioned raw
+        spelling via the ``entity_name_variant`` table — the same names the
+        playground bubble shows. Without ``db``, canonical names are returned.
+
         Raises:
             RuntimeError: When Neo4j is unreachable or not configured.
+            ValueError: When ``node_label`` is not a valid Cypher label.
         """
+        if node_label and not _NODE_LABEL_RE.fullmatch(node_label):
+            raise ValueError(f"Invalid node_label: {node_label!r}")
+
         workspace = cls._workspace_name(silo_id)
-        return cls._cypher_graph(
+        graph = cls._cypher_graph(
             workspace=workspace,
             max_nodes=max_nodes,
             max_edges=max_edges,
@@ -74,9 +96,71 @@ class SiloGraphService:
             search=search,
         )
 
+        # Presentation rewrite, AFTER the Cypher fetch: matching ran on the
+        # canonical ids; only the returned strings carry the display variants.
+        names = {n["id"] for n in graph["nodes"]}
+        for edge in graph["edges"]:
+            names.update((edge["source"], edge["target"]))
+        if db is not None and names:
+            try:
+                from repositories.entity_name_variant_repository import (
+                    EntityNameVariantRepository,
+                )
+                name_map = EntityNameVariantRepository.best_variant_map(
+                    silo_id, sorted(names), db
+                )
+            except Exception as exc:  # noqa: WPS433 - rendering must not fail here
+                logger.warning(
+                    "Failed to resolve graph display names for silo %d: %s",
+                    silo_id, exc,
+                )
+                name_map = {}
+        else:
+            name_map = {}
+        if name_map:
+            for node in graph["nodes"]:
+                node["id"] = name_map.get(node["id"], node["id"])
+                props = node.get("properties")
+                if isinstance(props, dict) and props.get("entity_id"):
+                    props["entity_id"] = name_map.get(props["entity_id"], props["entity_id"])
+            for edge in graph["edges"]:
+                edge["source"] = name_map.get(edge["source"], edge["source"])
+                edge["target"] = name_map.get(edge["target"], edge["target"])
+
+        return graph
+
     # ------------------------------------------------------------------
     # Direct Cypher query
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _build_search_clause(cls, search: str, params: Dict[str, Any]) -> str:
+        """Build the node-search WHERE clause.
+
+        Two match layers:
+        - raw spelling (``toLower(...) CONTAINS toLower($search)``): covers
+          prose descriptions (kept raw, with accents) and legacy node names
+          indexed before merge-key canonicalization;
+        - canonical merge key (``n.entity_id CONTAINS $canonical_search``):
+          since indexing folds names (case/accents/space/hyphen — see
+          ``tools.vector_stores.lightrag.entity_name_normalization``), a
+          user-typed "MCF-40" only reaches node ``mcf 40`` through the
+          folded term. Skipped when the fold is empty (``"-"``, etc.)
+          because ``CONTAINS ""`` matches everything.
+        """
+        from tools.vector_stores.lightrag.entity_name_normalization import (
+            canonicalize_entity_name,
+        )
+
+        conditions = [
+            "toLower(n.entity_id) CONTAINS toLower($search)",
+            "toLower(n.description) CONTAINS toLower($search)",
+        ]
+        canonical_search = canonicalize_entity_name(search)
+        if canonical_search:
+            conditions.append("n.entity_id CONTAINS $canonical_search")
+            params["canonical_search"] = canonical_search
+        return "WHERE (" + " OR ".join(conditions) + ") "
 
     @classmethod
     def _cypher_graph(
@@ -127,21 +211,16 @@ class SiloGraphService:
                 else:
                     node_q = f"MATCH (n:`{workspace}`) "
 
+                params: Dict[str, Any] = {"limit": max_nodes}
                 if search:
-                    node_q += (
-                        "WHERE (toLower(n.entity_id) CONTAINS toLower($search) "
-                        "OR toLower(n.description) CONTAINS toLower($search)) "
-                    )
+                    node_q += cls._build_search_clause(search, params)
+                    params["search"] = search
 
                 node_q += (
                     "WITH n, size([(n)-[]-() | 1]) AS degree "
                     "ORDER BY degree DESC "
                     "RETURN n LIMIT $limit"
                 )
-
-                params: Dict[str, Any] = {"limit": max_nodes}
-                if search:
-                    params["search"] = search
 
                 result = neo_session.run(node_q, **params)
                 node_ids = set()

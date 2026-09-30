@@ -787,7 +787,10 @@ def get_silo_graph(
             max_depth=max_depth,
             node_label=node_label,
             search=search,
+            db=db,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
