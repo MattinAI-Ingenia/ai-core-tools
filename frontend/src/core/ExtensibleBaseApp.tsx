@@ -21,6 +21,12 @@ import AppsPage from '../pages/AppsPage';
 import AppDashboard from '../pages/AppDashboard';
 import AgentsPage from '../pages/AgentsPage';
 import AgentFormPage from '../pages/AgentFormPage';
+import ScheduledTasksPage from '../pages/ScheduledTasksPage';
+import ScheduledTaskFormPage from '../pages/ScheduledTaskFormPage';
+import ScheduledTaskDetailPage from '../pages/ScheduledTaskDetailPage';
+import ScheduledTaskRunPage from '../pages/ScheduledTaskRunPage';
+import MarketplaceScheduledTaskPage from '../pages/MarketplaceScheduledTaskPage';
+import MarketplaceScheduledTaskRunPage from '../pages/MarketplaceScheduledTaskRunPage';
 import SilosPage from '../pages/SilosPage';
 import SiloFormPage from '../pages/SiloFormPage';
 import SiloPlaygroundPage from '../pages/SiloPlaygroundPage';
@@ -45,6 +51,7 @@ import MiddlewaresPage from '../pages/settings/MiddlewaresPage';
 import DataStructuresPage from '../pages/settings/DataStructuresPage';
 import UsersPage from '../pages/admin/UsersPage';
 import StatsPage from '../pages/admin/StatsPage';
+import AdminMetricsPage from '../pages/admin/AdminMetricsPage';
 import SystemSettingsPage from '../pages/admin/SystemSettingsPage';
 import LoginPage from '../pages/LoginPage';
 import AuthSuccessPage from '../pages/AuthSuccessPage';
@@ -60,9 +67,9 @@ import SaasUserListPage from '../pages/admin/SaasUserListPage';
 import SystemAIServicesPage from '../pages/admin/SystemAIServicesPage';
 import SystemEmbeddingServicesPage from '../pages/admin/SystemEmbeddingServicesPage';
 import SystemSandboxServicesPage from '../pages/admin/SystemSandboxServicesPage';
+import SystemSkillsPage from '../pages/admin/SystemSkillsPage';
 import TierConfigPage from '../pages/admin/TierConfigPage';
 import { DeploymentModeProvider } from '../contexts/DeploymentModeContext';
-import { CapabilitiesProvider } from '../contexts/CapabilitiesContext';
 import { PlatformChatbotProvider } from '../contexts/PlatformChatbotContext';
 import PlatformChatbotWidget from '../components/platform-chatbot/PlatformChatbotWidget';
 import MCPServersPage from '../pages/MCPServersPage';
@@ -75,7 +82,7 @@ import MarketplaceHomePage from '../pages/MarketplaceHomePage';
 import SharePointSourcesPage from '../pages/SharePointSourcesPage';
 import SharePointWizardPage from '../pages/SharePointWizardPage';
 import SharePointSourceDetailPage from '../pages/SharePointSourceDetailPage';
-import EnterpriseFeaturePage from '../pages/EnterpriseFeaturePage';
+import AppMetricsPage from '../pages/AppMetricsPage';
 
 interface ExtensibleBaseAppProps {
   config: LibraryConfig;
@@ -149,25 +156,24 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
         <UserProvider>
           <SettingsCacheProvider>
             <DeploymentModeProvider>
-              <CapabilitiesProvider>
-                <PlatformChatbotProvider>
-                  <Router>
-                    <ScrollToTop />
-                    <ConfirmProvider>
-                      <Routes>
-                        {/* Public routes */}
-                        <Route path="/login" element={<LoginPage />} />
-                        <Route path="/auth/success" element={<AuthSuccessPage />} />
-                        <Route path="/register" element={<RegisterPage />} />
-                        <Route path="/verify-email" element={<VerifyEmailPage />} />
-                        <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
-                        <Route path="/password-reset" element={<PasswordResetPage />} />
-                        <Route path="/set-password" element={<SetPasswordPage />} />
-                        <Route path="/change-password" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <ChangePasswordPage />
-                          </ProtectedLayoutRoute>
-                        } />
+              <PlatformChatbotProvider>
+                <Router>
+                  <ScrollToTop />
+                  <ConfirmProvider>
+                    <Routes>
+                      {/* Public routes */}
+                      <Route path="/login" element={<LoginPage />} />
+                      <Route path="/auth/success" element={<AuthSuccessPage />} />
+                      <Route path="/register" element={<RegisterPage />} />
+                      <Route path="/verify-email" element={<VerifyEmailPage />} />
+                      <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
+                      <Route path="/password-reset" element={<PasswordResetPage />} />
+                      <Route path="/set-password" element={<SetPasswordPage />} />
+                      <Route path="/change-password" element={
+                        <ProtectedLayoutRoute {...commonLayoutProps}>
+                          <ChangePasswordPage />
+                        </ProtectedLayoutRoute>
+                      } />
 
                         {/* Public landing page — handles its own redirect when not in SaaS mode */}
                         <Route path="/" element={<LandingPage />} />
@@ -196,11 +202,15 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </ProtectedLayoutRoute>
                         } />
 
-                        <Route path="/marketplace/chat/:conversationId" element={
-                          <ProtectedLayoutRoute {...commonLayoutProps}>
-                            <MarketplaceChatPage />
-                          </ProtectedLayoutRoute>
-                        } />
+                      <Route path="/marketplace/scheduled-tasks/:taskId" element={<ProtectedLayoutRoute {...commonLayoutProps}><MarketplaceScheduledTaskPage /></ProtectedLayoutRoute>} />
+                      <Route path="/marketplace/scheduled-tasks/:taskId/runs/:runId" element={<ProtectedLayoutRoute {...commonLayoutProps}><MarketplaceScheduledTaskRunPage /></ProtectedLayoutRoute>} />
+                      <Route path="/marketplace/scheduled-tasks/:taskId/conversation" element={<ProtectedLayoutRoute {...commonLayoutProps}><MarketplaceScheduledTaskRunPage /></ProtectedLayoutRoute>} />
+
+                      <Route path="/marketplace/chat/:conversationId" element={
+                        <ProtectedLayoutRoute {...commonLayoutProps}>
+                          <MarketplaceChatPage />
+                        </ProtectedLayoutRoute>
+                      } />
 
                         <Route path="/home" element={
                           <ProtectedLayoutRoute {...commonLayoutProps}>
@@ -220,11 +230,17 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </EditorLayoutRoute>
                         } />
 
-                        <Route path="/apps/:appId/agents/:agentId" element={
-                          <EditorLayoutRoute {...commonLayoutProps}>
-                            <AgentFormPage />
-                          </EditorLayoutRoute>
-                        } />
+                      <Route path="/apps/:appId/agents/:agentId" element={
+                        <EditorLayoutRoute {...commonLayoutProps}>
+                          <AgentFormPage />
+                        </EditorLayoutRoute>
+                      } />
+                      <Route path="/apps/:appId/scheduled-tasks" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTasksPage /></ProtectedLayoutRoute>} />
+                      <Route path="/apps/:appId/scheduled-tasks/new" element={<EditorLayoutRoute {...commonLayoutProps}><ScheduledTaskFormPage /></EditorLayoutRoute>} />
+                      <Route path="/apps/:appId/scheduled-tasks/:taskId/edit" element={<EditorLayoutRoute {...commonLayoutProps}><ScheduledTaskFormPage /></EditorLayoutRoute>} />
+                      <Route path="/apps/:appId/scheduled-tasks/:taskId" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTaskDetailPage /></ProtectedLayoutRoute>} />
+                      <Route path="/apps/:appId/scheduled-tasks/:taskId/runs/:runId" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTaskRunPage /></ProtectedLayoutRoute>} />
+                      <Route path="/apps/:appId/scheduled-tasks/:taskId/conversation" element={<ProtectedLayoutRoute {...commonLayoutProps}><ScheduledTaskRunPage /></ProtectedLayoutRoute>} />
 
                         <Route path="/apps/:appId/agents/:agentId/playground" element={
                           <EditorLayoutRoute {...commonLayoutProps}>
@@ -292,17 +308,11 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </EditorLayoutRoute>
                         } />
 
-                        <Route path="/apps/:appId/enterprise" element={
-                          <EditorLayoutRoute {...commonLayoutProps}>
-                            <EnterpriseFeaturePage />
-                          </EditorLayoutRoute>
-                        } />
-
-                        <Route path="/apps/:appId/sharepoint" element={
-                          <EditorLayoutRoute {...commonLayoutProps}>
-                            <SharePointSourcesPage />
-                          </EditorLayoutRoute>
-                        } />
+                      <Route path="/apps/:appId/sharepoint" element={
+                        <EditorLayoutRoute {...commonLayoutProps}>
+                          <SharePointSourcesPage />
+                        </EditorLayoutRoute>
+                      } />
 
                         <Route path="/apps/:appId/sharepoint/new" element={
                           <EditorLayoutRoute {...commonLayoutProps}>
@@ -316,11 +326,17 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </EditorLayoutRoute>
                         } />
 
-                        <Route path="/apps/:appId/mcp-servers" element={
-                          <EditorLayoutRoute {...commonLayoutProps}>
-                            <MCPServersPage />
-                          </EditorLayoutRoute>
-                        } />
+                      <Route path="/apps/:appId/metrics" element={
+                        <EditorLayoutRoute {...commonLayoutProps}>
+                          <AppMetricsPage />
+                        </EditorLayoutRoute>
+                      } />
+
+                      <Route path="/apps/:appId/mcp-servers" element={
+                        <EditorLayoutRoute {...commonLayoutProps}>
+                          <MCPServersPage />
+                        </EditorLayoutRoute>
+                      } />
 
                         <Route path="/apps/:appId/mcp-servers/new" element={
                           <EditorLayoutRoute {...commonLayoutProps}>
@@ -413,11 +429,17 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </AdminLayoutRoute>
                         } />
 
-                        <Route path="/admin/stats" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <StatsPage />
-                          </AdminLayoutRoute>
-                        } />
+                      <Route path="/admin/stats" element={
+                        <AdminLayoutRoute {...commonLayoutProps}>
+                          <StatsPage />
+                        </AdminLayoutRoute>
+                      } />
+
+                      <Route path="/admin/metrics" element={
+                        <AdminLayoutRoute {...commonLayoutProps}>
+                          <AdminMetricsPage />
+                        </AdminLayoutRoute>
+                      } />
 
                         <Route path="/admin/settings" element={
                           <AdminLayoutRoute {...commonLayoutProps}>
@@ -443,11 +465,17 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                           </AdminLayoutRoute>
                         } />
 
-                        <Route path="/admin/system-sandbox-services" element={
-                          <AdminLayoutRoute {...commonLayoutProps}>
-                            <SystemSandboxServicesPage />
-                          </AdminLayoutRoute>
-                        } />
+                      <Route path="/admin/system-sandbox-services" element={
+                        <AdminLayoutRoute {...commonLayoutProps}>
+                          <SystemSandboxServicesPage />
+                        </AdminLayoutRoute>
+                      } />
+
+                      <Route path="/admin/system-skills" element={
+                        <AdminLayoutRoute {...commonLayoutProps}>
+                          <SystemSkillsPage />
+                        </AdminLayoutRoute>
+                      } />
 
                         <Route path="/admin/tier-config" element={
                           <AdminLayoutRoute {...commonLayoutProps}>
@@ -502,7 +530,6 @@ export const ExtensibleBaseApp: React.FC<ExtensibleBaseAppProps> = ({
                     </ConfirmProvider>
                   </Router>
                 </PlatformChatbotProvider>
-              </CapabilitiesProvider>
             </DeploymentModeProvider>
           </SettingsCacheProvider>
         </UserProvider>

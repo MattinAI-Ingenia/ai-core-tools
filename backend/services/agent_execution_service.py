@@ -1,12 +1,16 @@
 import os
 import asyncio
 import ast
+import functools
 import json
 import posixpath
 import shutil
 import threading
+import uuid
 from contextlib import nullcontext
-from typing import List, Dict, Any, Optional
+from datetime import datetime
+from time import monotonic
+from typing import List, Dict, Any, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
@@ -14,6 +18,8 @@ from sqlalchemy.orm import Session
 from models.agent import Agent
 from models.ocr_agent import OCRAgent
 from services.agent_execution_context import AgentExecutionContext
+from services.agent_metrics_collector import AgentMetricsCollector
+from services.agent_metrics_recorder import record_agent_execution
 from tools.PDFTools import extract_text_from_pdf, convert_pdf_to_images, check_pdf_has_text
 from tools.ocrAgentTools import (
     convert_image_to_base64,
@@ -36,6 +42,10 @@ logger = get_logger(__name__)
 
 _IMAGE_FILE_TYPES = {"image"}
 _AGENT_NOT_FOUND = "Agent not found"
+_CONTENT_IN_RAG_NOTE = (
+    "[Content indexed in this conversation's knowledge base; "
+    "relevant passages are retrieved automatically.]"
+)
 _WORKSPACE_INPUT_DIR = "input"
 _WORKSPACE_WORK_DIR = "work"
 _WORKSPACE_OUTPUT_DIR = "output"
@@ -70,6 +80,7 @@ class _LazySandboxHandle:
         processed_files: list[dict] | None = None,
         tmp_base: str | None = None,
         sandbox_service_id: int | None = None,
+        skills_loader: Callable[[Any], None] | None = None,
     ) -> None:
         self.session_key = session_key
         self.working_dir = working_dir
@@ -91,6 +102,41 @@ class _LazySandboxHandle:
         # rebuild a provider with the same tenant credentials instead of
         # falling back to zero-credential env defaults.
         self.sandbox_service_id = sandbox_service_id
+        # step_020: optional hook invoked from get() right after a *fresh*
+        # underlying SandboxHandle is resolved (first use, or recreation after
+        # invalidate()). Takes the resolved SandboxHandle and re-activates
+        # whatever this proxy's own "previously active" registry says should be
+        # active — see _active_skill_registry below.
+        self._skills_loader = skills_loader
+        # step_020: name -> skill_id of every skill successfully (or
+        # degraded-but-usable) activated on THIS session, across however many
+        # underlying SandboxHandle recreations happen *within a single turn*.
+        # IMPORTANT (F4 carry-over): despite the "session" language, the scope
+        # of this registry is actually only "for the duration of this turn" —
+        # `_LazySandboxHandle` itself is reconstructed fresh on every call to
+        # `execute_agent_chat_with_file_refs`/`_prepare_turn` (see the
+        # construction site below), so this registry does NOT persist across
+        # separate agent-execution turns. A skill activated in turn N, with
+        # the sandbox expiring in a later turn M > N, is only replayed here if
+        # it was *also* (re)activated at some point during turn M itself —
+        # otherwise it silently isn't replayed by this mechanism (it still
+        # self-heals on the next explicit `load_skill` call for that skill,
+        # so this is a gap, not a crash). Moving this registry onto the
+        # session-keyed entry in `sandbox_session_service.py` (mirroring how
+        # `SandboxHandle` itself is cached there) would close this gap, but
+        # was judged too large to fold into this fix round without touching
+        # that module's locking/eviction logic — deferred, tracked in
+        # plan.md's step_020 carry-over notes.
+        # Kept on the proxy — not SandboxHandle.active_skills, which lives on
+        # the underlying handle and is empty again after every recreate — so
+        # it is the durable source of truth get() replays against a fresh
+        # handle *within this turn*.
+        self._active_skill_registry: Dict[str, int] = {}
+        # step_020: name -> last re-activation error detail, so a future caller
+        # (e.g. tools/skill_tools.py, duck-typing this attribute) can surface a
+        # re-activation failure on the next load_skill/read_skill_file result
+        # instead of it being silently swallowed. Never raised/logged-only.
+        self.skill_reactivation_errors: Dict[str, str] = {}
 
     @property
     def sandbox_id_if_created(self) -> str | None:
@@ -110,6 +156,72 @@ class _LazySandboxHandle:
     def get_if_created(self) -> Any | None:
         return self._handle
 
+    def invalidate(self) -> None:
+        """Drop the cached handle and evict the underlying session.
+
+        Call this after a :class:`~tools.sandbox.provider.SandboxExpiredError`
+        so that the *next* call to :meth:`get` (or any proxied attribute
+        access) rebuilds a fresh sandbox instead of returning the same dead
+        cached handle. Without this, retrying against this same
+        ``_LazySandboxHandle`` instance keeps raising ``SandboxExpiredError``
+        forever, since neither ``get()`` nor ``SandboxSessionService`` on its
+        own resets this proxy's private ``_handle``.
+        """
+        with self._lock:
+            self._handle = None
+            self._remote_inputs_prepared = False
+            self._remote_pre_existing_files = set()
+        try:
+            from services.sandbox_session_service import sandbox_session_service as _sss
+
+            _sss.evict(self.session_key)
+        except Exception:
+            logger.debug(
+                "IT4: sandbox_session_service.evict failed for %s during invalidate()",
+                self.session_key,
+                exc_info=True,
+            )
+        # Deliberately NOT clearing _active_skill_registry / skill_reactivation_errors
+        # here (step_020): that registry is what get() replays against the fresh
+        # underlying handle the *next* time it materialises one — it must survive
+        # exactly the recreation invalidate() sets up.
+
+    def _record_active_skill(self, name: str, skill_id: int) -> None:
+        """Record *name* (id=``skill_id``) as successfully activated this session.
+
+        Called by ``_LazySandboxProvider.ensure_skill`` after a non-``failed``
+        activation result. Deliberately kept on the proxy, not
+        ``SandboxHandle.active_skills`` (see the class docstring note on
+        ``_active_skill_registry``) so it survives a sandbox recreation.
+        """
+        with self._lock:
+            self._active_skill_registry[name] = skill_id
+
+    def _forget_active_skill(self, name: str) -> None:
+        """Remove *name* from the "previously active" registry (F1).
+
+        Called when a re-activation attempt against a fresh underlying handle
+        comes back with ``status="failed"`` — the skill is no longer active
+        anywhere, so leaving a phantom "active" entry for it would make a
+        future recreation believe it just needs replaying (it doesn't; it
+        needs a fresh explicit ``load_skill`` call instead).
+        """
+        with self._lock:
+            self._active_skill_registry.pop(name, None)
+
+    def _snapshot_active_skills(self) -> list[tuple[str, int]]:
+        """Return a point-in-time copy of ``(name, skill_id)`` pairs previously activated."""
+        with self._lock:
+            return list(self._active_skill_registry.items())
+
+    def _record_reactivation_failure(self, name: str, detail: str) -> None:
+        with self._lock:
+            self.skill_reactivation_errors[name] = detail
+
+    def _clear_reactivation_failure(self, name: str) -> None:
+        with self._lock:
+            self.skill_reactivation_errors.pop(name, None)
+
     def get(self) -> Any:
         with self._lock:
             if self._handle is None:
@@ -125,6 +237,76 @@ class _LazySandboxHandle:
                 )
                 if self._provider.requires_file_sync:
                     self._prepare_remote_workspace(_sss)
+                # step_020: re-activate any skills this proxy previously activated on an
+                # earlier (now-replaced) underlying handle — e.g. first materialisation
+                # after invalidate() following a SandboxExpiredError mid-conversation, or
+                # any other path producing a fresh SandboxHandle/sandbox_id. This must
+                # happen before get() returns, so no tool call ever observes a freshly
+                # (re)created sandbox with fewer skills active than the conversation had
+                # before.
+                #
+                # Lock-scope note (NFR-4b): this runs inside the same `with self._lock:`
+                # as the remote-workspace prep above, which already does sandbox I/O
+                # under this lock. That's intentional, not an oversight: self._lock is
+                # scoped to *this one* _LazySandboxHandle, i.e. one conversation/session
+                # (`session_key`) — a different conversation has its own proxy and its
+                # own independent RLock, so holding this lock across a (potentially
+                # multi-skill, each up to SANDBOX_SKILL_BOOTSTRAP_TIMEOUT_S-long)
+                # re-activation loop never serialises *unrelated* turns/conversations.
+                # It does serialise concurrent tool calls within THIS conversation behind
+                # full recovery, which is the desired behaviour: a tool call must never
+                # see a half-recovered sandbox.
+                if self._skills_loader is not None:
+                    from tools.sandbox.provider import SandboxExpiredError
+
+                    try:
+                        self._skills_loader(self._handle)
+                    except SandboxExpiredError as exc:
+                        # F3b/H1: this can escape the whole re-activation loop when the
+                        # lease itself re-raises on eviction, or (H2) when
+                        # _reactivate_previous_skills now re-raises after recording the
+                        # specific per-skill failure that triggered it. Either way,
+                        # `sandbox_session_service` has already dropped the underlying
+                        # session by this point, so handing back `self._handle` here
+                        # would cache a *confirmed-dead* handle with no self-heal path.
+                        # Route through the canonical invalidate() (not a manual
+                        # `self._handle = None`) so every related field
+                        # (_remote_inputs_prepared, _remote_pre_existing_files) is reset
+                        # consistently too — otherwise the next get() would recreate the
+                        # sandbox but skip re-pushing input files (early-return in
+                        # _prepare_remote_workspace) and misclassify stale pre-existing
+                        # files as new outputs. self._lock is an RLock and invalidate()
+                        # only re-acquires it, so this reentrant call is safe.
+                        #
+                        # H2/MEDIUM(b): do NOT set the "*" batch sentinel here — when the
+                        # exception originates from _reactivate_previous_skills' per-skill
+                        # loop (the common case now that it raises instead of breaking),
+                        # a specific per-skill failure was already recorded before the
+                        # raise, and overwriting it with a generic "*" would be less
+                        # useful, not more. Any exception raised *outside*/*before* the
+                        # per-skill loop (e.g. the lease context manager itself) is rare
+                        # and still logged below; it doesn't need "*" duplicated either,
+                        # since the recreated sandbox will simply appear to have no
+                        # skills active, which self-heals on the next load_skill call.
+                        logger.error(
+                            "step_020: sandbox expired while re-activating skills for "
+                            "session %s; invalidating so the next get() call recreates "
+                            "it cleanly: %s",
+                            self.session_key,
+                            exc,
+                            exc_info=True,
+                        )
+                        self.invalidate()
+                        raise
+                    except Exception as exc:
+                        logger.error(
+                            "step_020: skills_loader raised while re-activating skills "
+                            "for sandbox session %s: %s",
+                            self.session_key,
+                            exc,
+                            exc_info=True,
+                        )
+                        self._record_reactivation_failure("*", str(exc))
             return self._handle
 
     def _prepare_remote_workspace(self, sandbox_session_service: Any) -> None:
@@ -202,7 +384,7 @@ class _LazySandboxProvider:
             return handle.get()
         return handle
 
-    def _lease(self):
+    def _lease(self, expected_seconds: int = 30):
         if not self._lazy_handle.session_key:
             return nullcontext()
         try:
@@ -212,7 +394,7 @@ class _LazySandboxProvider:
                 self._lazy_handle.session_key,
                 conversation=self._lazy_handle._conversation,
                 db=self._lazy_handle._db,
-                expected_seconds=30,
+                expected_seconds=expected_seconds,
                 sandbox_service_id=self._lazy_handle.sandbox_service_id,
             )
         except Exception:
@@ -240,6 +422,231 @@ class _LazySandboxProvider:
         resolved = self._resolve(handle)
         with self._lease():
             return self._provider.write_file(resolved, *args, **kwargs)
+
+    def ensure_skill(self, handle: Any, *args, **kwargs) -> Any:
+        # H4: ensure_skill must be resolved + leased like the other delegates
+        # (it otherwise falls through __getattr__ straight to the raw provider
+        # with an unresolved _LazySandboxHandle, which has no .active_skills).
+        # Sized to the skill bootstrap timeout (up to 120s by default) plus a
+        # margin, not the default ~30s used by the lighter-weight calls above,
+        # so the session lease doesn't expire mid-bootstrap.
+        resolved = self._resolve(handle)
+        expected_seconds = _skill_bootstrap_budget_seconds()
+        with self._lease(expected_seconds=expected_seconds):
+            result = self._provider.ensure_skill(resolved, *args, **kwargs)
+        # step_020: record a successful (or degraded-but-still-usable) activation on the
+        # long-lived proxy, not just the (recreation-volatile) underlying SandboxHandle —
+        # this is what get() replays the next time this session's sandbox is recreated.
+        # A "failed" result (e.g. a name collision, OQ-4) is deliberately never recorded.
+        #
+        # MEDIUM fix: record the (name, skill_id) pair from the *payload the caller
+        # passed in* rather than the provider's returned result object. Tenant isolation
+        # would otherwise rely on the provider faithfully echoing back the same skill_id
+        # it was given — defense-in-depth against a provider bug/compromise silently
+        # attributing an activation to the wrong skill. Fall back to the result's own
+        # fields only if no payload is identifiable (defensive, should not happen on the
+        # documented ensure_skill(handle, payload) call shape).
+        if isinstance(handle, _LazySandboxHandle) and getattr(result, "status", None) in ("active", "degraded"):
+            payload = args[0] if args else kwargs.get("payload")
+            skill_name = getattr(payload, "name", None) or getattr(result, "skill_name", None)
+            skill_id = getattr(payload, "skill_id", None)
+            if skill_id is None:
+                skill_id = getattr(result, "skill_id", None)
+            if skill_name and skill_id is not None:
+                handle._record_active_skill(skill_name, skill_id)
+                # MEDIUM fix: a stale reactivation failure recorded for this exact skill
+                # (e.g. by a reactivation loop invoked earlier in the SAME get() call
+                # that led to this ensure_skill call) must not survive a subsequent
+                # genuine success — otherwise the next load_skill/read_skill_file call
+                # for this skill would falsely tell the model to reload an
+                # already-working skill.
+                handle._clear_reactivation_failure(skill_name)
+        return result
+
+    def skills_root(self, handle: Any, *args, **kwargs) -> Any:
+        # H-A: same trap as ensure_skill (H4) — this is a hand-maintained
+        # delegate list (not a generic __getattr__ rewrite), so any new
+        # public SandboxProvider method that takes a handle must get an
+        # explicit delegate here too or it silently receives an unresolved
+        # _LazySandboxHandle via __getattr__. No lease is taken: the default
+        # implementation does no sandbox I/O, it only needs a real
+        # SandboxHandle in hand for future per-provider overrides
+        # (step_018) that may branch on handle/metadata.
+        resolved = self._resolve(handle)
+        return self._provider.skills_root(resolved, *args, **kwargs)
+
+
+def _skill_bootstrap_budget_seconds() -> int:
+    """Return the wall-clock budget (seconds) allotted to a skill bootstrap/re-activation.
+
+    Extracted from ``SANDBOX_SKILL_BOOTSTRAP_TIMEOUT_S`` (default 120s) plus a fixed
+    30s margin. MEDIUM fix: this arithmetic previously appeared duplicated in both
+    ``_LazySandboxProvider.ensure_skill`` and ``_reactivate_previous_skills`` — both
+    now call this single helper instead.
+    """
+    import config as settings
+
+    return int(getattr(settings, "SANDBOX_SKILL_BOOTSTRAP_TIMEOUT_S", 120)) + 30
+
+
+def _reactivation_failure_detail(result: Any) -> str:
+    """Extract a human-readable failure detail from a ``status="failed"`` result.
+
+    Mirrors ``tools/skill_tools.py``'s ``_activation_failure_response`` phase-picking
+    logic (prefer the first ``status="failed"`` phase; fall back to the last phase's
+    detail if none is marked failed) so re-activation failures read the same way a
+    fresh ``load_skill`` failure would.
+    """
+    phases = getattr(result, "phases", None) or ()
+    failed_phase = next((p for p in phases if getattr(p, "status", None) == "failed"), None)
+    if failed_phase is not None:
+        return f"{failed_phase.phase}: {failed_phase.detail}"
+    last_phase = phases[-1] if phases else None
+    if last_phase is not None:
+        return f"{last_phase.phase}: {last_phase.detail}"
+    return "activation failed (no phase detail available)"
+
+
+def _reactivate_previous_skills(
+    lazy_handle: "_LazySandboxHandle",
+    provider: Any,
+    payload_provider: Callable[[int], Any],
+    real_handle: Any,
+) -> None:
+    """Re-activate every skill ``lazy_handle`` has ever successfully activated this turn.
+
+    Called from ``_LazySandboxHandle.get()`` right after a *fresh* underlying
+    ``SandboxHandle`` is resolved (first materialisation of this proxy, or a
+    recreation following ``invalidate()`` — e.g. a ``SandboxExpiredError`` handled
+    mid-conversation by ``tools/skill_tools.py``'s ``load_skill``). ``real_handle`` is
+    that fresh ``SandboxHandle``; its own ``active_skills`` dict starts empty on every
+    recreation, so ``lazy_handle``'s own registry (``_snapshot_active_skills()``,
+    which survives recreation *within this turn* — see the scope note on
+    ``_active_skill_registry``) is the source of truth for what needs replaying.
+
+    ``ensure_skill`` communicates failure through its **return value**
+    (``status: "active"|"degraded"|"failed"``), never by raising (only
+    ``SandboxExpiredError`` raises) — so every call here is branched explicitly on
+    ``result.status`` (F1): only ``"active"``/``"degraded"`` clears a prior failure;
+    ``"failed"`` (or any other unexpected status) is recorded as a failure AND the
+    skill is dropped from the registry — it is no longer active anywhere, so leaving a
+    phantom "active" entry would make the *next* recreation believe it just needs
+    replaying instead of a fresh ``load_skill`` call.
+
+    A ``SandboxExpiredError`` for one skill means the sandbox itself is confirmed dead
+    (F3a): the loop aborts immediately rather than burning a full upload+bootstrap
+    timeout per remaining skill against a sandbox already known to be gone.
+
+    The whole loop is bounded by a single wall-clock budget (not multiplied by skill
+    count) — any skills not reached before the deadline are recorded as
+    not-yet-replayed rather than attempted; they self-heal on the next explicit
+    ``load_skill`` call for that skill, which is already idempotent.
+    """
+    # MEDIUM fix: clear the batch-level "*" sentinel before the early-return below too,
+    # not just later on — a stale "*" from an earlier cycle (e.g. a lease-context
+    # failure with no skills to replay this time) must not linger and be misread as
+    # applying to this call.
+    lazy_handle._clear_reactivation_failure("*")
+
+    previously_active = lazy_handle._snapshot_active_skills()
+    if not previously_active:
+        return
+
+    budget_seconds = _skill_bootstrap_budget_seconds()
+    deadline = monotonic() + budget_seconds
+
+    lease_ctx: Any = nullcontext()
+    if lazy_handle.session_key:
+        try:
+            from services.sandbox_session_service import sandbox_session_service as _sss
+
+            lease_ctx = _sss.use(
+                lazy_handle.session_key,
+                conversation=lazy_handle._conversation,
+                db=lazy_handle._db,
+                expected_seconds=budget_seconds,
+                sandbox_service_id=lazy_handle.sandbox_service_id,
+            )
+        except Exception:
+            lease_ctx = nullcontext()
+
+    from tools.sandbox.provider import SandboxExpiredError
+
+    with lease_ctx:
+        for idx, (name, skill_id) in enumerate(previously_active):
+            if monotonic() > deadline:
+                detail = (
+                    "not attempted: re-activation wall-clock budget exceeded; will be "
+                    "replayed lazily on the next load_skill call"
+                )
+                logger.warning(
+                    "step_020: re-activation budget exceeded for session %s — skipping "
+                    "%d remaining skill(s) starting with '%s'",
+                    lazy_handle.session_key,
+                    len(previously_active) - idx,
+                    name,
+                )
+                for remaining_name, _remaining_id in previously_active[idx:]:
+                    lazy_handle._record_reactivation_failure(remaining_name, detail)
+                break
+
+            try:
+                payload = payload_provider(skill_id)
+                result = provider.ensure_skill(real_handle, payload)
+            except SandboxExpiredError as exc:
+                # F3a/H2: the sandbox is confirmed dead — every remaining skill would
+                # fail the exact same way, each burning a full timeout pointlessly.
+                # Record this one, then RE-RAISE (not `break`) so the exception
+                # propagates all the way to get()'s own SandboxExpiredError handling
+                # (F3b/H1), which is the only place that actually invalidates the
+                # cached handle. Swallowing it here (as the previous round's `break`
+                # did) would let get() return/cache a handle already proven dead, with
+                # no guaranteed self-heal trigger on every code path.
+                logger.error(
+                    "step_020: sandbox expired while re-activating skill '%s' (id=%s) "
+                    "for session %s — aborting remaining re-activations: %s",
+                    name,
+                    skill_id,
+                    lazy_handle.session_key,
+                    exc,
+                    exc_info=True,
+                )
+                lazy_handle._record_reactivation_failure(name, str(exc))
+                raise
+            except Exception as exc:
+                logger.error(
+                    "step_020: failed to re-activate skill '%s' (id=%s) after sandbox "
+                    "recreation for session %s: %s",
+                    name,
+                    skill_id,
+                    lazy_handle.session_key,
+                    exc,
+                    exc_info=True,
+                )
+                lazy_handle._record_reactivation_failure(name, str(exc))
+                continue
+
+            status = getattr(result, "status", None)
+            if status in ("active", "degraded"):
+                lazy_handle._clear_reactivation_failure(name)
+            else:
+                # status == "failed" (or an unrecognised/malformed status — treated the
+                # same, conservatively, as a failure) — F1: never inferred as success
+                # from the mere absence of a raised exception.
+                detail = _reactivation_failure_detail(result) if status == "failed" else (
+                    f"unexpected activation status: {status!r}"
+                )
+                logger.error(
+                    "step_020: re-activation of skill '%s' (id=%s) for session %s "
+                    "reported status=%r — %s",
+                    name,
+                    skill_id,
+                    lazy_handle.session_key,
+                    status,
+                    detail,
+                )
+                lazy_handle._record_reactivation_failure(name, detail)
+                lazy_handle._forget_active_skill(name)
 
 
 def _safe_workspace_filename(filename: str) -> str:
@@ -310,6 +717,13 @@ def _ensure_remote_workspace_layout(provider: Any, handle: Any) -> None:
             )
     except Exception as exc:
         logger.debug("Could not create remote workspace layout: %s", exc, exc_info=True)
+
+
+def _quota_user_id(user_context: Optional[Dict]) -> Any:
+    """User charged for system-LLM usage: scheduled tasks bill their creator (billing_user_id)."""
+    if not user_context:
+        return None
+    return user_context.get('billing_user_id') or user_context.get('user_id')
 
 
 def _inject_file_markers(text: str, files: list) -> str:
@@ -462,9 +876,9 @@ class AgentExecutionService:
             )
 
         # 4. System LLM quota (SaaS mode, no-op in self-managed)
-        if db and user_context and user_context.get('user_id'):
+        if db and _quota_user_id(user_context):
             from services.tier_enforcement_service import TierEnforcementService
-            TierEnforcementService.check_system_llm_quota(db, user_context['user_id'])
+            TierEnforcementService.check_system_llm_quota(db, _quota_user_id(user_context))
 
         # 5. Convert FileReference objects to plain dicts
         processed_files: List[Dict] = []
@@ -476,6 +890,9 @@ class AgentExecutionService:
                     "type": file_ref.file_type,
                     "file_id": file_ref.file_id,
                     "file_path": file_ref.file_path,
+                    "uploaded_this_turn": bool(
+                        getattr(file_ref, "uploaded_this_turn", False)
+                    ),
                 })
 
         # 6. Resolve the conversation for any client-supplied conversation_id,
@@ -546,16 +963,11 @@ class AgentExecutionService:
             raise HTTPException(status_code=404, detail="Agent not found in database")
 
         # 8. Build enhanced message + separate image files.
-        # Vectorizable files (pdf, text) are excluded from the message context —
-        # every upload path vectorizes them into the session's temp playground
-        # silo at upload time (a silo is always created), so they are retrieved
-        # via RAG instead of being pasted into the prompt.
-        from services.playground_media_service import VECTORIZABLE_FILE_TYPES
-        non_vectorized_files = [
-            f for f in processed_files
-            if f.get("type") not in VECTORIZABLE_FILE_TYPES
-        ]
-        enhanced_message, image_files = self._prepare_message_with_files(message, non_vectorized_files)
+        await self._index_turn_uploads(fresh_agent, conversation, processed_files, db)
+        message_files = self._select_message_files(
+            fresh_agent, conversation, processed_files, db
+        )
+        enhanced_message, image_files = self._prepare_message_with_files(message, message_files)
 
         session_id_for_cache = session.id if (fresh_agent.has_memory and session) else None
         effective_conv_id = conversation_id or (
@@ -647,6 +1059,22 @@ class AgentExecutionService:
                     effective_conv_id,
                     session_id=None if effective_conv_id else identity_session_id,
                 )
+
+                # step_020: reuse step_019's DB-bound payload-provider factory (the same
+                # one tools/agentTools.py uses to wire create_skill_loader_tool) so the
+                # re-activation loader can rebuild a SkillPackagePayload for a skill_id
+                # without this module importing SkillPackageService/Repository directly.
+                from services.skill_package_service import build_skill_tool_providers
+
+                _skill_payload_provider, _, _ = build_skill_tool_providers()
+
+                # Construct the proxy first (without a loader — `_reactivate_previous_skills`
+                # needs the proxy itself, as its first argument, to read the "previously
+                # active skills" registry), then attach the loader via `functools.partial`
+                # afterward. This avoids the construction-order chicken-and-egg without a
+                # late-binding closure over a not-yet-assigned local (the earlier round-1
+                # shape relied on `sandbox_handle` only being read once `get()` actually
+                # calls the loader, well after this block finished executing).
                 sandbox_handle = _LazySandboxHandle(
                     session_key=sandbox_session_key,
                     provider=resolved_sandbox_provider,
@@ -656,6 +1084,12 @@ class AgentExecutionService:
                     processed_files=processed_files,
                     tmp_base=tmp_base,
                     sandbox_service_id=resolved_sandbox_service_id,
+                )
+                sandbox_handle._skills_loader = functools.partial(
+                    _reactivate_previous_skills,
+                    sandbox_handle,
+                    resolved_sandbox_provider,
+                    _skill_payload_provider,
                 )
                 sandbox_provider = _LazySandboxProvider(
                     resolved_sandbox_provider,
@@ -894,12 +1328,11 @@ class AgentExecutionService:
             ai_svc is not None
             and getattr(ai_svc, 'app_id', 'NOT_NULL') is None
             and db
-            and ctx.user_context
-            and ctx.user_context.get('user_id')
+            and _quota_user_id(ctx.user_context)
         ):
             try:
                 from services.usage_tracking_service import UsageTrackingService
-                UsageTrackingService.record_system_llm_call(db, ctx.user_context['user_id'])
+                UsageTrackingService.record_system_llm_call(db, _quota_user_id(ctx.user_context))
             except Exception as _usage_exc:
                 logger.warning(
                     "Failed to record system LLM usage: %s", _usage_exc, exc_info=True
@@ -1123,31 +1556,16 @@ class AgentExecutionService:
                 # Validate ownership BEFORE destroying anything: a client-supplied
                 # conversation_id must not let one user tear down another user's
                 # live sandbox session just by guessing/iterating the id.
-                _conv = None
                 if _reset_conv_id and db:
-                    from services.conversation_service import ConversationService
-                    _conv = ConversationService.get_conversation(
-                        db, _reset_conv_id, user_context, agent_id=agent_id
-                    )
-                    if not _conv:
+                    if not conversation:
                         raise HTTPException(
                             status_code=404,
                             detail="Conversation not found or access denied",
                         )
-
-                if _conv is not None:
-                    # A persisted conversation was resolved: it will be fully torn
-                    # down (sandbox included) by ConversationService.delete_conversation
-                    # below. Destroying it here too would duplicate the call (and risk
-                    # using a mismatched key), so defer to that single teardown.
-                    logger.info(
-                        f"Sandbox teardown for conversation {_reset_conv_id} deferred to "
-                        "conversation deletion"
-                    )
-                else:
-                    # No persisted conversation to delete later (e.g. public API
-                    # session-based reset without a conversation_id) — destroy the
-                    # sandbox directly, it won't be handled elsewhere.
+                # Conversation deletion owns sandbox teardown when the row has
+                # been resolved. Destroy directly only for session resets that
+                # do not have a database conversation to delete.
+                if not conversation:
                     _sandbox_key = SandboxSessionService.session_key(agent_id, _reset_conv_id)
                     sandbox_session_service.destroy(_sandbox_key)
                     logger.info(f"Sandbox destroyed on conversation reset for key {_sandbox_key}")
@@ -1531,6 +1949,103 @@ class AgentExecutionService:
             logger.error(f"Error processing PDF with OCR: {str(e)}")
             raise
     
+    async def _index_turn_uploads(
+        self,
+        agent: Agent,
+        conversation: Any,
+        processed_files: List[Dict],
+        db: Optional[Session],
+    ) -> None:
+        """Vectorize documents uploaded with this request into the conversation's temp silo.
+
+        Public API calls upload and chat in one request, so nothing indexed the
+        file beforehand. Only memory-enabled agents keep a temp silo: later
+        turns retrieve the document via RAG once it falls out of the memory
+        window. Failures are logged — this turn still gets the full content.
+        """
+        if not agent.has_memory or db is None:
+            return
+        session_id = getattr(conversation, "session_id", None)
+        if not session_id:
+            return
+
+        from services.playground_media_service import PlaygroundMediaService, is_vectorizable_file
+
+        loop = asyncio.get_running_loop()
+        for file_data in processed_files:
+            if not (
+                file_data.get("uploaded_this_turn")
+                and is_vectorizable_file(file_data.get("type"), file_data.get("filename"))
+                and file_data.get("content")
+            ):
+                continue
+            try:
+                await loop.run_in_executor(
+                    self._executor,
+                    functools.partial(
+                        PlaygroundMediaService.vectorize_uploaded_file,
+                        app_id=agent.app_id,
+                        agent_id=agent.agent_id,
+                        session_id=session_id,
+                        file_id=file_data["file_id"],
+                        filename=file_data["filename"],
+                        file_path=file_data.get("file_path"),
+                        content=file_data["content"],
+                        db=db,
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Vectorization of {file_data.get('filename')} failed: {e}")
+
+    def _select_message_files(
+        self,
+        agent: Agent,
+        conversation: Any,
+        processed_files: List[Dict],
+        db: Optional[Session],
+    ) -> List[Dict]:
+        """Decide which attached documents go into the prompt in full.
+
+        Files uploaded with this request, and every file for memory-less agents,
+        are sent in full: the agent needs the whole document now (e.g. to
+        extract every invoice line) and memory-less agents have no temp silo.
+        Documents attached in an earlier request to a memory-enabled agent are
+        already in the conversation's temp silo, so they are marked
+        ``content_in_rag`` and only announced. If the conversation has no temp
+        silo (e.g. the file was attached before the conversation existed),
+        they are sent in full as well.
+        """
+        from services.playground_media_service import PlaygroundMediaService, is_vectorizable_file
+
+        if not agent.has_memory:
+            return processed_files
+        rag_candidates = [
+            f for f in processed_files
+            if is_vectorizable_file(f.get("type"), f.get("filename"))
+            and not f.get("uploaded_this_turn")
+        ]
+        session_id = getattr(conversation, "session_id", None)
+        if not rag_candidates or not session_id or db is None:
+            return processed_files
+
+        try:
+            has_temp_silo = bool(
+                PlaygroundMediaService.get_temp_silo_ids_for_agent(
+                    agent.app_id, agent.agent_id, session_id, db
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Could not resolve temp silo for file context: {e}")
+            has_temp_silo = False
+        if not has_temp_silo:
+            return processed_files
+
+        rag_ids = {id(f) for f in rag_candidates}
+        return [
+            {**f, "content_in_rag": True} if id(f) in rag_ids else f
+            for f in processed_files
+        ]
+
     def _prepare_message_with_files(self, message: str, processed_files: List[Dict]) -> tuple:
         """
         Build enhanced message with file contents and separate image files.
@@ -1551,10 +2066,17 @@ class AgentExecutionService:
                     image_files.append(file_data)
                 else:
                     safe_name = _safe_workspace_filename(file_data["filename"])
+                    # Documents already indexed in the conversation's temp silo
+                    # are announced (name + path) but retrieved via RAG.
+                    content = (
+                        _CONTENT_IN_RAG_NOTE
+                        if file_data.get("content_in_rag")
+                        else file_data['content']
+                    )
                     text_files_msg += (
                         f"\n\n--- File: {file_data['filename']} "
                         f"(Sandbox path: input/{safe_name}) ---\n"
-                        f"{file_data['content']}\n"
+                        f"{content}\n"
                         f"--- End of {file_data['filename']} ---"
                     )
 
@@ -1652,6 +2174,10 @@ class AgentExecutionService:
         )
 
         mcp_client = None
+        # Metrics: sub-agents built as tools read current_event_id to link their
+        # executions to this one. Copy so the caller's dict is not mutated.
+        event_id = str(uuid.uuid4())
+        user_context = {**(user_context or {}), 'current_event_id': event_id}
         try:
             # Create the agent chain with all tools and capabilities
             agent_chain, mcp_client = await create_agent(
@@ -1665,6 +2191,7 @@ class AgentExecutionService:
                 sandbox_session_key=sandbox_session_key,
                 attached_files=processed_files,
                 temp_silo_ids=temp_silo_ids,
+                user_message=message,
             )
 
             # Prepare configuration
@@ -1698,62 +2225,40 @@ class AgentExecutionService:
                     ls_settings.source,
                 )
 
+            metrics_collector = AgentMetricsCollector()
+            config.setdefault("callbacks", []).append(metrics_collector)
+            started_at = datetime.utcnow()
+            status, error_code, error_message, result = "SUCCESS", None, None, None
             try:
-                result = await agent_chain.ainvoke(
-                    {"messages": [message_payload]},
-                    config=config,
+                result = await self._ainvoke_with_checkpoint_recovery(
+                    agent_chain, message_payload, config, fresh_agent, session_id_for_cache,
                 )
-            except Exception as invoke_exc:
-                from services.agent_cache_service import (
-                    CheckpointerCacheService,
-                    is_missing_tool_output_error,
+            except asyncio.TimeoutError:
+                status, error_code, error_message = "TIMEOUT", "TIMEOUT", "Execution timed out"
+                raise
+            except asyncio.CancelledError:
+                status, error_code, error_message = "ERROR", "CancelledError", "Execution cancelled"
+                raise
+            except Exception as exc:
+                status, error_code, error_message = "ERROR", type(exc).__name__, str(exc)[:2000]
+                raise
+            finally:
+                finished_at = datetime.utcnow()
+                record_agent_execution(
+                    event_id=event_id,
+                    fresh_agent=fresh_agent,
+                    user_context=user_context,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+                    status=status,
+                    error_code=error_code,
+                    error_message=error_message,
+                    result=result if status == "SUCCESS" else None,
+                    image_files=image_files or [],
+                    message=message,
+                    collector=metrics_collector,
                 )
-
-                if (
-                    fresh_agent.has_memory
-                    and session_id_for_cache
-                    and is_missing_tool_output_error(invoke_exc)
-                ):
-                    # Recover by forking from the last known-good checkpoint
-                    # instead of deleting the whole thread: adelete_thread
-                    # wipes the user's entire visible conversation history
-                    # (get_conversation_history reads the same checkpointer),
-                    # not just the broken step. Checkpoints are immutable and
-                    # ordered, so retrying with an earlier checkpoint_id set
-                    # simply forks history forward from there — nothing is
-                    # deleted.
-                    rollback_checkpoint_id = await CheckpointerCacheService.get_rollback_checkpoint_id(
-                        fresh_agent.agent_id,
-                        session_id_for_cache,
-                    )
-                    if rollback_checkpoint_id is None:
-                        logger.warning(
-                            "Incomplete tool-call checkpoint for agent %s session %s "
-                            "has no earlier checkpoint to roll back to; failing the "
-                            "turn instead of retrying",
-                            fresh_agent.agent_id,
-                            session_id_for_cache,
-                        )
-                        raise HTTPException(
-                            status_code=502,
-                            detail="Your last message could not be completed. Please resend it.",
-                        ) from invoke_exc
-
-                    logger.warning(
-                        "Detected incomplete tool-call checkpoint for agent %s "
-                        "session %s; retrying turn from prior checkpoint %s "
-                        "(no history deleted)",
-                        fresh_agent.agent_id,
-                        session_id_for_cache,
-                        rollback_checkpoint_id,
-                    )
-                    config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
-                    result = await agent_chain.ainvoke(
-                        {"messages": [message_payload]},
-                        config=config,
-                    )
-                else:
-                    raise
 
             # LangChain v1: structured output is in 'structured_response' key
             # when create_agent is called with response_format=pydantic_model
@@ -1789,6 +2294,68 @@ class AgentExecutionService:
             if mcp_client:
                 logger.info("MCP client will be cleaned up automatically")
     
+    async def _ainvoke_with_checkpoint_recovery(
+        self, agent_chain, message_payload, config, fresh_agent, session_id_for_cache,
+    ):
+        """Invoke the agent, retrying once from the prior checkpoint on an incomplete tool-call turn."""
+        try:
+            result = await agent_chain.ainvoke(
+                {"messages": [message_payload]},
+                config=config,
+            )
+        except Exception as invoke_exc:
+            from services.agent_cache_service import (
+                CheckpointerCacheService,
+                is_missing_tool_output_error,
+            )
+
+            if (
+                fresh_agent.has_memory
+                and session_id_for_cache
+                and is_missing_tool_output_error(invoke_exc)
+            ):
+                # Recover by forking from the last known-good checkpoint
+                # instead of deleting the whole thread: adelete_thread
+                # wipes the user's entire visible conversation history
+                # (get_conversation_history reads the same checkpointer),
+                # not just the broken step. Checkpoints are immutable and
+                # ordered, so retrying with an earlier checkpoint_id set
+                # simply forks history forward from there — nothing is
+                # deleted.
+                rollback_checkpoint_id = await CheckpointerCacheService.get_rollback_checkpoint_id(
+                    fresh_agent.agent_id,
+                    session_id_for_cache,
+                )
+                if rollback_checkpoint_id is None:
+                    logger.warning(
+                        "Incomplete tool-call checkpoint for agent %s session %s "
+                        "has no earlier checkpoint to roll back to; failing the "
+                        "turn instead of retrying",
+                        fresh_agent.agent_id,
+                        session_id_for_cache,
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Your last message could not be completed. Please resend it.",
+                    ) from invoke_exc
+
+                logger.warning(
+                    "Detected incomplete tool-call checkpoint for agent %s "
+                    "session %s; retrying turn from prior checkpoint %s "
+                    "(no history deleted)",
+                    fresh_agent.agent_id,
+                    session_id_for_cache,
+                    rollback_checkpoint_id,
+                )
+                config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
+                result = await agent_chain.ainvoke(
+                    {"messages": [message_payload]},
+                    config=config,
+                )
+            else:
+                raise
+        return result
+
     async def _save_uploaded_file(self, file: UploadFile) -> str:
         """Save uploaded file to temporary location"""
         import tempfile

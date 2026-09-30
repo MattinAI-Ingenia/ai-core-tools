@@ -18,13 +18,16 @@ from typing import Any, Optional, Dict, List, Tuple, Type
 from pydantic import BaseModel, Field
 import types as _types
 from services.silo_service import SiloService
+from services.skill_router_service import select_skills as _select_prompt_skills
 from db.database import SessionLocal
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.documents import Document
 from langchain_core.tools import StructuredTool
-import asyncio
+from services.agent_metrics_collector import METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
 import json
+import asyncio
+import uuid
 import os
 import base64
 import mimetypes
@@ -34,7 +37,14 @@ from utils.logger import get_logger
 from utils.config import get_app_config
 from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_context
 from utils.mcp_ssl_utils import inject_ssl_config
-from tools.skill_tools import create_skill_loader_tool, generate_skills_system_prompt_section
+from tools.skill_tools import (
+    create_skill_file_reader_tool,
+    create_skill_loader_tool,
+    generate_skills_system_prompt_section,
+    resolve_agent_skills,
+    resolve_prompt_skills,
+    snapshot_skills,
+)
 from tools.sandbox import (
     create_sandbox_builtin_tools,
     create_sandbox_repl_tools,
@@ -251,6 +261,54 @@ def _build_summarization_llm_from_service(agent, ai_service_id: int):
     return None
 
 
+async def _resolve_skills_for_prompt(
+    agent: Agent,
+    *,
+    user_message: Optional[str] = None,
+    llm: Optional[Any] = None,
+) -> Tuple[List[Any], Optional[str]]:
+    """Single shared assembly path: resolve -> snapshot -> route -> render.
+
+    AD-13's single-source-of-truth mandate for "which skills does this agent use this
+    turn" extends to this whole pipeline, not just ``resolve_agent_skills`` — every
+    prompt-building call site (the top-level agent in ``create_agent`` and both
+    agent-as-tool builders, ``IACTTool.create`` / ``IACTOCRTool.create``) must go
+    through the exact same sequence: ``resolve_agent_skills`` (collision-safe
+    resolution) -> ``snapshot_skills`` (H1: thread/session-safe before any tool
+    closure can see it) -> ``resolve_prompt_skills`` (step_024's opt-in router hook,
+    a no-op unless ``agent.skill_router_enabled``) -> ``generate_skills_system_prompt_section``.
+
+    Extracted from ``create_agent`` (review-round finding: sub-agent builders had
+    drifted onto a direct, unresolved, unsnapshotted
+    ``generate_skills_system_prompt_section(agent.skill_associations)`` call, costing an
+    N+1 lazy-load per turn and silently skipping the router even when
+    ``skill_router_enabled`` was set) so the three call sites cannot drift again.
+
+    Returns ``(skill_snapshots, skills_section)``:
+      - ``skill_snapshots`` is the FULL resolved+enabled set (never narrowed by the
+        router) — the only list that may be used to register ``load_skill`` /
+        ``read_skill_file`` tools, so the model can always explicitly load a skill the
+        router did not proactively surface.
+      - ``skills_section`` is the (possibly router-narrowed) rendered
+        ``<available_skills>`` block to append to the system prompt, or ``None`` if the
+        agent has no enabled skills.
+    """
+    if not hasattr(agent, "skill_associations") or not agent.skill_associations:
+        return [], None
+
+    resolved_skills = resolve_agent_skills(agent.skill_associations)
+    skill_snapshots = snapshot_skills(resolved_skills)
+    prompt_skills = await resolve_prompt_skills(
+        resolved_skills, agent=agent, user_message=user_message, llm=llm,
+        selector=_select_prompt_skills,
+    )
+    prompt_skill_snapshots = (
+        skill_snapshots if prompt_skills is resolved_skills else snapshot_skills(prompt_skills)
+    )
+    skills_section = generate_skills_system_prompt_section(prompt_skill_snapshots)
+    return skill_snapshots, skills_section
+
+
 async def create_agent(
     agent: Agent,
     search_params=None,
@@ -263,6 +321,7 @@ async def create_agent(
     sandbox_session_service: Optional[Any] = None,
     attached_files: Optional[List[Dict]] = None,
     temp_silo_ids: Optional[List[int]] = None,
+    user_message: Optional[str] = None,
 ):
     """Create a new agent instance with cached checkpointer if memory is enabled.
 
@@ -278,6 +337,10 @@ async def create_agent(
         sandbox_session_service: Optional service used for sandbox active-use leasing
         attached_files: Optional list of attached files to pass to the agent chain
         temp_silo_ids: Optional list of temporary silo IDs (e.g. playground media) to include as extra retrievers
+        user_message: Optional current turn's user message. Only consumed when
+            ``agent.skill_router_enabled`` is True (step_024's opt-in skill router,
+            used to pre-select at most 2 skills to describe in the prompt) — otherwise
+            never read, so passing/omitting it has no effect on today's default path.
     """
     llm = get_llm(agent)
     if llm is None:
@@ -325,10 +388,24 @@ async def create_agent(
     # Inject current date to avoid need for a tool call
     current_date = datetime.now().strftime("%Y-%m-%d")
     system_prompt_content += f"\n\nToday's date is {current_date}."
-    if hasattr(agent, 'skill_associations') and agent.skill_associations:
-        skills_section = generate_skills_system_prompt_section(agent.skill_associations)
-        if skills_section:
-            system_prompt_content = system_prompt_content + "\n" + skills_section
+    # H2 (round-2 review fix): resolve_agent_skills is the single source of truth for
+    # "which skills does this agent use this turn" — call it exactly once here and
+    # reuse the (snapshotted) result for every consumer below (prompt section, the
+    # load_skill map, the read_skill_file map), instead of each one independently
+    # re-resolving. Independent re-resolves risk a skill visible in the prompt but
+    # missing from a tool's map (or vice versa) if resolution ever becomes
+    # non-deterministic (e.g. step_024's planned LLM-routed resolver). Snapshotted
+    # immediately (H1) so no tool closure built below ever holds a live Skill ORM
+    # instance across a thread/session boundary — mirrors ``_capture_silo_data``.
+    # H2 (round-2 review fix) + Finding 3/5 (review-round fix): `_resolve_skills_for_prompt`
+    # is the single shared resolve -> snapshot -> route -> render pipeline, reused by
+    # `IACTTool.create` / `IACTOCRTool.create` below so a sub-agent can never drift onto
+    # an unresolved/unsnapshotted/unrouted skills section again.
+    skill_snapshots, skills_section = await _resolve_skills_for_prompt(
+        agent, user_message=user_message, llm=llm,
+    )
+    if skills_section:
+        system_prompt_content = system_prompt_content + "\n" + skills_section
 
     if working_dir:
         system_prompt_content = (
@@ -650,6 +727,7 @@ async def create_agent(
             sandbox_session_key=sandbox_session_key,
             sandbox_session_service=sandbox_session_service,
             attached_files=attached_files,
+            user_message=user_message,
         ))
 
     # Base tools — always available for every agent
@@ -836,6 +914,8 @@ async def create_agent(
                 if hasattr(tool, "args_schema") and isinstance(tool.args_schema, dict):
                     ensure_json_schema_types(tool.args_schema)
             if mcp_tools:
+                for tool in mcp_tools:
+                    _tag_tool(tool, "MCP")
                 tools.extend(mcp_tools)
     except asyncio.TimeoutError:
         logger.warning(
@@ -851,12 +931,35 @@ async def create_agent(
         logger.debug("Full MCP tools loading error:", exc_info=True)
         mcp_client = None
 
-    # Add skill loader tool if agent has skills
-    if hasattr(agent, 'skill_associations') and agent.skill_associations:
-        skill_tool = create_skill_loader_tool(agent.skill_associations)
+    # Add skill loader / file reader tools if agent has skills. Providers are built lazily
+    # (only when there are skills to wire) via the service-layer factory so this module is
+    # the single site that bridges tools/skill_tools.py (DB-free) to the DB/sandbox layers —
+    # step_013's contract: no other call site iterates skill_associations directly. Reuse
+    # the single resolve+snapshot from above (H1/H2) — never re-resolve here.
+    if skill_snapshots:
+        from services.skill_package_service import build_skill_tool_providers
+
+        payload_provider, list_paths_provider, file_content_provider = build_skill_tool_providers()
+
+        skill_tool = create_skill_loader_tool(
+            skill_snapshots,
+            sandbox_handle=sandbox_handle,
+            sandbox_provider=sandbox_provider,
+            payload_provider=payload_provider,
+        )
         if skill_tool:
             tools.append(skill_tool)
-            logger.info(f"Skill loader tool added with {len(agent.skill_associations)} skills")
+
+        skill_file_reader_tool = create_skill_file_reader_tool(
+            skill_snapshots,
+            list_paths_provider=list_paths_provider,
+            file_content_provider=file_content_provider,
+            sandbox_handle=sandbox_handle,
+        )
+        if skill_file_reader_tool:
+            tools.append(skill_file_reader_tool)
+
+    _tag_untyped_tools(tools)
 
     if pydantic_model:
         # In LangChain v1, response_format accepts the pydantic model directly.
@@ -945,6 +1048,24 @@ def compute_thread_id(agent, session_id=None) -> str:
     if getattr(agent, "has_memory", False) and session_id:
         return f"thread_{agent.agent_id}_{session_id}"
     return f"thread_{agent.agent_id}"
+
+
+def _tag_tool(tool: Any, tool_type: str, **extra: Any) -> None:
+    """Record the tool's metrics type in its metadata (propagated to callback handlers)."""
+    if not isinstance(tool, BaseTool):
+        return  # provider-side tool dicts never run locally
+    tool.metadata = {**(tool.metadata or {}), METRICS_TOOL_TYPE_KEY: tool_type, **extra}
+
+
+def _tag_untyped_tools(tools: List[Any]) -> None:
+    """Tag every tool not already typed at its source: sub-agents as AGENT, the rest BUILTIN."""
+    for tool in tools:
+        if not isinstance(tool, BaseTool) or METRICS_TOOL_TYPE_KEY in (tool.metadata or {}):
+            continue
+        if isinstance(tool, (IACTTool, IACTOCRTool)):
+            _tag_tool(tool, "AGENT", **{METRICS_SUB_AGENT_ID_KEY: tool.agent.agent_id})
+        else:
+            _tag_tool(tool, "BUILTIN")
 
 
 def prepare_agent_config(agent):
@@ -1171,12 +1292,18 @@ class IACTTool(BaseTool):
         sandbox_session_key: Optional[str] = None,
         sandbox_session_service: Optional[Any] = None,
         attached_files: Optional[List[Dict]] = None,
+        user_message: Optional[str] = None,
     ) -> "IACTTool":
         """Build an agent-as-tool, including the sub-agent's MCP tools.
 
         MCP tools are loaded with an awaited MultiServerMCPClient, which is not
         possible inside a synchronous ``__init__``; hence this async factory. It
         is the only supported way to obtain a ready-to-use ``IACTTool``.
+
+        ``user_message`` is the parent turn's user message, forwarded down from
+        ``create_agent``/``discover_tool`` purely so this sub-agent's own skill-router
+        pass (``agent.skill_router_enabled``, see ``_resolve_skills_for_prompt``) has
+        the same routing signal the top-level agent has — it is otherwise unused here.
         """
         instance = cls(
             agent,
@@ -1193,7 +1320,10 @@ class IACTTool(BaseTool):
         # Add nested tool agents recursively
         for tool in agent.tool_associations:
             sub_agent = tool.tool
-            tools.append(await discover_tool(sub_agent, user_context=user_context, attached_files=attached_files))
+            tools.append(await discover_tool(
+                sub_agent, user_context=user_context, attached_files=attached_files,
+                user_message=user_message,
+            ))
 
         # Add base useful tools
         tools.append(fetch_file_in_base64)
@@ -1276,8 +1406,16 @@ class IACTTool(BaseTool):
         # Inject current date to avoid need for a tool call
         current_date = datetime.now().strftime("%Y-%m-%d")
         tool_system_prompt += f"\n\nToday's date is {current_date}."
-        if agent.system_prompt and hasattr(agent, 'skill_associations') and agent.skill_associations:
-            skills_section = generate_skills_system_prompt_section(agent.skill_associations)
+        if agent.system_prompt:
+            # Finding 3/5 fix: reuse the shared resolve -> snapshot -> route -> render
+            # pipeline (see `_resolve_skills_for_prompt`) instead of calling
+            # `generate_skills_system_prompt_section(agent.skill_associations)` directly
+            # on the lazy-loaded ORM relationship — that reintroduced an N+1 query per
+            # turn (1 for the association list + 1 per attached skill) and never reached
+            # the opt-in skill router even when `skill_router_enabled` was set.
+            _, skills_section = await _resolve_skills_for_prompt(
+                agent, user_message=user_message, llm=instance.llm,
+            )
             if skills_section:
                 tool_system_prompt = tool_system_prompt + "\n" + skills_section
 
@@ -1322,14 +1460,44 @@ class IACTTool(BaseTool):
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
+        started_at = datetime.utcnow()
+        result = None
+        error = None
         try:
             formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
             result = self.react_agent.invoke({"messages": messages})
             return self._extract_last_message_content(result)
         except Exception as e:
+            error = e
             logger.error(f"Error executing agent tool {self.name}: {str(e)}")
             return f"Error executing agent tool: {str(e)}"
+        finally:
+            self._record_metrics(query, started_at, result, error)
+
+    def _record_metrics(self, query: str, started_at: datetime, result: Any, error: Optional[Exception]) -> None:
+        """Record this sub-agent run as an AGENT_AS_TOOL execution linked to its parent."""
+        from services.agent_metrics_recorder import record_agent_execution
+
+        finished_at = datetime.utcnow()
+        record_agent_execution(
+            event_id=str(uuid.uuid4()),
+            fresh_agent=self.agent,
+            user_context={
+                **(self.user_context or {}),
+                'parent_execution_id': (self.user_context or {}).get('current_event_id'),
+                'caller_type_override': 'AGENT_AS_TOOL',
+            },
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+            status="ERROR" if error is not None else "SUCCESS",
+            error_code=type(error).__name__ if error is not None else None,
+            error_message=str(error)[:2000] if error is not None else None,
+            result=result if isinstance(result, dict) else None,
+            image_files=[],
+            message=query,
+        )
 
     def _format_tool_query(self, query: str) -> str:
         """Apply the sub-agent prompt template to a tool query."""
@@ -1413,6 +1581,9 @@ class IACTTool(BaseTool):
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
+        started_at = datetime.utcnow()
+        result = None
+        error = None
         try:
             formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
@@ -1429,6 +1600,7 @@ class IACTTool(BaseTool):
             from tools.streaming_utils import map_stream_event
 
             latest_state: Any = None
+            turn_messages: list = []
             async for mode, chunk in self.react_agent.astream(
                 {"messages": messages},
                 stream_mode=["updates", "custom"],
@@ -1437,6 +1609,7 @@ class IACTTool(BaseTool):
                     for state_delta in chunk.values():
                         if isinstance(state_delta, dict) and "messages" in state_delta:
                             latest_state = state_delta
+                            turn_messages.extend(state_delta["messages"] or [])
 
                 events = map_stream_event(mode, chunk)
                 if not events:
@@ -1444,14 +1617,18 @@ class IACTTool(BaseTool):
                 for event in events:
                     self._emit_subagent_stream_event(stream_writer, event)
 
+            result = {"messages": turn_messages}
             if latest_state is not None:
                 return self._extract_last_message_content(latest_state)
 
             return ""
 
         except Exception as e:
+            error = e
             logger.error(f"Error executing agent tool {self.name} (async): {str(e)}")
             return f"Error executing agent tool: {str(e)}"
+        finally:
+            self._record_metrics(query, started_at, result, error)
 
 
 async def _execute_tool_agent_ocr(
@@ -1562,12 +1739,16 @@ class IACTOCRTool(BaseTool):
         agent: Agent,
         user_context: Optional[Dict] = None,
         attached_files: Optional[List[Dict]] = None,
+        user_message: Optional[str] = None,
     ) -> "IACTOCRTool":
         """Build an OCR agent-as-tool with MCP support.
 
         Similar to ``IACTTool.create`` but adds OCR-specific validation
         and tools.  A failing MCP server degrades the sub-agent but never
         breaks construction.
+
+        ``user_message`` is forwarded from the parent turn purely to feed this
+        sub-agent's own opt-in skill-router pass — see ``IACTTool.create``.
         """
         instance = cls(agent, user_context=user_context, attached_files=attached_files)
 
@@ -1576,7 +1757,10 @@ class IACTOCRTool(BaseTool):
         # Nested tool agents — only recurse into non-OCR agents, because
         for t in agent.tool_associations:
             sub_agent = t.tool
-            nested = await discover_tool(sub_agent, user_context=user_context, attached_files=attached_files)
+            nested = await discover_tool(
+                sub_agent, user_context=user_context, attached_files=attached_files,
+                user_message=user_message,
+            )
             tools.append(nested)
 
         # MCP tools
@@ -1602,8 +1786,11 @@ class IACTOCRTool(BaseTool):
         tool_system_prompt = agent.system_prompt or ""
         current_date = datetime.now().strftime("%Y-%m-%d")
         tool_system_prompt += f"\n\nToday's date is {current_date}."
-        if agent.system_prompt and hasattr(agent, "skill_associations") and agent.skill_associations:
-            skills_section = generate_skills_system_prompt_section(agent.skill_associations)
+        if agent.system_prompt:
+            # Finding 3/5 fix — see the matching comment in IACTTool.create.
+            _, skills_section = await _resolve_skills_for_prompt(
+                agent, user_message=user_message, llm=instance.llm,
+            )
             if skills_section:
                 tool_system_prompt = tool_system_prompt + "\n" + skills_section
 
@@ -1681,13 +1868,11 @@ class IACTOCRTool(BaseTool):
                         user_context=self.user_context,
                     )
 
+                    # execute_agent_ocr(for_api=True) already unwraps the
+                    # OCR result to its "content" (the output-parser dict).
                     results.append({
                         "file": filename,
-                        "content": (
-                            ocr_result.get("content")
-                            if isinstance(ocr_result, dict)
-                            else ocr_result
-                        )
+                        "content": ocr_result,
                     })
 
                 except Exception as exc:
@@ -1779,6 +1964,7 @@ async def discover_tool(
     sandbox_session_key: Optional[str] = None,
     sandbox_session_service: Optional[Any] = None,
     attached_files: Optional[List[Dict]] = None,
+    user_message: Optional[str] = None,
 ) -> BaseTool:
     """Return the appropriate tool wrapper for *agent*.
 
@@ -1786,9 +1972,17 @@ async def discover_tool(
     (``type == 'ocr_agent'``), otherwise to :class:`IACTTool`. Sandbox
     parameters are only meaningful for :class:`IACTTool` — OCR agents
     don't support code interpreter.
+
+    ``user_message`` is the current turn's user message, forwarded straight through
+    from the top-level ``create_agent`` call (and recursively from nested
+    ``IACTTool``/``IACTOCRTool`` builders) purely to feed each sub-agent's own opt-in
+    skill-router pass (Finding 5) — see ``_resolve_skills_for_prompt``.
     """
     if agent.type == "ocr_agent":
-        return await IACTOCRTool.create(agent, user_context=user_context, attached_files=attached_files)
+        return await IACTOCRTool.create(
+            agent, user_context=user_context, attached_files=attached_files,
+            user_message=user_message,
+        )
     return await IACTTool.create(
         agent,
         user_context=user_context,
@@ -1798,6 +1992,7 @@ async def discover_tool(
         sandbox_session_key=sandbox_session_key,
         sandbox_session_service=sandbox_session_service,
         attached_files=attached_files,
+        user_message=user_message,
     )
 
 
@@ -2135,5 +2330,6 @@ def get_retriever_tool(
         description=tool_description,
         args_schema=args_schema,
         response_format="content_and_artifact",
+        metadata={METRICS_TOOL_TYPE_KEY: "RETRIEVER"},
     )
 
