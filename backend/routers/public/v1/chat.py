@@ -1,7 +1,9 @@
+import asyncio
+import contextlib
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from typing import AsyncGenerator, List, Optional, Annotated
@@ -66,6 +68,37 @@ def _validate_search_params(parsed):
     return parsed
 
 
+# How often call_agent checks whether its client is still connected.
+_DISCONNECT_POLL_SECONDS = 1.0
+
+
+async def _cancel_on_disconnect(request: Request, coro):
+    """Await *coro*, cancelling it if the client disconnects first.
+
+    Returns ``(result, disconnected)``. A non-streaming request whose client
+    has gone (timeout, closed connection) used to keep running to the end:
+    every tool call and LLM turn for an answer nobody reads. Under a client
+    that retries on timeout this piles up — on 2026-10-01 an eval run at
+    parallel 4 ended with 37 agent executions in flight, saturating the LLM.
+    Cutting a turn mid-tool is safe for memory: the next turn of that
+    conversation rolls back to the last clean checkpoint (see
+    ``CheckpointerCacheService.get_rollback_checkpoint_id``).
+    """
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_DISCONNECT_POLL_SECONDS)
+            if done:
+                return task.result(), False
+            if await request.is_disconnected():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                return None, True
+    finally:
+        # Our own caller was cancelled (e.g. server shutdown): don't orphan it.
+        if not task.done():
+            task.cancel()
 
 
 # AGENT CHAT ENDPOINTS
@@ -87,6 +120,7 @@ def _validate_search_params(parsed):
     },
 )
 async def call_agent(
+    request: Request,
     app_id: int,
     agent_id: int,
     message: Annotated[str, Form(..., description="The user message to send to the agent")],
@@ -146,15 +180,26 @@ async def call_agent(
         )
 
         execution_service = AgentExecutionService()
-        result = await execution_service.execute_agent_chat_with_file_refs(
-            agent_id=agent_id,
-            message=message,
-            file_references=all_file_references,
-            search_params=parsed_search_params,
-            user_context=user_context,
-            conversation_id=conversation_id,
-            db=db,
+        result, disconnected = await _cancel_on_disconnect(
+            request,
+            execution_service.execute_agent_chat_with_file_refs(
+                agent_id=agent_id,
+                message=message,
+                file_references=all_file_references,
+                search_params=parsed_search_params,
+                user_context=user_context,
+                conversation_id=conversation_id,
+                db=db,
+            ),
         )
+        if disconnected:
+            logger.warning(
+                "Public API chat for agent %s cancelled: client disconnected before the answer",
+                agent_id,
+            )
+            # 499 (nginx "client closed request"): nobody reads it, but it
+            # keeps the access log honest instead of a fake 200.
+            return Response(status_code=499)
 
         response_data = AgentResponseSchema(
             response=result["response"],

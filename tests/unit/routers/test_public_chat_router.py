@@ -3,6 +3,7 @@ Tests for public API chat router.
 Covers: call_agent, call_agent_stream, reset_conversation,
         conversation CRUD, and shared helpers.
 """
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -47,6 +48,16 @@ def _mock_streaming_service(mocker):
 
     svc.stream_agent_chat.return_value = _gen()
     return svc
+
+
+class _FakeRequest:
+    """Stand-in for starlette's Request: only is_disconnected() is used."""
+
+    def __init__(self, disconnected: bool = False):
+        self.disconnected = disconnected
+
+    async def is_disconnected(self) -> bool:
+        return self.disconnected
 
 
 def _mock_process_files(mocker):
@@ -120,6 +131,7 @@ class TestCallAgent:
         svc = _mock_execution_service(mocker)
 
         result = await chat_module.call_agent(
+            request=_FakeRequest(),
             app_id=1,
             agent_id=1,
             message="Hello",
@@ -144,7 +156,7 @@ class TestCallAgent:
 
         with pytest.raises(HTTPException) as exc_info:
             await chat_module.call_agent(
-                app_id=1, agent_id=999, message="hi", files=[],
+                request=_FakeRequest(), app_id=1, agent_id=999, message="hi", files=[],
                 file_references=None, search_params=None,
                 conversation_id=None, api_key="key", db=MagicMock(),
             )
@@ -161,13 +173,64 @@ class TestCallAgent:
 
         with pytest.raises(HTTPException) as exc_info:
             await chat_module.call_agent(
-                app_id=1, agent_id=1, message="hi", files=[],
+                request=_FakeRequest(), app_id=1, agent_id=1, message="hi", files=[],
                 file_references=None, search_params=None,
                 conversation_id=None, api_key="key", db=MagicMock(),
             )
         assert exc_info.value.status_code == 500
         assert "internal error" not in exc_info.value.detail
         assert exc_info.value.detail == "Agent execution failed"
+
+    @pytest.mark.asyncio
+    async def test_client_disconnect_cancels_execution(self, mocker):
+        # A client that gives up (timeout, closed tab) must not leave the agent
+        # running: on 2026-10-01 abandoned eval requests kept executing until
+        # 37 ran at once against a 4-way client and saturated the LLM.
+        _patch_auth(mocker)
+        _mock_process_files(mocker)
+        svc = _mock_execution_service(mocker)
+        mocker.patch.object(chat_module, "_DISCONNECT_POLL_SECONDS", 0.01)
+        cancelled = asyncio.Event()
+
+        async def _slow_execution(**_kwargs):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        svc.execute_agent_chat_with_file_refs = AsyncMock(side_effect=_slow_execution)
+
+        response = await asyncio.wait_for(
+            chat_module.call_agent(
+                request=_FakeRequest(disconnected=True), app_id=1, agent_id=1,
+                message="hi", files=[], file_references=None, search_params=None,
+                conversation_id=None, api_key="key", db=MagicMock(),
+            ),
+            timeout=5,
+        )
+        assert cancelled.is_set()
+        assert response.status_code == 499
+
+    @pytest.mark.asyncio
+    async def test_connected_client_waits_for_slow_execution(self, mocker):
+        _patch_auth(mocker)
+        _mock_process_files(mocker)
+        svc = _mock_execution_service(mocker)
+        mocker.patch.object(chat_module, "_DISCONNECT_POLL_SECONDS", 0.01)
+
+        async def _slow_execution(**_kwargs):
+            await asyncio.sleep(0.1)  # several poll intervals
+            return {"response": "done", "conversation_id": 7, "metadata": {}}
+
+        svc.execute_agent_chat_with_file_refs = AsyncMock(side_effect=_slow_execution)
+
+        result = await chat_module.call_agent(
+            request=_FakeRequest(disconnected=False), app_id=1, agent_id=1,
+            message="hi", files=[], file_references=None, search_params=None,
+            conversation_id=None, api_key="key", db=MagicMock(),
+        )
+        assert result.response == "done"
 
 
 # ---------------------------------------------------------------------------
