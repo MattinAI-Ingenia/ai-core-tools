@@ -27,10 +27,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Instalar Poetry
 RUN pip install --no-cache-dir "poetry>=2.2.0,<3.0.0"
 
+# `simplegeneric` (pulled in by the legacy OpenStack `WSME` dependency in the
+# lock file) imports the private `_adapters` symbol from importlib-metadata
+# while its source distribution is being built. That symbol was removed in
+# importlib-metadata 8.7.0. Build it with the last compatible release first;
+# Poetry then reuses the already-installed wheel instead of rebuilding the
+# broken sdist.
+RUN pip install --no-cache-dir "importlib-metadata<8.7.0" "simplegeneric==0.8.1"
+
 # Copiar archivos de dependencias
 COPY pyproject.toml poetry.lock ./
 
-# Instalar dependencias de producción
+# Instalar dependencias de producción — includes the optional sandbox
+# provider SDKs (opensandbox, daytona, e2b-code-interpreter), now managed
+# directly in pyproject.toml/poetry.lock rather than a separate ad-hoc `pip
+# install` step, so their transitive dependencies are pinned and reproducible.
+# (e2b is pinned explicitly in pyproject.toml because e2b-code-interpreter
+# only declares a loose `e2b>=2.7.0,<3.0.0` — an unpinned resolve previously
+# picked up a newer e2b release that broke `create_code_context()`/
+# `run_code()` with `AttributeError: 'Sandbox' object has no attribute
+# '_transport'`.)
 RUN poetry config virtualenvs.create false && \
     poetry install --only=main --no-interaction --no-ansi --no-cache
 
@@ -86,5 +102,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
-# Comando de inicio: ejecutar migraciones y luego la aplicación
-CMD ["sh", "-c", "cd / && python -m alembic upgrade head && cd /aict_backend && python -m uvicorn main:app --host=0.0.0.0 --port=8000 --workers 4 --limit-concurrency 100"]
+# Comando de inicio: ejecutar migraciones y luego la aplicación.
+# Workers y concurrencia parametrizables via env vars para poder ajustar el
+# consumo de memoria por despliegue sin rebuild. Cada worker uvicorn carga
+# FastAPI + SQLAlchemy + LangChain en su propio proceso (~0.5–1.5 GB RSS),
+# asi que en hosts pequeños conviene bajarlo a 1.
+#   UVICORN_WORKERS              (default 2)
+#   UVICORN_LIMIT_CONCURRENCY    (default 100 por worker)
+CMD ["sh", "-c", "cd / && python -m alembic upgrade head && cd /aict_backend && python -m uvicorn main:app --host=0.0.0.0 --port=8000 --workers ${UVICORN_WORKERS:-2} --limit-concurrency ${UVICORN_LIMIT_CONCURRENCY:-100}"]

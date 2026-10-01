@@ -44,32 +44,65 @@ DATABASE_HOST=postgres  # Service name in docker-compose
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AICT_LOGIN` | No | `OIDC` | Authentication mode: `OIDC`, `FAKE`, or `LOCAL` |
-| `SECRET_KEY` | Yes | — | Session encryption key (256-bit) |
-| `AICT_OMNIADMINS` | No | — | Comma-separated emails of superusers |
-| `JWT_ALGORITHM` | No | `HS256` | JWT signing algorithm |
-| `JWT_EXPIRATION_HOURS` | No | `24` | JWT token expiration (hours) |
+| `AICT_LOGIN` | No | `OIDC` | Authentication mode: `OIDC` (Microsoft Entra) or `LOCAL` (admin-provisioned email+password). FAKE mode is retired. |
+| `SECRET_KEY` | **Yes** | — | Application secret key. Must be at least 32 characters and not a known placeholder. App fails fast at startup if the check fails. Used to sign JWTs and set-password tokens — rotating this value invalidates all active sessions. |
+| `AICT_OMNIADMINS` | No | — | Comma-separated email addresses of superusers |
+| `JWT_ALGORITHM` | No | `HS256` | **Legacy — read but unused at runtime.** LOCAL mode hardcodes HS256. |
+| `JWT_EXPIRATION_HOURS` | No | `24` | **Legacy — read but unused at runtime.** Access token TTL is controlled by `LOCAL_ACCESS_TTL_MINUTES`. |
 
-**Example**:
+> Generate a safe `SECRET_KEY`: `python -c "import secrets; print(secrets.token_hex(32))"`
+
+**OIDC mode**:
 ```bash
 AICT_LOGIN=OIDC
-SECRET_KEY=your-256-bit-secret-key-here-change-in-production
-AICT_OMNIADMINS=admin@example.com,superuser@example.com
-JWT_ALGORITHM=HS256
-JWT_EXPIRATION_HOURS=24
+SECRET_KEY=<64-char hex string>
+AICT_OMNIADMINS=admin@example.com
 ```
 
-**Development** (FAKE mode):
-```bash
-AICT_LOGIN=FAKE
-SECRET_KEY=dev-secret-key
-```
-
-**SaaS mode** (LOCAL — email+password):
+**LOCAL mode** (self-hosted email+password):
 ```bash
 AICT_LOGIN=LOCAL
-AICT_DEPLOYMENT_MODE=saas
-SECRET_KEY=your-256-bit-secret-key-here
+SECRET_KEY=<64-char hex string>
+AICT_OMNIADMINS=admin@example.com
+```
+
+### LOCAL Mode Tuning
+
+All variables are optional. The defaults are suitable for most deployments.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_COOKIE_SECURE` | `true` | Controls the `Secure` flag on session cookies. Set `false` only for plain-HTTP local development — never in production. |
+| `LOCAL_ACCESS_TTL_MINUTES` | `15` | Access token lifetime in minutes |
+| `LOCAL_REFRESH_TTL_DAYS` | `14` | Refresh token lifetime in days |
+| `LOCAL_LOCKOUT_THRESHOLD` | `5` | Failed login attempts before account lockout |
+| `LOCAL_LOCKOUT_BASE_SECONDS` | `60` | Base lockout duration in seconds (exponential backoff: `base * 2^(attempts - threshold)`) |
+| `LOCAL_TOKEN_LEEWAY_SECONDS` | `30` | Clock-skew tolerance for JWT validation |
+| `LOCAL_SET_PASSWORD_TOKEN_MAX_AGE_HOURS` | `48` | Validity window for admin-issued set-password links |
+
+### SMTP (LOCAL Mode)
+
+Used to email set-password links when calling `POST /internal/admin/users/{id}/reset-link`. Both `SMTP_HOST` and `SMTP_FROM` must be set to enable email delivery. When either is absent a `NoopEmailSender` is used: the token is returned only in the admin API response body (never logged) and the admin must forward it manually. For newly created users (`POST /internal/admin/users/local`) the token is always returned only in the response body — no email is sent regardless of SMTP configuration.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SMTP_HOST` | — | SMTP relay hostname. Required for email delivery. |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_USER` | — | SMTP authentication username (optional) |
+| `SMTP_PASSWORD` | — | SMTP authentication password. Never logged. |
+| `SMTP_TLS` | `true` | Enable STARTTLS |
+| `SMTP_FROM` | — | Sender address (e.g. `no-reply@example.com`). Required for email delivery. |
+| `SMTP_TIMEOUT_SECONDS` | `10` | Per-connection SMTP timeout |
+
+**Example (LOCAL mode with SMTP)**:
+```bash
+AICT_LOGIN=LOCAL
+SECRET_KEY=<64-char hex string>
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=no-reply@example.com
+SMTP_PASSWORD=smtp-password
+SMTP_FROM=no-reply@example.com
 ```
 
 ### LLM API Keys
@@ -81,7 +114,7 @@ SECRET_KEY=your-256-bit-secret-key-here
 | `MISTRAL_API_KEY` | No | — | MistralAI API key |
 | `AZURE_OPENAI_API_KEY` | No | — | Azure OpenAI API key |
 | `AZURE_OPENAI_ENDPOINT` | No | — | Azure OpenAI endpoint URL |
-| `GOOGLE_API_KEY` | No | — | Google Gemini API key |
+| `GOOGLE_API_KEY` | No | — | Google Gemini API key for AI Studio LLMs and embeddings |
 
 **Example**:
 ```bash
@@ -91,6 +124,8 @@ MISTRAL_API_KEY=...
 ```
 
 **Note**: API keys are optional. Configure only the providers you plan to use.
+
+Google AI Studio and Vertex AI credentials can also be configured per AI Service or Embedding Service in the Mattin AI UI. Vertex AI uses a service-account JSON, project ID, and region stored on the service configuration rather than a global environment variable.
 
 ### Vector Database
 
@@ -213,6 +248,49 @@ SMTP_PORT=587
 
 See [SaaS Mode Guide](../guides/saas-mode.md) for complete setup instructions.
 
+### Sandbox Providers
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SANDBOX_DEFAULT_PROVIDER` | No | `opensandbox` | Default code interpreter sandbox provider: `opensandbox`, `daytona`, or `e2b` |
+| `SANDBOX_ALLOWED_PROVIDERS` | No | `opensandbox,daytona,e2b` | Comma-separated provider names apps may select |
+| `OPENSANDBOX_DOMAIN` | OpenSandbox | `localhost:8080` | OpenSandbox server host and port |
+| `OPENSANDBOX_API_KEY` | No | — | OpenSandbox server API key |
+| `OPENSANDBOX_CODE_INTERPRETER_IMAGE` | No | `opensandbox/code-interpreter:v1.0.2` | OpenSandbox code interpreter image |
+| `DAYTONA_API_KEY` | Daytona | — | Daytona API key |
+| `DAYTONA_API_URL` | No | SDK default | Daytona API URL |
+| `DAYTONA_TARGET` | No | org default | Daytona target/region |
+| `DAYTONA_IMAGE` | No | — | Optional Daytona image for sandbox creation |
+| `DAYTONA_SNAPSHOT` | No | — | Optional Daytona snapshot for sandbox creation |
+| `DAYTONA_WORKSPACE` | No | `workspace` | Workspace root inside Daytona sandboxes |
+| `DAYTONA_SUPPORTED_LANGUAGES` | No | `python,bash` | Languages exposed through the Daytona provider |
+| `DAYTONA_AUTO_STOP_INTERVAL` | No | `2` | Daytona auto-stop interval in minutes. Defaults to the global idle timeout rounded up to minutes |
+| `E2B_API_KEY` | E2B | — | E2B API key |
+| `E2B_TEMPLATE` | No | SDK default | Optional E2B sandbox template name or ID |
+| `E2B_WORKSPACE` | No | `/home/user/workspace` | Workspace root inside E2B sandboxes |
+| `E2B_SUPPORTED_LANGUAGES` | No | `python,javascript,bash` | Languages exposed through the E2B provider |
+| `E2B_ALLOW_INTERNET_ACCESS` | No | `true` | Whether E2B sandboxes may access the internet |
+| `SANDBOX_DEFAULT_TIMEOUT_S` | No | `30` | Per-execution timeout in seconds |
+| `SANDBOX_SKILL_BOOTSTRAP_TIMEOUT_S` | No | `120` | Timeout for a skill's bootstrap script inside the sandbox. Deliberately more generous than `SANDBOX_DEFAULT_TIMEOUT_S` — bootstrap scripts are allowed to assume network egress (e.g. `pip install`) to prepare a skill's runtime dependencies. |
+| `SANDBOX_SESSION_TTL_H` | No | `2` | Max sandbox lifetime in hours for providers that enforce TTL |
+| `SANDBOX_IDLE_TIMEOUT_S` | No | `120` | Max idle time before cached sandboxes are stopped/destroyed |
+| `SANDBOX_REAPER_INTERVAL_S` | No | `30` | How often the backend checks for idle sandboxes |
+
+### Skill Package Import
+
+Hardened limits applied by the in-memory zip reader (`backend/utils/safe_zip.py`) when a skill package (`.zip`) is imported — via the app-scoped `/skills/import` route, the admin `/system-skills/import` route, or a Claude Code plugin import. All are optional; an invalid value (non-numeric, NaN/infinite, below the documented minimum) makes the backend fail fast at startup rather than silently falling back to the default.
+
+| Variable | Default | Description |
+|----------|---------|--------------|
+| `SKILL_IMPORT_MAX_FILES` | `500` | Maximum number of file entries in an uploaded skill package |
+| `SKILL_IMPORT_MAX_TOTAL_BYTES` | `52428800` (50 MiB) | Maximum cumulative **uncompressed** size of an uploaded skill package |
+| `SKILL_IMPORT_MAX_FILE_BYTES` | `10485760` (10 MiB) | Maximum **uncompressed** size of a single file inside a skill package |
+| `SKILL_IMPORT_MAX_RATIO` | `100` | Maximum uncompressed/compressed ratio (zip-bomb guard), measured against the uploaded archive size |
+| `SKILL_IMPORT_MAX_ARCHIVE_BYTES` | `26214400` (25 MiB) | Maximum size of the uploaded (compressed) archive itself |
+| `SKILL_IMPORT_MAX_CONCURRENCY` | `2` | Maximum number of skill package import/export operations processed concurrently per backend process (shared bulkhead — both hold a whole package in memory); exceeding it returns HTTP 429 |
+| `SKILL_IMPORT_MAX_PLUGIN_SKILLS` | `25` | Maximum number of candidate skills (top-level `skills/<name>/` directories) accepted from a single Claude Code plugin archive import |
+| `SKILL_IMPORT_LOCK_TIMEOUT_SECONDS` | `5` | Per-app advisory lock timeout applied while importing one candidate skill from a Claude Code plugin archive; bounds how long a contended import can hold the shared import/export bulkhead before that candidate is reported busy |
+
 ### CORS Configuration
 
 | Variable | Required | Default | Description |
@@ -278,7 +356,7 @@ VITE_OIDC_REDIRECT_URI=http://localhost:5173/auth/success
 VITE_OIDC_SCOPE=openid profile email
 ```
 
-**Development** (FAKE mode):
+**LOCAL mode** (OIDC disabled):
 ```bash
 VITE_OIDC_ENABLED=false
 ```
@@ -331,9 +409,10 @@ DATABASE_PORT=5432
 SQLALCHEMY_DATABASE_URI=postgresql://mattin:password@localhost:5432/mattin_ai
 DATABASE_PASSWORD=dev_password
 
-# Authentication
-AICT_LOGIN=FAKE
-SECRET_KEY=dev-secret-key-for-local-testing-only
+# Authentication — LOCAL mode for local development
+AICT_LOGIN=LOCAL
+SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
+AUTH_COOKIE_SECURE=false        # Required for plain-HTTP local dev
 
 # LLM API Keys (optional for development)
 OPENAI_API_KEY=sk-proj-...
@@ -355,8 +434,8 @@ DATABASE_NAME=mattin_ai
 DATABASE_PORT=5432
 
 # Authentication
-AICT_LOGIN=FAKE
-SECRET_KEY=docker-secret-key-change-in-production
+AICT_LOGIN=LOCAL
+SECRET_KEY=<generate a strong key — minimum 32 chars>
 
 # Ports
 BACKEND_PORT=8000
@@ -443,6 +522,6 @@ openssl rand -base64 24
 
 ## See Also
 
-- [Authentication Guide](../guides/authentication.md) — OIDC and FAKE mode setup
+- [Authentication Guide](../guides/authentication.md) — OIDC and LOCAL mode setup, cookie transport, provisioning workflow, and migration from FAKE mode
 - [Deployment Guide](../guides/deployment.md) — Docker and Kubernetes configuration
 - [LLM Integration](../ai/llm-integration.md) — API key configuration for LLM providers

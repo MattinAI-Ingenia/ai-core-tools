@@ -18,11 +18,12 @@ from schemas.apps_schemas import (
     InvitationResponseSchema
 )
 from schemas.common_schemas import MessageResponseSchema
-from .auth_utils import get_current_user_oauth
+from .auth_utils import get_current_user_oauth, viewer_writable
 from routers.controls.role_authorization import require_min_role, AppRole
 
 # Import logger
 from utils.logger import get_logger
+from utils.config import is_omniadmin
 
 logger = get_logger(__name__)
 
@@ -82,10 +83,10 @@ async def list_collaborators(
     List all collaborators for a specific app.
     """
     user_id = auth_context.identity.id
-    
+
     try:
         _, collaboration_service = get_services(db)
-        
+
         # Check if user can access this app
         if not collaboration_service.can_user_access_app(user_id, app_id):
             raise HTTPException(
@@ -106,7 +107,8 @@ async def list_collaborators(
                 status=collab.status.value,
                 invited_at=collab.invited_at,
                 accepted_at=collab.accepted_at,
-                invited_by_name=collab.inviter.name if collab.inviter else "Unknown"
+                invited_by_name=collab.inviter.name if collab.inviter else "Unknown",
+                platform_role=collab.user.platform_role if collab.user else 'editor',
             ))
         
         return result
@@ -139,13 +141,23 @@ async def invite_collaborator(
     try:
         _, collaboration_service = get_services(db)
         
-        # Check if user can manage collaborators (owner only)
-        if not collaboration_service.can_user_manage_app(user_id, app_id):
+        # Check if user can manage collaborators (owner or administrator collaborator)
+        if not collaboration_service.can_user_administer_app(user_id, app_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only app owners can invite collaborators"
+                detail="Only app owners or administrators can invite collaborators"
             )
         
+        # Platform-role constraint: viewers can only be assigned viewer app-role.
+        # Omniadmins are exempt — new omniadmin accounts get platform_role='admin'
+        # directly, but accounts created before that default existed may still
+        # carry the old 'viewer' value, which shouldn't force a viewer-only invite.
+        target_user = UserService.get_user_by_email(db, invitation_data.email)
+        if (target_user and target_user.platform_role == 'viewer'
+                and not is_omniadmin(target_user.email)
+                and invitation_data.role != 'viewer'):
+            raise ValueError("Users with viewer platform role can only be invited as app viewers")
+
         collaboration = collaboration_service.invite_user_to_app(
             app_id=app_id,
             user_email=invitation_data.email,
@@ -195,6 +207,11 @@ async def update_collaborator_role(
     try:
         _, collaboration_service = get_services(db)
         
+        # Platform-role constraint: viewers can only hold viewer app-role
+        target_user = UserService.get_user_by_id(db, user_id)
+        if target_user and target_user.platform_role == 'viewer' and role_data.role != 'viewer':
+            raise ValueError("Users with viewer platform role can only be assigned the viewer app role")
+
         success = collaboration_service.update_collaborator_role(
             app_id=app_id,
             user_id=user_id,
@@ -273,6 +290,7 @@ async def remove_collaborator(
                            summary="Respond to invitation",
                            tags=["Collaboration"],
                            response_model=MessageResponseSchema)
+@viewer_writable  # viewers must be able to accept/decline the invites they receive
 async def respond_to_invitation(
     collaboration_id: int,
     response_data: InvitationResponseSchema,

@@ -6,17 +6,78 @@ Focus: the async factory ``IACTTool.create`` must load the sub-agent's MCP tools
 All external dependencies are mocked — no LLM, MCP server or database is touched.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
 from models.agent import Agent
+from models.ocr_agent import OCRAgent
 from tools import agentTools
 
 
 def _make_agent(name: str = "Sub Agent") -> Agent:
     """Build a transient (un-persisted) Agent suitable for IACTTool construction."""
     return Agent(name=name, description=f"{name} description", system_prompt="")
+
+
+class _StreamingReactAgent:
+    async def astream(self, _payload, stream_mode=None):
+        assert stream_mode == ["updates", "custom"]
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "python_repl",
+                                    "id": "call-1",
+                                    "args": {"code": "print('hi')"},
+                                }
+                            ],
+                        )
+                    ]
+                }
+            },
+        )
+        yield (
+            "custom",
+            {
+                "type": "code_output",
+                "tool_name": "python_repl",
+                "stream": "stdout",
+                "line": "hi\n",
+            },
+        )
+        yield (
+            "updates",
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content="hi\n",
+                            name="python_repl",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                }
+            },
+        )
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [AIMessage(content="Sub-agent final answer")]
+                }
+            },
+        )
+
+    async def ainvoke(self, _payload):
+        raise AssertionError("ainvoke should not be used when a stream writer is available")
 
 
 @pytest.mark.asyncio
@@ -76,4 +137,332 @@ async def test_iact_tool_create_survives_mcp_load_failure():
     assert tool.react_agent is not None
     assert tool.mcp_client is None
     # Base tools are still present despite the MCP failure.
-    assert agentTools.get_current_date in mock_create.call_args.kwargs["tools"]
+    assert agentTools.fetch_file_in_base64 in mock_create.call_args.kwargs["tools"]
+
+
+@pytest.mark.asyncio
+async def test_iact_tool_create_uses_sub_agent_rag_config():
+    """AC-17: the sub-agent retriever is built from the sub-agent's OWN RAG config.
+
+    ``get_retriever_tool`` must receive the params resolved for THIS agent plus its
+    own ``rag_max_retrieval_calls`` — not the root agent's caller params.
+    """
+    agent = _make_agent("RAG Sub-Agent")
+    agent.silo_id = 99
+    agent.rag_max_retrieval_calls = 3
+
+    resolved_sp = {"k": 7, "search_type": "mmr"}
+    resolved_pinned = {"anio": {"$eq": 2024}}
+    sentinel_tool = MagicMock()
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
+        patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
+        patch(
+            "services.silo_service.resolve_search_params",
+            return_value=(resolved_sp, resolved_pinned),
+        ) as mock_resolve,
+        patch("tools.agentTools.get_retriever_tool", return_value=sentinel_tool) as mock_get_ret,
+    ):
+        await agentTools.IACTTool.create(agent)
+
+    # Precedence is resolved for the sub-agent itself, with NO caller search params.
+    assert mock_resolve.call_args.args[0] is agent
+    assert mock_resolve.call_args.args[1] is None
+
+    # The dynamic tool is built with the resolved params + the sub-agent's own ceiling.
+    ret_args = mock_get_ret.call_args.args
+    assert ret_args[0] is agent.silo
+    assert ret_args[1] == resolved_sp
+    assert ret_args[2] == 3
+    assert ret_args[3] == resolved_pinned
+
+    # The retriever tool is wired into the sub-agent's toolset.
+    assert sentinel_tool in mock_create.call_args.kwargs["tools"]
+
+
+@pytest.mark.asyncio
+async def test_iact_tool_create_skips_retriever_without_silo():
+    """A sub-agent without a silo builds no retriever tool and never resolves params."""
+    agent = _make_agent("No-Silo Sub-Agent")
+    agent.silo_id = None
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()),
+        patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
+        patch("services.silo_service.resolve_search_params") as mock_resolve,
+        patch("tools.agentTools.get_retriever_tool") as mock_get_ret,
+    ):
+        await agentTools.IACTTool.create(agent)
+
+    mock_resolve.assert_not_called()
+    mock_get_ret.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_iact_tool_create_adds_shared_sandbox_tools(tmp_path):
+    """Agent-tools with code interpreter reuse the parent sandbox handle."""
+    agent = _make_agent("Sandbox Sub-Agent")
+    agent.enable_code_interpreter = True
+
+    handle = MagicMock()
+    handle.sandbox_id = "parent-sandbox"
+    handle.provider_name = "opensandbox"
+    provider = MagicMock()
+    provider.get_supported_languages.return_value = ["python"]
+    session_service = MagicMock()
+    repl_tool = MagicMock()
+    repl_tool.name = "python_repl"
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
+        patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
+        patch("tools.agentTools.create_sandbox_repl_tools", return_value=[repl_tool]) as make_repl_tools,
+    ):
+        await agentTools.IACTTool.create(
+            agent,
+            user_context={"user_id": 1},
+            working_dir=str(tmp_path),
+            sandbox_handle=handle,
+            sandbox_provider=provider,
+            sandbox_session_key="conv_1_99",
+            sandbox_session_service=session_service,
+        )
+
+    make_repl_tools.assert_called_once_with(
+        handle,
+        provider,
+        session_key="conv_1_99",
+        session_service=session_service,
+    )
+    assert repl_tool in mock_create.call_args.kwargs["tools"]
+    assert "same sandbox used by the parent agent" in mock_create.call_args.kwargs["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_iact_tool_arun_forwards_subagent_tool_events():
+    agent = _make_agent("Research Agent")
+    agent.agent_id = 42
+    emitted_events = []
+
+    with patch("tools.agentTools.get_llm", return_value=object()):
+        tool = agentTools.IACTTool(agent)
+    tool.react_agent = _StreamingReactAgent()
+
+    with patch("langgraph.config.get_stream_writer", return_value=emitted_events.append):
+        result = await tool._arun("run code")
+
+    assert result == "Sub-agent final answer"
+    assert emitted_events[0] == {
+        "type": "tool_start",
+        "data": {
+            "tool_name": "python_repl",
+            "tool_call_id": "Research_Agent:42:call-1",
+            "args": {"code": "print('hi')"},
+            "tool_input": '{"code": "print(\'hi\')"}',
+            "parent_tool_name": "Research_Agent",
+            "subagent_name": "Research Agent",
+            "subagent_id": 42,
+            "raw_tool_call_id": "call-1",
+        },
+    }
+    assert emitted_events[2] == {
+        "type": "code_output",
+        "tool_name": "python_repl",
+        "stream": "stdout",
+        "line": "hi\n",
+        "parent_tool_name": "Research_Agent",
+        "subagent_name": "Research Agent",
+        "subagent_id": 42,
+    }
+    assert emitted_events[3]["type"] == "tool_end"
+    assert emitted_events[3]["data"]["tool_call_id"] == "Research_Agent:42:call-1"
+
+
+# === OCR Agent-as-tool tests ===
+
+
+def _make_ocr_agent(name: str = "OCR Tool") -> OCRAgent:
+    """Build a transient (un-persisted) OCRAgent suitable for IACTOCRTool construction."""
+    ocr = OCRAgent(name=name, description=f"{name} description", system_prompt="")
+    ocr.type = "ocr_agent"
+    return ocr
+
+
+@pytest.mark.asyncio
+async def test_iact_ocr_tool_detects_ocr_agent():
+    """discover_tool should return IACTOCRTool when given an OCRAgent."""
+    ocr_agent = _make_ocr_agent()
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()),
+        patch.object(
+            agentTools.MCPClientManager,
+            "get_client",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        tool_instance = await agentTools.discover_tool(
+            ocr_agent,
+            user_context=None,
+        )
+
+    assert isinstance(tool_instance, agentTools.IACTOCRTool)
+
+
+@pytest.mark.asyncio
+async def test_iact_ocr_tool_falls_back_to_chat_when_no_files():
+    """IACTOCRTool should delegate to chat agents when no PDF file was provided."""
+    ocr_agent = _make_ocr_agent()
+
+    fake_react = MagicMock()
+    fake_react.ainvoke = AsyncMock(
+        return_value={
+            "messages": [
+                MagicMock(content="plain chat response")
+            ]
+        }
+    )
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch(
+            "tools.agentTools.create_langchain_agent",
+            return_value=fake_react,
+        ),
+        patch.object(
+            agentTools.MCPClientManager,
+            "get_client",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        tool_instance = await agentTools.IACTOCRTool.create(ocr_agent)
+
+    result = await tool_instance._arun(query="hello")
+
+    assert result == "plain chat response"
+
+
+@pytest.mark.asyncio
+async def test_iact_ocr_tool_uses_attached_pdf_files():
+    ocr_agent = _make_ocr_agent()
+
+    attached_files = [
+        {
+            "filename": "invoice.pdf",
+            "type": "pdf",
+            "file_path": "/tmp/invoice.pdf",
+        }
+    ]
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch(
+            "tools.agentTools._execute_tool_agent_ocr",
+            new=AsyncMock(return_value={"amount": 100}),
+        ) as mock_exec,
+        patch(
+            "tools.agentTools.create_langchain_agent",
+            return_value=MagicMock(),
+        ),
+        patch.object(
+            agentTools.MCPClientManager,
+            "get_client",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("os.path.exists", return_value=True),
+    ):
+        tool = await agentTools.IACTOCRTool.create(
+            ocr_agent,
+            attached_files=attached_files,
+        )
+
+        result = await tool._arun(query="extract")
+
+    mock_exec.assert_awaited_once()
+    # Regression: the already-unwrapped OCR content must reach the parent
+    # agent instead of being unwrapped a second time into null.
+    assert json.loads(result) == [{"file": "invoice.pdf", "content": {"amount": 100}}]
+
+
+@pytest.mark.asyncio
+async def test_iact_ocr_tool_reports_missing_pdf():
+    ocr_agent = _make_ocr_agent()
+
+    attached_files = [
+        {
+            "filename": "missing.pdf",
+            "type": "pdf",
+            "file_path": "/tmp/missing.pdf",
+        }
+    ]
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch(
+            "tools.agentTools.create_langchain_agent",
+            return_value=MagicMock(),
+        ),
+        patch.object(
+            agentTools.MCPClientManager,
+            "get_client",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("os.path.exists", return_value=False),
+    ):
+        tool = await agentTools.IACTOCRTool.create(
+            ocr_agent,
+            attached_files=attached_files,
+        )
+
+        result = await tool._arun(query="extract")
+
+    assert "PDF file not found" in result
+
+
+@pytest.mark.asyncio
+async def test_iact_ocr_tool_processes_multiple_pdfs():
+    ocr_agent = _make_ocr_agent()
+
+    attached_files = [
+        {
+            "filename": "a.pdf",
+            "type": "pdf",
+            "file_path": "/tmp/a.pdf",
+        },
+        {
+            "filename": "b.pdf",
+            "type": "pdf",
+            "file_path": "/tmp/b.pdf",
+        },
+    ]
+
+    with (
+        patch("tools.agentTools.get_llm", return_value=object()),
+        patch(
+            "tools.agentTools._execute_tool_agent_ocr",
+            new=AsyncMock(return_value={"ok": True}),
+        ) as mock_exec,
+        patch(
+            "tools.agentTools.create_langchain_agent",
+            return_value=MagicMock(),
+        ),
+        patch.object(
+            agentTools.MCPClientManager,
+            "get_client",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("os.path.exists", return_value=True),
+    ):
+        tool = await agentTools.IACTOCRTool.create(
+            ocr_agent,
+            attached_files=attached_files,
+        )
+
+        await tool._arun(query="extract")
+
+    assert mock_exec.await_count == 2

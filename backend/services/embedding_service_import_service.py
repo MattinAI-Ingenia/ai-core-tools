@@ -137,6 +137,7 @@ class EmbeddingServiceImportService:
                     export_data.embedding_service.model_name
                 )  # model_name mapped to description
                 existing_service.endpoint = export_data.embedding_service.endpoint
+                existing_service.api_version = export_data.embedding_service.api_version
                 # Note: Keep existing api_key (user configured)
 
                 self.session.add(existing_service)
@@ -166,6 +167,7 @@ class EmbeddingServiceImportService:
             provider=export_data.embedding_service.provider,
             description=export_data.embedding_service.model_name,  # model_name mapped to description
             endpoint=export_data.embedding_service.endpoint,
+            api_version=export_data.embedding_service.api_version,
         )
 
         self.session.add(new_service)

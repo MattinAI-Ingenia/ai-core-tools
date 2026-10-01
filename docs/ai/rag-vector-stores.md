@@ -10,7 +10,7 @@ Mattin AI provides a comprehensive **Retrieval-Augmented Generation (RAG)** syst
 - **Multi-backend support**: PGVector (PostgreSQL extension) or Qdrant (standalone vector DB)
 - **Document ingestion**: Upload files or scrape websites
 - **Semantic search**: Find relevant documents based on meaning, not keywords
-- **Embedding models**: OpenAI, HuggingFace, Ollama
+- **Embedding models**: OpenAI, MistralAI, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI, HuggingFace, Ollama
 - **Factory pattern**: Unified interface for all vector store backends
 
 ## Silo System
@@ -59,7 +59,8 @@ Each silo has its own:
 
 **Example**: 
 - Silo A: OpenAI embeddings, PGVector, retrieves 5 docs
-- Silo B: HuggingFace embeddings, Qdrant, retrieves 10 docs
+- Silo B: Google AI Studio Gemini embeddings, Qdrant, retrieves 10 docs
+- Silo C: Google Cloud Vertex AI embeddings, PGVector, retrieves 8 docs
 
 ### Creating a Silo
 

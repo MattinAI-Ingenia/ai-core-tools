@@ -1,20 +1,35 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from lks_idprovider import AuthContext
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
 from db.database import get_db
-from models.app import App
 from models.agent import Agent
 from models.api_key import APIKey
-from services.user_service import UserService
-from services.system_settings_service import SystemSettingsService
-from services.marketplace_quota_service import MarketplaceQuotaService
-from utils.config import is_omniadmin
+from models.app import App
 from routers.internal.auth_utils import get_current_user_oauth
-from schemas.admin_schemas import UserListResponse, UserDetailResponse, SystemStatsResponse, MarketplaceQuotaResetResponse
+from schemas.admin_schemas import (
+    AppTransferSummary,
+    DeleteUserRequest,
+    MarketplaceQuotaResetResponse,
+    OwnedAppsConflictResponse,
+    OwnedAppConflictItem,
+    SetPlatformRoleRequest,
+    SystemStatsResponse,
+    TransferOwnerRequest,
+    UserDetailResponse,
+    UserListResponse,
+)
 from schemas.system_setting_schemas import SystemSettingRead, SystemSettingUpdate
+from services.marketplace_quota_service import MarketplaceQuotaService
+from services.system_settings_service import SystemSettingsService
+from services.user_service import UserService
+from utils.config import is_omniadmin
 from utils.logger import get_logger
-from datetime import datetime, timezone
 
 logger = get_logger(__name__)
 
@@ -23,13 +38,22 @@ router = APIRouter(tags=["admin"])
 USER_NOT_FOUND = "User not found"
 SYSTEM_AI_SERVICE_NOT_FOUND = "System AI service not found"
 SYSTEM_EMBEDDING_SERVICE_NOT_FOUND = "System embedding service not found"
+SYSTEM_SANDBOX_SERVICE_NOT_FOUND = "System sandbox service not found"
+SYSTEM_SKILL_NOT_FOUND = "System skill not found"
 
 
-def require_admin(auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)]):
-    """Dependency to require admin access"""
-    if not is_omniadmin(auth_context.identity.email):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return auth_context
+async def require_admin(
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Dependency to require omniadmin access (env var or DB platform_role)"""
+    email = auth_context.identity.email
+    if is_omniadmin(email):
+        return auth_context
+    user = UserService.get_user_by_email(db, email)
+    if user and user.platform_role == 'admin':
+        return auth_context
+    raise HTTPException(status_code=403, detail="Admin access required")
 
 
 @router.get(
@@ -90,7 +114,9 @@ async def get_user(
             created_at=user.created_at.isoformat(),
             owned_apps_count=len(user.owned_apps) if user.owned_apps else 0,
             api_keys_count=len(user.api_keys) if user.api_keys else 0,
-            is_active=user.is_active
+            is_active=user.is_active,
+            platform_role=user.platform_role or 'editor',
+            is_omniadmin=is_omniadmin(user.email),
         )
     except HTTPException:
         raise
@@ -100,8 +126,16 @@ async def get_user(
 
 @router.delete(
     "/users/{user_id}",
+    status_code=status.HTTP_200_OK,
     responses={
+        400: {"description": "Bad request — self-deletion or invalid transfer recipient"},
+        403: {"description": "Forbidden — target user is an omniadmin"},
         404: {"description": "User not found"},
+        409: {
+            "description": "Conflict — user owns apps (mode=block) or tier limit exceeded",
+            "model": OwnedAppsConflictResponse,
+        },
+        501: {"description": "Not implemented — transfer_apps stub not yet wired"},
         500: {"description": "Internal server error"},
     },
 )
@@ -109,22 +143,176 @@ async def delete_user(
     user_id: int,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-):
-    """Delete a user and all associated data"""
+    body: Optional[DeleteUserRequest] = None,
+    mode: Annotated[
+        Optional[str],
+        Query(description="Deletion mode: block | cascade_apps | transfer_apps (query-param fallback)"),
+    ] = None,
+    transfer_to_user_id: Annotated[
+        Optional[int],
+        Query(description="Recipient user_id for mode=transfer_apps (query-param fallback)"),
+    ] = None,
+) -> dict:
+    """Delete a user account and orchestrate all associated data.
+
+    Body fields take precedence over query-param fallbacks; omitting both defaults to ``mode='block'``.
+    Actor identity is always resolved from the session (NFR-1 / IDOR prevention).
+    """
+    from services.user_deletion_errors import (
+        OmniadminDeletionError,
+        OwnedAppsPresentError,
+        SelfDeletionError,
+        UserNotFoundError,
+    )
+    from services.app_ownership_errors import (
+        TierLimitExceededError,
+        TransferRecipientInvalidError,
+    )
+
+    _VALID_MODES = {"block", "cascade_apps", "transfer_apps"}
+    effective_mode: str = "block"
+    effective_transfer_to: Optional[int] = None
+
+    if body is not None:
+        effective_mode = body.mode
+        effective_transfer_to = body.transfer_to_user_id
+    elif mode is not None:
+        if mode not in _VALID_MODES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid mode '{mode}'. Must be one of: {sorted(_VALID_MODES)}.",
+            )
+        effective_mode = mode
+        effective_transfer_to = transfer_to_user_id
+    actor_user_id: int = int(auth_context.identity.id)
+
     try:
-        user = UserService.get_user_by_id(db, user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
-        
-        success = UserService.delete_user(db, user_id)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to delete user")
-        
-        return {"message": f"User {user.email} and all associated data have been deleted successfully"}
+        UserService.delete_user(
+            db,
+            user_id,
+            actor_user_id=actor_user_id,
+            mode=effective_mode,  # type: ignore[arg-type]
+            transfer_to_user_id=effective_transfer_to,
+        )
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except SelfDeletionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except OmniadminDeletionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
+    except OwnedAppsPresentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=OwnedAppsConflictResponse(
+                detail=exc.message,
+                owned_apps=[
+                    OwnedAppConflictItem(app_id=a["app_id"], name=a["name"])
+                    for a in exc.owned_apps
+                ],
+            ).model_dump(),
+        )
+    except TransferRecipientInvalidError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except TierLimitExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+    except NotImplementedError as exc:
+        logger.warning(
+            "delete_user: transfer_apps stub hit — user_id=%s actor=%s",
+            user_id,
+            auth_context.identity.email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc) or "transfer_apps mode is not yet implemented.",
+        )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting user: {str(e)}")
+    except Exception:
+        logger.error(
+            "delete_user: unexpected error user_id=%s actor=%s",
+            user_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete user due to an unexpected error.",
+        )
+
+    logger.info(
+        "admin:delete_user user_id=%s mode=%s actor=%s",
+        user_id,
+        effective_mode,
+        auth_context.identity.email,
+    )
+    return {"message": f"User {user_id} and all associated data have been deleted successfully"}
+
+
+@router.post(
+    "/apps/{app_id}/transfer",
+    response_model=AppTransferSummary,
+    status_code=status.HTTP_200_OK,
+    responses={
+        400: {"description": "Recipient user is invalid (inactive, same as current owner, or does not exist)"},
+        404: {"description": "App not found"},
+        409: {"description": "Transfer would exceed the recipient's SaaS app-count limit"},
+    },
+)
+async def transfer_app_ownership(
+    app_id: int,
+    body: TransferOwnerRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AppTransferSummary:
+    """Immediately reassign app ownership to another user (OMNIADMIN only, no handshake)."""
+    from services.app_ownership_service import AppOwnershipService
+    from services.app_ownership_errors import (
+        AppNotFoundError,
+        TierLimitExceededError,
+        TransferRecipientInvalidError,
+    )
+
+    actor_user_id: int = int(auth_context.identity.id)
+
+    try:
+        app, previous_owner_id = AppOwnershipService.transfer_direct(
+            db,
+            app_id=app_id,
+            new_owner_id=body.new_owner_id,
+            actor_user_id=actor_user_id,
+        )
+    except AppNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    except TransferRecipientInvalidError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except TierLimitExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "transfer_app_ownership: unexpected error app_id=%s new_owner_id=%s actor=%s",
+            app_id,
+            body.new_owner_id,
+            auth_context.identity.email,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Transfer failed due to an unexpected error.")
+
+    logger.info(
+        "admin:transfer_app app_id=%s previous_owner_id=%s new_owner_id=%s by=%s",
+        app_id,
+        previous_owner_id,
+        body.new_owner_id,
+        auth_context.identity.email,
+    )
+
+    return AppTransferSummary(
+        app_id=app.app_id,
+        name=app.name,
+        previous_owner_id=previous_owner_id,
+        new_owner_id=app.owner_id,
+    )
 
 
 @router.post(
@@ -184,6 +372,42 @@ async def deactivate_user(
 
 
 @router.post(
+    "/users/{user_id}/set-platform-role",
+    responses={
+        400: {"description": "Bad request — invalid role value or self-change attempt"},
+        403: {"description": "Forbidden — cannot modify an omniadmin"},
+        404: {"description": "User not found"},
+        500: {"description": "Internal server error"},
+    },
+)
+async def set_user_platform_role(
+    user_id: int,
+    body: SetPlatformRoleRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Set a user's platform role (viewer, editor, or admin)"""
+    try:
+        result = UserService.set_platform_role(db, user_id, body.role, auth_context.identity.email)
+        user = result["user"]
+        warnings = result["warnings"]
+        logger.info(f"Platform role set to '{body.role}' for user {user.email} by {auth_context.identity.email}")
+        return {
+            "message": f"Platform role updated to '{body.role}' for {user.email}",
+            "user_id": user.user_id,
+            "platform_role": user.platform_role,
+            "warnings": warnings,
+        }
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error setting platform role for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error setting platform role: {str(e)}")
+
+
+@router.post(
     "/users/{user_id}/reset-marketplace-quota",
     response_model=MarketplaceQuotaResetResponse,
     responses={
@@ -196,41 +420,24 @@ async def reset_user_marketplace_quota(
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)]
 ):
-    """
-    Reset a user's current month marketplace quota to 0.
-    
-    This endpoint is only accessible to OMNIADMIN users and is used for:
-    - Granting additional quota when a user reports counting errors
-    - Providing extra quota to VIP users
-    - Testing/debugging purposes
-    
-    The reset only affects the current UTC month; previous months remain unchanged.
-    """
+    """Reset a user's current-month marketplace quota to 0 (OMNIADMIN only)."""
     try:
-        # Get the target user and validate exists
         user = UserService.get_user_by_id(db, user_id)
         if not user:
             raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
         
-        # Get current usage before reset
         previous_count = MarketplaceQuotaService.get_current_month_usage(user_id, db)
-        
-        # Perform the reset (handle case where no record exists - idempotent behavior)
         try:
             MarketplaceQuotaService.reset_user_current_month_usage(user_id, db)
         except ValueError:
-            # No usage record exists for current month - user already at 0, which is desired state
-            # Log this and return success anyway (idempotent)
+            # No usage record for the current month — idempotent, already at 0.
             logger.info(
                 f"OMNIADMIN {auth_context.identity.email} attempted to reset marketplace quota "
                 f"for user {user.email} (ID: {user_id}) but no usage record exists. "
                 f"User already has 0 usage for current month."
             )
         
-        # Get current timestamp
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        
-        # Log the reset action for audit trail
         logger.info(
             f"OMNIADMIN {auth_context.identity.email} (email) reset marketplace quota "
             f"for user {user.email} (ID: {user_id}). Previous count: {previous_count}, New count: 0. "
@@ -264,12 +471,9 @@ async def get_system_stats(
 ):
     """Get system-wide statistics"""
     try:
-        # Get user stats
         user_stats = UserService.get_user_stats(db)
         active_users = UserService.get_active_users_count(db)
         inactive_users = UserService.get_inactive_users_count(db)
-        
-        # Get other counts using the same db session
         total_apps = db.query(App).count()
         total_agents = db.query(Agent).count()
         total_api_keys = db.query(APIKey).count()
@@ -330,8 +534,6 @@ async def update_setting(
     try:
         service = SystemSettingsService(db)
         service.update_setting(key, update.value)
-        
-        # Get full setting with resolved value for response
         all_settings = service.get_all_settings()
         updated_setting = next((s for s in all_settings if s["key"] == key), None)
         
@@ -374,10 +576,6 @@ async def reset_setting(
         raise HTTPException(status_code=500, detail=f"Error resetting setting: {str(e)}")
 
 
-# ==================== SAAS ADMIN ENDPOINTS ====================
-# These endpoints are always registered but guarded by OMNIADMIN requirement.
-# SaaS-specific functionality is a no-op / returns empty data in self-managed mode.
-
 from schemas.admin_schemas import UserAdminRead, TierOverrideRequest
 from schemas.tier_config_schemas import TierConfigRead, TierConfigUpdate
 from schemas.ai_service_schemas import AIServiceListItemSchema, AIServiceDetailSchema, CreateUpdateAIServiceSchema
@@ -396,6 +594,26 @@ from schemas.embedding_service_schemas import (
     CreateUpdateEmbeddingServiceSchema,
     SystemEmbeddingServiceImpactSchema,
 )
+from schemas.sandbox_service_schemas import (
+    SandboxServiceListItemSchema,
+    SandboxServiceDetailSchema,
+    CreateUpdateSandboxServiceSchema,
+)
+from schemas.skill_schemas import (
+    CreateUpdateSkillSchema,
+    SkillDetailSchema,
+    SkillEnabledUpdateSchema,
+    SkillFileContentSchema,
+    SkillListItemSchema,
+)
+from routers.controls.skill_router_helpers import (
+    read_upload_bounded,
+    skill_error_boundary,
+    zip_download_response,
+)
+from services.skill_errors import SkillServiceError
+from services.skill_package_service import SkillPackageService
+from services.skill_service import SkillService
 from typing import List
 
 
@@ -466,7 +684,6 @@ async def override_user_tier(
     sub_repo.set_admin_override(user_id, body.tier)
     db.commit()
 
-    # Recalculate freeze state based on new effective tier
     try:
         FreezeService.apply_freeze(db, user_id, body.tier)
         db.commit()
@@ -509,6 +726,7 @@ async def list_system_ai_services(
     """List all platform-level AI Services (OMNIADMIN only, available in all deployment modes)."""
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import mask_api_key
+    from tools.aws_bedrock_utils import parse_extra_config
     services = AIServiceRepository.get_system_services(db)
     return [
         AIServiceDetailSchema(
@@ -518,7 +736,10 @@ async def list_system_ai_services(
             model_name=svc.description or "",
             api_key=mask_api_key(svc.api_key) if svc.api_key else "",
             base_url=svc.endpoint or "",
+            supports_video=svc.supports_video or False,
             created_at=svc.create_date,
+            aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
+            aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
         )
         for svc in services
     ]
@@ -533,10 +754,12 @@ async def get_system_ai_service(
     """Get a single platform-level AI Service by ID (OMNIADMIN only)."""
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import mask_api_key
+    from tools.aws_bedrock_utils import parse_extra_config
 
     svc = AIServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
         raise HTTPException(status_code=404, detail=SYSTEM_AI_SERVICE_NOT_FOUND)
+    extra_cfg = parse_extra_config(svc.extra_config)
     return AIServiceDetailSchema(
         service_id=svc.service_id,
         name=svc.name,
@@ -544,7 +767,10 @@ async def get_system_ai_service(
         model_name=svc.description or "",
         api_key=mask_api_key(svc.api_key) if svc.api_key else "",
         base_url=svc.endpoint or "",
+        supports_video=svc.supports_video or False,
         created_at=svc.create_date,
+        aws_access_key_id=extra_cfg.get("aws_access_key_id"),
+        aws_region=extra_cfg.get("aws_region"),
     )
 
 
@@ -558,15 +784,18 @@ async def create_system_ai_service(
     from models.ai_service import AIService
     from repositories.ai_service_repository import AIServiceRepository
     from services.ai_service_service import AIServiceService
+    from tools.aws_bedrock_utils import build_extra_config
     from datetime import datetime
 
     svc = AIService()
-    svc.app_id = None  # NULL = system/platform service
+    svc.app_id = None
     svc.name = body.name
     svc.provider = body.provider
-    svc.description = body.model_name  # model name stored in description
+    svc.description = body.model_name  # stored in description column
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.supports_video = body.supports_video
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc.create_date = datetime.now()
     svc = AIServiceRepository.create(db, svc)
     return AIServiceService._to_list_item(svc, is_system=True)
@@ -583,6 +812,7 @@ async def update_system_ai_service(
     from repositories.ai_service_repository import AIServiceRepository
     from services.ai_service_service import AIServiceService
     from utils.secret_utils import is_masked_key
+    from tools.aws_bedrock_utils import build_extra_config
 
     svc = AIServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
@@ -594,6 +824,8 @@ async def update_system_ai_service(
     if not is_masked_key(body.api_key):
         svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.supports_video = body.supports_video
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc = AIServiceRepository.update(db, svc)
     return AIServiceService._to_list_item(svc, is_system=True)
 
@@ -621,6 +853,7 @@ async def list_system_embedding_services(
     """List all platform-level Embedding Services (OMNIADMIN only)."""
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from utils.secret_utils import mask_api_key
+    from tools.aws_bedrock_utils import parse_extra_config
     services = EmbeddingServiceRepository.get_system_services(db)
     return [
         EmbeddingServiceDetailSchema(
@@ -630,7 +863,10 @@ async def list_system_embedding_services(
             model_name=svc.description or "",
             api_key=mask_api_key(svc.api_key) if svc.api_key else "",
             base_url=svc.endpoint or "",
+            api_version=svc.api_version,
             created_at=svc.create_date,
+            aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
+            aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
         )
         for svc in services
     ]
@@ -646,15 +882,18 @@ async def create_system_embedding_service(
     from models.embedding_service import EmbeddingService
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from services.embedding_service_service import EmbeddingServiceService
+    from tools.aws_bedrock_utils import build_extra_config
     from datetime import datetime
 
     svc = EmbeddingService()
-    svc.app_id = None  # NULL = system/platform service
+    svc.app_id = None
     svc.name = body.name
     svc.provider = body.provider
-    svc.description = body.model_name  # model name stored in description
+    svc.description = body.model_name  # stored in description column
     svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.api_version = body.api_version
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc.create_date = datetime.now()
     svc = EmbeddingServiceRepository.create(db, svc)
     return EmbeddingServiceService._to_list_item(svc, is_system=True)
@@ -671,6 +910,7 @@ async def update_system_embedding_service(
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from services.embedding_service_service import EmbeddingServiceService
     from utils.secret_utils import is_masked_key
+    from tools.aws_bedrock_utils import build_extra_config
 
     svc = EmbeddingServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
@@ -682,6 +922,8 @@ async def update_system_embedding_service(
     if not is_masked_key(body.api_key):
         svc.api_key = body.api_key
     svc.endpoint = body.base_url or ""
+    svc.api_version = body.api_version
+    svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
     svc = EmbeddingServiceRepository.update(db, svc)
     return EmbeddingServiceService._to_list_item(svc, is_system=True)
 
@@ -740,14 +982,182 @@ async def delete_system_embedding_service(
     if not svc or svc.app_id is not None:
         raise HTTPException(status_code=404, detail=SYSTEM_EMBEDDING_SERVICE_NOT_FOUND)
 
-    # Nullify references in silos before deleting
     db.query(Silo).filter(Silo.embedding_service_id == service_id).update(
         {Silo.embedding_service_id: None}, synchronize_session='fetch'
     )
     EmbeddingServiceRepository.delete(db, svc)
 
 
-# ==================== PROVIDER MODEL DISCOVERY (system) ====================
+@router.get("/system-skills", response_model=List[SkillListItemSchema])
+async def list_system_skills(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """List all system (platform) skills, including disabled ones (platform admin (AICT_OMNIADMINS or platform_role='admin'))."""
+    with skill_error_boundary("Error listing system skills"):
+        return SkillService.list_system_skills(db, enabled_only=False)
+
+
+@router.get("/system-skills/{skill_id}", response_model=SkillDetailSchema)
+async def get_system_skill(
+    skill_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Get a system skill in any enabled state (platform admin (AICT_OMNIADMINS or platform_role='admin')). 404 when missing or app-scoped."""
+    with skill_error_boundary(f"Error retrieving system skill {skill_id}"):
+        detail = SkillService.get_system_skill_detail(db, skill_id)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+        return detail
+
+
+@router.post("/system-skills", response_model=SkillDetailSchema, status_code=status.HTTP_201_CREATED)
+async def create_system_skill(
+    body: CreateUpdateSkillSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Create a new system skill (platform admin (AICT_OMNIADMINS or platform_role='admin')). Never subject to the per-app skill quota."""
+    with skill_error_boundary(f"create_system_skill: unexpected error by={auth_context.identity.email}"):
+        detail = SkillService.create_or_update_system_skill(db, 0, body)
+        logger.info("admin:create_system_skill skill_id=%s by=%s", detail.skill_id, auth_context.identity.email)
+        return detail
+
+
+@router.put("/system-skills/{skill_id}", response_model=SkillDetailSchema)
+async def update_system_skill(
+    skill_id: int,
+    body: CreateUpdateSkillSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Update a system skill (platform admin (AICT_OMNIADMINS or platform_role='admin')). ``source`` is immutable after creation."""
+    with skill_error_boundary(
+        f"update_system_skill: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        if skill_id == 0:
+            # Sentinel-0 create is POST-only; a PUT to id 0 can never resolve an existing skill.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        detail = SkillService.create_or_update_system_skill(db, skill_id, body)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        logger.info("admin:update_system_skill skill_id=%s by=%s", skill_id, auth_context.identity.email)
+        return detail
+
+
+@router.delete("/system-skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_system_skill(
+    skill_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Delete a system skill (platform admin (AICT_OMNIADMINS or platform_role='admin')).
+
+    Refuses (409) skills seeded from system_defaults.yaml, frozen skills, and skills still attached
+    to at least one agent — disable it instead in those cases.
+    """
+    with skill_error_boundary(
+        f"delete_system_skill: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        deleted = SkillService.delete_system_skill(db, skill_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        logger.info("admin:delete_system_skill skill_id=%s by=%s", skill_id, auth_context.identity.email)
+
+
+@router.get("/system-skills/{skill_id}/files/content", response_model=SkillFileContentSchema)
+async def get_system_skill_file_content(
+    skill_id: int,
+    path: str,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Fetch the text content of one file of a system skill in any enabled state (platform admin).
+
+    404 when the skill is missing/app-scoped, or when ``path`` does not resolve to a file of THIS
+    skill. A binary file, or a ``path`` that fails the shared path-safety validation, is rejected
+    with 400.
+    """
+    with skill_error_boundary(f"Error reading system skill file content for skill {skill_id}"):
+        content = SkillService.get_file_content_for_system_skill(db, skill_id, path)
+        if content is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+        return content
+
+
+@router.post("/system-skills/import", response_model=SkillDetailSchema, status_code=status.HTTP_201_CREATED)
+async def import_system_skill(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    file: Annotated[UploadFile, File(...)],
+):
+    """Import a system skill package (ZIP with SKILL.md). platform admin (AICT_OMNIADMINS or platform_role='admin'), never subject to a quota."""
+    import config as settings
+
+    with skill_error_boundary(f"import_system_skill: unexpected error by={auth_context.identity.email}"):
+        try:
+            with SkillPackageService.upload_admission_slot():
+                data = await read_upload_bounded(
+                    file, settings.SKILL_IMPORT_MAX_ARCHIVE_BYTES, log_context="system"
+                )
+                detail = await run_in_threadpool(
+                    SkillPackageService.import_package, db, app_id=None, data=data, source='admin',
+                )
+        except SkillServiceError as exc:
+            logger.info(
+                "admin:import_system_skill rejected by=%s: %s (%s) %s",
+                auth_context.identity.email, exc.__class__.__name__, exc.status_code, exc.detail,
+            )
+            raise
+        logger.info(
+            "admin:import_system_skill accepted skill_id=%s bytes=%s files=%s by=%s",
+            detail.skill_id, len(data), len(detail.files), auth_context.identity.email,
+        )
+        return detail
+
+
+@router.get("/system-skills/{skill_id}/export")
+async def export_system_skill(
+    skill_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Export a system skill as a ZIP package (platform admin (AICT_OMNIADMINS or platform_role='admin')). Works for any enabled state."""
+    with skill_error_boundary(
+        f"export_system_skill: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        result = await run_in_threadpool(SkillPackageService.export_system_skill, db, skill_id)
+        if result is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        filename, data = result
+        return zip_download_response(filename, data)
+
+
+@router.patch("/system-skills/{skill_id}/enabled", response_model=SkillDetailSchema)
+async def set_system_skill_enabled(
+    skill_id: int,
+    body: SkillEnabledUpdateSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Enable or disable a system skill (platform admin (AICT_OMNIADMINS or platform_role='admin'))."""
+    with skill_error_boundary(
+        f"set_system_skill_enabled: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        detail = SkillService.set_system_skill_enabled(db, skill_id, body.is_enabled)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        logger.info(
+            "admin:set_system_skill_enabled skill_id=%s is_enabled=%s by=%s",
+            skill_id, body.is_enabled, auth_context.identity.email,
+        )
+        return detail
 
 
 @router.post(
@@ -758,9 +1168,7 @@ async def list_system_ai_service_provider_models(
     body: ListProviderModelsRequest,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
 ):
-    """List models for a provider using the credentials in the body.
-    Used by the System AI Service wizard (OMNIADMIN only).
-    """
+    """List models for a provider using the credentials in the body (System AI Service wizard, OMNIADMIN only)."""
     body.purpose = "chat"
     try:
         return ProviderModelsService.list_models(body)
@@ -787,9 +1195,7 @@ async def list_system_embedding_service_provider_models(
     body: ListProviderModelsRequest,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
 ):
-    """List embedding models for a provider using the credentials in the
-    body. Used by the System Embedding Service wizard (OMNIADMIN only).
-    """
+    """List embedding models for a provider using the credentials in the body (System Embedding Service wizard, OMNIADMIN only)."""
     body.purpose = "embedding"
     try:
         return ProviderModelsService.list_models(body)
@@ -815,15 +1221,12 @@ async def test_system_ai_service_connection_with_config(
     db: Annotated[Session, Depends(get_db)],
     service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
 ):
-    """Test a system AI service connection with the provided config (OMNIADMIN).
-
-    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
-    persisted key for that system service is used.
-    """
+    """Test a system AI service connection (OMNIADMIN). Falls back to the stored key when api_key is empty or masked."""
     from services.ai_service_service import AIServiceService
     from repositories.ai_service_repository import AIServiceRepository
     from utils.secret_utils import is_masked_key
     from core.export_constants import PLACEHOLDER_API_KEY
+    from tools.aws_bedrock_utils import build_extra_config
 
     try:
         api_key = config.api_key or ""
@@ -833,8 +1236,7 @@ async def test_system_ai_service_connection_with_config(
             or is_masked_key(api_key)
         ):
             stored = AIServiceRepository.get_by_id(db, service_id)
-            # Only honor the stored key when the target is actually a system
-            # service (app_id is NULL) — never leak an app-scoped key here.
+            # Only use stored key for system services (app_id IS NULL) — never leak an app-scoped key.
             if stored and stored.app_id is None and stored.api_key:
                 api_key = stored.api_key
 
@@ -844,6 +1246,10 @@ async def test_system_ai_service_connection_with_config(
             "api_key": api_key,
             "endpoint": config.base_url,
             "api_version": getattr(config, "api_version", None),
+            "extra_config": build_extra_config(
+                getattr(config, "aws_access_key_id", None),
+                getattr(config, "aws_region", None),
+            ),
         }
         result = AIServiceService.test_connection_with_config(service_config)
         if isinstance(result, dict) and len(str(result.get("response", ""))) > 500:
@@ -861,22 +1267,430 @@ async def test_system_ai_service_connection_with_config(
         raise HTTPException(status_code=500, detail="Test failed")
 
 
+@router.get("/system-sandbox-services", response_model=List[SandboxServiceDetailSchema])
+async def list_system_sandbox_services(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """List all platform-level Sandbox Services (OMNIADMIN only, available in all deployment modes)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from utils.secret_utils import mask_api_key
+    services = SandboxServiceRepository.get_system_services(db)
+    return [
+        SandboxServiceDetailSchema(
+            service_id=svc.service_id,
+            name=svc.name,
+            provider=svc.provider,
+            api_key=mask_api_key(svc.api_key) if svc.api_key else "",
+            base_url=svc.endpoint or "",
+            created_at=svc.create_date,
+            **SandboxServiceService._extra_config_fields(svc.provider, svc.extra_config),
+        )
+        for svc in services
+    ]
+
+
+@router.get("/system-sandbox-services/{service_id}", response_model=SandboxServiceDetailSchema)
+async def get_system_sandbox_service(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Get a single platform-level Sandbox Service by ID (OMNIADMIN only)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from utils.secret_utils import mask_api_key
+
+    svc = SandboxServiceRepository.get_by_id(db, service_id)
+    if not svc or svc.app_id is not None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+    return SandboxServiceDetailSchema(
+        service_id=svc.service_id,
+        name=svc.name,
+        provider=svc.provider,
+        api_key=mask_api_key(svc.api_key) if svc.api_key else "",
+        base_url=svc.endpoint or "",
+        created_at=svc.create_date,
+        **SandboxServiceService._extra_config_fields(svc.provider, svc.extra_config),
+    )
+
+
+@router.post("/system-sandbox-services", response_model=SandboxServiceListItemSchema, status_code=201)
+async def create_system_sandbox_service(
+    body: CreateUpdateSandboxServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Create a new platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
+    from models.sandbox_service import SandboxService
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from tools.sandbox.factory import SandboxProviderUnavailableError
+    from tools.sandbox_service_utils import build_extra_config
+    from datetime import datetime
+
+    try:
+        SandboxServiceService._validate_provider_allowed(body.provider)
+    except SandboxProviderUnavailableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    svc = SandboxService()
+    svc.app_id = None
+    svc.name = body.name
+    svc.provider = body.provider
+    svc.api_key = body.api_key
+    svc.endpoint = body.base_url or ""
+    svc.extra_config = build_extra_config(
+        body.provider,
+        image=body.opensandbox_image,
+        target=body.daytona_target,
+        workspace=body.daytona_workspace or body.e2b_workspace,
+        cpu=body.daytona_cpu,
+        memory_gb=body.daytona_memory_gb,
+        template=body.e2b_template,
+    )
+    svc.create_date = datetime.now()
+    svc = SandboxServiceRepository.create(db, svc)
+    return SandboxServiceService._to_list_item(svc, is_system=True)
+
+
+@router.put("/system-sandbox-services/{service_id}", response_model=SandboxServiceListItemSchema)
+async def update_system_sandbox_service(
+    service_id: int,
+    body: CreateUpdateSandboxServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Update a platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from tools.sandbox.factory import SandboxProviderUnavailableError
+    from utils.secret_utils import is_masked_key
+    from tools.sandbox_service_utils import build_extra_config
+
+    svc = SandboxServiceRepository.get_by_id(db, service_id)
+    if not svc or svc.app_id is not None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+
+    try:
+        SandboxServiceService._validate_provider_allowed(body.provider)
+    except SandboxProviderUnavailableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    svc.name = body.name
+    svc.provider = body.provider
+    if not is_masked_key(body.api_key):
+        svc.api_key = body.api_key
+    svc.endpoint = body.base_url or ""
+    svc.extra_config = build_extra_config(
+        body.provider,
+        image=body.opensandbox_image,
+        target=body.daytona_target,
+        workspace=body.daytona_workspace or body.e2b_workspace,
+        cpu=body.daytona_cpu,
+        memory_gb=body.daytona_memory_gb,
+        template=body.e2b_template,
+    )
+    svc = SandboxServiceRepository.update(db, svc)
+    return SandboxServiceService._to_list_item(svc, is_system=True)
+
+
+@router.delete("/system-sandbox-services/{service_id}", status_code=204)
+async def delete_system_sandbox_service(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Delete a platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+
+    svc = SandboxServiceRepository.get_by_id(db, service_id)
+    if not svc or svc.app_id is not None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+    SandboxServiceRepository.delete(db, svc)
+
+
+@router.post("/system-sandbox-services/test-connection")
+async def test_system_sandbox_service_connection_with_config(
+    config: CreateUpdateSandboxServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
+):
+    """Test a system Sandbox Service connection (OMNIADMIN). Falls back to the stored key when api_key is empty or masked."""
+    from services.sandbox_service_service import SandboxServiceService
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from utils.secret_utils import is_masked_key
+    from core.export_constants import PLACEHOLDER_API_KEY
+    from tools.sandbox_service_utils import build_extra_config
+
+    try:
+        api_key = config.api_key or ""
+        if service_id is not None and (
+            not api_key
+            or api_key == PLACEHOLDER_API_KEY
+            or is_masked_key(api_key)
+        ):
+            stored = SandboxServiceRepository.get_by_id(db, service_id)
+            # Only use stored key for system services (app_id IS NULL) — never leak an app-scoped key.
+            if stored and stored.app_id is None and stored.api_key:
+                api_key = stored.api_key
+
+        service_config = {
+            "provider": config.provider,
+            "api_key": api_key,
+            "endpoint": config.base_url,
+            "extra_config": build_extra_config(
+                config.provider,
+                image=config.opensandbox_image,
+                target=config.daytona_target,
+                workspace=config.daytona_workspace or config.e2b_workspace,
+                cpu=config.daytona_cpu,
+                memory_gb=config.daytona_memory_gb,
+                template=config.e2b_template,
+            ),
+        }
+        result = SandboxServiceService.test_connection_with_config(service_config)
+        if isinstance(result, dict) and len(str(result.get("response", ""))) > 500:
+            result["response"] = str(result["response"])[:500] + "... (truncated)"
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Error testing system sandbox service connection (provider: %s): %s",
+            config.provider,
+            type(e).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Test failed")
+
+
+from schemas.local_auth_schemas import AdminCreateUserRequest, AdminSetPasswordRequest
+from services.auth.credential_service import (
+    CredentialError as _CredentialError,
+    CredentialService as _CredentialService,
+    UserAlreadyExistsError as _UserAlreadyExistsError,
+)
+from services.auth.refresh_service import RefreshService as _RefreshService
+from utils.config import Config as _Config
+
+
+def _set_password_token_expires_at() -> str:
+    """Compute the ISO-8601 expiry timestamp for a set-password token."""
+    max_age_hours: int = _Config.get_int_env_var(
+        "LOCAL_SET_PASSWORD_TOKEN_MAX_AGE_HOURS", default=48
+    )
+    return (datetime.now(timezone.utc) + timedelta(hours=max_age_hours)).isoformat()
+
+
+class _LocalUserCreatedResponse(BaseModel):
+    """Response returned to an admin after creating a LOCAL auth user account."""
+
+    user_id: int
+    email: str
+    name: Optional[str]
+    set_password_token: str
+    expires_at: str
+
+
+class _ResetLinkResponse(BaseModel):
+    """Response returned to an admin when issuing a reset link."""
+
+    set_password_token: str
+    expires_at: str
+
+
+class _PasswordUpdatedResponse(BaseModel):
+    """Response for admin set-password."""
+
+    message: str
+
+
+class _SessionsRevokedResponse(BaseModel):
+    """Response for admin revoke-sessions."""
+
+    message: str
+
+
+@router.post(
+    "/users/local",
+    response_model=_LocalUserCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create LOCAL auth user (admin)",
+    description=(
+        "Create a new LOCAL auth user account and return a one-time set-password "
+        "token (FR-C4/FR-D1/AD-12). The token is returned in the response body for "
+        "the admin to hand to the user. It is NOT logged."
+    ),
+)
+async def create_local_user(
+    body: AdminCreateUserRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _LocalUserCreatedResponse:
+    """Create a LOCAL auth user and issue a first-time set-password token. Returns 404 in OIDC mode."""
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    try:
+        user = await _CredentialService.admin_create_user(db, email=str(body.email), name=body.name)
+    except _UserAlreadyExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    try:
+        token = _CredentialService.issue_set_password_token(db, user.user_id)
+    except _CredentialError as exc:
+        logger.error("admin:create_local_user token_issue_failed user_id=%s — %s", user.user_id, exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to issue setup link.")
+    except Exception as exc:
+        logger.error("admin:create_local_user unexpected user_id=%s — %s", user.user_id, type(exc).__name__, exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to issue setup link.")
+
+    logger.info(
+        "admin:create_local_user user_id=%s email=%s by=%s",
+        user.user_id,
+        user.email,
+        auth_context.identity.email,
+    )
+
+    return _LocalUserCreatedResponse(
+        user_id=user.user_id,
+        email=user.email,
+        name=user.name,
+        set_password_token=token,
+        expires_at=_set_password_token_expires_at(),
+    )
+
+
+@router.post(
+    "/users/{user_id}/set-password",
+    response_model=_PasswordUpdatedResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Admin: forcibly set user password",
+    description=(
+        "Directly set a LOCAL auth user's password (emergency admin reset). "
+        "Resets lockout state and revokes all existing sessions."
+    ),
+)
+async def admin_set_user_password(
+    user_id: int,
+    body: AdminSetPasswordRequest,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _PasswordUpdatedResponse:
+    """Forcibly set a LOCAL auth user's password (admin emergency reset). Returns 404 in OIDC mode."""
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    user = UserService.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=USER_NOT_FOUND)
+
+    try:
+        await _CredentialService.admin_set_password(
+            db, user_id=user_id, new_password=body.new_password.get_secret_value()
+        )
+    except _CredentialError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    logger.info(
+        "admin:set_password user_id=%s by=%s",
+        user_id,
+        auth_context.identity.email,
+    )
+    return _PasswordUpdatedResponse(message="Password updated.")
+
+
+@router.post(
+    "/users/{user_id}/reset-link",
+    response_model=_ResetLinkResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Admin: issue set-password reset link",
+    description=(
+        "Generate a new one-time set-password token for an existing LOCAL auth user. "
+        "Returns the token in the response body for the admin to forward to the user."
+    ),
+)
+async def issue_reset_link(
+    user_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _ResetLinkResponse:
+    """Issue a new set-password token for a LOCAL auth user. Returns 404 in OIDC mode."""
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    user = UserService.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=USER_NOT_FOUND)
+
+    try:
+        token = _CredentialService.issue_set_password_token(db, user_id)
+    except _CredentialError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    logger.info(
+        "admin:reset_link_issued user_id=%s by=%s",
+        user_id,
+        auth_context.identity.email,
+    )
+
+    return _ResetLinkResponse(set_password_token=token, expires_at=_set_password_token_expires_at())
+
+
+@router.post(
+    "/users/{user_id}/revoke-sessions",
+    response_model=_SessionsRevokedResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Admin: revoke all sessions for a user",
+    description="Revoke all refresh tokens for a user, forcing re-authentication on all devices.",
+)
+async def admin_revoke_sessions(
+    user_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> _SessionsRevokedResponse:
+    """Revoke all active refresh tokens for a LOCAL auth user. Returns 404 in OIDC mode."""
+    from utils.auth_config import AuthConfig
+
+    if AuthConfig.LOGIN_MODE != "LOCAL":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+    user = UserService.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=USER_NOT_FOUND)
+
+    _RefreshService.revoke_all(db, user_id)
+
+    logger.info(
+        "admin:revoke_sessions user_id=%s by=%s",
+        user_id,
+        auth_context.identity.email,
+    )
+    return _SessionsRevokedResponse(message=f"All sessions revoked for user {user_id}.")
+
+
 @router.post("/system-embedding-services/test-connection")
 async def test_system_embedding_service_connection_with_config(
     config: CreateUpdateEmbeddingServiceSchema,
     auth_context: Annotated[AuthContext, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
+    service_id: Annotated[Optional[int], Query(description="Edit-mode: recover stored API key when the request sends a masked placeholder")] = None,
 ):
-    """Test a system embedding service connection with the provided config (OMNIADMIN).
-
-    When ``service_id`` is supplied and ``api_key`` is empty/masked, the
-    persisted key for that system service is used.
-    """
+    """Test a system embedding service connection (OMNIADMIN). Falls back to the stored key when api_key is empty or masked."""
     from services.embedding_service_service import EmbeddingServiceService
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from utils.secret_utils import is_masked_key
     from core.export_constants import PLACEHOLDER_API_KEY
+    from tools.aws_bedrock_utils import build_extra_config
 
     try:
         api_key = config.api_key or ""
@@ -894,6 +1708,11 @@ async def test_system_embedding_service_connection_with_config(
             "description": config.model_name,
             "api_key": api_key,
             "endpoint": config.base_url,
+            "api_version": config.api_version,
+            "extra_config": build_extra_config(
+                getattr(config, "aws_access_key_id", None),
+                getattr(config, "aws_region", None),
+            ),
         }
         return EmbeddingServiceService.test_connection_with_config(service_config)
     except HTTPException:

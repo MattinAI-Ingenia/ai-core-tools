@@ -2,7 +2,13 @@ import { ExternalLink } from 'lucide-react';
 import { FormField } from '../../../ui/FormField';
 import Alert from '../../../ui/Alert';
 import { getProviderDescriptor } from '../providers';
-import type { ServiceWizardMode } from '../../../../types/services';
+import type { ServiceKind, ServiceWizardMode } from '../../../../types/services';
+
+/** Provider-specific label for the secret field. */
+const API_KEY_LABELS: Record<string, string> = {
+  GoogleCloud: 'Service Account JSON',
+  Bedrock: 'AWS Secret Access Key',
+};
 
 export interface CredentialsState {
   api_key: string;
@@ -12,9 +18,20 @@ export interface CredentialsState {
   base_url: string;
   /** For Azure: API version. For GoogleCloud: region/location. */
   api_version: string;
+  /** AWS Bedrock: Access Key ID (non-secret). */
+  aws_access_key_id?: string;
+  /** AWS Bedrock: region, e.g. us-east-1. */
+  aws_region?: string;
+  /** Sandbox (OpenSandbox): container image used to create sandboxes. */
+  image?: string;
+  /** Sandbox (Daytona): target/region identifier. */
+  target?: string;
+  /** Sandbox (E2B): template id used to create sandboxes. */
+  template?: string;
 }
 
 interface CredentialsStepProps {
+  readonly kind: ServiceKind;
   readonly provider: string;
   readonly mode: ServiceWizardMode;
   readonly value: CredentialsState;
@@ -22,6 +39,7 @@ interface CredentialsStepProps {
 }
 
 function CredentialsStep({
+  kind,
   provider,
   mode,
   value,
@@ -43,13 +61,16 @@ function CredentialsStep({
     onChange({ ...value, ...patch });
   const manualFields = descriptor.manualFields ?? [];
 
-  const apiKeyLabel = `${
-    descriptor.value === 'GoogleCloud' ? 'Service Account JSON' : 'API Key'
-  }${descriptor.apiKey === 'optional' ? ' (optional)' : ''}`;
+  const apiKeyBaseLabel = API_KEY_LABELS[descriptor.value] ?? 'API Key';
+  const apiKeyLabel = `${apiKeyBaseLabel}${
+    descriptor.apiKey === 'optional' ? ' (optional)' : ''
+  }`;
 
   let baseUrlLabel = 'Base URL';
   if (descriptor.value === 'GoogleCloud') baseUrlLabel = 'GCP Project ID';
   else if (descriptor.value === 'Azure') baseUrlLabel = 'Azure endpoint';
+  else if (descriptor.value === 'opensandbox') baseUrlLabel = 'OpenSandbox server domain';
+  else if (descriptor.value === 'daytona') baseUrlLabel = 'Daytona API URL';
 
   return (
     <div className="space-y-4">
@@ -123,7 +144,76 @@ function CredentialsStep({
         />
       )}
 
-      {!descriptor.supportsModelListing && (
+      {manualFields.includes('aws_access_key_id') && (
+        <FormField
+          label="AWS Access Key ID"
+          id="aws_access_key_id"
+          type="text"
+          value={value.aws_access_key_id ?? ''}
+          onChange={(e) => update({ aws_access_key_id: e.target.value })}
+          placeholder="AKIA..."
+          required
+        />
+      )}
+
+      {manualFields.includes('aws_region') && (
+        <FormField
+          label="AWS Region"
+          id="aws_region"
+          type="text"
+          value={value.aws_region ?? ''}
+          onChange={(e) => update({ aws_region: e.target.value })}
+          placeholder="us-east-1"
+          helpText="Region where Bedrock is enabled, e.g. us-east-1 or eu-west-1."
+          required
+        />
+      )}
+
+      {manualFields.includes('image') && (
+        <FormField
+          label="Container image"
+          id="image"
+          type="text"
+          value={value.image ?? ''}
+          onChange={(e) => update({ image: e.target.value })}
+          placeholder="python:3.11-slim"
+          helpText="Docker image used to create sandbox containers. Leave empty to use the server default."
+        />
+      )}
+
+      {manualFields.includes('target') && (
+        <FormField
+          label="Target"
+          id="target"
+          type="text"
+          value={value.target ?? ''}
+          onChange={(e) => update({ target: e.target.value })}
+          placeholder="us"
+          helpText="Daytona target/region identifier. Leave empty to use the account default."
+        />
+      )}
+
+      {manualFields.includes('template') && (
+        <FormField
+          label="Template"
+          id="template"
+          type="text"
+          value={value.template ?? ''}
+          onChange={(e) => update({ template: e.target.value })}
+          placeholder="base"
+          helpText="E2B sandbox template id. Leave empty to use the default template."
+        />
+      )}
+
+      {descriptor.value === 'Bedrock' && (
+        <Alert
+          type="info"
+          title="Model access may be required"
+          message="A listed model still needs to be enabled in the AWS console (Bedrock → Model access) before it can be invoked."
+        />
+      )}
+
+      {kind !== 'sandbox' && !descriptor.supportsModelListing && (
         <Alert
           type="info"
           title="Manual model entry"

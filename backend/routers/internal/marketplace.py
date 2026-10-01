@@ -31,8 +31,9 @@ from schemas.marketplace_schemas import (
     AgentRatingInputSchema,
     AgentRatingResponseSchema,
     UserRatingResponseSchema,
+    ConversationStarterSchema,
 )
-from schemas.conversation_schemas import ConversationResponse, ConversationWithHistoryResponse
+from schemas.conversation_schemas import ConversationWithHistoryResponse, MarketplaceConversationResponse
 from schemas.chat_schemas import ChatResponseSchema
 from utils.logger import get_logger
 
@@ -152,6 +153,19 @@ async def marketplace_agent_detail(
     return detail
 
 
+@marketplace_router.get(
+    "/agents/{agent_id}/conversation-starters",
+    summary="Get agent conversation starters",
+    response_model=List[ConversationStarterSchema],
+)
+async def get_agent_conversation_starters(
+    agent_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Retrieve the conversation starters for a published marketplace agent."""
+    starters = MarketplaceService.get_agent_conversation_starters(db, agent_id)
+    return starters
+
 # ==================== RATINGS ====================
 
 
@@ -200,7 +214,7 @@ async def get_my_rating(
 @marketplace_router.post(
     "/agents/{agent_id}/conversations",
     summary="Start marketplace conversation",
-    response_model=ConversationResponse,
+    response_model=MarketplaceConversationResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def start_marketplace_conversation(
@@ -348,12 +362,39 @@ async def upload_marketplace_file(
             agent_id=agent.agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
+
+        # Vectorize at upload time if file is vectorizable (pdf, text). Only
+        # memory-enabled agents keep a temp silo; memory-less agents get the
+        # full content in the prompt instead.
+        vectorized = False
+        from services.playground_media_service import PlaygroundMediaService, is_vectorizable_file
+        if (
+            agent.has_memory
+            and is_vectorizable_file(file_ref.file_type, file_ref.filename)
+            and file_ref.content
+        ):
+            try:
+                vectorized = PlaygroundMediaService.vectorize_uploaded_file(
+                    app_id=agent.app_id,
+                    agent_id=agent.agent_id,
+                    session_id=conversation.session_id,
+                    file_id=file_ref.file_id,
+                    filename=file_ref.filename,
+                    file_path=file_ref.file_path,
+                    content=file_ref.content,
+                    db=db,
+                )
+            except Exception as vec_err:
+                logger.warning(f"Marketplace file vectorization at upload failed: {vec_err}")
+
         return {
             "success": True,
             "file_id": file_ref.file_id,
             "filename": file_ref.filename,
             "file_type": file_ref.file_type,
+            "vectorized": vectorized,
             "file_size_bytes": file_ref.file_size_bytes,
             "file_size_display": FileReference.format_file_size(file_ref.file_size_bytes),
             "processing_status": file_ref.processing_status,
@@ -602,6 +643,8 @@ async def marketplace_chat(
     user_id = int(current_user.identity.id)
     _, agent = _prepare_marketplace_chat(conversation_id, user_id, db)
 
+    fms = FileManagementService()
+    all_file_references: list = []
     try:
         parsed_refs = _parse_file_references_json(file_references)
         jwt_token = _extract_jwt_token(request)
@@ -614,12 +657,13 @@ async def marketplace_chat(
             "token": jwt_token,
         }
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_refs,
             agent_id=agent.agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         execution_service = AgentExecutionService()
@@ -649,6 +693,8 @@ async def marketplace_chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error",
         )
+    finally:
+        await fms.cleanup_ephemeral_refs(all_file_references)
 
 
 @marketplace_router.post(
@@ -685,12 +731,14 @@ async def marketplace_chat_stream(
             "token": jwt_token,
         }
 
-        all_file_references = await FileManagementService().resolve_chat_files(
+        fms = FileManagementService()
+        all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_refs,
             agent_id=agent.agent_id,
             user_context=user_context,
             conversation_id=conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
         streaming_service = AgentStreamingService(db)
@@ -714,6 +762,13 @@ async def marketplace_chat_stream(
             finally:
                 if stream_completed:
                     _safe_increment_marketplace_usage(user_id, db)
+                # Cleanup ephemeral artifacts uploaded for this turn. Runs
+                # when the consumer has finished reading the stream (or when
+                # the connection is dropped), so it fires after the agent
+                # has actually used the files.
+                await fms.cleanup_ephemeral_refs(all_file_references)
+                # Release request session; get_db teardown is too late for streaming.
+                db.close()
 
         logger.info(
             f"Streaming marketplace chat for agent {agent.agent_id}, "

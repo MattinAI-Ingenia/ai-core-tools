@@ -42,6 +42,9 @@ SSE_THINKING: str = "thinking"
 #: Conversation / session metadata (e.g. conversation_id).
 SSE_METADATA: str = "metadata"
 
+#: A line of stdout emitted by the sandbox code interpreter in real time.
+SSE_CODE_OUTPUT: str = "code_output"
+
 #: An error occurred during streaming.
 SSE_ERROR: str = "error"
 
@@ -56,8 +59,6 @@ SSE_DONE: str = "done"
 # When i18n support is added, map the keys to the appropriate locale string
 # instead of replacing this dict.
 _THINKING_MESSAGES: dict[str, str] = {
-    "silo_retriever":           "Searching knowledge base...",
-    "get_current_date":         "Getting current date...",
     "python_repl":              "Running code...",
     "code_interpreter":         "Running code...",
     "web_search":               "Searching the web...",
@@ -115,6 +116,10 @@ def get_thinking_message(tool_name: str, is_agent_tool: bool = False) -> str:
 
     if tool_name in _THINKING_MESSAGES:
         return _THINKING_MESSAGES[tool_name]
+
+    # Dynamic retrieval tools follow the pattern search_{slug}_{silo_id} (AD-8).
+    if tool_name.startswith("search_"):
+        return "Searching knowledge base..."
 
     if "mcp" in tool_name.lower():
         return "Using external tool..."
@@ -297,6 +302,7 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                             "tool_name": tool_name,
                             "tool_call_id": tool_call_id,
                             "args": tool_args,
+                            "tool_input": json.dumps(tool_args, ensure_ascii=False) if tool_args else None,
                         },
                     })
 
@@ -322,11 +328,19 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                 try:
                     tool_call_id = getattr(msg, "tool_call_id", "") or ""
                     tool_name_end = getattr(msg, "name", "") or ""
+                    raw_output = getattr(msg, "content", None)
+                    tool_output: str | None = None
+                    if raw_output is not None:
+                        tool_output = (
+                            raw_output if isinstance(raw_output, str)
+                            else json.dumps(raw_output, ensure_ascii=False)
+                        )
                     events.append({
                         "type": SSE_TOOL_END,
                         "data": {
                             "tool_name": tool_name_end,
                             "tool_call_id": tool_call_id,
+                            "tool_output": tool_output,
                         },
                     })
                 except Exception:
@@ -342,14 +356,49 @@ def _map_custom_chunk(chunk: Any) -> list[dict] | None:
     """Handle a single ``custom``-mode chunk from LangGraph astream.
 
     Custom events are arbitrary data emitted by the graph via
-    ``StreamWriter``.  We wrap the raw payload in a ``thinking`` event.
+    ``dispatch_custom_event``.  Events with ``type == "code_output"`` are
+    forwarded as :data:`SSE_CODE_OUTPUT`; everything else becomes a
+    ``thinking`` event.
 
     Args:
         chunk: Arbitrary data emitted as a custom stream event.
 
     Returns:
-        A list containing one ``thinking`` event dict.
+        A list containing one event dict.
     """
+    if isinstance(chunk, dict) and chunk.get("type") in {
+        SSE_TOOL_START,
+        SSE_TOOL_END,
+        SSE_THINKING,
+    }:
+        data = chunk.get("data", {})
+        if not isinstance(data, dict):
+            data = {"message": str(data)}
+        return [{"type": chunk["type"], "data": data}]
+
+    if isinstance(chunk, dict) and chunk.get("type") == "code_output":
+        stream = chunk.get("stream", "stdout")
+        if stream not in ("stdout", "stderr"):
+            stream = "stdout"
+        data = {
+            "line": chunk.get("line", ""),
+            "stream": stream,
+        }
+        for optional_key in (
+            "tool_name",
+            "parent_tool_name",
+            "subagent_name",
+            "subagent_id",
+        ):
+            if chunk.get(optional_key):
+                data[optional_key] = chunk.get(optional_key)
+        return [
+            {
+                "type": SSE_CODE_OUTPUT,
+                "data": data,
+            }
+        ]
+
     if isinstance(chunk, str):
         payload = {"message": chunk}
     elif isinstance(chunk, dict):

@@ -1,5 +1,6 @@
-import logging
 import base64
+import json
+import re
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
@@ -17,13 +18,11 @@ from tools.outputParserTools import get_parser_model_by_id
 from typing import List
 from langchain_core.documents import Document
 from tools.embeddingTools import get_embeddings_model
+from utils.logger import get_logger
+
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Initialize VectorStore lazily when needed
 
@@ -64,6 +63,8 @@ def create_llm_from_service(ai_service, temperature=0, is_vision=False):
         ProviderEnum.Azure.value: lambda: _build_azure_llm(ai_service, temperature),
         ProviderEnum.Google.value: lambda: _build_google_llm(ai_service, temperature),
         ProviderEnum.GoogleCloud.value: lambda: _build_google_cloud_llm(ai_service, temperature),
+        ProviderEnum.OpenRouter.value: lambda: _build_openrouter_llm(ai_service, temperature),
+        ProviderEnum.Bedrock.value: lambda: _build_bedrock_llm(ai_service, temperature),
     }
 
     # Handle case where provider might be an Enum object instead of string
@@ -112,13 +113,66 @@ class VoidRetriever(BaseRetriever):
         return []
 
 
+# OpenAI reasoning families (o1/o3/o4…, gpt-5 and later) reject `temperature` unless it
+# is 1; the "-chat" variants accept it. langchain-openai only strips it for names starting
+# with "gpt-5", so newer families (e.g. gpt-6-luna) reached OpenAI with the agent's
+# temperature and failed with "Unsupported parameter: 'temperature'".
+_OPENAI_REASONING_MODEL = re.compile(r"^(o\d|gpt-(5|[6-9]|\d{2,}))", re.IGNORECASE)
+
+
+def _openai_temperature(model, temperature):
+    """The temperature to send to OpenAI, or None (not sent) for reasoning models."""
+    model = model or ""
+    if _OPENAI_REASONING_MODEL.match(model) and "chat" not in model.lower():
+        return None
+    return temperature
+
+
 def _build_openai_llm(ai_service, temperature):
     base_url = ai_service.endpoint if ai_service.endpoint else None
+    return ChatOpenAI(
+        model=ai_service.description,
+        temperature=_openai_temperature(ai_service.description, temperature),
+        api_key=ai_service.api_key,
+        base_url=base_url,
+        # Reasoning models reject function tools on /v1/chat/completions ("Function tools
+        # with reasoning_effort are not supported ... use /v1/responses or set
+        # reasoning_effort to 'none'"), and every agent here is built with tools. The
+        # Responses API keeps reasoning on (unlike reasoning_effort='none') and is what
+        # the provider-side server tools (web_search, image_generation, code_interpreter)
+        # already expect. Only for OpenAI itself: a custom endpoint is an OpenAI-compatible
+        # gateway, and those speak /v1/chat/completions but not necessarily /v1/responses.
+        use_responses_api=base_url is None,
+    )
+
+
+# OpenRouter session-level defaults — configurable later via env vars.
+_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _build_openrouter_llm(ai_service, temperature):
+    """Build a ChatOpenAI instance pointed at OpenRouter's API.
+
+    OpenRouter speaks the OpenAI chat completions protocol, so we reuse
+    ChatOpenAI with a different base_url. The description field stores
+    the full model identifier (e.g. ``openai/gpt-4o``).
+
+    Attribution headers (HTTP-Referer, X-Title) identify MattinAI on
+    the OpenRouter platform.
+    """
+    base_url = (ai_service.endpoint or _OPENROUTER_DEFAULT_BASE_URL).rstrip("/")
+
+    default_headers = {
+        "HTTP-Referer": "https://github.com/lksnext-ai-lab/ai-core-tools",
+        "X-Title": "MattinAI",
+    }
+
     return ChatOpenAI(
         model=ai_service.description,
         temperature=temperature,
         api_key=ai_service.api_key,
         base_url=base_url,
+        default_headers=default_headers,
     )
 
 
@@ -193,6 +247,25 @@ def _build_azure_llm(ai_service, temperature):
         endpoint=ai_service.endpoint,
         api_version=ai_service.api_version,
     )
+
+
+def _build_bedrock_llm(ai_service, temperature):
+    from langchain_aws import ChatBedrockConverse
+
+    from tools.aws_bedrock_utils import resolve_bedrock_credentials
+
+    creds = resolve_bedrock_credentials(ai_service)
+    bedrock_kwargs = {
+        "model": ai_service.description,
+        "temperature": temperature,
+        **creds,
+    }
+
+    endpoint_raw = (ai_service.endpoint or "").strip()
+    if endpoint_raw:
+        bedrock_kwargs["endpoint_url"] = endpoint_raw
+
+    return ChatBedrockConverse(**bedrock_kwargs)
 
 
 _DEFAULT_GOOGLE_HOST = "generativelanguage.googleapis.com"

@@ -59,6 +59,7 @@ class EmbeddingServiceExportService(BaseExportService):
             model_name=service.description,  # BD: description field stores model_name
             endpoint=service.endpoint,  # BD: endpoint field stores base_url
             description=None,  # No separate description field in current model
+            api_version=service.api_version,
         )
 
         # Create export file

@@ -10,47 +10,37 @@ class ConversationSource(enum.Enum):
     PLAYGROUND = "playground"
     MARKETPLACE = "marketplace"
     API = "api"
+    SCHEDULED_TASK = "scheduled_task"
 
 
 class Conversation(Base):
-    """
-    Model for tracking user conversations with agents.
-    
-    Each conversation represents an independent chat session between a user and an agent.
-    The conversation history is stored in PostgreSQL via LangGraph's checkpointer,
-    using thread_id = f"thread_{agent_id}_{session_id}"
-    where session_id = f"conv_{agent_id}_{conversation_id}"
-    """
+    """Chat session. History lives in LangGraph's checkpointer under thread_id = f"thread_{agent_id}_{session_id}"."""
     __tablename__ = "Conversation"
-    
-    # Primary key
+
     conversation_id = Column(Integer, primary_key=True, autoincrement=True)
-    
-    # Foreign keys
     agent_id = Column(Integer, ForeignKey('Agent.agent_id'), nullable=False)
-    user_id = Column(Integer, ForeignKey('User.user_id'), nullable=True)  # Null for API key users
-    
-    # Conversation metadata
-    title = Column(String(255), nullable=True)  # User-defined or auto-generated title
-    session_id = Column(String(255), nullable=False, unique=True)  # Format: conv_{agent_id}_{uuid}
-    
-    # Tracking fields
+    user_id = Column(Integer, ForeignKey('User.user_id', ondelete='SET NULL'), nullable=True)
+    title = Column(String(255), nullable=True)
+    session_id = Column(String(255), nullable=False, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    last_message = Column(Text, nullable=True)  # Preview of last message
-    message_count = Column(Integer, default=0, nullable=False)  # Number of messages in conversation
-    
-    # User context (for API key users who don't have user_id)
-    api_key_hash = Column(String(64), nullable=True)  # MD5 hash of API key for tracking
+    last_message = Column(Text, nullable=True)
+    message_count = Column(Integer, default=0, nullable=False)
+    # Set for conversations owned by a scheduled task (user_id is then NULL).
+    scheduled_task_id = Column(Integer, ForeignKey('scheduled_task.id', ondelete='CASCADE'), nullable=True)
+    api_key_hash = Column(String(64), nullable=True)  # SHA-256 hash of the API key (utils.security.hash_api_key); user_id is null for API-key requests
 
-    # Source of conversation: playground, marketplace, or api
     source = Column(
         Enum(ConversationSource),
         nullable=False,
         default=ConversationSource.PLAYGROUND
     )
 
-    # Relationships
+    # Sandbox session tracking (IT-1 / Q5): provider sandbox id for reconnect attempts after a restart.
+    sandbox_session_id = Column(String(255), nullable=True)
+    # Serialized JSON snapshot of the sandbox state (provider, session_key, sandbox_id, updated_at).
+    sandbox_state = Column(Text, nullable=True)
+
     agent = relationship("Agent", backref="conversations")
     user = relationship("User", backref="conversations", foreign_keys=[user_id])
     
@@ -58,7 +48,6 @@ class Conversation(Base):
         return f"<Conversation {self.conversation_id}: Agent={self.agent_id}, User={self.user_id}, Title='{self.title}'>"
     
     def to_dict(self):
-        """Convert conversation to dictionary"""
         return {
             "conversation_id": self.conversation_id,
             "agent_id": self.agent_id,
@@ -70,4 +59,3 @@ class Conversation(Base):
             "last_message": self.last_message,
             "message_count": self.message_count
         }
-

@@ -62,6 +62,7 @@ class ExportOutputParserFieldSchema(BaseModel):
     name: str
     type: str  # 'str', 'int', 'float', 'bool', 'date', 'list', 'dict', 'parser'
     description: str
+    optional: bool = False  # If True, the field is optional (may be absent in LLM output)
     parser_name: Optional[str] = None  # For type='parser' (name-based reference)
     list_item_type: Optional[str] = None  # For type='list'
     list_item_parser_name: Optional[str] = None  # For list of parsers (name-based reference)
@@ -166,6 +167,7 @@ class ExportAgentSchema(BaseModel):
     agent_tool_refs: List[ExportAgentToolRefSchema] = []
     agent_mcp_refs: List[ExportAgentMCPRefSchema] = []
     has_memory: Optional[bool] = False
+    skill_router_enabled: Optional[bool] = False
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = None
     memory_summarize_threshold: Optional[int] = 10

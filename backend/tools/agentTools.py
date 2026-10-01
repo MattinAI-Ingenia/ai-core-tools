@@ -1,33 +1,144 @@
 from langchain.messages import HumanMessage, SystemMessage, AnyMessage
 from langchain.agents import create_agent as create_langchain_agent, AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from models.agent import Agent
-from models.silo import Silo, SiloType
+from utils.schema_utils import sanitize_identifier, ensure_json_schema_types
+from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+from models.silo import Silo
 from langchain.tools import BaseTool, tool
 from tools.outputParserTools import get_parser_model_by_id
 from tools.aiServiceTools import get_llm, get_output_parser
-from tools.ai.dateTimeTools import get_current_date
 from tools.ai.fileTools import fetch_file_in_base64
 from tools.ai.workspaceTools import create_download_url_tool
-from typing import Any, Optional, Dict, List
-from langchain_core.tools.retriever import create_retriever_tool
+from typing import Any, Optional, Dict, List, Tuple, Type
+from pydantic import BaseModel, Field
+import types as _types
 from services.silo_service import SiloService
+from services.skill_router_service import select_skills as _select_prompt_skills
+from db.database import SessionLocal
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from services.agent_cache_service import CheckpointerCacheService
-from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
+from langchain_core.tools import StructuredTool
+from services.agent_metrics_collector import METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
 import json
 import asyncio
+import uuid
 import os
 import base64
 import mimetypes
+from datetime import datetime
+from urllib.parse import parse_qsl, urlparse
 from utils.logger import get_logger
+from utils.config import get_app_config
 from utils.mcp_auth_utils import prepare_mcp_headers, get_user_token_from_context
 from utils.mcp_ssl_utils import inject_ssl_config
-from tools.skill_tools import create_skill_loader_tool, generate_skills_system_prompt_section
-from tools.python_sandbox_tools import create_python_repl_tool
+from tools.skill_tools import (
+    create_skill_file_reader_tool,
+    create_skill_loader_tool,
+    generate_skills_system_prompt_section,
+    resolve_agent_skills,
+    resolve_prompt_skills,
+    snapshot_skills,
+)
+from tools.sandbox import (
+    create_sandbox_builtin_tools,
+    create_sandbox_repl_tools,
+    resolve_provider,
+)
+from tools.sandbox.factory import SandboxProviderUnavailableError
 
 logger = get_logger(__name__)
+
+
+_AUTH_QUERY_PARAMS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "api-key",
+    "key",
+    "tavilyapikey",
+    "token",
+}
+
+
+def _url_contains_auth_credentials(url: str) -> bool:
+    try:
+        query_params = parse_qsl(urlparse(url).query, keep_blank_values=False)
+    except ValueError:
+        return False
+    return any(name.lower() in _AUTH_QUERY_PARAMS for name, _value in query_params)
+
+
+def _merge_mcp_auth_headers(
+    server_name: str,
+    server_config: Dict[str, Any],
+    auth_headers: Dict[str, str],
+) -> None:
+    """Add Mattin auth headers without replacing MCP-specific credentials."""
+    if 'url' not in server_config:
+        return
+
+    existing_headers = server_config.setdefault('headers', {})
+    existing_header_names = {str(key).lower() for key in existing_headers}
+    applied_headers = {}
+    has_url_credentials = _url_contains_auth_credentials(str(server_config.get("url", "")))
+
+    for header_name, header_value in auth_headers.items():
+        normalized_header_name = header_name.lower()
+        if normalized_header_name in existing_header_names:
+            logger.info(
+                "Preserving configured MCP header '%s' for server: %s",
+                header_name,
+                server_name,
+            )
+            continue
+        if normalized_header_name == "authorization" and has_url_credentials:
+            logger.info(
+                "Skipping Mattin Authorization header for MCP server with URL credentials: %s",
+                server_name,
+            )
+            continue
+        applied_headers[header_name] = header_value
+
+    if applied_headers:
+        existing_headers.update(applied_headers)
+        logger.info(f"Added auth headers to MCP server: {server_name}")
+
+
+def _redact_mcp_connections(connections: Dict[str, Any]) -> Dict[str, Any]:
+    redacted = {}
+    sensitive_headers = {"authorization", "x-api-key", "api-key"}
+
+    for server_name, server_config in connections.items():
+        if not isinstance(server_config, dict):
+            redacted[server_name] = server_config
+            continue
+
+        safe_config = dict(server_config)
+        headers = safe_config.get("headers")
+        if isinstance(headers, dict):
+            safe_config["headers"] = {
+                key: "<redacted>" if str(key).lower() in sensitive_headers else value
+                for key, value in headers.items()
+            }
+        redacted[server_name] = safe_config
+
+    return redacted
+
+
+def _tool_name_for_language(language: str) -> str:
+    return "python_repl" if language == "python" else f"{language}_repl"
+
+
+def _sandbox_id_for_log(sandbox_handle: Any) -> str:
+    sandbox_id = getattr(sandbox_handle, "sandbox_id_if_created", None)
+    if sandbox_id:
+        return sandbox_id
+    is_materialized = getattr(sandbox_handle, "is_materialized", None)
+    if callable(is_materialized) and not is_materialized():
+        return "<lazy>"
+    return getattr(sandbox_handle, "sandbox_id", "<unknown>")
+
 
 class MCPClientManager:
     _instance = None
@@ -64,17 +175,13 @@ class MCPClientManager:
                             if auth_token:
                                 # Prepare headers for MCP server authentication
                                 headers = prepare_mcp_headers(auth_token)
-                                
-                                # Add headers to each connection in the config
+
+                                # Add headers to each connection in the config,
+                                # preserving provider credentials already configured.
                                 for server_name, server_config in connection_config.items():
                                     if isinstance(server_config, dict):
-                                        # If it's an SSE connection with a URL
-                                        if 'url' in server_config:
-                                            if 'headers' not in server_config:
-                                                server_config['headers'] = {}
-                                            server_config['headers'].update(headers)
-                                            logger.info(f"Added auth headers to MCP server: {server_name}")
-                        
+                                        _merge_mcp_auth_headers(server_name, server_config, headers)
+
                         connections.update(connection_config)
                 except ValueError as e:
                     logger.error(f"Error configuring MCP {mcp_config.name}: {e}")
@@ -92,7 +199,10 @@ class MCPClientManager:
                             if server_name in connections:
                                 inject_ssl_config({server_name: connections[server_name]}, ssl_verify=False)
                 
-                logger.info(f"Creating new MCP client with connections: {connections}")
+                logger.info(
+                    "Creating new MCP client with connections: %s",
+                    _redact_mcp_connections(connections),
+                )
                 # Create a new client each time - don't reuse the singleton
                 # As of langchain-mcp-adapters 0.1.0, MultiServerMCPClient cannot be used as a context manager
                 client = MultiServerMCPClient(connections=connections)
@@ -109,14 +219,86 @@ class MCPClientManager:
         if self._client is not None:
             self._client = None
 
-async def create_agent(agent: Agent, search_params=None, session_id=None, user_context: Optional[Dict] = None, working_dir: Optional[str] = None):
+async def _resolve_skills_for_prompt(
+    agent: Agent,
+    *,
+    user_message: Optional[str] = None,
+    llm: Optional[Any] = None,
+) -> Tuple[List[Any], Optional[str]]:
+    """Single shared assembly path: resolve -> snapshot -> route -> render.
+
+    AD-13's single-source-of-truth mandate for "which skills does this agent use this
+    turn" extends to this whole pipeline, not just ``resolve_agent_skills`` — every
+    prompt-building call site (the top-level agent in ``create_agent`` and both
+    agent-as-tool builders, ``IACTTool.create`` / ``IACTOCRTool.create``) must go
+    through the exact same sequence: ``resolve_agent_skills`` (collision-safe
+    resolution) -> ``snapshot_skills`` (H1: thread/session-safe before any tool
+    closure can see it) -> ``resolve_prompt_skills`` (step_024's opt-in router hook,
+    a no-op unless ``agent.skill_router_enabled``) -> ``generate_skills_system_prompt_section``.
+
+    Extracted from ``create_agent`` (review-round finding: sub-agent builders had
+    drifted onto a direct, unresolved, unsnapshotted
+    ``generate_skills_system_prompt_section(agent.skill_associations)`` call, costing an
+    N+1 lazy-load per turn and silently skipping the router even when
+    ``skill_router_enabled`` was set) so the three call sites cannot drift again.
+
+    Returns ``(skill_snapshots, skills_section)``:
+      - ``skill_snapshots`` is the FULL resolved+enabled set (never narrowed by the
+        router) — the only list that may be used to register ``load_skill`` /
+        ``read_skill_file`` tools, so the model can always explicitly load a skill the
+        router did not proactively surface.
+      - ``skills_section`` is the (possibly router-narrowed) rendered
+        ``<available_skills>`` block to append to the system prompt, or ``None`` if the
+        agent has no enabled skills.
+    """
+    if not hasattr(agent, "skill_associations") or not agent.skill_associations:
+        return [], None
+
+    resolved_skills = resolve_agent_skills(agent.skill_associations)
+    skill_snapshots = snapshot_skills(resolved_skills)
+    prompt_skills = await resolve_prompt_skills(
+        resolved_skills, agent=agent, user_message=user_message, llm=llm,
+        selector=_select_prompt_skills,
+    )
+    prompt_skill_snapshots = (
+        skill_snapshots if prompt_skills is resolved_skills else snapshot_skills(prompt_skills)
+    )
+    skills_section = generate_skills_system_prompt_section(prompt_skill_snapshots)
+    return skill_snapshots, skills_section
+
+
+async def create_agent(
+    agent: Agent,
+    search_params=None,
+    session_id=None,
+    user_context: Optional[Dict] = None,
+    working_dir: Optional[str] = None,
+    sandbox_handle: Optional[Any] = None,
+    sandbox_provider: Optional[Any] = None,
+    sandbox_session_key: Optional[str] = None,
+    sandbox_session_service: Optional[Any] = None,
+    attached_files: Optional[List[Dict]] = None,
+    temp_silo_ids: Optional[List[int]] = None,
+    user_message: Optional[str] = None,
+):
     """Create a new agent instance with cached checkpointer if memory is enabled.
-    
+
     Args:
         agent: The agent to create
         search_params: Optional search parameters for silo-based retrieval
         session_id: Optional session ID for memory-enabled agents (used to cache checkpointer)
         user_context: Optional user context containing authentication tokens for MCP
+        working_dir: Optional per-conversation working directory
+        sandbox_handle: Optional sandbox handle created during turn preparation
+        sandbox_provider: Optional provider matching sandbox_handle
+        sandbox_session_key: Optional key for sandbox active-use leasing
+        sandbox_session_service: Optional service used for sandbox active-use leasing
+        attached_files: Optional list of attached files to pass to the agent chain
+        temp_silo_ids: Optional list of temporary silo IDs (e.g. playground media) to include as extra retrievers
+        user_message: Optional current turn's user message. Only consumed when
+            ``agent.skill_router_enabled`` is True (step_024's opt-in skill router,
+            used to pre-select at most 2 skills to describe in the prompt) — otherwise
+            never read, so passing/omitting it has no effect on today's default path.
     """
     llm = get_llm(agent)
     if llm is None:
@@ -145,33 +327,81 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         checkpointer = await CheckpointerCacheService.get_async_checkpointer()
         logger.info(f"Using async PostgreSQL checkpointer for agent {agent.agent_id} (session: {cache_session_id})")
 
+    ci_provider_for_prompt = None
+    ci_languages: list[str] = []
+    if agent.enable_code_interpreter and working_dir:
+        try:
+            ci_provider_for_prompt = sandbox_provider or resolve_provider(agent)
+            ci_languages = ci_provider_for_prompt.get_supported_languages()
+        except SandboxProviderUnavailableError as exc:
+            logger.warning(
+                "Code interpreter unavailable for agent %s: %s", agent.agent_id, exc
+            )
+            ci_provider_for_prompt = None
+            ci_languages = []
+
     # Build system prompt with optional skills section and format instructions
     # In LangChain v1, system_prompt is a static string passed to create_agent
     system_prompt_content = agent.system_prompt
-    if hasattr(agent, 'skill_associations') and agent.skill_associations:
-        skills_section = generate_skills_system_prompt_section(agent.skill_associations)
-        if skills_section:
-            system_prompt_content = system_prompt_content + "\n" + skills_section
+    # Inject current date to avoid need for a tool call
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    system_prompt_content += f"\n\nToday's date is {current_date}."
+    # H2 (round-2 review fix): resolve_agent_skills is the single source of truth for
+    # "which skills does this agent use this turn" — call it exactly once here and
+    # reuse the (snapshotted) result for every consumer below (prompt section, the
+    # load_skill map, the read_skill_file map), instead of each one independently
+    # re-resolving. Independent re-resolves risk a skill visible in the prompt but
+    # missing from a tool's map (or vice versa) if resolution ever becomes
+    # non-deterministic (e.g. step_024's planned LLM-routed resolver). Snapshotted
+    # immediately (H1) so no tool closure built below ever holds a live Skill ORM
+    # instance across a thread/session boundary — mirrors ``_capture_silo_data``.
+    # H2 (round-2 review fix) + Finding 3/5 (review-round fix): `_resolve_skills_for_prompt`
+    # is the single shared resolve -> snapshot -> route -> render pipeline, reused by
+    # `IACTTool.create` / `IACTOCRTool.create` below so a sub-agent can never drift onto
+    # an unresolved/unsnapshotted/unrouted skills section again.
+    skill_snapshots, skills_section = await _resolve_skills_for_prompt(
+        agent, user_message=user_message, llm=llm,
+    )
+    if skills_section:
+        system_prompt_content = system_prompt_content + "\n" + skills_section
 
     if working_dir:
         system_prompt_content = (
             system_prompt_content
             + "\n\n<workspace>\n"
             + f"Working directory: {working_dir}\n"
-            + "User-uploaded files are in this directory — reference them by filename only.\n"
+            + "Workspace layout:\n"
+            + "- input/: user-provided files. Treat these as source material.\n"
+            + "- work/: scratch files, scripts, dependencies, extracted content, and intermediate data.\n"
+            + "- output/: final files intended for the user to download.\n"
+            + "User-uploaded files are available under input/; reference them as input/<filename>.\n"
             + "Use `download_url_to_workspace` to save any URL (generated image, PDF, report…) "
-            + "to this directory so the user can download it from the files panel.\n"
+            + "to output/ so the user can download it from the files panel.\n"
             + "</workspace>"
         )
 
-    if agent.enable_code_interpreter and working_dir:
+    if agent.enable_code_interpreter and working_dir and ci_provider_for_prompt is not None:
+        _ci_languages = ci_languages
+        _tool_names = ", ".join(f"`{_tool_name_for_language(lang)}`" for lang in _ci_languages)
         system_prompt_content = (
             system_prompt_content
             + "\n\n<code_interpreter>\n"
-            + "You have access to a `python_repl` tool that executes Python code.\n"
-            + "Reference uploaded files by filename only (e.g. 'report.xlsx').\n"
-            + "Save output files to the working directory and print the filename so the user can download it.\n"
-            + "Available libraries: pandas, openpyxl, numpy, os, json, csv, re, datetime.\n"
+            + f"You have access to the following code execution tools: {_tool_names}.\n"
+            + "Each tool accepts source code in the corresponding language and returns stdout + stderr.\n"
+            + (
+                "When bash is available, you also have sandbox builtin tools: "
+                "`SandboxInfo`, `PWD`, `Read`, `Write`, `Edit`, `LS`, `Glob`, `Grep`, `Stat`, `Bash`, "
+                "`BashOutput`, and `KillShell`. These operate exclusively inside the Linux sandbox. "
+                "`Read`/`Write`/`Edit` require an absolute path, and the absolute workspace root "
+                "differs by provider — never guess a prefix like `/workspace`. Before your first "
+                "call to any of `Read`/`Write`/`Edit`, call `PWD` (or `SandboxInfo`, which also "
+                "reports it) once to learn the sandbox's actual working directory, then build every "
+                "absolute path from that.\n"
+                if "bash" in _ci_languages else ""
+            )
+            + "Read uploaded files from input/<filename>.\n"
+            + "Use work/ for temporary files, package installs, scripts, and dependencies.\n"
+            + "Save only final user-facing deliverables in output/ and print the output/<filename> path.\n"
             + "</code_interpreter>"
         )
 
@@ -225,24 +455,188 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
 
     for tool in agent.tool_associations:
         sub_agent = tool.tool
-        tools.append(await IACTTool.create(sub_agent, user_context=user_context))
+        tools.append(await discover_tool(
+            sub_agent,
+            user_context=user_context,
+            working_dir=working_dir,
+            sandbox_handle=sandbox_handle,
+            sandbox_provider=sandbox_provider,
+            sandbox_session_key=sandbox_session_key,
+            sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
+            user_message=user_message,
+        ))
 
     # Base tools — always available for every agent
-    tools.append(get_current_date)
     if working_dir:
         tools.append(create_download_url_tool(working_dir))
 
     if agent.silo_id is not None:
-
-        retriever_tool = get_retriever_tool(agent.silo, search_params)
+        # Resolve precedence (caller > agent RAG config > system) AND build the tool
+        # off the event loop: both precedence resolution (lazy-loads
+        # silo.metadata_definition) and construction (distinct-value sampling) do
+        # synchronous DB work.
+        retriever_tool = await asyncio.to_thread(
+            _resolve_and_build_retriever_tool, agent, search_params
+        )
         if retriever_tool is not None:
             tools.append(retriever_tool)
 
+    # Add temp silo retrievers (e.g. playground media/file uploads)
+    has_temp_retrievers = False
+    has_media_content = False
+    has_file_content = False
+    if temp_silo_ids:
+        def _build_temp_retrievers():
+            """Sync silo/media inspection + retriever build (own DB session).
+
+            Runs off the event loop via ``asyncio.to_thread`` so the synchronous
+            embedding/vector-store setup inside ``get_retriever_tool`` and the
+            Media lookups do not block the loop during chain construction.
+            """
+            from repositories.silo_repository import SiloRepository
+            from models.media import Media
+            from db.database import SessionLocal
+            built = []
+            media_found = False
+            temp_db = SessionLocal()
+            try:
+                for idx, temp_silo_id in enumerate(temp_silo_ids):
+                    temp_silo = SiloRepository.get_by_id(temp_silo_id, temp_db)
+                    if not temp_silo:
+                        continue
+                    temp_tool = get_retriever_tool(temp_silo, search_params)
+                    if not temp_tool:
+                        continue
+                    temp_tool.name = f"playground_content_retriever_{idx}"
+                    temp_tool.description = (
+                        "Use this tool to search for information from content uploaded "
+                        "in this conversation (documents, PDFs, text files, video/audio "
+                        "transcriptions). Always use this when the user asks about "
+                        "attached or uploaded content."
+                    )
+                    built.append(temp_tool)
+
+                    # Check if silo contains media content (for timestamp instructions)
+                    if temp_silo.repository:
+                        repo_list = temp_silo.repository if isinstance(temp_silo.repository, list) else [temp_silo.repository]
+                        for repo in repo_list:
+                            if temp_db.query(Media).filter(Media.repository_id == repo.repository_id).first():
+                                media_found = True
+                                break
+            finally:
+                temp_db.close()
+            return built, media_found
+
+        temp_tools, has_media_content = await asyncio.to_thread(_build_temp_retrievers)
+        for temp_tool in temp_tools:
+            tools.append(temp_tool)
+            has_temp_retrievers = True
+            logger.info(f"Added temp silo retriever for agent {agent.agent_id}")
+
+        # Check if files were vectorized by looking at silo content
+        if has_temp_retrievers:
+            has_file_content = True  # files are always possible when temp retrievers exist
+
+    # Inject timestamp citation instruction when media content is in the silo
+    if has_media_content:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<media_timestamp_instructions>\n"
+            + "The user has uploaded video/audio media. When answering questions about media content, "
+            + "you MUST include timestamps from the retrieved chunks metadata.\n"
+            + "Each retrieved chunk has metadata with the fields 'name' (the media filename), "
+            + "'start_time' and 'end_time' (in seconds).\n"
+            + "When you reference a specific moment, cite it using this EXACT format, including the "
+            + "media filename so the moment is unambiguously tied to its media:\n"
+            + "[<name> @ MM:SS - MM:SS]\n"
+            + "where <name> is the exact 'name' value from that chunk's metadata. Convert start_time "
+            + "and end_time from seconds to MM:SS (or HH:MM:SS when over an hour).\n"
+            + "Example: if a chunk has name=\"lesson.mp4\", start_time=125 and end_time=180, "
+            + "cite it as [lesson.mp4 @ 02:05 - 03:00].\n"
+            + "Only cite timestamps for the specific media you are actually referencing. When multiple "
+            + "media were uploaded, NEVER mix timestamps from one media into a citation for another, and "
+            + "only cite the media that genuinely answer the user's question.\n"
+            + "Always cite the relevant timestamps so the user can navigate to those moments in the media.\n"
+            + "</media_timestamp_instructions>"
+        )
+
+    # Inject file retriever instruction when files have been vectorized
+    if has_file_content:
+        system_prompt_content = (
+            system_prompt_content
+            + "\n\n<uploaded_files_instructions>\n"
+            + "The user has uploaded documents (PDFs, text files) in this conversation. "
+            + "Their content has been indexed for semantic search.\n"
+            + "When the user asks about or references attached files, you MUST use the "
+            + "uploaded-file semantic search retriever tool available in this conversation "
+            + "to search for relevant information.\n"
+            + "Always cite the source filename from the retrieved chunk metadata.\n"
+            + "</uploaded_files_instructions>"
+        )
+
     if agent.enable_code_interpreter and working_dir:
         os.makedirs(working_dir, exist_ok=True)
-        python_tool = create_python_repl_tool(working_dir=working_dir)
-        tools.append(python_tool)
-        logger.info(f"Python REPL tool added for agent {agent.agent_id} (working_dir={working_dir})")
+        if sandbox_provider is None:
+            try:
+                sandbox_provider = ci_provider_for_prompt or resolve_provider(agent)
+            except SandboxProviderUnavailableError as exc:
+                logger.warning(
+                    "Skipping code interpreter tools for agent %s: %s",
+                    agent.agent_id,
+                    exc,
+                )
+                sandbox_provider = None
+        if sandbox_provider is not None and sandbox_handle is None:
+            logger.warning(
+                "Code interpreter tool requested without prepared sandbox handle; "
+                "creating fallback sandbox during tool assembly for agent %s",
+                agent.agent_id,
+            )
+            try:
+                sandbox_handle = sandbox_provider.create_sandbox(working_dir=working_dir)
+            except Exception as exc:
+                # A provider that resolves fine but is actually unreachable
+                # (e.g. registered but the backing service isn't running)
+                # must not crash tool assembly — degrade the same way an
+                # unavailable provider does just above.
+                logger.warning(
+                    "Fallback sandbox creation failed for agent %s: %s",
+                    agent.agent_id,
+                    exc,
+                )
+                sandbox_provider = None
+                sandbox_handle = None
+        if sandbox_provider is not None and sandbox_handle is not None:
+            if sandbox_session_service is None and sandbox_session_key is not None:
+                try:
+                    from services.sandbox_session_service import sandbox_session_service as _sss
+                    sandbox_session_service = _sss
+                except Exception:
+                    sandbox_session_service = None
+            repl_tools = create_sandbox_repl_tools(
+                sandbox_handle,
+                sandbox_provider,
+                session_key=sandbox_session_key,
+                session_service=sandbox_session_service,
+            )
+            tools.extend(repl_tools)
+            builtin_tools = create_sandbox_builtin_tools(
+                sandbox_handle,
+                sandbox_provider,
+                session_key=sandbox_session_key,
+                session_service=sandbox_session_service,
+            )
+            tools.extend(builtin_tools)
+            logger.info(
+                "Sandbox tools added for agent %s (repl=%s, builtins=%s, working_dir=%s, sandbox_id=%s, provider=%s)",
+                agent.agent_id,
+                [t.name for t in repl_tools],
+                [t.name for t in builtin_tools],
+                working_dir,
+                _sandbox_id_for_log(sandbox_handle),
+                sandbox_handle.provider_name,
+            )
 
     mcp_client = None
     try:
@@ -251,19 +645,45 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
         if (mcp_client):
             mcp_tools = await mcp_client.get_tools()
             logger.info(f"MCP tools loaded successfully: {len(mcp_tools)} tools")
+            _prepare_mcp_tools(mcp_tools)
             if (mcp_tools):
+                for tool in mcp_tools:
+                    _tag_tool(tool, "MCP")
                 tools.extend(mcp_tools)
     except Exception as e:
         logger.error(f"Error loading MCP tools: {e}", exc_info=True)
         # As of langchain-mcp-adapters 0.1.0, no manual cleanup needed
         mcp_client = None
 
-    # Add skill loader tool if agent has skills
-    if hasattr(agent, 'skill_associations') and agent.skill_associations:
-        skill_tool = create_skill_loader_tool(agent.skill_associations)
+    # Add skill loader / file reader tools if agent has skills. Providers are built lazily
+    # (only when there are skills to wire) via the service-layer factory so this module is
+    # the single site that bridges tools/skill_tools.py (DB-free) to the DB/sandbox layers —
+    # step_013's contract: no other call site iterates skill_associations directly. Reuse
+    # the single resolve+snapshot from above (H1/H2) — never re-resolve here.
+    if skill_snapshots:
+        from services.skill_package_service import build_skill_tool_providers
+
+        payload_provider, list_paths_provider, file_content_provider = build_skill_tool_providers()
+
+        skill_tool = create_skill_loader_tool(
+            skill_snapshots,
+            sandbox_handle=sandbox_handle,
+            sandbox_provider=sandbox_provider,
+            payload_provider=payload_provider,
+        )
         if skill_tool:
             tools.append(skill_tool)
-            logger.info(f"Skill loader tool added with {len(agent.skill_associations)} skills")
+
+        skill_file_reader_tool = create_skill_file_reader_tool(
+            skill_snapshots,
+            list_paths_provider=list_paths_provider,
+            file_content_provider=file_content_provider,
+            sandbox_handle=sandbox_handle,
+        )
+        if skill_file_reader_tool:
+            tools.append(skill_file_reader_tool)
+
+    _tag_untyped_tools(tools)
 
     if pydantic_model:
         # In LangChain v1, response_format accepts the pydantic model directly.
@@ -294,13 +714,107 @@ async def create_agent(agent: Agent, search_params=None, session_id=None, user_c
     return agent_chain, mcp_client
 
 
+_DEFAULT_RECURSION_LIMIT = 50
+
+
+def _load_recursion_limit() -> int:
+    """Read AICT_AGENT_RECURSION_LIMIT from the environment once at module load.
+
+    Logs a WARNING and falls back to 50 when the value is absent, non-integer, or
+    below 1 (LangGraph requires recursion_limit >= 1; a value < 1 fails every turn).
+    """
+    raw = os.getenv("AICT_AGENT_RECURSION_LIMIT")
+    if raw is None:
+        return _DEFAULT_RECURSION_LIMIT
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "prepare_agent_config: AICT_AGENT_RECURSION_LIMIT=%r is not a valid integer; "
+            "using default %d",
+            raw, _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
+    if value < 1:
+        logger.warning(
+            "prepare_agent_config: AICT_AGENT_RECURSION_LIMIT=%r is < 1 (invalid); "
+            "using default %d",
+            raw, _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
+    return value
+
+
+AICT_AGENT_RECURSION_LIMIT: int = _load_recursion_limit()
+
+
+def _resolve_and_build_retriever_tool(agent, caller_search_params):
+    """Resolve RAG precedence then build the dynamic retriever tool for *agent*.
+
+    Runs synchronous DB work — precedence resolution lazy-loads
+    ``silo.metadata_definition`` and ``get_retriever_tool`` samples distinct values.
+    MUST be invoked via ``asyncio.to_thread`` so it never blocks the event loop.
+    """
+    from services.silo_service import resolve_search_params  # noqa: PLC0415 — avoids import cycle
+
+    resolved_sp, resolved_pinned = resolve_search_params(agent, caller_search_params)
+    return get_retriever_tool(
+        agent.silo,
+        resolved_sp,
+        getattr(agent, "rag_max_retrieval_calls", None),
+        resolved_pinned,
+    )
+
+
+
+
+def _mcp_tool_error_message(error: Exception) -> str:
+    return (
+        f"Error: the tool call failed: {error}\n"
+        "Check the arguments against the tool's input schema and try again."
+    )
+
+
+def _prepare_mcp_tools(mcp_tools: List[Any]) -> None:
+    """Make tools from external MCP servers safe to hand to a model.
+
+    - Completes missing ``type`` keys in their input schemas (providers reject them).
+    - Returns tool errors (a ``ToolException`` for an ``isError`` result, e.g.
+      rejected arguments) to the model as the tool's output instead of aborting
+      the whole turn, so the model can correct the call.
+    """
+    for tool in mcp_tools:
+        if hasattr(tool, "args_schema") and isinstance(tool.args_schema, dict):
+            ensure_json_schema_types(tool.args_schema)
+        if isinstance(tool, BaseTool):
+            tool.handle_tool_error = _mcp_tool_error_message
+
+
+def _tag_tool(tool: Any, tool_type: str, **extra: Any) -> None:
+    """Record the tool's metrics type in its metadata (propagated to callback handlers)."""
+    if not isinstance(tool, BaseTool):
+        return  # provider-side tool dicts never run locally
+    tool.metadata = {**(tool.metadata or {}), METRICS_TOOL_TYPE_KEY: tool_type, **extra}
+
+
+def _tag_untyped_tools(tools: List[Any]) -> None:
+    """Tag every tool not already typed at its source: sub-agents as AGENT, the rest BUILTIN."""
+    for tool in tools:
+        if not isinstance(tool, BaseTool) or METRICS_TOOL_TYPE_KEY in (tool.metadata or {}):
+            continue
+        if isinstance(tool, (IACTTool, IACTOCRTool)):
+            _tag_tool(tool, "AGENT", **{METRICS_SUB_AGENT_ID_KEY: tool.agent.agent_id})
+        else:
+            _tag_tool(tool, "BUILTIN")
+
+
 def prepare_agent_config(agent):
     """Helper function to prepare agent configuration."""
     config = {
         "configurable": {
             "thread_id": f"thread_{agent.agent_id}"
         },
-        "recursion_limit": 200,
+        "recursion_limit": AICT_AGENT_RECURSION_LIMIT,
     }
     return config
 
@@ -440,21 +954,66 @@ def build_human_message(
     return HumanMessage(content=content)
 
 
+class AgentToolInput(BaseModel):
+    """Input schema for an agent-as-tool.
+
+    Pinned explicitly so the provider function schema is exactly
+    ``{query: string}``. Without it, ``BaseTool`` derives the schema from the
+    ``_run(self, query, *args, **kwargs)`` signature, which emits an untyped
+    ``args`` array (``items`` with no ``type``) that OpenAI rejects with
+    ``schema must have a 'type' key``.
+    """
+
+    query: str = Field(description="The question or instruction to send to the sub-agent.")
+
+
 class IACTTool(BaseTool):
     name: str = "agent_tool"
     description: str = "Search for a repository"
+    args_schema: Type[BaseModel] = AgentToolInput
     agent: Agent
     user_context: Optional[Dict] = None
     react_agent: Any = None
     mcp_client: Any = None
     llm: Any = None
+    working_dir: Optional[str] = None
+    sandbox_handle: Any = None
+    sandbox_provider: Any = None
+    sandbox_session_key: Optional[str] = None
+    sandbox_session_service: Any = None
+    attached_files: Optional[List[Dict]] = None
 
-    def __init__(self, agent: Agent, user_context: Optional[Dict] = None) -> None:
-        super().__init__(agent=agent, user_context=user_context)
+    def __init__(
+        self,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        working_dir: Optional[str] = None,
+        sandbox_handle: Optional[Any] = None,
+        sandbox_provider: Optional[Any] = None,
+        sandbox_session_key: Optional[str] = None,
+        sandbox_session_service: Optional[Any] = None,
+        attached_files: Optional[List[Dict]] = None,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            user_context=user_context,
+            working_dir=working_dir,
+            sandbox_handle=sandbox_handle,
+            sandbox_provider=sandbox_provider,
+            sandbox_session_key=sandbox_session_key,
+            sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
+        )
 
         self.agent = agent
         self.user_context = user_context
-        self.name = agent.name.replace(" ", "_")
+        self.working_dir = working_dir
+        self.sandbox_handle = sandbox_handle
+        self.sandbox_provider = sandbox_provider
+        self.sandbox_session_key = sandbox_session_key
+        self.sandbox_session_service = sandbox_session_service
+        self.attached_files = attached_files or []
+        self.name = sanitize_identifier(agent.name)
         self.description = agent.description or "Agent tool"
         self.llm = get_llm(agent)
         if self.llm is None:
@@ -463,30 +1022,94 @@ class IACTTool(BaseTool):
         self.mcp_client = None
 
     @classmethod
-    async def create(cls, agent: Agent, user_context: Optional[Dict] = None) -> "IACTTool":
+    async def create(
+        cls,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        working_dir: Optional[str] = None,
+        sandbox_handle: Optional[Any] = None,
+        sandbox_provider: Optional[Any] = None,
+        sandbox_session_key: Optional[str] = None,
+        sandbox_session_service: Optional[Any] = None,
+        attached_files: Optional[List[Dict]] = None,
+        user_message: Optional[str] = None,
+    ) -> "IACTTool":
         """Build an agent-as-tool, including the sub-agent's MCP tools.
 
         MCP tools are loaded with an awaited MultiServerMCPClient, which is not
         possible inside a synchronous ``__init__``; hence this async factory. It
         is the only supported way to obtain a ready-to-use ``IACTTool``.
+
+        ``user_message`` is the parent turn's user message, forwarded down from
+        ``create_agent``/``discover_tool`` purely so this sub-agent's own skill-router
+        pass (``agent.skill_router_enabled``, see ``_resolve_skills_for_prompt``) has
+        the same routing signal the top-level agent has — it is otherwise unused here.
         """
-        instance = cls(agent, user_context=user_context)
+        instance = cls(
+            agent,
+            user_context=user_context,
+            working_dir=working_dir,
+            sandbox_handle=sandbox_handle,
+            sandbox_provider=sandbox_provider,
+            sandbox_session_key=sandbox_session_key,
+            sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
+        )
 
         tools = []
         # Add nested tool agents recursively
         for tool in agent.tool_associations:
             sub_agent = tool.tool
-            tools.append(await IACTTool.create(sub_agent, user_context=user_context))
+            tools.append(await discover_tool(
+                sub_agent, user_context=user_context, attached_files=attached_files,
+                user_message=user_message,
+            ))
 
         # Add base useful tools
-        tools.append(get_current_date)
         tools.append(fetch_file_in_base64)
 
-        # Add silo retriever if configured
+        # Add silo retriever if configured. The sub-agent uses the same dynamic
+        # metadata-aware tool as the root agent, driven by its OWN RAG config
+        # (rag_k / rag_search_type / rag_score_threshold / rag_fixed_filters /
+        # rag_max_retrieval_calls). Caller search params are NOT propagated from the
+        # root agent (caller_search_params=None) — sub-agents are self-contained (FR-12).
         if agent.silo_id is not None:
-            retriever_tool = get_retriever_tool(agent.silo)
+            # Caller params NOT propagated (None) — the sub-agent uses its OWN config.
+            # Off the event loop: resolution + construction do synchronous DB work.
+            retriever_tool = await asyncio.to_thread(
+                _resolve_and_build_retriever_tool, agent, None
+            )
             if retriever_tool is not None:
                 tools.append(retriever_tool)
+
+        if agent.enable_code_interpreter and working_dir and sandbox_handle is not None and sandbox_provider is None:
+            try:
+                sandbox_provider = resolve_provider(agent)
+                instance.sandbox_provider = sandbox_provider
+            except SandboxProviderUnavailableError as exc:
+                logger.warning(
+                    "Skipping code interpreter tools for sub-agent %s: %s",
+                    agent.agent_id,
+                    exc,
+                )
+
+        if agent.enable_code_interpreter and working_dir and sandbox_handle is not None and sandbox_provider is not None:
+            repl_tools = create_sandbox_repl_tools(
+                sandbox_handle,
+                sandbox_provider,
+                session_key=sandbox_session_key,
+                session_service=sandbox_session_service,
+            )
+            tools.extend(repl_tools)
+            logger.info(
+                "Shared sandbox REPL tools added for sub-agent %s "
+                "(languages=%s, working_dir=%s, sandbox_id=%s, provider=%s)",
+                agent.agent_id,
+                [t.name for t in repl_tools],
+                working_dir,
+                _sandbox_id_for_log(sandbox_handle),
+                sandbox_handle.provider_name,
+            )
 
         # Add MCP tools — mirrors create_agent. A failing MCP server degrades the
         # sub-agent but never breaks its construction.
@@ -499,6 +1122,7 @@ class IACTTool(BaseTool):
                     f"MCP tools loaded successfully for sub-agent {agent.agent_id}: "
                     f"{len(mcp_tools)} tools"
                 )
+                _prepare_mcp_tools(mcp_tools)
                 if mcp_tools:
                     tools.extend(mcp_tools)
         except Exception as e:
@@ -510,10 +1134,48 @@ class IACTTool(BaseTool):
 
         # Build system prompt with optional skills section (LangChain v1 pattern)
         tool_system_prompt = agent.system_prompt or ""
-        if agent.system_prompt and hasattr(agent, 'skill_associations') and agent.skill_associations:
-            skills_section = generate_skills_system_prompt_section(agent.skill_associations)
+        # Inject current date to avoid need for a tool call
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        tool_system_prompt += f"\n\nToday's date is {current_date}."
+        if agent.system_prompt:
+            # Finding 3/5 fix: reuse the shared resolve -> snapshot -> route -> render
+            # pipeline (see `_resolve_skills_for_prompt`) instead of calling
+            # `generate_skills_system_prompt_section(agent.skill_associations)` directly
+            # on the lazy-loaded ORM relationship — that reintroduced an N+1 query per
+            # turn (1 for the association list + 1 per attached skill) and never reached
+            # the opt-in skill router even when `skill_router_enabled` was set.
+            _, skills_section = await _resolve_skills_for_prompt(
+                agent, user_message=user_message, llm=instance.llm,
+            )
             if skills_section:
                 tool_system_prompt = tool_system_prompt + "\n" + skills_section
+
+        if working_dir:
+            tool_system_prompt = (
+                tool_system_prompt
+                + "\n\n<workspace>\n"
+                + f"Working directory: {working_dir}\n"
+                + "Workspace layout:\n"
+                + "- input/: user-provided files. Treat these as source material.\n"
+                + "- work/: scratch files, scripts, dependencies, extracted content, and intermediate data.\n"
+                + "- output/: final files intended for the user to download.\n"
+                + "User-uploaded files are available under input/; reference them as input/<filename>.\n"
+                + "</workspace>"
+            )
+
+        if agent.enable_code_interpreter and working_dir and sandbox_handle is not None and sandbox_provider is not None:
+            _ci_languages = sandbox_provider.get_supported_languages()
+            _tool_names = ", ".join(f"`{_tool_name_for_language(lang)}`" for lang in _ci_languages)
+            tool_system_prompt = (
+                tool_system_prompt
+                + "\n\n<code_interpreter>\n"
+                + f"You have access to the following code execution tools: {_tool_names}.\n"
+                + "They run in the same sandbox used by the parent agent and sibling tools.\n"
+                + "Read uploaded files from input/<filename>.\n"
+                + "Use work/ for temporary files, package installs, scripts, and dependencies.\n"
+                + "Save only final user-facing deliverables in output/ and print the output/<filename> path.\n"
+                + "</code_interpreter>"
+            )
 
         # Create sub-agent
         instance.react_agent = create_langchain_agent(
@@ -529,194 +1191,877 @@ class IACTTool(BaseTool):
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
+        started_at = datetime.utcnow()
+        result = None
+        error = None
         try:
-            # Format the message using prompt_template if available, otherwise use query directly
-            if self.agent.prompt_template:
-                try:
-                    formatted_prompt = self.agent.prompt_template.format(question=query)
-                except KeyError:
-                    # If 'question' is not in template, try other common placeholders
-                    try:
-                        formatted_prompt = self.agent.prompt_template.format(query=query)
-                    except KeyError:
-                        # If no placeholder works, just use the query
-                        logger.warning(f"Could not format prompt_template for agent {self.agent.name}, using query directly")
-                        formatted_prompt = query
-            else:
-                formatted_prompt = query
-            
+            formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
             result = self.react_agent.invoke({"messages": messages})
-            
-            # Extract the content from the last AI message
-            if isinstance(result, dict) and "messages" in result:
-                messages_list = result["messages"]
-                # Find the last AI message with content
-                for msg in reversed(messages_list):
-                    if hasattr(msg, 'content') and msg.content:
-                        return str(msg.content)
-                # Fallback: return the last message content
-                if messages_list:
-                    last_msg = messages_list[-1]
-                    return str(last_msg.content) if hasattr(last_msg, 'content') else str(last_msg)
-            
-            # If result is a string, return it directly
-            return str(result)
-            
+            return self._extract_last_message_content(result)
         except Exception as e:
+            error = e
             logger.error(f"Error executing agent tool {self.name}: {str(e)}")
             return f"Error executing agent tool: {str(e)}"
-    
+        finally:
+            self._record_metrics(query, started_at, result, error)
+
+    def _record_metrics(self, query: str, started_at: datetime, result: Any, error: Optional[Exception]) -> None:
+        """Record this sub-agent run as an AGENT_AS_TOOL execution linked to its parent."""
+        from services.agent_metrics_recorder import record_agent_execution
+
+        finished_at = datetime.utcnow()
+        record_agent_execution(
+            event_id=str(uuid.uuid4()),
+            fresh_agent=self.agent,
+            user_context={
+                **(self.user_context or {}),
+                'parent_execution_id': (self.user_context or {}).get('current_event_id'),
+                'caller_type_override': 'AGENT_AS_TOOL',
+            },
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+            status="ERROR" if error is not None else "SUCCESS",
+            error_code=type(error).__name__ if error is not None else None,
+            error_message=str(error)[:2000] if error is not None else None,
+            result=result if isinstance(result, dict) else None,
+            image_files=[],
+            message=query,
+        )
+
+    def _format_tool_query(self, query: str) -> str:
+        """Apply the sub-agent prompt template to a tool query."""
+        if self.agent.prompt_template:
+            try:
+                return self.agent.prompt_template.format(question=query)
+            except KeyError:
+                try:
+                    return self.agent.prompt_template.format(query=query)
+                except KeyError:
+                    logger.warning(
+                        f"Could not format prompt_template for agent {self.agent.name}, using query directly"
+                    )
+        return query
+
+    @staticmethod
+    def _extract_last_message_content(result: Any) -> str:
+        """Return the last non-empty message content from a LangGraph result/state."""
+        if isinstance(result, dict) and "messages" in result:
+            messages_list = result["messages"]
+            for msg in reversed(messages_list):
+                if hasattr(msg, 'content') and msg.content:
+                    return str(msg.content)
+            if messages_list:
+                last_msg = messages_list[-1]
+                return str(last_msg.content) if hasattr(last_msg, 'content') else str(last_msg)
+        return str(result)
+
+    def _get_stream_writer_or_none(self):
+        try:
+            from langgraph.config import get_stream_writer
+
+            return get_stream_writer()
+        except Exception:
+            return None
+
+    def _emit_subagent_stream_event(self, writer: Any, event: dict) -> None:
+        """Forward a nested sub-agent event to the parent graph custom stream."""
+        if writer is None or not isinstance(event, dict):
+            return
+
+        event_type = event.get("type")
+        data = event.get("data")
+        if not isinstance(data, dict):
+            data = {}
+
+        if event_type in {"tool_start", "tool_end", "thinking"}:
+            raw_tool_call_id = data.get("tool_call_id")
+            data = {
+                **data,
+                "parent_tool_name": self.name,
+                "subagent_name": self.agent.name,
+                "subagent_id": self.agent.agent_id,
+            }
+            if raw_tool_call_id:
+                data["raw_tool_call_id"] = raw_tool_call_id
+                data["tool_call_id"] = f"{self.name}:{self.agent.agent_id}:{raw_tool_call_id}"
+            try:
+                writer({"type": event_type, "data": data})
+            except Exception:
+                pass
+            return
+
+        if event_type == "code_output":
+            try:
+                writer({
+                    "type": "code_output",
+                    "tool_name": data.get("tool_name"),
+                    "stream": data.get("stream", "stdout"),
+                    "line": data.get("line", ""),
+                    "parent_tool_name": self.name,
+                    "subagent_name": self.agent.name,
+                    "subagent_id": self.agent.agent_id,
+                })
+            except Exception:
+                pass
+
     async def _arun(self, query: str, *args, **kwargs) -> str:
         """Asynchronous execution of the agent tool"""
         if self.react_agent is None:
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
+        started_at = datetime.utcnow()
+        result = None
+        error = None
         try:
-            # Format the message using prompt_template if available, otherwise use query directly
-            if self.agent.prompt_template:
-                try:
-                    formatted_prompt = self.agent.prompt_template.format(question=query)
-                except KeyError:
-                    # If 'question' is not in template, try other common placeholders
-                    try:
-                        formatted_prompt = self.agent.prompt_template.format(query=query)
-                    except KeyError:
-                        # If no placeholder works, just use the query
-                        logger.warning(f"Could not format prompt_template for agent {self.agent.name}, using query directly")
-                        formatted_prompt = query
-            else:
-                formatted_prompt = query
-            
+            formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
-            result = await self.react_agent.ainvoke({"messages": messages})
-            
-            # Extract the content from the last AI message
-            if isinstance(result, dict) and "messages" in result:
-                messages_list = result["messages"]
-                # Find the last AI message with content
-                for msg in reversed(messages_list):
-                    if hasattr(msg, 'content') and msg.content:
-                        return str(msg.content)
-                # Fallback: return the last message content
-                if messages_list:
-                    last_msg = messages_list[-1]
-                    return str(last_msg.content) if hasattr(last_msg, 'content') else str(last_msg)
-            
-            # If result is a string, return it directly
-            return str(result)
-            
+            stream_writer = self._get_stream_writer_or_none()
+
+            if stream_writer is None:
+                result = await self.react_agent.ainvoke({"messages": messages})
+                return self._extract_last_message_content(result)
+
+            if not hasattr(self.react_agent, "astream"):
+                result = await self.react_agent.ainvoke({"messages": messages})
+                return self._extract_last_message_content(result)
+
+            from tools.streaming_utils import map_stream_event
+
+            latest_state: Any = None
+            turn_messages: list = []
+            async for mode, chunk in self.react_agent.astream(
+                {"messages": messages},
+                stream_mode=["updates", "custom"],
+            ):
+                if mode == "updates" and isinstance(chunk, dict):
+                    for state_delta in chunk.values():
+                        if isinstance(state_delta, dict) and "messages" in state_delta:
+                            latest_state = state_delta
+                            turn_messages.extend(state_delta["messages"] or [])
+
+                events = map_stream_event(mode, chunk)
+                if not events:
+                    continue
+                for event in events:
+                    self._emit_subagent_stream_event(stream_writer, event)
+
+            result = {"messages": turn_messages}
+            if latest_state is not None:
+                return self._extract_last_message_content(latest_state)
+
+            return ""
+
         except Exception as e:
+            error = e
             logger.error(f"Error executing agent tool {self.name} (async): {str(e)}")
             return f"Error executing agent tool: {str(e)}"
+        finally:
+            self._record_metrics(query, started_at, result, error)
 
-def convert_search_params_to_types(search_params: dict, metadata_definition) -> dict:
-    """
-    Convert search parameters to their proper types based on metadata definition.
-    The search_params dictionary should have a 'filter' key containing the metadata filters.
-    
-    Args:
-        search_params: Dictionary containing search parameters with a 'filter' key
-        metadata_definition: OutputParser instance containing field definitions
-        
-    Returns:
-        Dictionary with converted parameter values
-    """
-    if not search_params or not metadata_definition:
-        return search_params
-        
-    # Create a copy of search_params to avoid modifying the original
-    converted_params = search_params.copy()
-    
-    # Only process the 'filter' key if it exists
-    if 'filter' in search_params and search_params['filter']:
-        field_definitions = {f['name']: f for f in metadata_definition.fields}
-        converted_filter = {}
-        
-        for key, value in search_params['filter'].items():
-            if key in field_definitions:
-                field_type = field_definitions[key]['type']
-                try:
-                    if field_type == 'int':
-                        converted_filter[key] = int(value)
-                    elif field_type == 'float':
-                        converted_filter[key] = float(value)
-                    elif field_type == 'bool':
-                        converted_filter[key] = bool(value)
-                    else:
-                        converted_filter[key] = value
-                except (ValueError, TypeError):
-                    # If conversion fails, keep original value
-                    converted_filter[key] = value
-            else:
-                converted_filter[key] = value
-                
-        converted_params['filter'] = converted_filter
-            
-    return converted_params
 
-def get_retriever_tool(silo: Silo, search_params=None):
-    
-    if silo.silo_id is not None:
-        # Convert search parameters to proper types based on metadata definition
-        if search_params:
-            search_params = convert_search_params_to_types(search_params, silo.metadata_definition)
+async def _execute_tool_agent_ocr(
+    agent_id: int,
+    pdf_path: str,
+    user_context: Dict,
+) -> Dict[str, Any]:
+    """Delegate to AgentExecutionService.execute_agent_ocr synchronously."""
+    from sqlalchemy.orm import Session
+    from db.database import SessionLocal
+    from services.agent_execution_service import AgentExecutionService
+    from fastapi import UploadFile as FastAPIUploadFile
 
-        retriever = SiloService.get_silo_retriever(silo.silo_id, search_params)
-        name = "silo_retriever"
-        description = "Use this tool to search for documents in the pgvector collection."
-        if silo.silo_type == SiloType.REPO:
-            #todo: add description to repository model to compose description
-            description = "Use this tool to search for relevant documents in the repository."
-        elif silo.silo_type == SiloType.DOMAIN:
-            description = f"Use this tool to search for documents. This tool stores information about a web site and this is its description: {silo.domain.description}"
-        else:
-            description = f"Use this tool to search for documents and information about {silo.description}"
+    db: Session = SessionLocal()
+    try:
+        # Wrap pdf_path in an in-memory UploadFile so we can reuse
+        # AgentExecutionService.execute_agent_ocr without duplicating OCR logic.
+        class _PathUploadFile(FastAPIUploadFile):
+            """Thin UploadFile wrapper backed by a file path."""
+            _file: Any = None
 
-        # Create a wrapper retriever that includes metadata in page_content
-        # This ensures the agent can see metadata like holiday_item_id, type, etc.
-        # We'll use a closure to capture the retriever instead of storing it as an attribute
-        original_retriever = retriever
-        
-        def format_docs_with_metadata(docs: List[Document]) -> List[Document]:
-            """Format documents to include metadata in page_content"""
-            formatted_docs = []
-            for doc in docs:
-                metadata_str = json.dumps(doc.metadata, ensure_ascii=False) if doc.metadata else "{}"
-                # Include metadata in the page_content so the agent can see it
-                formatted_content = f"Content: {doc.page_content}\nMetadata: {metadata_str}"
-                formatted_doc = Document(
-                    page_content=formatted_content,
-                    metadata=doc.metadata  # Keep original metadata for filtering
+            def __init__(self, file_path: str) -> None:
+                super().__init__(
+                    filename=os.path.basename(file_path),
+                    file=open(file_path, "rb"),
                 )
-                formatted_docs.append(formatted_doc)
-            return formatted_docs
-        
-        class MetadataRetrieverWrapper(BaseRetriever):
-            """Wrapper retriever that includes metadata in document content"""
-            
-            def _get_relevant_documents(self, query: str) -> List[Document]:
-                docs = original_retriever.invoke(query)
-                return format_docs_with_metadata(docs)
-            
-            async def _aget_relevant_documents(self, query: str) -> List[Document]:
-                docs = await original_retriever.ainvoke(query)
-                return format_docs_with_metadata(docs)
-        
-        # Wrap the retriever to include metadata in content
-        wrapped_retriever = MetadataRetrieverWrapper()
-        
-        # Use default document prompt since metadata is now in page_content
-        from langchain_core.prompts import PromptTemplate
-        document_prompt = PromptTemplate.from_template("{page_content}")
+                self._file = self.file  # keep reference alive
 
-        return create_retriever_tool(
-            retriever=wrapped_retriever, 
-            name=name, 
-            description=description, 
-            response_format="content_and_artifact",
-            document_prompt=document_prompt
+        upload = _PathUploadFile(pdf_path)
+        exec_svc = AgentExecutionService()
+        return await exec_svc.execute_agent_ocr(
+            agent_id=agent_id,
+            pdf_file=upload,
+            user_context=user_context,
+            for_api=True,
+            db=db,
         )
-    return None
+    finally:
+        db.close()
+
+        if upload is not None:
+            upload.file.close()
+
+
+class IACTOCRTool(BaseTool):
+    """
+    Tool wrapper for OCR agents.
+
+    PDF documents are discovered automatically from
+    self.attached_files.
+
+    When one or more PDFs are attached, OCR processing is executed.
+    Otherwise the tool falls back to normal chat behaviour.
+    """
+
+    name: str = "ocr_agent_tool"
+    description: str = "OCR agent tool for extracting text from PDF documents"
+    args_schema: Type[BaseModel] = AgentToolInput
+    agent: Agent
+    user_context: Optional[Dict] = None
+    react_agent: Any = None
+    mcp_client: Any = None
+    llm: Any = None
+    has_memory: bool = False
+    memory_max_messages: int = 20
+    memory_max_tokens: int = 4000
+    memory_summarize_threshold: int = DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+    output_parser_id: Optional[int] = None
+    temperature: float = DEFAULT_AGENT_TEMPERATURE
+    attached_files: Optional[List[Dict]] = None
+
+    def __init__(
+        self,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        attached_files: Optional[List[Dict]] = None,
+    ) -> None:
+        super().__init__(agent=agent, user_context=user_context)
+        self.agent = agent
+        self.user_context = user_context
+        self.attached_files = attached_files or []
+        self.name = sanitize_identifier(agent.name)
+        self.description = agent.description or "OCR agent tool"
+        try:
+            self.llm = get_llm(agent, is_vision=False)
+        except Exception:
+            self.llm = None
+        if self.llm is None:
+            logger.warning(
+                "OCR agent %s has no configured LLM; OCR will not work until service_id is set",
+                agent.name,
+            )
+        self.react_agent = None
+        self.mcp_client = None
+        self.has_memory = getattr(agent, "has_memory", False) or False
+        self.memory_max_messages = getattr(agent, "memory_max_messages", 20) or 20
+        self.memory_max_tokens = getattr(agent, "memory_max_tokens", 4000)
+        self.memory_summarize_threshold = (
+            getattr(agent, "memory_summarize_threshold", DEFAULT_MEMORY_SUMMARIZE_THRESHOLD)
+            or DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+        )
+        self.output_parser_id = getattr(agent, "output_parser_id", None)
+        self.temperature = getattr(agent, "temperature", DEFAULT_AGENT_TEMPERATURE) or DEFAULT_AGENT_TEMPERATURE
+
+    @classmethod
+    async def create(
+        cls,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        attached_files: Optional[List[Dict]] = None,
+        user_message: Optional[str] = None,
+    ) -> "IACTOCRTool":
+        """Build an OCR agent-as-tool with MCP support.
+
+        Similar to ``IACTTool.create`` but adds OCR-specific validation
+        and tools.  A failing MCP server degrades the sub-agent but never
+        breaks construction.
+
+        ``user_message`` is forwarded from the parent turn purely to feed this
+        sub-agent's own opt-in skill-router pass — see ``IACTTool.create``.
+        """
+        instance = cls(agent, user_context=user_context, attached_files=attached_files)
+
+        tools: list = [fetch_file_in_base64]
+
+        # Nested tool agents — only recurse into non-OCR agents, because
+        for t in agent.tool_associations:
+            sub_agent = t.tool
+            nested = await discover_tool(
+                sub_agent, user_context=user_context, attached_files=attached_files,
+                user_message=user_message,
+            )
+            tools.append(nested)
+
+        # MCP tools
+        try:
+            logger.info(f"Starting MCP tools loading for OCR sub-agent {agent.agent_id}...")
+            instance.mcp_client = await MCPClientManager().get_client(agent, user_context)
+            if instance.mcp_client:
+                mcp_tools = await instance.mcp_client.get_tools()
+                logger.info(
+                    f"MCP tools loaded successfully for OCR sub-agent {agent.agent_id}: "
+                    f"{len(mcp_tools)} tools"
+                )
+                _prepare_mcp_tools(mcp_tools)
+                if mcp_tools:
+                    tools.extend(mcp_tools)
+        except Exception as e:
+            logger.error(
+                f"Error loading MCP tools for OCR sub-agent {agent.agent_id}: {e}",
+                exc_info=True,
+            )
+            instance.mcp_client = None
+
+        # System prompt — same pattern as IACTTool
+        tool_system_prompt = agent.system_prompt or ""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        tool_system_prompt += f"\n\nToday's date is {current_date}."
+        if agent.system_prompt:
+            # Finding 3/5 fix — see the matching comment in IACTTool.create.
+            _, skills_section = await _resolve_skills_for_prompt(
+                agent, user_message=user_message, llm=instance.llm,
+            )
+            if skills_section:
+                tool_system_prompt = tool_system_prompt + "\n" + skills_section
+
+        instance.react_agent = create_langchain_agent(
+            model=instance.llm,
+            tools=tools,
+            system_prompt=tool_system_prompt if tool_system_prompt else None,
+        )
+        return instance
+
+    def _run(self, query: str, **kwargs: Any) -> str:
+        """Synchronous execution of the OCR agent tool."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._arun(query=query)
+            )
+        finally:
+            loop.close()
+
+    async def _arun(
+        self,
+        query: str,
+        **kwargs: Any,
+    ) -> str:
+        """Asynchronous execution of the OCR agent tool."""
+
+        if self.react_agent is None:
+            raise RuntimeError(
+                "IACTOCRTool must be built via 'await IACTOCRTool.create(...)' before use."
+            )
+
+        pdf_files = [
+            f for f in self.attached_files
+            if f.get("type") == "pdf"
+        ]
+
+        #
+        # OCR PATH
+        #
+        if pdf_files:
+
+            results = []
+
+            for pdf_file in pdf_files:
+
+                pdf_path = pdf_file.get("file_path")
+                filename = pdf_file.get("filename", "unknown.pdf")
+
+                if not pdf_path:
+                    results.append({
+                        "file": filename,
+                        "error": "PDF file path not found"
+                    })
+                    continue
+
+                if not os.path.isabs(pdf_path):
+                    pdf_path = os.path.join(
+                        get_app_config()["TMP_BASE_FOLDER"],
+                        pdf_path
+                    )
+
+                if not os.path.exists(pdf_path):
+                    results.append({
+                        "file": filename,
+                        "error": f"PDF file not found: {pdf_path}"
+                    })
+                    continue
+
+                try:
+
+                    ocr_result = await _execute_tool_agent_ocr(
+                        agent_id=self.agent.agent_id,
+                        pdf_path=pdf_path,
+                        user_context=self.user_context,
+                    )
+
+                    # execute_agent_ocr(for_api=True) already unwraps the
+                    # OCR result to its "content" (the output-parser dict).
+                    results.append({
+                        "file": filename,
+                        "content": ocr_result,
+                    })
+
+                except Exception as exc:
+
+                    logger.exception(
+                        "OCR failed for %s",
+                        filename
+                    )
+
+                    results.append({
+                        "file": filename,
+                        "error": str(exc)
+                    })
+
+            return json.dumps(
+                results,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+
+        #
+        # CHAT FALLBACK PATH
+        #
+        if self.agent.prompt_template:
+            try:
+                formatted_prompt = self.agent.prompt_template.format(
+                    question=query
+                )
+            except KeyError:
+                try:
+                    formatted_prompt = self.agent.prompt_template.format(
+                        query=query
+                    )
+                except KeyError:
+                    logger.warning(
+                        "Could not format prompt_template for OCR agent %s, using query directly",
+                        self.agent.name,
+                    )
+                    formatted_prompt = query
+        else:
+            formatted_prompt = query
+
+        messages = [
+            HumanMessage(content=formatted_prompt)
+        ]
+
+        try:
+
+            result = await self.react_agent.ainvoke(
+                {"messages": messages}
+            )
+
+            if isinstance(result, dict) and "messages" in result:
+
+                messages_list = result["messages"]
+
+                for msg in reversed(messages_list):
+                    if hasattr(msg, "content") and msg.content:
+                        return str(msg.content)
+
+                if messages_list:
+                    last_msg = messages_list[-1]
+
+                    return (
+                        str(last_msg.content)
+                        if hasattr(last_msg, "content")
+                        else str(last_msg)
+                    )
+
+            return str(result)
+
+        except Exception as e:
+
+            logger.error(
+                "Error executing OCR chat fallback: %s",
+                e,
+            )
+
+            return f"Error executing agent tool: {str(e)}"
+
+
+async def discover_tool(
+    agent: Agent,
+    user_context: Optional[Dict] = None,
+    working_dir: Optional[str] = None,
+    sandbox_handle: Optional[Any] = None,
+    sandbox_provider: Optional[Any] = None,
+    sandbox_session_key: Optional[str] = None,
+    sandbox_session_service: Optional[Any] = None,
+    attached_files: Optional[List[Dict]] = None,
+    user_message: Optional[str] = None,
+) -> BaseTool:
+    """Return the appropriate tool wrapper for *agent*.
+
+    Routes to :class:`IACTOCRTool` when the agent is an OCR agent
+    (``type == 'ocr_agent'``), otherwise to :class:`IACTTool`. Sandbox
+    parameters are only meaningful for :class:`IACTTool` — OCR agents
+    don't support code interpreter.
+
+    ``user_message`` is the current turn's user message, forwarded straight through
+    from the top-level ``create_agent`` call (and recursively from nested
+    ``IACTTool``/``IACTOCRTool`` builders) purely to feed each sub-agent's own opt-in
+    skill-router pass (Finding 5) — see ``_resolve_skills_for_prompt``.
+    """
+    if agent.type == "ocr_agent":
+        return await IACTOCRTool.create(
+            agent, user_context=user_context, attached_files=attached_files,
+            user_message=user_message,
+        )
+    return await IACTTool.create(
+        agent,
+        user_context=user_context,
+        working_dir=working_dir,
+        sandbox_handle=sandbox_handle,
+        sandbox_provider=sandbox_provider,
+        sandbox_session_key=sandbox_session_key,
+        sandbox_session_service=sandbox_session_service,
+        attached_files=attached_files,
+        user_message=user_message,
+    )
+
+
+_SEARCH_ERROR_MSG = "The knowledge base search failed; try rephrasing or removing filters."
+
+
+def _format_docs_with_metadata(docs: List[Document]) -> str:
+    """Serialize retrieved documents as a text block with metadata for the LLM."""
+    parts: List[str] = []
+    for doc in docs:
+        metadata_str = json.dumps(doc.metadata, ensure_ascii=False) if doc.metadata else "{}"
+        parts.append(f"Content: {doc.page_content}\nMetadata: {metadata_str}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _capture_silo_data(silo: Silo) -> dict:
+    """Extract all silo ORM data needed by the retrieval coroutine into plain values.
+
+    After this call the coroutine never accesses the ORM object or its lazy
+    relationships, avoiding DetachedInstanceError.
+    """
+    metadata_definition = getattr(silo, "metadata_definition", None)
+    captured_fields_list: List[dict] = []
+    if metadata_definition is not None:
+        for fspec in (metadata_definition.fields or []):
+            if isinstance(fspec, dict) and fspec.get("name"):
+                captured_fields_list.append(dict(fspec))
+
+    return {
+        "silo_id": silo.silo_id,
+        "vector_db_type": getattr(silo, "vector_db_type", None) or "PGVECTOR",
+        "captured_fields_list": captured_fields_list,
+        "captured_metadata_def": (
+            _types.SimpleNamespace(fields=captured_fields_list)
+            if captured_fields_list
+            else None
+        ),
+        "metadata_field_types": {
+            f["name"]: f.get("type", "str") for f in captured_fields_list
+        },
+    }
+
+
+def _build_pinned_filter(
+    raw_caller_filter: dict,
+    captured_metadata_def: Any,
+    vector_db_type: str,
+) -> dict:
+    """Convert the caller's flat {field: value} filter to a backend filter dict.
+
+    Skips the field whitelist (validate_clauses) so undeclared fields pass through —
+    pinned filters come from trusted caller code, not the LLM. Type coercion is applied
+    using declared field types; undeclared fields are treated as str.
+    """
+    from tools.vector_stores.metadata_filters import (
+        MetadataFilterClause,
+        convert_clause_types,
+        to_backend_filter,
+    )
+
+    clauses: List[MetadataFilterClause] = []
+    for field, value in raw_caller_filter.items():
+        try:
+            clauses.append(MetadataFilterClause(field=field, op="$eq", value=value))
+        except Exception:
+            logger.warning(
+                "get_retriever_tool: could not build pinned clause for field '%s' — skipped",
+                field,
+            )
+
+    if not clauses:
+        return {}
+
+    typed = convert_clause_types(clauses, captured_metadata_def)
+    return to_backend_filter(typed)
+
+
+def _build_llm_filter(
+    metadata_kwargs: dict,
+    metadata_field_types: dict,
+    captured_metadata_def: Any,
+    vector_db_type: str,
+    tool_name: str,
+) -> dict:
+    """Build a backend filter dict from LLM-inferred kwargs.
+
+    Applies the strict field whitelist (only declared fields pass) — LLM input
+    is untrusted.
+    """
+    from tools.vector_stores.metadata_filters import MetadataFilterClause, build_filter_dict
+
+    llm_clauses: List[MetadataFilterClause] = []
+    for field, value in metadata_kwargs.items():
+        if value is None:
+            continue
+        if field not in metadata_field_types:
+            logger.warning(
+                "get_retriever_tool[%s]: field '%s' not in metadata_definition — skipped (AC-5)",
+                tool_name,
+                field,
+            )
+            continue
+        try:
+            llm_clauses.append(MetadataFilterClause(field=field, op="$eq", value=value))
+        except Exception:
+            logger.warning(
+                "get_retriever_tool[%s]: could not build LLM clause for field '%s' — skipped",
+                tool_name,
+                field,
+            )
+
+    if not llm_clauses:
+        return {}
+    return build_filter_dict(llm_clauses, captured_metadata_def, vector_db_type)
+
+
+async def _run_retrieval(
+    silo_id: int,
+    call_search_params: Optional[dict],
+    query: str,
+) -> List[Document]:
+    """Invoke SiloService.get_silo_retriever off the event loop, then run ainvoke."""
+    retriever = await asyncio.to_thread(
+        SiloService.get_silo_retriever, silo_id, call_search_params
+    )
+    return await retriever.ainvoke(query)
+
+
+async def _build_fallback_notice(
+    silo_id: int,
+    llm_filter_fields: List[str],
+    distinct_values: dict,
+    tool_name: str,
+) -> str:
+    """Build the [notice] string for AC-8 fallback, fetching missing values via thread."""
+    from tools.vector_stores.metadata_filters import sanitize_metadata_value, MAX_EXAMPLE_VALUES
+    from services.metadata_values_cache_service import MetadataValuesCacheService
+
+    def _fetch(f: str) -> List[str]:
+        with SessionLocal() as s:
+            return MetadataValuesCacheService.get_distinct_values(
+                silo_id=silo_id, field=f, db=s
+            )
+
+    notice_parts: List[str] = []
+    for field in llm_filter_fields:
+        cached_vals = distinct_values.get(field, [])
+        if not cached_vals:
+            try:
+                cached_vals = await asyncio.to_thread(_fetch, field)
+            except Exception:
+                logger.warning(
+                    "get_retriever_tool[%s]: could not fetch distinct values for field '%s'",
+                    tool_name,
+                    field,
+                )
+                cached_vals = []
+
+        sanitized = [
+            sanitize_metadata_value(str(v))
+            for v in cached_vals
+            if v is not None
+        ]
+        sanitized = [v for v in sanitized if v][:MAX_EXAMPLE_VALUES]
+        if sanitized:
+            notice_parts.append(f"{field}: {', '.join(sanitized)}")
+
+    notice = (
+        f"[notice] No results with the inferred filter {llm_filter_fields}; "
+        f"retried without it."
+    )
+    if notice_parts:
+        notice += " Existing values — " + "; ".join(notice_parts) + "."
+    return notice
+
+
+def get_retriever_tool(
+    silo: Silo,
+    search_params: Optional[dict] = None,
+    max_retrieval_calls: Optional[int] = None,
+    pinned_filter: Optional[dict] = None,
+) -> Optional[StructuredTool]:
+    """Build the dynamic retrieval tool for *silo*.
+
+    All silo ORM state is captured in plain variables at construction time.
+    The coroutine never accesses the ORM object directly, avoiding DetachedInstanceError.
+
+    Args:
+        silo: Attached Silo ORM instance.
+        search_params: Optional caller-level search parameters (tuning only — no
+            'filter' key expected when ``pinned_filter`` is provided).
+        max_retrieval_calls: Optional ceiling on tool invocations per agent turn.
+        pinned_filter: Optional pre-built backend filter dict
+            ``{field: {op: value}}``.  When provided it is used directly as the
+            pinned filter and ``_build_pinned_filter`` is skipped.  When None the
+            existing behaviour is preserved: the ``filter`` key from
+            ``search_params`` is translated via ``_build_pinned_filter``.
+
+    Returns:
+        A StructuredTool whose coroutine performs metadata-aware retrieval,
+        or None when silo.silo_id is falsy.
+    """
+    if not silo.silo_id:
+        return None
+
+    from tools.retriever_tool_builder import (
+        build_retriever_args_schema,
+        build_retriever_description,
+        build_retriever_tool_name,
+        collect_distinct_values,
+    )
+    from tools.vector_stores.metadata_filters import merge_filters_and
+
+    captured = _capture_silo_data(silo)
+    silo_id: int = captured["silo_id"]
+    vector_db_type: str = captured["vector_db_type"]
+    captured_fields_list: List[dict] = captured["captured_fields_list"]
+    captured_metadata_def = captured["captured_metadata_def"]
+    metadata_field_types: dict[str, str] = captured["metadata_field_types"]
+
+    with SessionLocal() as db_session:
+        distinct_values: dict[str, List[str]] = collect_distinct_values(silo, db=db_session)
+
+    effective_search_params: Optional[dict] = search_params
+
+    if pinned_filter is not None:
+        # Pre-built filter supplied by resolve_search_params — use directly.
+        _pinned_filter: dict[str, Any] = pinned_filter
+        if _pinned_filter:
+            effective_search_params = {**(search_params or {}), "filter": _pinned_filter}
+    else:
+        # Legacy path: translate search_params["filter"] flat dict.
+        _pinned_filter = {}
+        if search_params and search_params.get("filter"):
+            _pinned_filter = _build_pinned_filter(
+                search_params["filter"], captured_metadata_def, vector_db_type
+            )
+            if _pinned_filter:
+                effective_search_params = {**search_params, "filter": _pinned_filter}
+
+    # Alias for closure capture
+    resolved_pinned = _pinned_filter
+
+    tool_name: str = build_retriever_tool_name(silo)
+    tool_description: str = build_retriever_description(silo, distinct_values)
+    args_schema = build_retriever_args_schema(silo, distinct_values)
+
+    # Not async-safe under parallel tool calls; safe with LangGraph's serialized model.
+    _call_count: List[int] = [0]
+
+    async def _search(query: str, **metadata_kwargs: Any) -> Tuple[str, List[Document]]:
+        if max_retrieval_calls is not None and _call_count[0] >= max_retrieval_calls:
+            logger.info(
+                "get_retriever_tool[%s]: retrieval ceiling reached (%d/%d)",
+                tool_name, _call_count[0], max_retrieval_calls,
+            )
+            return (
+                "Search limit reached — answer with the information you already have "
+                "or state what is missing.",
+                [],
+            )
+        _call_count[0] += 1
+
+        llm_filter = _build_llm_filter(
+            metadata_kwargs, metadata_field_types, captured_metadata_def,
+            vector_db_type, tool_name,
+        )
+        merged_filter = merge_filters_and(resolved_pinned, llm_filter)
+
+        if merged_filter:
+            base = dict(effective_search_params) if effective_search_params else {}
+            call_search_params: Optional[dict] = {**base, "filter": merged_filter}
+        else:
+            call_search_params = effective_search_params
+
+        applied_fields = list(merged_filter.keys()) if merged_filter else []
+        logger.info(
+            "get_retriever_tool[%s]: call #%d — applied filter fields=%s",
+            tool_name, _call_count[0], applied_fields or "(none)",
+        )
+
+        try:
+            docs: List[Document] = await _run_retrieval(silo_id, call_search_params, query)
+        except Exception as exc:
+            logger.error(
+                "get_retriever_tool[%s]: vector store error",
+                tool_name, exc_info=True,
+            )
+            return (_SEARCH_ERROR_MSG, [])
+
+        if not docs and llm_filter:
+            logger.info(
+                "get_retriever_tool[%s]: 0 results with LLM filter — retrying with pinned only (AC-8)",
+                tool_name,
+            )
+            notice = await _build_fallback_notice(
+                silo_id, list(llm_filter.keys()), distinct_values, tool_name
+            )
+
+            try:
+                docs = await _run_retrieval(silo_id, effective_search_params, query)
+            except Exception as exc:
+                logger.error(
+                    "get_retriever_tool[%s]: fallback vector store error",
+                    tool_name, exc_info=True,
+                )
+                return (_SEARCH_ERROR_MSG, [])
+
+            filter_label = f"with filter {resolved_pinned}" if resolved_pinned else "(no metadata filter)"
+            content = (
+                f"{notice}\n\n"
+                f"{len(docs)} results {filter_label}\n\n"
+                f"{_format_docs_with_metadata(docs)}"
+            )
+            logger.info(
+                "get_retriever_tool[%s]: fallback retrieved %d docs for silo_id=%d",
+                tool_name, len(docs), silo_id,
+            )
+            return (content, docs)
+
+        filter_label = f"with filter {merged_filter}" if merged_filter else "(no metadata filter)"
+        content = (
+            f"{len(docs)} results {filter_label}\n\n"
+            f"{_format_docs_with_metadata(docs)}"
+        )
+        logger.info(
+            "get_retriever_tool[%s]: retrieved %d docs for silo_id=%d, filter_fields=%s",
+            tool_name, len(docs), silo_id, applied_fields or "(none)",
+        )
+        return (content, docs)
+
+    return StructuredTool.from_function(
+        coroutine=_search,
+        name=tool_name,
+        description=tool_description,
+        args_schema=args_schema,
+        response_format="content_and_artifact",
+        metadata={METRICS_TOOL_TYPE_KEY: "RETRIEVER"},
+    )
 

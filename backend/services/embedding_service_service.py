@@ -8,6 +8,7 @@ from schemas.embedding_service_schemas import (
 )
 from core.export_constants import PLACEHOLDER_API_KEY
 from utils.secret_utils import mask_api_key, is_masked_key
+from tools.aws_bedrock_utils import build_extra_config, parse_extra_config
 from typing import List, Optional
 from datetime import datetime
 
@@ -71,6 +72,7 @@ class EmbeddingServiceService:
             not service.api_key
             or service.api_key == PLACEHOLDER_API_KEY
         )
+        extra_cfg = parse_extra_config(service.extra_config)
         return EmbeddingServiceDetailSchema(
             service_id=service.service_id,
             name=service.name,
@@ -78,9 +80,12 @@ class EmbeddingServiceService:
             model_name=service.description or "",
             api_key=mask_api_key(service.api_key),
             base_url=service.endpoint or "",
+            api_version=service.api_version,
             created_at=service.create_date,
             available_providers=providers,
             needs_api_key=needs_api_key,
+            aws_access_key_id=extra_cfg.get("aws_access_key_id"),
+            aws_region=extra_cfg.get("aws_region"),
         )
 
     @staticmethod
@@ -111,6 +116,12 @@ class EmbeddingServiceService:
         if not is_masked_key(service_data.api_key):
             service.api_key = service_data.api_key
         service.endpoint = service_data.base_url
+        service.api_version = service_data.api_version
+        # Persist provider-specific identifiers (AWS Bedrock) as JSON.
+        service.extra_config = build_extra_config(
+            service_data.aws_access_key_id,
+            service_data.aws_region,
+        )
         
         if service_id == 0:
             return EmbeddingServiceRepository.create(db, service)
@@ -149,6 +160,8 @@ class EmbeddingServiceService:
             return {"status": "error", "message": "Provider is required"}
         if not model_name:
             return {"status": "error", "message": "Model name is required"}
+        if provider == EmbeddingProvider.GoogleCloud.value and not endpoint:
+            return {"status": "error", "message": "Project ID is required for Google Cloud provider"}
 
         # Ollama runs locally and may not need an API key; every other
         # provider requires one to talk to its remote endpoint.
@@ -174,6 +187,7 @@ class EmbeddingServiceService:
                 self.api_key = data.get("api_key")
                 self.endpoint = data.get("endpoint")
                 self.api_version = data.get("api_version")
+                self.extra_config = data.get("extra_config")
 
         try:
             embeddings = get_embeddings_model(_MockEmbeddingService(config))
@@ -186,7 +200,7 @@ class EmbeddingServiceService:
             logger.error(
                 "Error testing embedding service connection (provider: %s): %s",
                 provider,
-                str(e),
+                type(e).__name__,
             )
             return {"status": "error", "message": str(e)}
 

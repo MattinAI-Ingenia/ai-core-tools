@@ -1,9 +1,10 @@
 from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session, joinedload
-from models.user import User
+from models.user import User, PlatformRole
 from models.app import App
 from sqlalchemy import or_
 from datetime import datetime, timedelta, timezone
+from utils.config import is_omniadmin
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,12 +32,19 @@ class UserRepository:
     def get_by_email(self, email: str) -> Optional[User]:
         """Get user by email"""
         return self.db.query(User).filter(User.email == email).first()
+
+    def get_by_emails(self, emails: list) -> List[User]:
+        """Get all users matching a list of emails (only rows that exist)"""
+        if not emails:
+            return []
+        return self.db.query(User).filter(User.email.in_(emails)).order_by(User.user_id).all()
     
     def create(self, email: str, name: str = None) -> User:
-        """Create a new user"""
+        """Create a new user. Omniadmin emails get platform_role='admin' from the start."""
         new_user = User(
             email=email,
-            name=name
+            name=name,
+            platform_role=PlatformRole.ADMIN.value if is_omniadmin(email) else PlatformRole.VIEWER.value,
         )
         self.db.add(new_user)
         self.db.commit()
@@ -44,9 +52,16 @@ class UserRepository:
         return new_user
     
     def update(self, user: User, name: str = None) -> User:
-        """Update user information"""
+        """Update user information. Also promotes an existing account to
+        platform_role='admin' if its email has since been added to AICT_OMNIADMINS."""
+        changed = False
         if name and user.name != name:
             user.name = name
+            changed = True
+        if is_omniadmin(user.email) and user.platform_role != PlatformRole.ADMIN.value:
+            user.platform_role = PlatformRole.ADMIN.value
+            changed = True
+        if changed:
             self.db.commit()
             self.db.refresh(user)
         return user
@@ -67,43 +82,55 @@ class UserRepository:
             self.db.rollback()
             raise e
     
-    def get_all_paginated(self, page: int = 1, per_page: int = 10) -> Tuple[List[User], int]:
+    def get_all_paginated(self, page: int = 1, per_page: int = 10, exclude_emails: list = None) -> Tuple[List[User], int]:
         """Get all users with pagination"""
         if page < 1:
             page = 1
         if per_page < 1 or per_page > 100:
             per_page = 10
-        
-        users_query = self.db.query(User).options(
-            joinedload(User.owned_apps),
-            joinedload(User.api_keys)
-        )
-        total = users_query.count()
+
+        base_query = self.db.query(User)
+        if exclude_emails:
+            base_query = base_query.filter(User.email.notin_(exclude_emails))
+        total = base_query.count()
         offset = (page - 1) * per_page
-        users = users_query.offset(offset).limit(per_page).all()
-        
+        users = (
+            base_query
+            .options(joinedload(User.owned_apps), joinedload(User.api_keys))
+            .order_by(User.user_id)
+            .offset(offset)
+            .limit(per_page)
+            .all()
+        )
+
         return users, total
-    
-    def search_users(self, query: str, page: int = 1, per_page: int = 10) -> Tuple[List[User], int]:
+
+    def search_users(self, query: str, page: int = 1, per_page: int = 10, exclude_emails: list = None) -> Tuple[List[User], int]:
         """Search users by name or email"""
         if page < 1:
             page = 1
         if per_page < 1 or per_page > 100:
             per_page = 10
-        
-        users_query = self.db.query(User).options(
-            joinedload(User.owned_apps),
-            joinedload(User.api_keys)
-        ).filter(
+
+        base_query = self.db.query(User).filter(
             or_(
                 User.name.ilike(f'%{query}%'),
                 User.email.ilike(f'%{query}%')
             )
         )
-        total = users_query.count()
+        if exclude_emails:
+            base_query = base_query.filter(User.email.notin_(exclude_emails))
+        total = base_query.count()
         offset = (page - 1) * per_page
-        users = users_query.offset(offset).limit(per_page).all()
-        
+        users = (
+            base_query
+            .options(joinedload(User.owned_apps), joinedload(User.api_keys))
+            .order_by(User.user_id)
+            .offset(offset)
+            .limit(per_page)
+            .all()
+        )
+
         return users, total
     
     def get_total_count(self) -> int:

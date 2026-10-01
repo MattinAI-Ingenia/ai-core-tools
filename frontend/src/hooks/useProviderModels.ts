@@ -63,6 +63,14 @@ export function useProviderModels({
       return;
     }
 
+    if (!client.listModels) {
+      // Sandbox services have no model listing — callers must gate this
+      // hook behind `descriptor.supportsModelListing` before enabling it.
+      setError({ message: 'This service kind does not support model listing' });
+      setLoading(false);
+      return;
+    }
+
     client
       .listModels(request)
       .then((response) => {
@@ -94,6 +102,8 @@ export function useProviderModels({
     request?.api_key,
     request?.base_url,
     request?.api_version,
+    request?.aws_access_key_id,
+    request?.aws_region,
     tick,
   ]);
 
