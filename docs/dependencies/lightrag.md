@@ -279,6 +279,56 @@ siguiente indexación, mantenerlo; si no, la causa está en otro sitio y subir
 la ventana no es la palanca correcta. Tratar este valor como algo a ajustar
 por despliegue, no como una constante ya cerrada.
 
+### 5.2 Filas `failed` en `doc_status` que no son fallos
+
+Un `SELECT status, count(*) FROM lightrag_doc_status` suele dar cientos de filas
+`failed` en un silo sano. Antes de concluir que faltan páginas, mirar el
+`error_msg`: casi todas son rechazos de dedup que LightRAG deja escritos como
+filas propias, con id `dup-<hash>`, mientras la página original está
+`processed`.
+
+| `error_msg` | Qué es | ¿Falta contenido? |
+|---|---|---|
+| `File name already exists. Original doc_id: …, Status: processed` | Reindexar un recurso vuelve a encolar páginas que ya estaban. Cada reindexado deja una fila más por página. | No |
+| `Identical content already exists under another filename. Original doc_id: …` | La página es idéntica, palabra por palabra, a una página de **otro** documento. LightRAG la indexa una sola vez, atribuida al original. | Para el documento duplicado, sí |
+
+Consulta para separar los fallos reales:
+
+```sql
+SELECT count(*) FROM lightrag_doc_status
+WHERE workspace = 'silo_<id>' AND status = 'failed' AND id NOT LIKE 'dup-%';
+```
+
+Si da 0, ninguna página falló de verdad.
+
+**El segundo caso afecta a la recuperación.** Los chunks de la página
+duplicada solo existen con el `file_path` del original. Por eso:
+
+- `list_documents_mentioning` (la herramienta de cobertura) nunca devuelve el
+  documento duplicado para un término que solo aparece en esas páginas.
+- Una pregunta cuyo `docs_esperados` incluye el documento duplicado pierde
+  `doc_recall` sin que el agente lo haya hecho mal.
+
+Observado el 2026-10-01 en los silos EN de DOMUSA (`silo_39`
+`test_new_embedding_en` y `silo_47` `test_new_dedup_en`):
+
+- **Fallos reales:** 0 en los dos silos. Las 33 fuentes tienen páginas procesadas en ambos.
+- **Rechazos por nombre:** 545 en `silo_39` y 592 en `silo_47` (más reindexados).
+- **Contenido idéntico entre manuales:**
+
+  | Páginas duplicadas | Original indexado |
+  |---|---|
+  | CDOC004388, p. 1, 2, 4 y 6 | CDOC004020 |
+  | CDOC001134, p. 33 | CDOC001110 |
+
+  12 de las 63 preguntas del eval set GB (`eval_set_gb_261001.json`) esperan
+  alguno de estos documentos. Al puntuarlas, comprobar si el dato está en una
+  página duplicada antes de contar el documento ausente como fallo.
+
+Posible mejora, sin hacer: añadir al `file_path` algo propio del recurso para
+que dos manuales con páginas iguales no colisionen. A cambio se pierde el ahorro
+de no indexar dos veces el mismo texto.
+
 ---
 
 ## 6. Extracción de entidades
