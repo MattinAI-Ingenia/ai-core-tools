@@ -647,14 +647,23 @@ def _build_rerank_func():
     from lightrag.rerank import generic_rerank_api  # noqa: WPS433
 
     async def _rerank(query, documents, top_n=None, **_kwargs):
-        return await generic_rerank_api(
-            query=query,
-            documents=documents,
-            model=config.LIGHTRAG_RERANK_MODEL,
-            base_url=config.LIGHTRAG_RERANK_URL,
-            api_key=config.LIGHTRAG_RERANK_API_KEY,
-            top_n=top_n,
-        )
+        # Timed so rerank latency can be grepped out of the logs ("[rerank]")
+        # and aggregated per run; finally so a failing/slow endpoint is logged too.
+        started = time.perf_counter()
+        try:
+            return await generic_rerank_api(
+                query=query,
+                documents=documents,
+                model=config.LIGHTRAG_RERANK_MODEL,
+                base_url=config.LIGHTRAG_RERANK_URL,
+                api_key=config.LIGHTRAG_RERANK_API_KEY,
+                top_n=top_n,
+            )
+        finally:
+            logger.info(
+                "[rerank] elapsed_ms=%d n_docs=%d top_n=%s",
+                (time.perf_counter() - started) * 1000, len(documents), top_n,
+            )
 
     return _rerank
 

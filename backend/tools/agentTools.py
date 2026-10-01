@@ -26,6 +26,7 @@ import langsmith as ls
 from langchain_core.tools import StructuredTool
 import asyncio
 import json
+import time
 import os
 import base64
 import mimetypes
@@ -455,6 +456,39 @@ def _build_summarization_llm_from_service(agent, ai_service_id: int):
 
     logger.warning(f"AIService id={ai_service_id} not found in agent's app — using agent LLM")
     return None
+
+
+class _TimingMiddleware(AgentMiddleware):
+    """Logs wall time of every LLM turn and tool call ("[timing]" lines).
+
+    Appended LAST so it is the innermost wrapper: it times the model/tool
+    call itself, not the other middlewares around it. ``finally`` so a
+    failing or timed-out call is logged too.
+    """
+
+    def __init__(self, agent_id):
+        super().__init__()
+        self._agent_id = agent_id
+
+    async def awrap_model_call(self, request, handler):
+        started = time.perf_counter()
+        try:
+            return await handler(request)
+        finally:
+            logger.info(
+                "[timing] llm_turn agent_id=%s elapsed_ms=%d",
+                self._agent_id, (time.perf_counter() - started) * 1000,
+            )
+
+    async def awrap_tool_call(self, request, handler):
+        started = time.perf_counter()
+        try:
+            return await handler(request)
+        finally:
+            logger.info(
+                "[timing] tool agent_id=%s name=%s elapsed_ms=%d",
+                self._agent_id, request.tool_call.get("name"), (time.perf_counter() - started) * 1000,
+            )
 
 
 async def create_agent(
@@ -1045,6 +1079,8 @@ async def create_agent(
         # Some providers (e.g. older Anthropic builds) don't accept parallel_tool_calls;
         # fall back to plain bind so the agent still works.
         llm = llm.bind_tools(tools)
+
+    middleware.append(_TimingMiddleware(agent.agent_id))
 
     if pydantic_model:
         # In LangChain v1, response_format accepts the pydantic model directly.
