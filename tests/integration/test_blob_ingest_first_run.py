@@ -86,10 +86,30 @@ def test_prefix_limits_the_listing(db, repository, fake_blob_client, instant_ind
     fake_blob_client.add_blob(FakeBlob("2025/old.pdf"))
     fake_blob_client.add_blob(FakeBlob("2026/new.pdf"))
 
-    result = trigger_ingestion(repository, db, prefix="2026/")
+    result = trigger_ingestion(repository, db, prefixes=["2026/"])
 
     assert result["queued"] == 1
     assert [r.extra_metadata["blob_name"] for r in azure_blob_resources(db, repository)] == ["2026/new.pdf"]
+
+
+@pytest.mark.usefixtures("tmp_repo_base", "forbid_index_single_content", "instant_indexing")
+def test_resource_shows_the_clean_blob_name_while_uri_keeps_the_staging_hash(db, repository, fake_blob_client, instant_indexing):
+    """The staged filename carries the anti-collision sha1 suffix, but the
+    Resource's shown name must be the clean blob name — the UI matches what
+    the container actually holds, and the on-disk path stays collision-safe."""
+    from services.azure_blob_ingest_service import _sanitize_blob_filename
+
+    fake_blob_client.add_blob(FakeBlob("CDOC001156.pdf", etag='"e1"'))
+    fake_blob_client.add_blob(FakeBlob("2026/CDOC000707.pdf", etag='"e2"'))
+
+    trigger_ingestion(repository, db)
+
+    by_blob = {r.extra_metadata["blob_name"]: r for r in azure_blob_resources(db, repository)}
+    assert by_blob["CDOC001156.pdf"].name == "CDOC001156.pdf"
+    assert by_blob["2026/CDOC000707.pdf"].name == "2026/CDOC000707.pdf"
+    # The on-disk path is still the collision-safe staged filename.
+    assert by_blob["CDOC001156.pdf"].uri == _sanitize_blob_filename("CDOC001156.pdf")
+    assert by_blob["2026/CDOC000707.pdf"].uri == _sanitize_blob_filename("2026/CDOC000707.pdf")
 
 
 @pytest.mark.usefixtures("tmp_repo_base", "forbid_index_single_content")

@@ -31,7 +31,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, List, Optional, Tuple
 
 from fastapi import HTTPException, status
@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 
 from repositories.app_repository import AppRepository
 from repositories.repository_repository import RepositoryRepository
+from models.repository import Repository
 from services import silo_indexing_lock
 from services.blob import azure_blob_client
 from services.blob.azure_blob_client import BlobSourceConfig, RemoteBlob
@@ -233,6 +234,61 @@ def _normalize_extension_filters(raw: Optional[List[str]]) -> set:
     return normalized
 
 
+def _normalize_prefixes(raw: Optional[List[str]]) -> List[str]:
+    """Normalize ``prefixes``: strip whitespace, drop empties, de-duplicate (first wins).
+
+    Overlapping prefixes are harmless — ``_list_filtered_blobs`` de-duplicates
+    the union by blob name — but a literal duplicate would only waste a
+    server-side listing call, so it is dropped here.
+    """
+    if not raw:
+        return []
+    normalized: List[str] = []
+    for value in raw:
+        prefix = (value or '').strip()
+        if prefix and prefix not in normalized:
+            normalized.append(prefix)
+    return normalized
+
+
+def _normalize_excludes(raw: Optional[List[str]]) -> List[str]:
+    """Normalize ``name_excludes`` the same way as ``_normalize_prefixes``."""
+    return _normalize_prefixes(raw)
+
+
+def _list_filtered_blobs(
+    cfg: BlobSourceConfig, prefixes: List[str], extensions: set, excludes: set, page_size: int, max_items: int,
+) -> List[RemoteBlob]:
+    """List the blobs matching ``prefixes`` (empty list = the whole container).
+
+    Azure's listing API only accepts a single ``name_starts_with`` per call,
+    so one server-side listing runs per prefix and the results are unioned by
+    blob name — overlapping prefixes (``CDOC`` and ``CDOC0``) can never yield
+    the same blob twice. ``max_items`` is a hard ceiling on the *union*, spent
+    in prefix order, so a listing can never exceed the run's configured cap
+    no matter how many prefixes were requested. Caveat of that ordering: when
+    an earlier prefix's matches exhaust the budget on their own, blobs matched
+    only by a later prefix are silently absent from the union (and thus from
+    the preview count) — the cap still binds, nothing over-fetches. The
+    client already filters by ``extensions`` and ``excludes``.
+    """
+    blobs: List[RemoteBlob] = []
+    seen: set = set()
+    for prefix in prefixes or [None]:
+        budget = max_items - len(blobs)
+        if budget <= 0:
+            break
+        call_cfg = replace(cfg, prefix=prefix) if prefix else cfg
+        for blob in azure_blob_client.list_blobs(
+            call_cfg, extensions=extensions, page_size=page_size, max_items=budget, excludes=excludes
+        ):
+            if blob.name in seen:
+                continue
+            seen.add(blob.name)
+            blobs.append(blob)
+    return blobs
+
+
 def _max_file_size_bytes(db: Session, app_id: int) -> Optional[int]:
     """The App's configured max upload size in bytes, or None when unlimited (0/unset)."""
     app = AppRepository(db).get_by_id(app_id)
@@ -377,6 +433,7 @@ def _process_batch(
 
         files: List[StagedFileAdapter] = []
         extra_metadata: dict = {}
+        display_names: dict = {}
         pending_by_filename: dict = {}
         for pending, dest_path, filename, failure_reason in download_results:
             if failure_reason:
@@ -385,6 +442,10 @@ def _process_batch(
 
             index = len(files)
             files.append(StagedFileAdapter(dest_path, filename))
+            # The staged filename carries the anti-collision sha1 suffix; the
+            # Resource's shown name is the clean blob name so the UI matches
+            # what the container actually holds.
+            display_names[index] = pending.blob.name
             extra_metadata[index] = {
                 'source_type': 'azure_blob',
                 'account_url': cfg.account_url,
@@ -400,6 +461,7 @@ def _process_batch(
         if files:
             created, pipeline_failed, session_id = ResourceService.create_multiple_resources(
                 files=files, repository_id=repository_id, db=db, extra_metadata=extra_metadata,
+                display_names=display_names,
             )
             created_count = len(created)
             failed_entries.extend(pipeline_failed)
@@ -564,8 +626,73 @@ def _run_remaining_batches(
         _log_run_summary(app_id, repository_id, silo_id, counters, last_session_id, elapsed, listed)
 
 
+@dataclass(frozen=True)
+class _BlobRequest:
+    """A validated ingest/preview request: everything the listing and diff need."""
+
+    repo: Repository
+    cfg: BlobSourceConfig
+    prefixes: List[str]
+    extensions: set
+    excludes: List[str]
+    blob_name: Optional[str]
+
+
+def _validated_blob_request(db: Session, app_id: int, repository_id: int, data: dict) -> _BlobRequest:
+    """Validate an ingest/preview body and build its blob source config.
+
+    Shared by ``trigger_ingestion`` and ``preview_ingestion`` so both entry
+    points cannot drift: repository ownership (404), silo presence,
+    auth-mode/sas-token combination, ``prefixes``/``blob_name`` normalization
+    and mutual exclusion, extension-filter validation, and the anti-SSRF
+    check (AC-4) — all before any persistence or outbound call.
+
+    Raises:
+        HTTPException: 404 if the repository does not belong to ``app_id``.
+        ValidationError: On an invalid body (no silo, bad auth_mode/sas_token
+            combination, prefixes together with blob_name, or an unsupported
+            extension filter).
+    """
+    repo = RepositoryRepository.get_by_id(db, repository_id)
+    if not repo or repo.app_id != app_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    if not repo.silo_id:
+        raise ValidationError("Repository has no silo configured")
+
+    auth_mode = data.get('auth_mode', 'ANONYMOUS')
+    sas_token = data.get('sas_token')
+    if auth_mode == 'SAS_TOKEN' and not sas_token:
+        raise ValidationError("auth_mode=SAS_TOKEN requires a non-empty sas_token")
+    if auth_mode == 'ANONYMOUS' and sas_token:
+        raise ValidationError("auth_mode=ANONYMOUS must not include a sas_token")
+
+    prefixes = _normalize_prefixes(data.get('prefixes'))
+    blob_name = (data.get('blob_name') or '').strip() or None
+    if blob_name and prefixes:
+        raise ValidationError("prefixes and blob_name are mutually exclusive")
+    excludes = _normalize_excludes(data.get('name_excludes'))
+
+    extensions = _normalize_extension_filters(data.get('file_extension_filters'))
+
+    # AC-4: reject before any persistence or outbound call. azure_blob_client
+    # re-validates again immediately before every SDK call (defense in depth, AD-4).
+    cfg = BlobSourceConfig(
+        account_url=assert_allowed_account_url(data['account_url']),
+        container=data['container'],
+        # Listing prefixes are passed explicitly per call (see
+        # _list_filtered_blobs); downloads never need one.
+        prefix=None,
+        auth_mode=auth_mode,
+        sas_token=sas_token,
+    )
+    return _BlobRequest(
+        repo=repo, cfg=cfg, prefixes=prefixes, extensions=extensions, excludes=excludes, blob_name=blob_name,
+    )
+
+
 class AzureBlobIngestService:
-    """Entry point for the ``POST .../ingest-azure-blobs`` endpoint."""
+    """Entry point for the ingest and preview Azure Blob endpoints
+    (``POST .../ingest-azure-blobs`` and ``POST .../preview-azure-blobs``)."""
 
     @staticmethod
     def trigger_ingestion(app_id: int, repository_id: int, data: dict, db: Session) -> dict:
@@ -594,44 +721,15 @@ class AzureBlobIngestService:
         Raises:
             HTTPException: 404 if the repository does not belong to ``app_id``.
             ValidationError: On an invalid body (no silo, bad auth_mode/sas_token
-                combination, or an unsupported extension filter) — 422 at the router.
+                combination, ``prefixes`` together with ``blob_name``, or an
+                unsupported extension filter) — 422 at the router.
             BlobUrlRejected: If ``account_url`` fails the anti-SSRF check (AC-4) — 422 at the router.
             ConflictError: If the destination silo is already indexing (AC-6), or another Azure
                 blob ingestion run is already active for this repository — 409 at the router.
         """
-        repo = RepositoryRepository.get_by_id(db, repository_id)
-        if not repo or repo.app_id != app_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
-        if not repo.silo_id:
-            raise ValidationError("Repository has no silo configured")
-
-        auth_mode = data.get('auth_mode', 'ANONYMOUS')
-        sas_token = data.get('sas_token')
-        if auth_mode == 'SAS_TOKEN' and not sas_token:
-            raise ValidationError("auth_mode=SAS_TOKEN requires a non-empty sas_token")
-        if auth_mode == 'ANONYMOUS' and sas_token:
-            raise ValidationError("auth_mode=ANONYMOUS must not include a sas_token")
-
-        prefix = data.get('prefix')
-        blob_name = (data.get('blob_name') or '').strip() or None
-        if blob_name and prefix:
-            raise ValidationError("prefix and blob_name are mutually exclusive")
-
-        extensions = _normalize_extension_filters(data.get('file_extension_filters'))
-
-        # AC-4: reject before any persistence or outbound call. azure_blob_client
-        # re-validates again immediately before every SDK call (defense in depth, AD-4).
-        account_url = assert_allowed_account_url(data['account_url'])
-        cfg = BlobSourceConfig(
-            account_url=account_url,
-            container=data['container'],
-            # blob_name doubles as the listing prefix — the cheapest way to
-            # fetch just that blob (and near-miss names, filtered to an exact
-            # match below).
-            prefix=blob_name if blob_name else prefix,
-            auth_mode=auth_mode,
-            sas_token=sas_token,
-        )
+        request = _validated_blob_request(db, app_id, repository_id, data)
+        repo = request.repo
+        cfg = request.cfg
 
         silo_id = repo.silo_id
         if silo_indexing_lock.is_locked(db, silo_id):
@@ -660,40 +758,48 @@ class AzureBlobIngestService:
 
             page_size = Config.get_int_env_var('BLOB_LIST_PAGE_SIZE', int(Config.DEFAULTS['BLOB_LIST_PAGE_SIZE']))
             max_items = Config.get_int_env_var('BLOB_LIST_MAX_ITEMS', int(Config.DEFAULTS['BLOB_LIST_MAX_ITEMS']))
-            remote_blobs = list(
-                azure_blob_client.list_blobs(cfg, extensions=extensions, page_size=page_size, max_items=max_items)
+            # blob_name doubles as the listing prefix — the cheapest way to
+            # fetch just that blob (and near-miss names, filtered to an exact
+            # match below).
+            listing_prefixes = [request.blob_name] if request.blob_name else request.prefixes
+            remote_blobs = _list_filtered_blobs(
+                cfg, listing_prefixes, request.extensions, set(request.excludes), page_size, max_items
             )
 
-            if blob_name:
+            if request.blob_name:
                 # The prefix listing may include near-miss names
                 # ("CDOC004211.pdfx" for "CDOC004211.pdf"); a single-file run
                 # is exact-match only, and "not found" is a caller error.
-                remote_blobs = [blob for blob in remote_blobs if blob.name == blob_name]
+                # name_excludes applies here too — a file whose name carries an
+                # excluded substring is by definition excluded.
+                remote_blobs = [blob for blob in remote_blobs if blob.name == request.blob_name]
                 if not remote_blobs:
                     raise ValidationError(
-                        f"Blob {blob_name!r} not found in container {cfg.container!r} "
-                        "(or its extension is not supported)"
+                        f"Blob {request.blob_name!r} not found in container {cfg.container!r} "
+                        "(or its extension is not supported, or its name matches an exclude)"
                     )
 
             # The listing succeeded, so this source is proven reachable —
             # remember it (minus secrets) for the repository's "Actualizar"
             # button. auth_mode is kept so an SAS_TOKEN source re-asks for the
             # token in the UI instead of silently downgrading to ANONYMOUS.
-            # The original prefix is persisted, not a single-file run's
-            # blob_name, so Update keeps scanning the whole (prefix-scoped)
-            # container. Commit before any further reads: the commit expires
+            # The original prefixes are persisted, not a single-file run's
+            # blob_name, so Update keeps scanning the same subset the Load
+            # did (the whole container after a single-file run). Commit before
+            # any further reads: the commit expires
             # this session's loaded instances, and the diff below wants a
             # fresh, cheaply-loaded view of the repository's Resources anyway.
             repo.azure_blob_source = {
                 'account_url': cfg.account_url,
                 'container': cfg.container,
-                'prefix': prefix,
-                'auth_mode': auth_mode,
+                'prefixes': request.prefixes,
+                'name_excludes': request.excludes,
+                'auth_mode': cfg.auth_mode,
             }
             db.commit()
             existing_resources = ResourceService.get_resources_by_repo_id(repository_id, db)
 
-            diff = classify_blobs(existing_resources, cfg.account_url, cfg.container, remote_blobs, extensions)
+            diff = classify_blobs(existing_resources, cfg.account_url, cfg.container, remote_blobs, request.extensions)
             sampled_pendings = _sample_pendings(diff.to_ingest, data.get('sample_size'))
             counters = {
                 'queued': 0,
@@ -774,3 +880,52 @@ class AzureBlobIngestService:
         finally:
             if not handed_off:
                 silo_indexing_lock.release(run_lock_conn, run_lock_id)
+
+    @staticmethod
+    def preview_ingestion(app_id: int, repository_id: int, data: dict, db: Session) -> dict:
+        """Dry-run of the listing + diff behind ``trigger_ingestion``: counts only.
+
+        Shares every validation with the real ingestion (via
+        ``_validated_blob_request``) and runs the exact same listing — same
+        ``prefixes``/``blob_name``/extension filters, same ``max_items``
+        ceiling — plus the idempotency diff, so the returned counters are
+        precisely the ``total_blobs``/``pending_blobs`` a real Load would
+        report right now. The UI shows them before the user commits.
+
+        Unlike the real run this acquires no lock, persists nothing (notably
+        the remembered source) and downloads nothing.
+
+        Returns:
+            A dict matching ``PreviewAzureBlobsResponseSchema``:
+            ``total_blobs`` (everything the listing found under the request's
+            filters) and ``pending_blobs`` (the subset that is new or changed,
+            before any ``sample_size`` cap — the same number the ingest
+            response reports).
+        """
+        request = _validated_blob_request(db, app_id, repository_id, data)
+        # _validated_blob_request's SELECTs autobegin a transaction on this
+        # pooled session; the preview only reads, so end it before the Azure
+        # listing rather than pinning a connection idle-in-transaction for the
+        # listing's whole duration (mirrors the run-lock poll's own db.rollback).
+        db.rollback()
+
+        page_size = Config.get_int_env_var('BLOB_LIST_PAGE_SIZE', int(Config.DEFAULTS['BLOB_LIST_PAGE_SIZE']))
+        max_items = Config.get_int_env_var('BLOB_LIST_MAX_ITEMS', int(Config.DEFAULTS['BLOB_LIST_MAX_ITEMS']))
+        listing_prefixes = [request.blob_name] if request.blob_name else request.prefixes
+        remote_blobs = _list_filtered_blobs(
+            request.cfg, listing_prefixes, request.extensions, set(request.excludes), page_size, max_items
+        )
+
+        if request.blob_name:
+            remote_blobs = [blob for blob in remote_blobs if blob.name == request.blob_name]
+            if not remote_blobs:
+                raise ValidationError(
+                    f"Blob {request.blob_name!r} not found in container {request.cfg.container!r} "
+                    "(or its extension is not supported, or its name matches an exclude)"
+                )
+
+        existing_resources = ResourceService.get_resources_by_repo_id(repository_id, db)
+        diff = classify_blobs(
+            existing_resources, request.cfg.account_url, request.cfg.container, remote_blobs, request.extensions
+        )
+        return {'total_blobs': len(remote_blobs), 'pending_blobs': len(diff.to_ingest)}

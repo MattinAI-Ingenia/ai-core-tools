@@ -1,5 +1,5 @@
 from schemas.media_schemas import MediaResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
@@ -27,16 +27,30 @@ class RepositoryListItemSchema(BaseModel):
 class AzureBlobSourceSchema(BaseModel):
     """The non-secret shape of ``Repository.azure_blob_source``.
 
-    Defining the field explicitly (not as ``Dict[str, Any]``) makes the
+    Defining the fields explicitly (not as ``Dict[str, Any]``) makes the
     no-secrets guarantee structural: whatever dict reaches the column, the
-    detail API can only ever serialize these four keys — a stray ``sas_token``
+    detail API can only ever serialize these keys — a stray ``sas_token``
     cannot leak through.
+
+    ``prefixes`` was renamed from a single ``prefix`` in the same branch that
+    introduced the feature (nothing ever shipped), so a pre-rename row's
+    ``prefix`` key is mapped to a one-element ``prefixes`` here rather than
+    silently dropped — otherwise an Update on such a repository would scan
+    the whole container instead of the previously persisted subset.
     """
 
     account_url: str
     container: str
-    prefix: Optional[str] = None
+    prefixes: Optional[List[str]] = None
+    name_excludes: Optional[List[str]] = None
     auth_mode: str
+
+    @model_validator(mode='before')
+    @classmethod
+    def _map_legacy_prefix(cls, data):
+        if isinstance(data, dict) and data.get('prefix') and not data.get('prefixes'):
+            data = {**data, 'prefixes': [data['prefix']]}
+        return data
 
 
 class RepositoryDetailSchema(BaseModel):
@@ -80,7 +94,7 @@ class RepositoryDetailSchema(BaseModel):
     lightrag_entity_types: Optional[str] = None
     lightrag_entity_types_mode: Optional[str] = None
     # Last successfully-validated Azure Blob source (account_url, container,
-    # prefix, auth_mode — never the SAS token) for the "Actualizar desde
+    # prefixes, auth_mode — never the SAS token) for the "Actualizar desde
     # Azure Blob" button; None until a first ingestion run has succeeded.
     azure_blob_source: Optional[AzureBlobSourceSchema] = None
     # True once something has been indexed: the fields above shaped how entities

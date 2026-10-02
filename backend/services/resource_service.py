@@ -232,7 +232,7 @@ class ResourceService:
             return os.path.join(REPO_BASE_FOLDER, str(resource.repository_id), resource.uri)
     
     @staticmethod
-    def create_multiple_resources(files: List, repository_id: int, db: Session, custom_names: dict = None, folder_id: Optional[int] = None, extra_metadata: dict = None) -> Tuple[List[Resource], List[dict]]:
+    def create_multiple_resources(files: List, repository_id: int, db: Session, custom_names: dict = None, folder_id: Optional[int] = None, extra_metadata: dict = None, display_names: dict = None) -> Tuple[List[Resource], List[dict]]:
         """
         Create multiple resources from uploaded files
         
@@ -242,6 +242,8 @@ class ResourceService:
             db: Database session
             custom_names: Dictionary mapping file indices to custom names (without extensions)
             folder_id: Optional folder ID to upload files to
+            display_names: Dictionary mapping file indices to display-only Resource
+                names — overrides the shown name without touching the saved filename
             
         Returns:
             Tuple containing a list of created Resource instances and a list of failed files
@@ -256,6 +258,8 @@ class ResourceService:
             custom_names = {}
         if extra_metadata is None:
             extra_metadata = {}
+        if display_names is None:
+            display_names = {}
 
         # Validate folder_id if provided
         if folder_id is not None:
@@ -306,6 +310,7 @@ class ResourceService:
             result = ResourceService._process_single_file(
                 file, repository_id, target_path, custom_name, folder_id, db,
                 extra_metadata=extra_metadata.get(index),
+                display_name=display_names.get(index),
             )
             if isinstance(result, Resource):
                 created_resources.append(result)
@@ -339,7 +344,7 @@ class ResourceService:
         return created_resources, failed_files, session_id
 
     @staticmethod
-    def _process_single_file(file, repository_id: int, target_path: str, custom_name: str = None, folder_id: Optional[int] = None, db: Session = None, extra_metadata: dict = None):
+    def _process_single_file(file, repository_id: int, target_path: str, custom_name: str = None, folder_id: Optional[int] = None, db: Session = None, extra_metadata: dict = None, display_name: str = None):
         """
         Process a single file upload
         
@@ -374,6 +379,13 @@ class ResourceService:
         else:
             name = os.path.splitext(file.filename)[0]
             save_filename = file.filename
+        # display_name (when given) overrides ONLY the shown Resource name — the
+        # on-disk filename (save_filename/uri) stays untouched, so path-collision
+        # safety and any flow keyed on uri are unaffected. Used by the Azure blob
+        # ingestion so users see the real blob name instead of the collision-safe
+        # staged filename (which carries a sha1 suffix).
+        if display_name and display_name.strip():
+            name = display_name.strip()
         
         try:
             file_path = os.path.join(target_path, save_filename)

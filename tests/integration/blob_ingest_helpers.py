@@ -27,6 +27,7 @@ CONTAINER = "etiquetas"
 SAS_TOKEN = "sv=2024-11-04&ss=b&srt=co&sp=rl&se=2030-01-01T00%3A00%3A00Z&sig=SUPERSECRETSIG"
 
 BLOB_INGEST_URL = "/internal/apps/{app_id}/repositories/{repository_id}/ingest-azure-blobs"
+BLOB_PREVIEW_URL = "/internal/apps/{app_id}/repositories/{repository_id}/preview-azure-blobs"
 
 
 def http_error(status_code: int, message: str) -> HttpResponseError:

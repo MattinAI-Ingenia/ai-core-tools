@@ -527,7 +527,8 @@ const RepositoryDetailPage: React.FC = () => {
         {
           account_url: source.account_url,
           container: source.container,
-          prefix: source.prefix ?? null,
+          prefixes: source.prefixes ?? null,
+          name_excludes: source.name_excludes ?? null,
           auth_mode: source.auth_mode,
           sample_size: AZURE_BLOB_SAMPLE_SIZE,
         },
