@@ -3,7 +3,7 @@
 AC for the UI feature: each run ingests at most ``sample_size`` randomly
 picked pending blobs (the frontend always sends 20), the response reports the
 whole-run ``total_blobs``/``pending_blobs`` the informative message needs, and
-the last successfully-listed source (account_url/container/prefix/auth_mode —
+the last successfully-listed source (account_url/container/prefixes/auth_mode —
 never the SAS token) is persisted on the Repository row so the "Actualizar"
 button survives page reloads.
 """
@@ -91,12 +91,13 @@ def test_no_sample_size_ingests_everything_pending(db, repository, fake_blob_cli
 def test_successful_run_persists_the_source_without_secrets(db, repository, fake_blob_client, instant_indexing):
     fake_blob_client.add_blob(FakeBlob("docs/etiqueta-a.pdf", etag='"etag-a"'))
 
-    trigger_ingestion(repository, db, prefix="docs/")
+    trigger_ingestion(repository, db, prefixes=["docs/"])
 
     assert repository.azure_blob_source == {
         "account_url": ACCOUNT_URL,
         "container": CONTAINER,
-        "prefix": "docs/",
+        "prefixes": ["docs/"],
+        "name_excludes": [],
         "auth_mode": "ANONYMOUS",
     }
     assert "sas_token" not in repository.azure_blob_source
@@ -178,7 +179,7 @@ def test_single_blob_and_prefix_are_mutually_exclusive(db, repository, fake_blob
     fake_blob_client.add_blob(FakeBlob("docs/etiqueta-a.pdf", etag='"etag-a"'))
 
     with pytest.raises(ValidationError, match="mutually exclusive"):
-        trigger_ingestion(repository, db, prefix="docs/", blob_name="docs/etiqueta-a.pdf")
+        trigger_ingestion(repository, db, prefixes=["docs/"], blob_name="docs/etiqueta-a.pdf")
 
 
 @pytest.mark.usefixtures("tmp_repo_base", "forbid_index_single_content")
@@ -190,6 +191,7 @@ def test_single_file_run_persists_the_container_not_the_blob_name(db, repository
     assert repository.azure_blob_source == {
         "account_url": ACCOUNT_URL,
         "container": CONTAINER,
-        "prefix": None,
+        "prefixes": [],
+        "name_excludes": [],
         "auth_mode": "ANONYMOUS",
     }

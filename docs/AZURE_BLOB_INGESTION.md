@@ -36,7 +36,8 @@ Body:
 {
   "account_url": "https://etiquetas.blob.core.windows.net",
   "container": "etiquetas",
-  "prefix": "2026/",
+  "prefixes": ["CDOC", "DSAT"],
+  "name_excludes": ["_"],
   "auth_mode": "ANONYMOUS",
   "sas_token": null,
   "file_extension_filters": [".pdf"],
@@ -49,12 +50,37 @@ Body:
 |-------|----------|-------|
 | `account_url` | yes | `https://…` only; host must end in `BLOB_ALLOWED_HOST_SUFFIXES` (default `.blob.core.windows.net`) |
 | `container` | yes | |
-| `prefix` | no | Only blobs whose name starts with this are listed |
+| `prefixes` | no | Only blobs whose name starts with **any** of these are listed (e.g. `["CDOC", "DSAT"]`), at most 16. One server-side listing per prefix, unioned and de-duplicated; the whole run's cap (`BLOB_LIST_MAX_ITEMS`) is spent across the union — an earlier prefix's matches can therefore exhaust it before a later prefix is listed at all. Omitted/empty = the whole container |
+| `name_excludes` | no | Character/substring blacklist: blobs whose names **contain** any of these (e.g. `["_"]` skips `CDOC002817_2a67fdb9.pdf`) are never listed, counted, or ingested, and never consume `BLOB_LIST_MAX_ITEMS`. Applies to exact `blob_name` requests too, at most 16 |
 | `auth_mode` | no | `ANONYMOUS` (default) or `SAS_TOKEN` |
 | `sas_token` | only if `SAS_TOKEN` | With or without a leading `?` |
 | `file_extension_filters` | no | Defaults to every extension the pipeline supports (`.pdf`, `.docx`, `.txt`, `.md`) |
 | `sample_size` | no | Cap each run to that many **randomly-picked pending blobs** (the frontend sends 20 during validation). `null`/omitted = ingest everything pending |
-| `blob_name` | no | Exact blob name (including its folder path) — ingests only that one, bypassing the sampling cap. Mutually exclusive with `prefix`; "not found" is a 422 |
+| `blob_name` | no | Exact blob name (including its folder path) — ingests only that one, bypassing the sampling cap. Mutually exclusive with `prefixes`; "not found" is a 422 |
+
+There is also a dry-run sibling of this endpoint that runs the exact same
+listing + idempotency diff but ingests nothing:
+
+```
+POST /internal/apps/{app_id}/repositories/{repository_id}/preview-azure-blobs
+Role: editor or above
+```
+
+Same body, response `200 OK`:
+
+```json
+{
+  "total_blobs": 347,
+  "pending_blobs": 347
+}
+```
+
+`total_blobs` is how many documents the current filters match;
+`pending_blobs` is how many of those are new or changed **before** the
+`sample_size` cap applies (the same number the ingest response reports), so a
+Load right now ingests at most 20 of them at random. Nothing is downloaded,
+indexed, persisted, or locked — it is safe to call while an ingestion is
+running. The UI's **Check count** button in the Load/Update dialog uses it.
 
 Response — `202 Accepted`:
 
@@ -87,22 +113,26 @@ The repository page has two buttons (editors and above, disabled while an
 ingestion is running):
 
 - **Load from Azure Blob** — opens a dialog for `account_url`, `container`,
-  `prefix`, and the auth mode (+ SAS token if chosen), plus an optional
-  **Single file** field: an exact blob name ingests only that one (ignoring
-  the random-20 cap; useful to re-pull a specific changed PDF). It always
-  sends `sample_size: 20`, and a toast reports what was found: *"N file(s)
-  found. Loading 20 at random (validation cap)"* when the cap applies,
-  *"everything is already up to date"* when the diff is empty.
+  comma-separated **Name prefixes** (e.g. `CDOC, DSAT`) and **Excluded
+  characters** (e.g. `_`), and the auth mode (+ SAS token if chosen), plus an
+  optional **Single file** field: an exact blob name ingests only that one
+  (ignoring the random-20 cap; useful to re-pull a specific changed PDF).
+  The **Check count** button dry-runs the listing and shows how many documents
+  the filters match — and how many would actually be loaded — before the user
+  commits. It always sends `sample_size: 20`, and a toast reports what was
+  found: *"N file(s) found. Loading 20 at random (validation cap)"* when the
+  cap applies, *"everything is already up to date"* when the diff is empty.
 - **Update from Azure Blob** — appears once a first run has succeeded; it
-  re-lists the container and ingests up to 20 random blobs that are new or
-  changed since the last run. Repeated runs eventually cover the rest.
+  re-lists the container with the same `prefixes`/`name_excludes` and ingests
+  up to 20 random blobs that are new or changed since the last run. Repeated
+  runs eventually cover the rest.
 
 The last successfully-validated source is stored on the Repository
-(`Repository.azure_blob_source`: `account_url`, `container`, `prefix`,
-`auth_mode`), written right after the container listing succeeded, so the
-Update button survives page reloads. **The SAS token is never persisted** —
-an `SAS_TOKEN` source always re-opens the dialog to ask for a fresh token
-before updating.
+(`Repository.azure_blob_source`: `account_url`, `container`, `prefixes`,
+`name_excludes`, `auth_mode`), written right after the container listing
+succeeded, so the Update button survives page reloads. **The SAS token is
+never persisted** — an `SAS_TOKEN` source always re-opens the dialog to ask
+for a fresh token before updating.
 
 ### Errors
 
@@ -135,9 +165,9 @@ Safe to re-run against the same container as often as you like:
 ## Security notes
 
 - The `sas_token` is request-scoped only: never persisted (the remembered
-  source keeps only `account_url`/`container`/`prefix`/`auth_mode`), never
-  returned in a response, and never logged — every error message goes through
-  a sanitizer that strips query strings and redacts
+  source keeps only `account_url`/`container`/`prefixes`/`name_excludes`/`auth_mode`),
+  never returned in a response, and never logged — every error message goes
+  through a sanitizer that strips query strings and redacts
   `sig=`/`se=`/`SharedAccessSignature=` values.
 - `account_url` is validated against the anti-SSRF allowlist before any
   outbound call, again inside the SDK wrapper right before each call, and the

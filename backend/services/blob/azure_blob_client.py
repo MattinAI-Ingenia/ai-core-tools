@@ -19,7 +19,7 @@ import re
 import socket
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterator, Optional
+from typing import Iterable, Iterator, Optional
 from urllib.parse import quote
 
 from azure.core.exceptions import (
@@ -220,8 +220,17 @@ def build_container_client(cfg: BlobSourceConfig) -> ContainerClient:
         raise BlobConnectionError("INVALID_CONFIG", sanitize_azure_error(exc, cfg.sas_token)) from None
 
 
-def list_blobs(cfg: BlobSourceConfig, extensions: set[str], *, page_size: int, max_items: int) -> Iterator[RemoteBlob]:
+def list_blobs(
+    cfg: BlobSourceConfig, extensions: set[str], *, page_size: int, max_items: int,
+    excludes: Iterable[str] = frozenset(),
+) -> Iterator[RemoteBlob]:
     """List blobs under ``cfg.prefix`` whose extension is in ``extensions``.
+
+    Blobs whose name *contains* any substring in ``excludes`` (a per-name
+    blacklist — e.g. ``{"_"}`` skips ``CDOC002817_2a67fdb9.pdf``) are skipped
+    here, before the ``max_items`` counter is touched, so an excluded blob
+    never consumes the run's listing budget. Azure cannot filter by substring
+    server-side, so this is the one client-side filter.
 
     Eagerly builds the container client (and therefore runs the anti-SSRF and
     auth-mode validation) before returning, so a caller gets ``BlobUrlRejected``
@@ -236,6 +245,8 @@ def list_blobs(cfg: BlobSourceConfig, extensions: set[str], *, page_size: int, m
             other extension are skipped without being yielded.
         page_size: Number of blobs requested per page from the service.
         max_items: Stop yielding once this many matching blobs have been produced.
+        excludes: Substrings that must not appear in a blob's name. Empty set
+            means no filtering.
 
     Returns:
         An iterator of ``RemoteBlob``, in listing order. Pages are fetched
@@ -253,7 +264,10 @@ def list_blobs(cfg: BlobSourceConfig, extensions: set[str], *, page_size: int, m
     # ContainerClient.url re-appends the raw SAS token for SAS_TOKEN auth, which would
     # otherwise leak the secret into RemoteBlob.url / Resource.extra_metadata (AC-9).
     account_url = assert_allowed_account_url(cfg.account_url, resolve=False)
-    return _iter_blobs(container_client, account_url, cfg, extensions, page_size=page_size, max_items=max_items)
+    return _iter_blobs(
+        container_client, account_url, cfg, extensions, page_size=page_size, max_items=max_items,
+        excludes=excludes,
+    )
 
 
 def _iter_blobs(
@@ -264,6 +278,7 @@ def _iter_blobs(
     *,
     page_size: int,
     max_items: int,
+    excludes: Iterable[str],
 ) -> Iterator[RemoteBlob]:
     try:
         pages = container_client.list_blobs(name_starts_with=cfg.prefix, results_per_page=page_size).by_page()
@@ -279,6 +294,8 @@ def _iter_blobs(
                     return
                 extension = os.path.splitext(blob.name)[1].lower()
                 if extensions and extension not in extensions:
+                    continue
+                if excludes and any(marker in blob.name for marker in excludes):
                     continue
                 content_settings = getattr(blob, "content_settings", None)
                 content_type = getattr(content_settings, "content_type", None) if content_settings else None

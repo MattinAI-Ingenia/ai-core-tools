@@ -304,14 +304,16 @@ export interface Repository {
 export interface AzureBlobSource {
   account_url: string;
   container: string;
-  prefix?: string | null;
+  prefixes?: string[] | null;
+  name_excludes?: string[] | null;
   auth_mode: 'ANONYMOUS' | 'SAS_TOKEN';
 }
 
 export interface IngestAzureBlobsPayload {
   account_url: string;
   container: string;
-  prefix?: string | null;
+  prefixes?: string[] | null;
+  name_excludes?: string[] | null;
   auth_mode: 'ANONYMOUS' | 'SAS_TOKEN';
   sas_token?: string | null;
   file_extension_filters?: string[];
@@ -325,6 +327,11 @@ export interface IngestAzureBlobsResult {
   skipped_unsupported: number;
   failed: number;
   session_id?: string | null;
+  total_blobs: number;
+  pending_blobs: number;
+}
+
+export interface PreviewAzureBlobsResult {
   total_blobs: number;
   pending_blobs: number;
 }
@@ -2061,6 +2068,13 @@ class ApiService {
 
   async ingestAzureBlobs(appId: number, repositoryId: number, payload: IngestAzureBlobsPayload): Promise<IngestAzureBlobsResult> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/ingest-azure-blobs`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async previewAzureBlobs(appId: number, repositoryId: number, payload: IngestAzureBlobsPayload): Promise<PreviewAzureBlobsResult> {
+    return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/preview-azure-blobs`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });

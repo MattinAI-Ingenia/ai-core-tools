@@ -266,6 +266,18 @@ class TestListBlobsLazyPagination:
 
         assert [b.name for b in results] == ["a.pdf", "c.PDF"]
 
+    def test_filters_by_excluded_substrings_before_spending_the_budget(self, monkeypatch):
+        """``excludes`` is the per-name blacklist: blobs whose names contain any
+        of the substrings are skipped BEFORE max_items counts them, so an
+        excluded blob can never consume the run's listing budget."""
+        pages = [[_fake_blob("CDOC000933.pdf"), _fake_blob("CDOC002817_2a67fdb9.pdf"), _fake_blob("CDOC2.pdf")]]
+        fake_client = _FakeContainerClient(pages)
+        monkeypatch.setattr(blob_client, "build_container_client", lambda cfg: fake_client)
+
+        results = list(list_blobs(_cfg(), extensions=set(), page_size=10, max_items=2, excludes={"_"}))
+
+        assert [b.name for b in results] == ["CDOC000933.pdf", "CDOC2.pdf"]
+
     def test_wraps_azure_errors_as_blob_connection_error(self, monkeypatch):
         class _FailingContainerClient(_FakeContainerClient):
             def list_blobs(self, name_starts_with=None, results_per_page=None):
