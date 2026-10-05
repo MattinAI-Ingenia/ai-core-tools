@@ -897,9 +897,12 @@ class SiloService:
                     "RETURN n.entity_id AS entity_id",
                     term=term,
                 )
+                # CONTAINS also matches inside a word ("rite" in "Secu-rite"); the
+                # literal search anchors at a word start, so the variants must too.
+                at_word_start = re.compile(r"(?<!\w)" + re.escape(term), re.IGNORECASE)
                 for record in result:
                     entity_id = record["entity_id"]
-                    if entity_id:
+                    if entity_id and at_word_start.search(entity_id):
                         variants.add(entity_id)
         except Exception:  # noqa: BLE001 — graph lookup is a best-effort supplement
             logger.warning("Graph term-variant lookup failed for term=%r in silo=%s", term, silo_id, exc_info=True)

@@ -229,6 +229,35 @@ def test_resolve_term_variants_drops_entity_names_absent_from_real_content():
     assert result == ["Dual Clima R"]
 
 
+def test_resolve_term_variants_ignores_entities_that_only_contain_the_term_inside_a_word():
+    """"RITE" is inside "Thermostat De Secu-RITE" and "Fe-RRITE": the graph lookup is
+    a CONTAINS, so those came back as variants and the literal search then
+    returned a French spare-parts page (CDOC001216) as if it cited the RITE
+    regulation. The literal search itself anchors at a word start; so must this."""
+    fake_records = [
+        {"entity_id": "RITE"},
+        {"entity_id": "Thermostat De Securite"},
+        {"entity_id": "Ferrite Hydroxide Fe₂O₄"},
+        {"entity_id": "Anti-frost function"},
+    ]
+    fake_session = MagicMock()
+    fake_session.run.return_value = fake_records
+    fake_driver = MagicMock()
+    fake_driver.session.return_value.__enter__.return_value = fake_session
+
+    with (
+        patch("services.silo_graph_service.SiloGraphService._neo4j_driver", return_value=fake_driver),
+        patch("services.silo_service.SiloService.get_silo", return_value=MagicMock()),
+        patch(
+            "services.silo_service._get_vector_store",
+            return_value=MagicMock(terms_present_literally=lambda collection, terms: terms),
+        ),
+    ):
+        assert SiloService.resolve_term_variants(37, "rite") == ["RITE"]
+        # a hyphen is a word boundary, as in the SQL pattern
+        assert SiloService.resolve_term_variants(37, "frost") == ["Anti-frost function"]
+
+
 def test_resolve_term_variants_degrades_to_empty_when_neo4j_unavailable():
     with patch(
         "services.silo_graph_service.SiloGraphService._neo4j_driver",
