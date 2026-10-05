@@ -1309,7 +1309,11 @@ class AgentExecutionService:
         """Validate user has access to the agent"""
         # TODO: Implement proper access validation
         # For now, just log the validation
-        logger.info(f"Validating access for agent {agent.agent_id} with context {user_context}")
+        # Never the whole context: it carries the caller's API key / OAuth token.
+        logger.info(
+            f"Validating access for agent {agent.agent_id} "
+            f"(user_id={user_context.get('user_id')}, app_id={user_context.get('app_id')})"
+        )
     
     async def _process_files_for_agent(self, files: List[UploadFile], agent: Agent) -> List[Dict]:
         """Process files for agent consumption using existing PDF tools"""

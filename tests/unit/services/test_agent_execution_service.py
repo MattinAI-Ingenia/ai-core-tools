@@ -738,3 +738,19 @@ class TestResetAgentConversationSandboxOwnership:
         assert owned_conversation.sandbox_session_id is None
         assert owned_conversation.sandbox_state is None
         db.commit.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_access_validation_never_logs_the_callers_api_key(monkeypatch):
+    """The log line used to print the whole user_context, API key included."""
+    import services.agent_execution_service as mod
+    spy = MagicMock()
+    monkeypatch.setattr(mod, "logger", spy)
+    svc = AgentExecutionService.__new__(AgentExecutionService)
+    secret = "k" * 32
+    await svc._validate_agent_access(
+        MagicMock(agent_id=3), {"user_id": "apikey_ab", "app_id": 1, "oauth": False, "api_key": secret},
+    )
+    logged = " ".join(str(c) for c in spy.method_calls)
+    assert secret not in logged
+    assert "agent 3" in logged and "apikey_ab" in logged
