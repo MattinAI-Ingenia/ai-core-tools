@@ -157,8 +157,8 @@ def test_term_accepts_a_list_and_ors_the_conditions():
     sql_arg = str(conn.execute.call_args[0][0])
     params = conn.execute.call_args[0][1]
     assert "OR" in sql_arg
-    assert params["term_pattern_0"] == "%cenicero%"
-    assert params["term_pattern_1"] == "%Cenicero Compresor Automatico%"
+    assert params["term_pattern_0"] == r"\mcenicero"
+    assert params["term_pattern_1"] == r"\mCenicero[\s-]+Compresor[\s-]+Automatico"
 
 
 # --- separators inside the term (EN-UC2-3, 2026-10-01) -----------------------
