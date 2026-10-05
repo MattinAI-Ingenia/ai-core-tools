@@ -100,3 +100,41 @@ def test_aggregate_separates_macro_from_micro_and_ignores_errored_rows():
 
 def test_empty_input_returns_an_empty_block_not_a_crash():
     assert aggregate_doc_recall([{"doc_recall": None}]) == {}
+
+
+# --- answers that cite with numbered links instead of document codes ---------
+# EN-UC1-2 (2026-10-01): a correct answer cited only "[1](cite://1)" and model
+# names, never a CDOC code, so the literal search scored it 0.0 and dragged the
+# macro recall down for a reason that has nothing to do with the retrieval.
+
+LINK_ONLY = "Los tres modelos declaran 3 bar [1](cite://1)[2](cite://2)."
+
+
+def test_answer_citing_only_by_link_is_not_scored_as_zero():
+    score = score_doc_recall(LINK_ONLY, ["CDOC004273", "CDOC001018"], VOCAB)
+    assert score["sin_codigos"] is True
+    assert score["recall"] is None, "unmeasurable, not a miss"
+    assert score["expected"] == 2
+
+
+def test_link_citations_next_to_codes_are_scored_normally():
+    score = score_doc_recall(LINK_ONLY + " Ver CDOC004273.", ["CDOC004273", "CDOC001018"], VOCAB)
+    assert "sin_codigos" not in score
+    assert score["recall"] == 0.5
+
+
+def test_an_answer_with_no_links_and_no_codes_is_still_a_real_zero():
+    """A genuine abstention must keep scoring 0, or the fix would hide misses."""
+    score = score_doc_recall("No he encontrado ese dato en el corpus.", ["CDOC004273"], VOCAB)
+    assert score["recall"] == 0.0 and "sin_codigos" not in score
+
+
+def test_aggregate_leaves_unmeasurable_rows_out_and_counts_them():
+    results = [
+        {"doc_recall": {"found": 1, "expected": 2, "recall": 0.5, "extra": []}},
+        {"doc_recall": {"found": 0, "expected": 3, "recall": None, "sin_codigos": True, "extra": []}},
+    ]
+    agg = aggregate_doc_recall(results)
+    assert agg["global"]["n_preguntas"] == 1
+    assert agg["global"]["recall_macro"] == 0.5
+    assert agg["global"]["n_sin_codigos"] == 1

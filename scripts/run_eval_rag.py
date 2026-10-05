@@ -127,6 +127,20 @@ def score_doc_recall(answer: str | None, expected: list[str], vocab: list[str]) 
     text = answer or ""
     mentioned = {code for code in vocab if code in text}
     expected_set = set(expected)
+    if not mentioned and "cite://" in text:
+        # The answer cites its sources only as numbered links ("[1](cite://1)")
+        # and names no document code, so there is nothing to count: unmeasurable,
+        # not a miss. Scoring it 0.0 dragged a correct answer's recall down
+        # (EN-UC1-2, 2026-10-01). ponytail: an answer that mixes links with a
+        # few codes is still scored on the codes alone.
+        return {
+            "found": 0,
+            "expected": len(expected_set),
+            "recall": None,
+            "sin_codigos": True,
+            "missing": [],
+            "extra": [],
+        }
     found = sorted(mentioned & expected_set)
     return {
         "found": len(found),
@@ -146,10 +160,9 @@ def aggregate_doc_recall(results: list[dict]) -> dict:
     question expects 25 documents and several expect 1 — and which one moved
     is itself informative.
     """
-    scored = [
-        (r, r["doc_recall"]) for r in results
-        if not r.get("error") and r.get("doc_recall")
-    ]
+    candidates = [r for r in results if not r.get("error") and r.get("doc_recall")]
+    sin_codigos = sum(1 for r in candidates if r["doc_recall"].get("sin_codigos"))
+    scored = [(r, r["doc_recall"]) for r in candidates if r["doc_recall"].get("recall") is not None]
     if not scored:
         return {}
 
@@ -169,8 +182,13 @@ def aggregate_doc_recall(results: list[dict]) -> dict:
     for r, s in scored:
         by_tipo.setdefault(r.get("tipo") or "sin_tipo", []).append((r, s))
 
+    global_block = _block(scored)
+    if sin_codigos:
+        # Answers that cite only by link: left out of the figures above because
+        # no code can be counted, reported so the exclusion is visible.
+        global_block["n_sin_codigos"] = sin_codigos
     return {
-        "global": _block(scored),
+        "global": global_block,
         "por_tipo": {t: _block(rows) for t, rows in sorted(by_tipo.items())},
         "nota": (
             "Recall de citas de documento, calculado sin intervencion humana ni LLM: "
