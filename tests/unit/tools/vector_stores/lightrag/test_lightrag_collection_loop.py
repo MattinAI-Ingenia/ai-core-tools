@@ -225,3 +225,36 @@ def test_delete_collection_closes_the_dedicated_loop():
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert "silo_1" not in store._collection_loops
+
+
+async def test_two_stores_never_initialise_their_storages_at_the_same_time():
+    """Each call builds a fresh LightRAGStore, hence a fresh LightRAG whose
+    initialize_storages() runs on its OWN loop. LightRAG guards that with a
+    module-level asyncio.Lock, so two overlapping initialisations on different
+    loops fail with "Lock ... is bound to a different event loop" (a 500 on the
+    agent call, seen 19 times in 27 runs the day the coverage tool started to
+    run a semantic search)."""
+    running = 0
+    peak = 0
+    guard = threading.Lock()
+
+    async def initialize_storages():
+        nonlocal running, peak
+        with guard:
+            running += 1
+            peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        with guard:
+            running -= 1
+
+    def build(self, collection_name):
+        return SimpleNamespace(initialize_storages=initialize_storages)
+
+    stores = [_make_store(), _make_store()]
+    with patch.object(LightRAGStore, "_build_rag", build):
+        threads = [threading.Thread(target=s._get_rag_instance, args=(f"silo_{i}",)) for i, s in enumerate(stores)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert peak == 1, "initialisations overlapped"

@@ -1237,6 +1237,13 @@ def _run_async(coro):
         return future.result()
 
 
+# LightRAG guards initialize_storages() with a MODULE-level asyncio.Lock. Every
+# store has its own collection loop, so two overlapping initialisations contend
+# on that lock from different loops and one fails with "bound to a different
+# event loop". Serialising them here keeps the lock uncontended.
+_INIT_STORAGES_LOCK = threading.Lock()
+
+
 class _CollectionEventLoop:
     """Owns one persistent background thread + event loop for ONE LightRAG
     collection (``collection_name`` / silo workspace).
@@ -1804,7 +1811,8 @@ class LightRAGStore(VectorStoreInterface):
             # collection's OWN dedicated loop so every later call (query,
             # insert, ...) can keep reusing that same loop instead of a fresh
             # throwaway one.
-            collection_loop.run(rag.initialize_storages())
+            with _INIT_STORAGES_LOCK:
+                collection_loop.run(rag.initialize_storages())
             self._rag_instances[collection_name] = rag
             logger.info("Created LightRAG instance for workspace '%s'", collection_name)
             return rag
@@ -2384,7 +2392,13 @@ class LightRAGStore(VectorStoreInterface):
                 rest = term[len(prefix):].removeprefix("-")
                 if rest:
                     return r"\m" + re.escape(term[: len(prefix)]) + "-?" + re.escape(rest)
-        return r"\m" + re.escape(term)
+        # Spaces and hyphens inside the term match any run of spaces, hyphens and
+        # line breaks: PDFs wrap lines mid-term ("EN 303-" / "5"), and the chunk
+        # keeps the newline. Joined with "+", not "*", so tokens stay separate.
+        tokens = [t for t in re.split(r"[\s\-]+", term) if t]
+        if not tokens:  # only separators: an empty pattern would match every chunk
+            return r"\m" + re.escape(term)
+        return r"\m" + r"[\s-]+".join(re.escape(t) for t in tokens)
 
     def find_chunks_mentioning(
         self, collection_name: str, term: Optional[Union[str, List[str]]],
@@ -2448,7 +2462,11 @@ class LightRAGStore(VectorStoreInterface):
                 "results may be truncated",
                 self._COVERAGE_QUERY_ROW_CAP, term, collection_name,
             )
-        per_doc_cap = self._COVERAGE_QUERY_ROW_CAP if term is None else 3
+        # No term: the whole document. A term across the corpus: the first matches already
+        # answer "does it appear here". A term inside one manual: the places matter.
+        per_doc_cap = (
+            self._COVERAGE_QUERY_ROW_CAP if term is None else (15 if doc_ids else 3)
+        )
         return _group_chunk_rows([(r[0], r[1], r[2]) for r in rows], per_doc_cap=per_doc_cap), cap_hit
 
     def terms_present_literally(self, collection_name: str, terms: List[str]) -> List[str]:

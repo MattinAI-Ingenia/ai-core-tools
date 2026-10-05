@@ -159,3 +159,59 @@ def test_term_accepts_a_list_and_ors_the_conditions():
     assert "OR" in sql_arg
     assert params["term_pattern_0"] == "%cenicero%"
     assert params["term_pattern_1"] == "%Cenicero Compresor Automatico%"
+
+
+# --- separators inside the term (EN-UC2-3, 2026-10-01) -----------------------
+# The manual prints "EN 303-" at the end of a line and "5" on the next: the
+# chunk text holds "EN 303-\n5", which a pattern with a literal space or hyphen
+# cannot match, so the document was missed by the literal coverage search.
+
+def _matches(term: str, text: str) -> bool:
+    import re
+    # Postgres ERE "\m" (word start) is "\b" in Python; the rest is shared syntax.
+    pattern = LightRAGStore._coverage_term_pattern(term).replace(r"\m", r"\b")
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+@pytest.mark.parametrize("text", ["EN 303-5", "EN 303- 5", "EN 303-\n5", "en  303 5", "EN\n303-5"])
+def test_separators_in_the_term_match_any_run_of_spaces_hyphens_and_line_breaks(text):
+    assert _matches("EN 303-5", text)
+
+
+def test_the_tolerance_does_not_join_unrelated_tokens():
+    assert not _matches("EN 303-5", "EN 3035")
+    assert not _matches("EN 303-5", "EN 303 and 5")
+
+
+def test_a_single_word_term_is_unchanged_and_still_word_anchored():
+    assert _matches("RITE", "the RITE regulation")
+    assert not _matches("RITE", "MISE EN SECURITE")
+
+
+def test_a_term_made_only_of_separators_does_not_become_a_match_everything_pattern():
+    assert not _matches(" - ", "any chunk of text")
+
+
+# --- how many snippets a document gets with a term ---------------------------
+
+def _rows_of_one_document(n):
+    return [(f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"P20 aparece aquí {i}") for i in range(n)]
+
+
+def test_with_a_term_and_no_document_a_document_gets_three_snippets():
+    """Corpus-wide the first matches already answer "does it appear here"."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = _rows_of_one_document(10)
+    grouped, _ = store.find_chunks_mentioning("silo_1", term="P20", doc_filter=None)
+    assert len(grouped["271"]) == 3
+
+
+def test_with_a_term_inside_one_manual_up_to_fifteen_places_are_returned():
+    """"Where does P20 appear in this manual" needs the places, not 3 samples:
+    P20 is on many pages of DSAT000118 and only 3 were returned."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = _rows_of_one_document(40)
+    grouped, _ = store.find_chunks_mentioning("silo_1", term="P20", doc_filter="271")
+    assert len(grouped["271"]) == 15
