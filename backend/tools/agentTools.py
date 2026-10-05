@@ -10,6 +10,7 @@ from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMAR
 from models.silo import Silo
 from langchain.tools import BaseTool, tool
 from tools.outputParserTools import get_parser_model_by_id
+from tools.coverage_union import augment_with_semantic, excerpt_around
 from tools.aiServiceTools import get_llm, get_output_parser
 from tools.ai.fileTools import fetch_file_in_base64
 from tools.ai.workspaceTools import create_download_url_tool
@@ -125,6 +126,18 @@ def _create_coverage_tool(
     # site in _resolve_and_build_retriever_tool for why.
     _lock = lock if lock is not None else asyncio.Lock()
 
+    async def _semantic_chunks(term: str) -> List[dict]:
+        # A wide naive pool (vector only, no LLM, ~0.7 s): 30 chunks reached only
+        # 15 of 25 omitted documents, 200 reach 23 (scripts/bench_enum_retrieval.py).
+        retriever = SiloService.get_silo_retriever(
+            silo_id, {"lightrag_query_mode": "naive", "lightrag_chunk_top_k": 200},
+        )
+        found: List[dict] = []
+        for doc in await retriever.ainvoke(term):
+            raw = (doc.metadata or {}).get("lightrag_raw_data") or {}
+            found.extend((raw.get("data") or {}).get("chunks") or [])
+        return found
+
     @tool(response_format="content_and_artifact")
     async def list_documents_mentioning(term: Optional[str] = None, doc: Optional[str] = None) -> tuple:
         """Search EVERY document for literal mentions of a term — use this
@@ -184,6 +197,25 @@ def _create_coverage_tool(
                     SiloService.find_chunks_mentioning, silo_id, search_term, resolved_doc_filter,
                 )
 
+                # Also surface documents that cover the topic in other words
+                # ("EN 303- 5", "pressure relief valve"): the literal search only
+                # matches the exact phrase. Skipped when scoped to one document.
+                semantic_tiers: dict = {}
+                excerpts: Dict[str, str] = {}  # file_path -> window the LLM reads for a semantic-only page
+
+                def _excerpt(file_path: str, content: str) -> Optional[str]:
+                    # centred on the term (literal hits) or on the best window (semantic-only pages)
+                    return excerpts.get(file_path) or (excerpt_around(content, term) if term else None)
+
+                if term and resolved_doc_filter is None:
+                    from tools.vector_stores.lightrag_store import _build_rerank_func
+                    grouped, semantic_tiers = await augment_with_semantic(
+                        grouped, term,
+                        semantic_chunks_fn=_semantic_chunks,
+                        rerank_fn=_build_rerank_func(),
+                        excerpts_out=excerpts,
+                    )
+
                 if not grouped:
                     abstain_term = term or f"el documento '{doc}'"
                     return f"No se encontró ningún documento que mencione {abstain_term}.", []
@@ -200,12 +232,23 @@ def _create_coverage_tool(
                     for resource_id, snippets in grouped.items():
                         file_path, content, page = snippets[0]
                         n = _citation_offset[0] + len(chunks) + 1
-                        enumerated_lines.append(f"- {file_path} [{n}](cite://{n})")
-                        chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
+                        flag = {"semantic": " (coincidencia semántica)", "possible": " (posible)"}.get(
+                            semantic_tiers.get(resource_id), "")
+                        enumerated_lines.append(f"- {file_path} [{n}](cite://{n}){flag}")
+                        chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page, "excerpt": _excerpt(file_path, content)})
                     for resource_id, snippets in grouped.items():
                         for file_path, content, page in snippets[1:]:
-                            chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
-                    summary = f"{len(grouped)} documento(s) mencionan '{term}'."
+                            chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page, "excerpt": _excerpt(file_path, content)})
+                    summary = f"{len(grouped) - len(semantic_tiers)} documento(s) mencionan '{term}'."
+                    n_sem = sum(1 for t in semantic_tiers.values() if t == "semantic")
+                    n_pos = len(semantic_tiers) - n_sem
+                    if semantic_tiers:
+                        summary += (
+                            f" Además, {n_sem} documento(s) marcados «(coincidencia semántica)» y {n_pos} "
+                            "marcados «(posible)» no contienen la frase literal: la búsqueda semántica los "
+                            "relaciona con el tema (los «posible» con menos seguridad). Lee su fragmento y "
+                            "decide tú si lo mencionan antes de incluirlos."
+                        )
                     instruction = (
                         "IMPORTANT: reproduce the list below in your answer EXACTLY as given, "
                         "one line per document, all of them — do not summarize, select a "
@@ -225,12 +268,15 @@ def _create_coverage_tool(
                         for file_path, content, page in snippets:
                             chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
                     doc_word = "documento" if len(grouped) == 1 else f"{len(grouped)} documentos"
-                    summary = f"Contenido completo del/de los {doc_word} solicitado(s) ({doc}), en {len(chunks)} fragmento(s)."
+                    summary = f"Páginas del/de los {doc_word} solicitado(s) ({doc}): {len(chunks)} fragmento(s), uno por página."
                     instruction = (
-                        "IMPORTANT: the sources below are the ENTIRE content of the requested "
-                        "document(s), split across many fragments — read through ALL of them before "
-                        "answering. Extract and list EVERY distinct instance of what was asked "
-                        "(e.g. every parameter code and its value), not just the first few you see."
+                        "IMPORTANT: the sources below list EVERY page of the requested document(s), "
+                        "but each one shows only the START of its page (about 240 characters), not the "
+                        "whole page. Read through ALL of them to see what each page is about, and list "
+                        "EVERY distinct instance of what was asked that you can see (e.g. every parameter "
+                        "code and its value). A page whose start does not show the thing may still contain "
+                        "it further down: say so instead of concluding it is absent, and search for the "
+                        "term inside this document to find the exact places."
                     )
                     body = None
                 page_content = f"{summary}\n\n{instruction}" + (f"\n\n{body}" if body else "")
@@ -2161,7 +2207,7 @@ def _append_lightrag_citation_sources(
         for chunk in (data.get("chunks") or []):
             counter[0] += 1
             src = chunk.get("file_path") or "Unknown source"
-            excerpt = " ".join((chunk.get("content") or "").split())[:_CITATION_EXCERPT_CHARS]
+            excerpt = chunk.get("excerpt") or " ".join((chunk.get("content") or "").split())[:_CITATION_EXCERPT_CHARS]
             lines.append(f"[{counter[0]}] (source: {src}) {excerpt}")
     if not lines:
         return content

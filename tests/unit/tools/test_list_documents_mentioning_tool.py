@@ -7,7 +7,7 @@ before searching, when the caller passes `doc`.
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -222,6 +222,9 @@ async def test_shared_lock_serializes_sibling_lightrag_tool():
         patch("services.silo_service.SiloService.find_chunks_mentioning", side_effect=slow_find_chunks_mentioning),
         patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
         patch("services.silo_service.SiloService.get_silo_retriever") as get_retriever_mock,
+        # The coverage tool now also runs a semantic search of its own inside the
+        # lock; this test is about the two tools not overlapping, so leave it out.
+        patch("tools.agentTools.augment_with_semantic", new=AsyncMock(side_effect=lambda g, *a, **k: (g, {}))),
     ):
         get_retriever_mock.return_value.ainvoke = slow_ainvoke
         await asyncio.gather(
