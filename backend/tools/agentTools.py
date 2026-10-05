@@ -472,12 +472,19 @@ class _TimingMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         started = time.perf_counter()
+        response = None
         try:
-            return await handler(request)
+            response = await handler(request)
+            return response
         finally:
+            # Tokens of THIS turn's context (every turn re-sends the history),
+            # the figure that actually has to fit the model's window.
+            msgs = getattr(response, "result", None) or [response]
+            usage = getattr(msgs[-1], "usage_metadata", None) or {}
             logger.info(
-                "[timing] llm_turn agent_id=%s elapsed_ms=%d",
+                "[timing] llm_turn agent_id=%s elapsed_ms=%d input_tokens=%s output_tokens=%s",
                 self._agent_id, (time.perf_counter() - started) * 1000,
+                usage.get("input_tokens"), usage.get("output_tokens"),
             )
 
     async def awrap_tool_call(self, request, handler):
