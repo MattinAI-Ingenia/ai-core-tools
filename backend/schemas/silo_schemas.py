@@ -50,6 +50,7 @@ class SiloDetailSchema(BaseModel):
     # and lightrag_entity_types stop being editable, and the entity-type
     # inference gate must stop showing (there is nothing left to infer for).
     lightrag_config_locked: bool = False
+    source_label_fields: Optional[str] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
@@ -85,6 +86,7 @@ class CreateSiloSchema(BaseModel):
     lightrag_max_source_ids_per_relation: Optional[int] = None
     lightrag_entity_types: Optional[str] = None
     lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
+    source_label_fields: Optional[str] = None
 
 
 class UpdateSiloSchema(BaseModel):
@@ -103,6 +105,8 @@ class UpdateSiloSchema(BaseModel):
     # uploaded documents before anything is extracted.
     lightrag_entity_types: Optional[str] = None
     lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
+    # Query-time only, editable at any time ("" clears it).
+    source_label_fields: Optional[str] = None
 
 
 class _ContentLengthFilterSchema(BaseModel):

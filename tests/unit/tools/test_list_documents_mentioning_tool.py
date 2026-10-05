@@ -14,8 +14,8 @@ import pytest
 from tools.agentTools import _create_coverage_tool, _create_dynamic_lightrag_tool
 
 
-def _fake_silo(silo_id=37):
-    return SimpleNamespace(silo_id=silo_id, vector_db_type="LIGHTRAG")
+def _fake_silo(silo_id=37, source_label_fields=None):
+    return SimpleNamespace(silo_id=silo_id, vector_db_type="LIGHTRAG", source_label_fields=source_label_fields)
 
 
 # NOTE: BaseTool.ainvoke() with a plain dict input runs without a tool_call_id,
@@ -34,6 +34,44 @@ async def test_returns_abstention_when_nothing_matches():
         content, artifact = await tool.coroutine(term="algo inexistente")
     assert "No se encontró ningún documento" in content
     assert artifact == []
+
+
+@pytest.mark.asyncio
+async def test_each_document_line_and_source_carries_its_product_label():
+    """Chunks only carry a code, so the LLM guessed the product (CDOC002071 is a
+    JAKA oil boiler, the answer called it BioClass iC). A document without
+    import metadata gets no label."""
+    tool = _create_coverage_tool(_fake_silo(source_label_fields="familia_en, tecnologia"), app_id=1)
+    grouped = {
+        "336": [("CDOC002071.pdf p.3", "RITE", 3)],
+        "359": [("CDOC001216.pdf p.9", "RITE", 9)],
+    }
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(grouped, False)),
+        patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
+        patch("services.silo_service.SiloService.get_resource_labels", return_value={336: "JAKA, gasoil"}) as labels_mock,
+        patch("tools.agentTools.augment_with_semantic", new=AsyncMock(side_effect=lambda g, *a, **k: (g, {}))),
+    ):
+        content, _ = await tool.coroutine(term="RITE")
+    assert "- CDOC002071.pdf p.3 — JAKA, gasoil [1](cite://1)" in content
+    assert "(source: CDOC002071.pdf p.3 — JAKA, gasoil)" in content
+    assert "- CDOC001216.pdf p.9 [2](cite://2)" in content
+    assert labels_mock.call_args[0] == (37, ("familia_en", "tecnologia"))
+
+
+@pytest.mark.asyncio
+async def test_a_silo_without_label_fields_queries_no_labels():
+    tool = _create_coverage_tool(_fake_silo(), app_id=1)
+    grouped = {"336": [("CDOC002071.pdf p.3", "RITE", 3)]}
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(grouped, False)),
+        patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
+        patch("services.silo_service.SiloService.get_resource_labels") as labels_mock,
+        patch("tools.agentTools.augment_with_semantic", new=AsyncMock(side_effect=lambda g, *a, **k: (g, {}))),
+    ):
+        content, _ = await tool.coroutine(term="RITE")
+    labels_mock.assert_not_called()
+    assert "- CDOC002071.pdf p.3 [1](cite://1)" in content
 
 
 @pytest.mark.asyncio

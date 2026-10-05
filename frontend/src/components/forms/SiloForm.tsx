@@ -42,6 +42,7 @@ interface Silo {
   lightrag_max_source_ids_per_relation?: number;
   lightrag_entity_types?: string;
   lightrag_entity_types_mode?: 'infer' | 'manual';
+  source_label_fields?: string;
   ai_services?: AIServiceOption[];
 }
 
@@ -75,6 +76,7 @@ interface SiloFormData {
   lightrag_max_source_ids_per_relation?: number;
   lightrag_entity_types?: string;
   lightrag_entity_types_mode?: 'infer' | 'manual';
+  source_label_fields?: string;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -108,6 +110,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     lightrag_max_source_ids_per_relation: 1000,
     lightrag_entity_types: '',
     lightrag_entity_types_mode: 'infer',
+    source_label_fields: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -172,6 +175,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       lightrag_max_source_ids_per_relation: silo?.lightrag_max_source_ids_per_relation || 1000,
       lightrag_entity_types: silo?.lightrag_entity_types || '',
       lightrag_entity_types_mode: silo?.lightrag_entity_types_mode || 'infer',
+      source_label_fields: silo?.source_label_fields || '',
     }));
   }, [silo]);
 
@@ -541,6 +545,27 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                 disabled={isSubmitting}
                 locked={isEditing}
               />
+
+              <div>
+                <label htmlFor="source_label_fields" className="block text-sm font-medium text-gray-700 mb-2">
+                  Source label fields
+                </label>
+                <input
+                  id="source_label_fields"
+                  type="text"
+                  value={formData.source_label_fields || ''}
+                  onChange={(e) => setFormData(prev => ({ ...prev, source_label_fields: e.target.value }))}
+                  placeholder="e.g. familia_en, tecnologia"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
+                  disabled={isSubmitting}
+                  aria-describedby="source_label_fields_help"
+                />
+                <p id="source_label_fields_help" className="mt-1 text-sm text-gray-500">
+                  Comma-separated metadata columns from the import CSV, shown next to every source the
+                  agent reads (e.g. the product a manual is about). Leave blank for no labels. Can be
+                  changed at any time.
+                </p>
+              </div>
 
             </div>
           )}

@@ -927,6 +927,34 @@ class SiloService:
             session.close()
 
     @staticmethod
+    def get_resource_labels(silo_id: int, fields: Tuple[str, ...]) -> Dict[int, str]:
+        """resource_id -> "value1, value2" from the *fields* of each resource's
+        import metadata (Resource.extra_metadata), for the silo's repositories.
+
+        Chunks only carry a document code, so the LLM guessed each manual's
+        product from a few hundred characters and got it wrong. Resources with
+        none of the fields are left out.
+        """
+        from models.repository import Repository
+
+        session = SessionLocal()
+        try:
+            rows = (
+                session.query(Resource.resource_id, Resource.extra_metadata)
+                .join(Repository, Resource.repository_id == Repository.repository_id)
+                .filter(Repository.silo_id == silo_id)
+                .all()
+            )
+        finally:
+            session.close()
+        labels = {}
+        for resource_id, meta in rows:
+            values = [str(meta[f]) for f in fields if (meta or {}).get(f)]
+            if values:
+                labels[resource_id] = ", ".join(values)
+        return labels
+
+    @staticmethod
     def find_chunks_mentioning(
         silo_id: int, term: Optional[Union[str, List[str]]], doc_filter: Optional[Union[str, int, List]] = None,
     ) -> Tuple[dict, bool]:
@@ -1136,6 +1164,9 @@ class SiloService:
 
             if silo_data.get('keywords_service_id'):
                 silo.keywords_service_id = silo_data['keywords_service_id']
+
+            if silo_data.get('source_label_fields') is not None:  # "" clears it
+                silo.source_label_fields = silo_data['source_label_fields'].strip() or None
 
             # Compatibility shim: an existing silo whose two columns somehow
             # disagree (e.g. legacy rows written before extract_service_id
@@ -2745,6 +2776,7 @@ class SiloService:
                 lightrag_entity_types=getattr(silo, 'lightrag_entity_types', None),
                 lightrag_entity_types_mode=getattr(silo, 'lightrag_entity_types_mode', None),
                 lightrag_config_locked=SiloService.is_lightrag_config_locked(silo_id, db),
+                source_label_fields=getattr(silo, 'source_label_fields', None),
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
@@ -2793,6 +2825,7 @@ class SiloService:
             'lightrag_max_source_ids_per_relation': getattr(silo_data, 'lightrag_max_source_ids_per_relation', None),
             'lightrag_entity_types': getattr(silo_data, 'lightrag_entity_types', None),
             'lightrag_entity_types_mode': getattr(silo_data, 'lightrag_entity_types_mode', None),
+            'source_label_fields': getattr(silo_data, 'source_label_fields', None),
         }
 
         # Create or update using the existing service

@@ -83,6 +83,12 @@ class Silo(Base):
         String(20), nullable=False, default='infer', server_default='manual'
     )
 
+    # Comma-separated keys of Resource.extra_metadata (the import CSV's columns,
+    # e.g. "familia_en,tecnologia") shown next to every source the agent reads, so
+    # it knows which product a manual is about. Query-time only: editable at any
+    # time. NULL = no labels.
+    source_label_fields = Column(Text, nullable=True)
+
     use_agent_as_query = Column(Boolean, default=False, nullable=False, server_default='false')
 
     is_frozen = Column(Boolean, default=False, nullable=False)

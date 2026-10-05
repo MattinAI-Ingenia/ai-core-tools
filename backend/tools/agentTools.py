@@ -51,6 +51,28 @@ logger = get_logger(__name__)
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
 
 
+def _source_labels_loader(silo: Silo):
+    """Async loader of SiloService.get_resource_labels for the silo's
+    source_label_fields, queried once per tool instance (one agent build).
+    No fields configured: no query, no labels. A failure only loses the labels."""
+    silo_id = silo.silo_id
+    fields = tuple(f.strip() for f in (getattr(silo, "source_label_fields", None) or "").split(",") if f.strip())
+    cache: Dict[str, Dict[int, str]] = {} if fields else {"labels": {}}
+
+    async def load() -> Dict[int, str]:
+        if "labels" not in cache:
+            try:
+                cache["labels"] = await asyncio.to_thread(
+                    SiloService.get_resource_labels, silo_id, fields,
+                )
+            except Exception:
+                logger.warning("[sources] could not load document labels", exc_info=True)
+                cache["labels"] = {}
+        return cache["labels"]
+
+    return load
+
+
 def _create_dynamic_lightrag_tool(
     silo: Silo, search_params=None, offset: Optional[List[int]] = None, lock: Optional[asyncio.Lock] = None,
 ):
@@ -65,6 +87,7 @@ def _create_dynamic_lightrag_tool(
     # `lock` serializes this tool against a sibling LightRAG tool sharing the
     # same offset — see the call site in _resolve_and_build_retriever_tool for why.
     _lock = lock if lock is not None else asyncio.Lock()
+    _labels = _source_labels_loader(silo)
 
     @tool(response_format="content_and_artifact")
     async def retrieve_from_knowledge_base(query: str, mode: str) -> tuple:
@@ -102,7 +125,9 @@ def _create_dynamic_lightrag_tool(
             # there are no entities/relationships (LightRAGGraphBubble), so naive shows
             # chunks-only. ponytail: header still reads "Subgrafo · 0 entidades…"; relabel
             # only if it bothers anyone.
-            content = _append_lightrag_citation_sources("\n\n---\n\n".join(parts), docs, _citation_offset)
+            content = _append_lightrag_citation_sources(
+                "\n\n---\n\n".join(parts), docs, _citation_offset, await _labels(),
+            )
             return content, docs
 
     return retrieve_from_knowledge_base
@@ -125,6 +150,7 @@ def _create_coverage_tool(
     # `lock` serializes this tool against that sibling tool — see the call
     # site in _resolve_and_build_retriever_tool for why.
     _lock = lock if lock is not None else asyncio.Lock()
+    _labels = _source_labels_loader(silo)
 
     async def _semantic_chunks(term: str) -> List[dict]:
         # A wide naive pool (vector only, no LLM, ~0.7 s): 30 chunks reached only
@@ -220,6 +246,7 @@ def _create_coverage_tool(
                     abstain_term = term or f"el documento '{doc}'"
                     return f"No se encontró ningún documento que mencione {abstain_term}.", []
                 chunks = []
+                labels = await _labels()
                 if term:
                     # Multi-document mode: one line per DOCUMENT is the useful
                     # enumeration (cobertura/G09-style — "in which documents does
@@ -234,7 +261,8 @@ def _create_coverage_tool(
                         n = _citation_offset[0] + len(chunks) + 1
                         flag = {"semantic": " (coincidencia semántica)", "possible": " (posible)"}.get(
                             semantic_tiers.get(resource_id), "")
-                        enumerated_lines.append(f"- {file_path} [{n}](cite://{n}){flag}")
+                        label = f" — {labels[int(resource_id)]}" if int(resource_id) in labels else ""
+                        enumerated_lines.append(f"- {file_path}{label} [{n}](cite://{n}){flag}")
                         chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page, "excerpt": _excerpt(file_path, content)})
                     for resource_id, snippets in grouped.items():
                         for file_path, content, page in snippets[1:]:
@@ -285,7 +313,7 @@ def _create_coverage_tool(
                     metadata={"lightrag_raw_data": {"data": {"chunks": chunks}}},
                 )
                 content = _append_lightrag_citation_sources(
-                    wrapper_doc.page_content, [wrapper_doc], _citation_offset,
+                    wrapper_doc.page_content, [wrapper_doc], _citation_offset, labels,
                 )
                 if cap_hit:
                     content += (
@@ -2185,7 +2213,8 @@ _CITATION_INSTRUCTION = (
 
 
 def _append_lightrag_citation_sources(
-    content: str, docs: List[Document], offset: Optional[List[int]] = None
+    content: str, docs: List[Document], offset: Optional[List[int]] = None,
+    labels: Optional[Dict[int, str]] = None,
 ) -> str:
     """Append a numbered SOURCES block + citation instruction for LightRAG chunks.
 
@@ -2198,6 +2227,9 @@ def _append_lightrag_citation_sources(
     single-item list across multiple retrieval calls in one turn so numbering
     continues (4, 5, 6...) instead of restarting at 1 each call. Omit for the
     old single-call behavior.
+
+    labels: resource_id -> product label (see SiloService.get_resource_labels),
+    appended to each source so the LLM does not guess the product.
     """
     counter = offset if offset is not None else [0]
     lines: List[str] = []
@@ -2207,6 +2239,8 @@ def _append_lightrag_citation_sources(
         for chunk in (data.get("chunks") or []):
             counter[0] += 1
             src = chunk.get("file_path") or "Unknown source"
+            if labels and chunk.get("resource_id") in labels:
+                src += f" — {labels[chunk['resource_id']]}"
             excerpt = chunk.get("excerpt") or " ".join((chunk.get("content") or "").split())[:_CITATION_EXCERPT_CHARS]
             lines.append(f"[{counter[0]}] (source: {src}) {excerpt}")
     if not lines:
