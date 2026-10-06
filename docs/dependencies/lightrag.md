@@ -875,6 +875,50 @@ descarga a un hilo worker si ya hay un loop corriendo.
 
 ---
 
+## 12. Limitaciones conocidas de recuperación
+
+Encontradas midiendo el corpus DOMUSA (benchmark ES/GB, 33 manuales en PDF). Son
+límites de los datos o de la indexación, no fallos del agente; se anotan para no
+volver a investigarlos.
+
+### 12.1 Lo que no es texto no se indexa
+
+La extracción de texto del PDF solo conserva texto. Se pierde, y la recuperación
+no puede responder sobre ello:
+
+- **Gráficas e imágenes**: de una gráfica solo queda su título. «¿Para qué modelos
+  hay gráfica de prestaciones?» solo ve los títulos (p. ej. DSAT000120 pp.165-167).
+- **Marcas gráficas de tablas** (✓ / ● en una matriz modelo × función): la celda
+  queda vacía.
+- **PDF escaneados**: sin capa de texto la extracción no devuelve nada que indexar
+  (caso EN-UC4-1 del benchmark). No se ha probado el rol `vlm` como vía de OCR.
+
+### 12.2 Una lista de figuras o una sección que se corta entre páginas
+
+Cada página del PDF se indexa como un documento propio (`res{id}-p{n}`) y, con
+`chunk_size` 2000, casi nunca se divide: en el silo 37, 1.600 páginas → 1.600
+chunks. El `chunk_overlap` solo actúa **dentro** de una página, así que **subirlo
+no hace nada** contra esto: nunca cruza el borde de página.
+
+Efecto: si el título de la última figura de una sección cae arriba de la página
+siguiente, pegado a otra sección (DSAT000120 p.167: «Dual Clima 19R/19RT» seguido
+de «12.4 Comprobación de cantidad de refrigerante»), la búsqueda semántica no la
+asocia a la sección anterior y el agente se deja ese elemento.
+
+Arreglo posible, **no hecho** (exige reindexar los 33 documentos): anteponer a cada
+chunk el título de la sección vigente (p. ej. «12.3 Curvas de prestaciones»). Es
+más general y barato que meter la cola de la página anterior; conviene hacerlo
+si se reindexa por otro motivo.
+
+### 12.3 La búsqueda literal exige las palabras de la página
+
+Una ficha para rellenar que se llama «PARAMETERISATION» no se encuentra buscando
+«parameter sheet»; una hoja «START-UP PROCEDURE» no comparte ninguna palabra con
+«ficha de parametrización». Su huella estructural (huecos `………`, casillas `□`)
+sí es exacta en el corpus, pero solo la usaría un humano. Sin cambio previsto.
+
+---
+
 *Documento generado analizando el código instalado en el contenedor
 `mattin-backend` y la capa de integración del repositorio. Ninguna afirmación de
 internals se basa en memoria; todas se verificaron sobre la fuente instalada.
