@@ -917,6 +917,22 @@ Una ficha para rellenar que se llama «PARAMETERISATION» no se encuentra buscan
 «ficha de parametrización». Su huella estructural (huecos `………`, casillas `□`)
 sí es exacta en el corpus, pero solo la usaría un humano. Sin cambio previsto.
 
+### 12.4 Texto corrompido por ligaduras (DSAT000008)
+
+La capa de texto del manual de servicio EVOL-TOP (DSAT000008, 103 páginas) pierde
+las ligaduras «fi» y «fl», que salen como `ö` y `ø` dentro de las palabras
+(«ediö cio», «Especiö caciones», «ø ujo»): 35 páginas con `ö` en medio de palabra,
+y es el único documento del corpus con el defecto (en los demás la `ø` es el
+símbolo de diámetro, siempre seguida de un número). Efecto: buscar
+«especificaciones», «edificio» o «flujo» no recupera ese manual, ni por búsqueda
+literal ni por la unión de cobertura. Las palabras sin «fi»/«fl» (caldera, agua,
+gas…) sí lo encuentran, así que un sondeo con palabras corrientes no lo delata.
+
+Arreglo posible, **no hecho**: reparar el texto al extraerlo del PDF (`ö` dentro de
+una palabra → `fi`; `ø` entre letras → `fl`, sin tocar `ø` + dígito) y reindexar solo
+ese documento. Comprobar antes sobre el texto reparado que no queden otras ligaduras
+(«ff», «ffi»).
+
 ---
 
 *Documento generado analizando el código instalado en el contenedor
