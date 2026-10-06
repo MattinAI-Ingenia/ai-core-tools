@@ -933,6 +933,17 @@ una palabra → `fi`; `ø` entre letras → `fl`, sin tocar `ø` + dígito) y re
 ese documento. Comprobar antes sobre el texto reparado que no queden otras ligaduras
 («ff», «ffi»).
 
+### 12.5 Preguntas de auditoría: revisar un elemento de todos los documentos
+
+Una pregunta como «¿algún documento tiene la portada con errores de idioma?» (benchmark
+ES UC4-5; la respuesta era una errata francesa, «INSTRUCCIONS D´INSTALLATION», en la
+portada bilingüe de CDOC001372) no tiene ningún término que buscar. Exige leer un
+elemento fijo (la página 1) de los 33 documentos y detectar una anomalía, y no hay
+una herramienta que devuelva «la primera página de cada documento» (la más cercana,
+`doc=`, son 33 llamadas). La recuperación por pasajes está pensada para localizar
+contenido, no para auditar. Mismo tipo que §12.4: se contesta con una herramienta o
+un script de revisión, no con el agente. Sin cambio previsto.
+
 ---
 
 *Documento generado analizando el código instalado en el contenedor
