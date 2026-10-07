@@ -68,7 +68,7 @@ def captured_payloads():
 async def _run_agent(fake_app, fake_agent, chain, user_context):
     from services.agent_execution_service import AgentExecutionService
 
-    with patch("tools.agentTools.create_agent", new=AsyncMock(return_value=(chain, None))), \
+    with patch("tools.agentTools.create_agent", new=AsyncMock(return_value=(chain, None, None, None))), \
          patch("tools.agentTools.prepare_agent_config", return_value={"configurable": {}}), \
          patch("tools.agentTools.build_human_message", return_value=MagicMock()):
         svc = AgentExecutionService.__new__(AgentExecutionService)
