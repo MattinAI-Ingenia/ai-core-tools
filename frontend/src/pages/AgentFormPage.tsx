@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers, Plus, Tv } from 'lucide-react';
-import { apiService } from '../services/api';
+import { apiService, type ScheduledTask } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../constants/messages';
-import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD } from '../constants/agentConstants';
+import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_PROMPT_TEMPLATE } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
+import { Badge } from '../components/ui/Badge';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
 import type { TabItem } from '../components/ui/Tabs';
@@ -16,6 +17,8 @@ import type { SearchFilterMetadataField } from '../components/playground/SearchF
 import type { AgentMCPUsage } from '../core/types';
 import type { MarketplaceVisibility, MarketplaceProfileUpdate } from '../types/marketplace';
 import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
+import { AgentMetricsTab } from '../components/metrics/AgentMetricsTab';
+import { randomId } from '../utils/randomId';
 
 // Define the Agent types
 interface Agent {
@@ -28,6 +31,7 @@ interface Agent {
   is_tool: boolean;
   has_memory: boolean;
   enable_code_interpreter: boolean;
+  skill_router_enabled?: boolean;
   memory_max_messages: number;
   memory_max_tokens: number;
   memory_summarize_threshold: number;
@@ -58,13 +62,13 @@ interface Agent {
   rag_chunk_top_k_deployment_default?: number;
   rag_fixed_filters?: RagFixedFilter[];
   // Media processing configuration (playground media upload)
-  transcription_service_id?: number;
-  video_ai_service_id?: number;
-  media_embedding_service_id?: number;
-  media_forced_language?: string;
-  media_chunk_min_duration?: number;
-  media_chunk_max_duration?: number;
-  media_chunk_overlap?: number;
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
+  media_embedding_service_id?: number | null;
+  media_forced_language?: string | null;
+  media_chunk_min_duration?: number | null;
+  media_chunk_max_duration?: number | null;
+  media_chunk_overlap?: number | null;
   ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
   sandbox_services: Array<{ service_id: number; name: string }>;
   silos: Array<{ silo_id: number; name: string; vector_db_type?: string }>;
@@ -72,7 +76,7 @@ interface Agent {
   lightrag_query_modes?: string[];
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
-  skills: Array<{ skill_id: number; name: string; description?: string }>;
+  skills: Array<{ skill_id: number; name: string; description?: string; is_enabled?: boolean; is_system?: boolean }>;
   middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[]; tool_agent_ids?: number[] }>;
 }
 
@@ -85,6 +89,7 @@ interface AgentFormData {
   is_tool: boolean;
   has_memory: boolean;
   enable_code_interpreter: boolean;
+  skill_router_enabled: boolean;
   server_tools: string[];
   memory_max_messages: number;
   memory_max_tokens: number;
@@ -187,6 +192,12 @@ function getPageDescription(type: string, isNewAgent: boolean, agentName?: strin
   return `Modify agent: ${agentName}`;
 }
 
+function ScheduledTaskReference({ appId, agentId }: { appId: number; agentId: number }) {
+  const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  useEffect(() => { void apiService.getScheduledTasks(appId, agentId).then(setTasks).catch(() => undefined); }, [appId, agentId]);
+  return <section className="mb-6 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-lg font-semibold text-gray-900">Scheduled tasks using this agent</h3><p className="text-sm text-gray-500">Scheduling is managed independently from the agent.</p></div><button type="button" onClick={() => globalThis.location.assign(`/apps/${appId}/scheduled-tasks/new`)} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">Create scheduled task</button></div>{tasks.length > 0 && <div className="mt-4 space-y-2">{tasks.map((task) => <a key={task.id} href={`/apps/${appId}/scheduled-tasks/${task.id}`} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"><span>{task.name}</span><span className="text-gray-500">{task.status === 'active' ? 'Active' : 'Paused'}</span></a>)}</div>}</section>;
+}
+
 function AgentFormPage() {
   const { appId, agentId } = useParams();
   const navigate = useNavigate();
@@ -234,11 +245,12 @@ function AgentFormPage() {
     name: '',
     description: '',
     system_prompt: '',
-    prompt_template: '{question}',
+    prompt_template: DEFAULT_PROMPT_TEMPLATE,
     type: 'agent',
     is_tool: false,
     has_memory: false,
     enable_code_interpreter: false,
+    skill_router_enabled: false,
     server_tools: [],
     memory_max_messages: 20,
     memory_max_tokens: 4000,
@@ -287,7 +299,7 @@ function AgentFormPage() {
   // Load agent data when component mounts
   useEffect(() => {
     if (appId && agentId) {
-      loadAgentData();
+      void loadAgentData();
     } else {
       setLoading(false);
     }
@@ -357,11 +369,12 @@ function AgentFormPage() {
         name: response.name || '',
         description: response.description || '',
         system_prompt: response.system_prompt || '',
-        prompt_template: response.prompt_template || '',
+        prompt_template: response.prompt_template || DEFAULT_PROMPT_TEMPLATE,
         type: response.type || 'agent',
         is_tool: response.is_tool || false,
         has_memory: response.has_memory || false,
         enable_code_interpreter: response.enable_code_interpreter || false,
+        skill_router_enabled: response.skill_router_enabled || false,
         server_tools: response.server_tools || [],
         memory_max_messages: response.memory_max_messages || 20,
         memory_max_tokens: response.memory_max_tokens || 4000,
@@ -389,7 +402,7 @@ function AgentFormPage() {
         rag_chunk_top_k: response.rag_chunk_top_k ?? null,
         rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
           ...f,
-          _key: Math.random().toString(36).slice(2),
+          _key: randomId(),
         })),
         // Media processing configuration
         transcription_service_id: response.transcription_service_id || undefined,
@@ -646,10 +659,15 @@ function AgentFormPage() {
 
     if (!appId || !agentId) return;
 
-    handleSaveMarketplaceProfile(); // Save marketplace profile first
-
     const hasSilo = !!formData.silo_id;
     const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
+
+    // The template is formatted with the user message; without {question} the message is lost.
+    if (!formData.prompt_template.includes(DEFAULT_PROMPT_TEMPLATE)) {
+      setActiveTab('prompts');
+      setError('The Prompt Template must include {question} before saving.');
+      return;
+    }
 
     // Mirror the backend invariant: a threshold strategy needs a threshold value.
     if (usesThreshold && formData.rag_score_threshold == null) {
@@ -681,6 +699,7 @@ function AgentFormPage() {
       is_tool: formData.is_tool,
       has_memory: formData.has_memory,
       enable_code_interpreter: formData.enable_code_interpreter,
+      skill_router_enabled: formData.skill_router_enabled,
       server_tools: formData.server_tools,
       memory_max_messages: formData.memory_max_messages,
       memory_max_tokens: formData.memory_max_tokens,
@@ -721,6 +740,10 @@ function AgentFormPage() {
     };
 
     const isNew = Number.parseInt(agentId) === 0;
+
+    // Save the marketplace profile first, but only once the form is valid, and
+    // wait for it so it never races with the agent save below.
+    await handleSaveMarketplaceProfile();
 
     setError(null);
     setSaving(true);
@@ -763,7 +786,8 @@ function AgentFormPage() {
     { id: 'prompts', label: 'Prompts' },
     { id: 'configuration', label: 'Configuration' },
     { id: 'advanced', label: 'Advanced' },
-    { id: 'marketplace', label: 'Marketplace' }
+    { id: 'marketplace', label: 'Marketplace' },
+    ...(!isNewAgent ? [{ id: 'metrics', label: 'Metrics' }] : []),
   ];
 
   return (
@@ -808,6 +832,7 @@ function AgentFormPage() {
             activeTab={activeTab}
             onChange={setActiveTab}
           />
+          {!isNewAgent && agent && <ScheduledTaskReference appId={Number.parseInt(appId ?? '0')} agentId={agent.agent_id} />}
 
           {/* TAB 1: BASIC */}
           {activeTab === 'basic' && (
@@ -1230,11 +1255,27 @@ function AgentFormPage() {
                           type="checkbox"
                           checked={formData.enable_code_interpreter}
                           onChange={(e) => handleInputChange('enable_code_interpreter', e.target.checked)}
+                          aria-describedby="enable_code_interpreter_help"
                           className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                         />
                         <div className="ml-3">
                           <label htmlFor="enable_code_interpreter" className="text-sm font-medium text-gray-900">Code Interpreter</label>
-                          <p className="text-xs text-gray-500">Allows the agent to execute Python code (pandas, openpyxl, numpy)</p>
+                          <p id="enable_code_interpreter_help" className="text-xs text-gray-500">Allows the agent to execute Python code (pandas, openpyxl, numpy)</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                        <input
+                          id="skill_router_enabled"
+                          type="checkbox"
+                          checked={formData.skill_router_enabled}
+                          onChange={(e) => handleInputChange('skill_router_enabled', e.target.checked)}
+                          aria-describedby="skill_router_enabled_help"
+                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <div className="ml-3">
+                          <label htmlFor="skill_router_enabled" className="text-sm font-medium text-gray-900">Skill Router</label>
+                          <p id="skill_router_enabled_help" className="text-xs text-gray-500">Let the model pre-select at most 2 skills per turn; off by default.</p>
                         </div>
                       </div>
 
@@ -1780,6 +1821,10 @@ function AgentFormPage() {
                     <>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {agent.skills.map((skill) => {
+                          const descriptionId = skill.description ? `skill-desc-${skill.skill_id}` : undefined;
+                          const disabledBadgeId = skill.is_enabled === false ? `skill-disabled-${skill.skill_id}` : undefined;
+                          const systemBadgeId = skill.is_system ? `skill-system-${skill.skill_id}` : undefined;
+                          const describedBy = [systemBadgeId, disabledBadgeId, descriptionId].filter(Boolean).join(' ') || undefined;
                           const isRouterDisabled = skill.name === ROUTER_SKILL_NAME && !selectedSiloIsLightRAG;
                           return (
                             <label
@@ -1799,6 +1844,8 @@ function AgentFormPage() {
                                     disabled={isRouterDisabled}
                                     checked={formData.skill_ids.includes(skill.skill_id)}
                                     onChange={() => handleSkillToggle(skill.skill_id)}
+                                    aria-label={skill.name}
+                                    aria-describedby={describedBy}
                                     className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                   />
                                   <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
@@ -1807,8 +1854,19 @@ function AgentFormPage() {
                                   formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
                                 }`} />
                               </div>
+                              {skill.is_system && (
+                                <p id={systemBadgeId} className="mt-2 ml-7">
+                                  <Badge label="System" variant="secondary" />
+                                </p>
+                              )}
+                              {skill.is_enabled === false && (
+                                <p id={disabledBadgeId} className="mt-2 ml-7 inline-flex items-center gap-1 text-xs font-medium text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full">
+                                  <AlertTriangle className="w-3 h-3" aria-hidden="true" />
+                                  Disabled — ignored at execution until re-enabled
+                                </p>
+                              )}
                               {skill.description && (
-                                <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
+                                <p id={descriptionId} className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
                               )}
                               {isRouterDisabled && (
                                 <p className="mt-2 ml-7 text-xs text-gray-400">Requires a LightRAG silo</p>
@@ -2171,6 +2229,15 @@ function AgentFormPage() {
               )}
               </>
               )}
+            </div>
+          )}
+
+          {activeTab === 'metrics' && !isNewAgent && (
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8">
+              <AgentMetricsTab
+                appId={Number(appId)}
+                agentId={Number(agentId)}
+              />
             </div>
           )}
 

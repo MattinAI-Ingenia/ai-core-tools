@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, Table, DateTime, Float, Enum, JSON
+from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, Table, DateTime, Float, Enum, JSON, text
 from sqlalchemy.orm import relationship
 from db.database import Base
 from datetime import datetime
@@ -20,6 +20,10 @@ DEFAULT_AGENT_TEMPERATURE = 0.7
 
 # Default memory summarize threshold (number of messages)
 DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20
+
+# Default prompt template: passes the user message through unchanged. An empty
+# template would format to an empty string and drop the user's message.
+DEFAULT_PROMPT_TEMPLATE = '{question}'
 
 
 class AgentSkill(Base):
@@ -59,7 +63,7 @@ class Agent(Base):
     description = Column(String(1000))
     create_date = Column(DateTime, default=datetime.now)
     system_prompt = Column(Text)
-    prompt_template = Column(Text)
+    prompt_template = Column(Text, default=DEFAULT_PROMPT_TEMPLATE)
     type = Column(String(45), nullable=False, default='agent')
     status = Column(String(45))
     request_count = Column(Integer, default=0)
@@ -79,6 +83,7 @@ class Agent(Base):
 
     has_memory = Column(Boolean)
     enable_code_interpreter = Column(Boolean, default=False, nullable=False, server_default='false')
+    skill_router_enabled = Column(Boolean, nullable=False, server_default=text('false'), default=False)
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
 
     # LightRAG query mode — the only per-agent retrieval knob that is LightRAG-specific

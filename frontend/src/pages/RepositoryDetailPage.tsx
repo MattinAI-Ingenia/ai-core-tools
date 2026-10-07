@@ -239,7 +239,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   useEffect(() => {
     if (appId && repositoryId) {
-      loadRepository();
+      void loadRepository();
     }
   }, [appId, repositoryId]);
 
@@ -595,9 +595,9 @@ const RepositoryDetailPage: React.FC = () => {
           selectedFolderId || undefined,
           mediaConfig,
         );
-
-        if (result.failed_files?.length > 0) {
-          const failedMessages = result.failed_files.map((f: any) =>
+        
+        if (result.failed_files && result.failed_files.length > 0) {
+          const failedMessages = result.failed_files.map((f: any) => 
             `${f.filename}: ${f.error}`
           ).join('\n');
           setError(`Some files failed:\n${failedMessages}`);
@@ -2019,4 +2019,4 @@ const RepositoryDetailPage: React.FC = () => {
   );
 };
 
-export default RepositoryDetailPage; 
+export default RepositoryDetailPage;

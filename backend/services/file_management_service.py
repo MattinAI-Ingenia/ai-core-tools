@@ -2,7 +2,6 @@ import json
 import os
 import shutil
 import uuid
-import tempfile
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -10,6 +9,9 @@ from fastapi import UploadFile, HTTPException
 
 from tools.PDFTools import extract_text_from_pdf, convert_pdf_to_images, check_pdf_has_text
 from utils.logger import get_logger
+from utils.log_safety import sanitize_for_log
+from utils.path_safety import UnsafePathError, resolve_within
+from utils.async_files import read_json, read_text, write_json, write_temp_file, write_text
 
 logger = get_logger(__name__)
 
@@ -316,8 +318,7 @@ class FileManagementService:
                 return extract_text_from_pdf(file_path)
             elif file_type in ["txt", "md", "json"]:
                 # Read text files directly
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+                return await read_text(file_path)
             else:
                 # For other file types, return basic info
                 return f"File: {os.path.basename(file_path)} (type: {file_type})"
@@ -480,12 +481,10 @@ class FileManagementService:
             session_dir = os.path.join(self._persistent_dir, session_key)
             os.makedirs(session_dir, exist_ok=True)
             metadata_file = os.path.join(session_dir, f"{file_id}.json")
-            with open(metadata_file, 'w') as f:
-                json.dump(file_ref.to_dict(), f, indent=2)
+            await write_json(metadata_file, file_ref.to_dict())
             # _load_session_files requires a matching .content file to load the entry
             content_file = os.path.join(session_dir, f"{file_id}.content")
-            with open(content_file, 'w', encoding='utf-8') as f:
-                f.write(file_ref.content)
+            await write_text(content_file, file_ref.content)
 
             logger.info(f"Registered output file {filename} (id={file_id}) for session {session_key}")
             return file_ref
@@ -547,8 +546,7 @@ class FileManagementService:
                 
                 elif file_type == "text":
                     # Read text files
-                    with open(temp_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
+                    content = await read_text(temp_path)
                     return content, temp_path, file_size
                 
                 elif file_type == "image":
@@ -556,8 +554,13 @@ class FileManagementService:
                     content = f"Image file: {file.filename} (OCR processing not implemented)"
                     return content, temp_path, file_size
                 
+                elif file_type == "document" and file.filename.lower().endswith(".docx"):
+                    import docx2txt
+                    content = docx2txt.process(temp_path) or ""
+                    return content, temp_path, file_size
+
                 elif file_type == "document":
-                    # For documents, return basic info (in production, use document processing)
+                    # .doc / spreadsheets / presentations: no text extraction yet
                     content = f"Document file: {file.filename} (Document processing not implemented)"
                     return content, temp_path, file_size
                 
@@ -578,18 +581,8 @@ class FileManagementService:
         """Save uploaded file to temporary location and return path with file size"""
         # Create temporary file in TMP_BASE_FOLDER/uploads
         suffix = os.path.splitext(file.filename)[1] if file.filename else ""
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=self._temp_dir)
-        
-        try:
-            # Write file content and track size
-            content = await file.read()
-            file_size = len(content)
-            temp_file.write(content)
-            temp_file.flush()
-            
-            return temp_file.name, file_size
-        finally:
-            temp_file.close()
+        content = await file.read()
+        return await write_temp_file(content, suffix=suffix, dir=self._temp_dir), len(content)
     
     async def _save_uploaded_file(self, file: UploadFile) -> str:
         """Save uploaded file to temporary location (legacy method for compatibility)"""
@@ -673,7 +666,7 @@ class FileManagementService:
                 if storage_strategy == STORAGE_STRATEGY_EPHEMERAL
                 else self._persistent_dir
             )
-            session_dir = os.path.join(base_dir, session_key)
+            session_dir = resolve_within(base_dir, session_key)
             os.makedirs(session_dir, exist_ok=True)
 
             # Save original file FIRST (to set file_path before saving metadata)
@@ -684,7 +677,7 @@ class FileManagementService:
                 if storage_strategy == STORAGE_STRATEGY_EPHEMERAL:
                     target_dir = session_dir
                 elif conversation_id:
-                    target_dir = os.path.join(
+                    target_dir = resolve_within(
                         self._tmp_base_folder, "conversations", str(conversation_id),
                     )
                 else:
@@ -694,9 +687,12 @@ class FileManagementService:
 
                 # Use the original user-facing filename so the code interpreter can
                 # reference files by the name the user knows (e.g. 'report.xlsx').
-                # Path separators are stripped to prevent directory traversal.
+                # Path separators are stripped, and the result must stay inside
+                # target_dir (rejects names such as '..').
                 safe_filename = file_ref.filename.replace('/', '_').replace('\\', '_')
-                original_file = os.path.join(target_dir, safe_filename)
+                original_file = resolve_within(target_dir, safe_filename)
+                if original_file == target_dir:
+                    raise ValueError(f"Invalid filename: {file_ref.filename!r}")
 
                 shutil.copy2(original_file_path, original_file)
 
@@ -712,14 +708,12 @@ class FileManagementService:
                 logger.info(f"FileReference file_path set to: {file_ref.file_path}")
 
             # Save file metadata AFTER setting file_path
-            metadata_file = os.path.join(session_dir, f"{file_id}.json")
-            with open(metadata_file, 'w') as f:
-                json.dump(file_ref.to_dict(), f, indent=2)
+            metadata_file = resolve_within(session_dir, f"{file_id}.json")
+            await write_json(metadata_file, file_ref.to_dict())
 
             # Save file content (extracted text)
-            content_file = os.path.join(session_dir, f"{file_id}.content")
-            with open(content_file, 'w', encoding='utf-8') as f:
-                f.write(file_ref.content)
+            content_file = resolve_within(session_dir, f"{file_id}.content")
+            await write_text(content_file, file_ref.content)
 
             logger.info(
                 "Saved file %s to disk: %s (strategy: %s)",
@@ -814,8 +808,13 @@ class FileManagementService:
             ):
                 if not os.path.exists(base_dir):
                     continue
-                candidate = os.path.join(base_dir, session_key)
-                if os.path.exists(candidate) and os.path.isdir(candidate):
+                try:
+                    # session_key embeds caller-supplied ids: never probe a path
+                    # outside the storage dir (filesystem oracle).
+                    candidate = resolve_within(base_dir, session_key)
+                except UnsafePathError:
+                    return
+                if os.path.isdir(candidate):
                     session_path = candidate
                     loaded_strategy = strategy
                     # Prefer persistent if it exists; ephemeral is only checked
@@ -902,28 +901,66 @@ class FileManagementService:
                         except Exception as e:
                             logger.error(f"Error loading file {file_id}: {str(e)}")
                             
-            logger.info(f"Loaded {len(self._files.get(session_key, {}))} persistent files for session {session_key}")
-            
-        except Exception as e:
-            logger.error(f"Error loading persistent files for session {session_key}: {str(e)}")
+            logger.info(
+                "Loaded %d persistent files for session %s",
+                len(self._files.get(session_key, {})), sanitize_for_log(session_key),
+            )
+
+        except Exception:
+            logger.exception(
+                "Error loading persistent files for session %s", sanitize_for_log(session_key)
+            )
+
+    async def remove_files(
+        self,
+        file_ids: List[str],
+        agent_id: int,
+        user_context: Dict = None,
+        conversation_id: Optional[str] = None,
+    ) -> None:
+        """Remove several files (metadata + stored bytes) from one session."""
+        session_key = self._get_session_key(agent_id, user_context, conversation_id)
+        for file_id in file_ids:
+            self._files.get(session_key, {}).pop(file_id, None)
+            await self._remove_file_from_disk(session_key, file_id)
+
+    def delete_conversation_storage(
+        self,
+        agent_id: int,
+        user_context: Dict = None,
+        conversation_id: Optional[str] = None,
+    ) -> None:
+        """Delete every file of a conversation: its session metadata and its working directory."""
+        session_key = self._get_session_key(agent_id, user_context, conversation_id)
+        self._files.pop(session_key, None)
+        paths = [os.path.join(self._persistent_dir, session_key)]
+        if conversation_id:
+            paths.append(os.path.join(self._tmp_base_folder, "conversations", str(conversation_id)))
+        for path in paths:
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+            except Exception as e:
+                logger.error(f"Error deleting conversation storage {path}: {e}")
 
     async def _remove_file_from_disk(self, session_key: str, file_id: str):
         """Remove file from disk"""
         try:
-            session_dir = os.path.join(self._persistent_dir, session_key)
-            metadata_file = os.path.join(session_dir, f"{file_id}.json")
-            content_file = os.path.join(session_dir, f"{file_id}.content")
+            session_dir = resolve_within(self._persistent_dir, session_key)
+            metadata_file = resolve_within(session_dir, f"{file_id}.json")
+            content_file = resolve_within(session_dir, f"{file_id}.content")
 
             # Read metadata BEFORE deleting it to locate the original file
             # (original files stored in conversations/ dir have a relative file_path)
             if os.path.exists(metadata_file):
                 try:
-                    with open(metadata_file, 'r') as f:
-                        metadata = json.load(f)
+                    metadata = await read_json(metadata_file)
                     file_path = metadata.get('file_path')
                     if file_path:
-                        abs_path = os.path.join(self._tmp_base_folder, file_path)
-                        if os.path.exists(abs_path):
+                        # file_path is read back from a sidecar, so it must
+                        # still resolve inside TMP_BASE_FOLDER before deleting.
+                        abs_path = resolve_within(self._tmp_base_folder, file_path)
+                        if os.path.isfile(abs_path):
                             os.remove(abs_path)
                             logger.info(f"Removed original file {abs_path}")
                 except Exception as e:
@@ -937,8 +974,8 @@ class FileManagementService:
             if os.path.exists(session_dir):
                 for filename in os.listdir(session_dir):
                     if filename.startswith(file_id) and not filename.endswith(('.json', '.content')):
-                        original_file = os.path.join(session_dir, filename)
-                        if os.path.exists(original_file):
+                        original_file = resolve_within(session_dir, filename)
+                        if os.path.isfile(original_file):
                             os.remove(original_file)
                             logger.info(f"Removed original file {filename}")
 
@@ -1083,6 +1120,9 @@ class FileManagementService:
                             conversation_id=conversation_id,
                             has_memory=has_memory,
                         )
+                        # Tells agent execution to send the full content this
+                        # turn — the file was never indexed by an attach step.
+                        file_ref.uploaded_this_turn = True
                         all_refs.append(file_ref)
                         uploaded_ids.add(file_ref.file_id)
                     except Exception as exc:

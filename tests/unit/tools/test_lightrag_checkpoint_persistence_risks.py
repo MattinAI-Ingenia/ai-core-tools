@@ -24,6 +24,10 @@ class _FakeSummaryModel:
 
     _llm_type = "fake"
 
+    def with_retry(self, **kwargs):
+        # SummarizationMiddleware (langchain >= 1.4) wraps its model in the constructor.
+        return self
+
     async def ainvoke(self, prompt, config=None):
         return AIMessage(content="fake summary")
 

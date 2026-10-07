@@ -8,13 +8,12 @@ from .sandbox_service import SandboxService
 from .output_parser import OutputParser
 from .mcp_config import MCPConfig
 from .silo import Silo
-from .skill import Skill
+from .skill import Skill, SkillFile
 from .middleware import Middleware, AgentMiddleware, MiddlewareMCP
 from .agent import Agent
 from .agent_marketplace_profile import AgentMarketplaceProfile
 from .conversation_starter import ConversationStarter
 from .agent_marketplace_rating import AgentMarketplaceRating
-from .skill import Skill
 from .ocr_agent import OCRAgent
 from .conversation import Conversation
 from .repository import Repository
@@ -28,6 +27,8 @@ from .import_job import ImportJob
 from .import_job_row import ImportJobRow
 from .sharepoint_source import SharePointSource
 from .sharepoint_file import SharePointFile
+from .agent_execution_event import AgentExecutionEvent
+from .agent_tool_call import AgentToolCall
 from .media import Media
 from .mcp_server import MCPServer, MCPServerAgent
 from .system_setting import SystemSetting
@@ -41,10 +42,11 @@ from .indexing_metric import IndexingMetric
 from .entity_type_inference_job import EntityTypeInferenceJob
 from .entity_name_variant import EntityNameVariant
 from .refresh_token import RefreshToken
+from .scheduled_task import ScheduledTask, ScheduledTaskRun
 
 __all__ = [
     'User', 'App', 'AppCollaborator', 'APIKey',
-    'AIService', 'EmbeddingService', 'OutputParser', 'MCPConfig', 'Silo', 'Skill',
+    'AIService', 'EmbeddingService', 'OutputParser', 'MCPConfig', 'Silo', 'Skill', 'SkillFile',
     'Agent', 'AgentMarketplaceProfile', 'ConversationStarter', 'AgentMarketplaceRating', 'OCRAgent', 'Conversation',
     'Repository', 'Resource', 'Folder', 'Domain',
     'DomainUrl', 'CrawlPolicy', 'CrawlJob', 'ImportJob', 'ImportJobRow', 'SharePointSource', 'SharePointFile',
@@ -64,4 +66,7 @@ __all__ = [
     'EntityNameVariant',
     'RefreshToken',
     'SandboxService',
+    'ScheduledTask', 'ScheduledTaskRun',
+    'AgentExecutionEvent',
+    'AgentToolCall',
 ]

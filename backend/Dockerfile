@@ -24,8 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Poetry
-RUN pip install --no-cache-dir "poetry>=2.2.0,<3.0.0"
+# Instalar Poetry: versión fijada y verificada por hash, solo wheels (no se
+# ejecutan scripts de instalación de paquetes en código fuente).
+COPY backend/requirements-poetry.txt ./
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r requirements-poetry.txt
 
 # Copiar archivo de dependencias (no copiar `poetry.lock` para evitar path deps locales)
 COPY pyproject.toml ./
@@ -71,8 +73,10 @@ RUN rm -f poetry.lock
 # picked up a newer e2b release that broke `create_code_context()`/
 # `run_code()` with `AttributeError: 'Sandbox' object has no attribute
 # '_transport'`.)
+# POETRY_INSTALLER_ONLY_BINARY: every dependency is installed from a wheel,
+# so no package setup script runs during the build.
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --no-cache --without dev
+    POETRY_INSTALLER_ONLY_BINARY=:all: poetry install --only=main --no-interaction --no-ansi --no-cache
 
 # --- pgvector + lightrag-hku --------------------------------------------------
 # langchain-postgres 0.0.17 declara pgvector <0.4 (restriccion conservadora),

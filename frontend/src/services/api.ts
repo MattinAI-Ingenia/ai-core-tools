@@ -43,6 +43,7 @@ import type {
   AgentMCPUsage,
   AppSlugInfo,
   Middleware,
+  ClaudePluginImportResult,
 } from '../core/types';
 import type {
   ImportResponse,
@@ -112,6 +113,7 @@ export interface Agent {
   is_tool: boolean;
   has_memory: boolean;
   enable_code_interpreter: boolean;
+  skill_router_enabled?: boolean;
   status?: string;
   server_tools?: string[];
   memory_max_messages: number;
@@ -136,6 +138,14 @@ export interface Agent {
   // LightRAG-specific: query mode (skill-routed | local | global | hybrid | mix | naive | bypass)
   lightrag_query_mode?: string | null;
   lightrag_query_modes?: string[];
+  // Media processing configuration
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
+  media_embedding_service_id?: number | null;
+  media_forced_language?: string | null;
+  media_chunk_min_duration?: number | null;
+  media_chunk_max_duration?: number | null;
+  media_chunk_overlap?: number | null;
   // RAG retrieval config
   rag_k?: number;
   rag_k_mode?: 'fixed' | 'per_100_chunks';
@@ -145,14 +155,6 @@ export interface Agent {
   rag_chunk_top_k?: number | null;
   rag_chunk_top_k_deployment_default?: number;
   rag_fixed_filters?: AgentRagFixedFilter[];
-  // Media processing configuration (playground media upload)
-  transcription_service_id?: number;
-  video_ai_service_id?: number;
-  media_embedding_service_id?: number;
-  media_forced_language?: string;
-  media_chunk_min_duration?: number;
-  media_chunk_max_duration?: number;
-  media_chunk_overlap?: number;
   ai_service?: { name: string; model_name: string; provider: string };
   ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
   silo?: {
@@ -174,6 +176,98 @@ export interface Agent {
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
   middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[]; tool_agent_ids?: number[] }>;
+}
+
+export type ScheduledTaskVisibility = 'unpublished' | 'private' | 'public';
+
+export interface ScheduledTask {
+  id: number;
+  name: string;
+  description?: string | null;
+  agent_id: number;
+  app_id: number;
+  created_by: number;
+  orchestrator_schedule_name: string;
+  input: Record<string, unknown>;
+  cron_expression: string;
+  timezone: string;
+  conversation_mode: 'new_per_run' | 'continuous' | string;
+  persistent_conversation_id?: number | null;
+  status: 'active' | 'paused' | string;
+  max_concurrent_runs: number;
+  max_runs_retained: number;
+  marketplace_visibility: ScheduledTaskVisibility;
+  created_at: string;
+  updated_at: string;
+  next_run_at?: string | null;
+}
+
+export type ScheduledTaskCreate = Pick<ScheduledTask, 'name' | 'agent_id' | 'input' | 'cron_expression' | 'timezone' | 'conversation_mode' | 'max_concurrent_runs'>
+  & Partial<Pick<ScheduledTask, 'description' | 'max_runs_retained' | 'marketplace_visibility'>>;
+
+export type ScheduledTaskUpdate = Partial<Pick<ScheduledTask,
+  'name' | 'description' | 'input' | 'cron_expression' | 'timezone' | 'max_concurrent_runs' | 'status'
+  | 'max_runs_retained' | 'marketplace_visibility'>>;
+
+export interface ScheduledTaskRunFile {
+  file_id: string;
+  filename: string;
+  file_type?: string | null;
+}
+
+export interface ScheduledTaskRun {
+  id: number;
+  scheduled_task_id: number;
+  conversation_id?: number | null;
+  conversation_anchor_message_id?: number | null;
+  orchestrator_run_id: string;
+  scheduled_time: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  status: string;
+  attempt_count: number;
+  error_summary?: string | null;
+  output_text?: string | null;
+  output_files: ScheduledTaskRunFile[];
+}
+
+export interface ScheduledTaskRunList {
+  items: ScheduledTaskRun[];
+  page: number;
+  per_page: number;
+  total: number;
+}
+
+/** What the marketplace shows of a scheduled task (never its input). */
+export interface MarketplaceScheduledTask {
+  id: number;
+  name: string;
+  description?: string | null;
+  app_id: number;
+  app_name?: string | null;
+  cron_expression: string;
+  timezone: string;
+  conversation_mode: string;
+  status: string;
+  marketplace_visibility: ScheduledTaskVisibility;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_run_status?: string | null;
+  run_count: number;
+}
+
+export interface MarketplaceScheduledTaskCatalog {
+  tasks: MarketplaceScheduledTask[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface ScheduledTaskTriggerResponse {
+  task_id: number;
+  workflow_id: string;
+  status: string;
 }
 
 export interface AIService {
@@ -539,7 +633,7 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 // DeploymentModeContext cannot be read here (not a hook), so it writes the
 // resolved auth mode via setApiAuthMode(). The default is derived from the
-// env/runtime OIDC flag so early requests (e.g. CapabilitiesContext) already
+// env/runtime OIDC flag so early requests already
 // use the correct mode before the context resolves /internal/config.
 const _rc = (globalThis as Record<string, unknown>).__RUNTIME_CONFIG__ as Record<string, string> | undefined;
 const _oidcDefault = _rc?.VITE_OIDC_ENABLED === undefined
@@ -556,16 +650,9 @@ class ApiService {
     return configService.getApiBaseUrl();
   }
 
-  // Coalesces concurrent 401-triggered refreshes into a single in-flight promise.
-  private _refreshPromise: Promise<boolean> | null = null;
-
-  private async _doRefresh(): Promise<boolean> {
-    if (!this._refreshPromise) {
-      this._refreshPromise = authService.refresh().finally(() => {
-        this._refreshPromise = null;
-      });
-    }
-    return this._refreshPromise;
+  // Renews the session once: refresh-token rotation (LOCAL) or OIDC silent renew.
+  private renewSession(): Promise<boolean> {
+    return _apiAuthMode === 'oidc' ? authService.renewOidcSession() : authService.refresh();
   }
 
   private getClientTimezone(): string | null {
@@ -576,14 +663,20 @@ class ApiService {
     }
   }
 
-  // Called when a refresh fails or a retried request still 401s (LOCAL mode only).
-  private clearClientAuthAndRedirect(): void {
-    // Use logout() (not clearAuth()) to clear the httpOnly session cookies. Best-effort.
-    authService.logout().catch(() => { }).finally(() => {
-      if (typeof globalThis !== 'undefined' && globalThis.location) {
-        globalThis.location.href = '/login';
-      }
-    });
+  private _sessionExpiring: Promise<void> | null = null;
+
+  // Route guards react to the expired session and navigate to /login in-app,
+  // preserving the requested location. Concurrent 401s share one expiry.
+  private expireSession(): void {
+    if (this._sessionExpiring) return;
+    // LOCAL: clear the httpOnly session cookies first. Best-effort.
+    const clearCookies = _apiAuthMode === 'local' ? authService.logout() : Promise.resolve();
+    this._sessionExpiring = clearCookies
+      .catch(() => {})
+      .finally(() => {
+        this._sessionExpiring = null;
+        authService.notifySessionExpired();
+      });
   }
 
   // LOCAL: cookies carry auth; CSRF header on mutating calls. OIDC: Authorization bearer.
@@ -681,21 +774,16 @@ class ApiService {
         throw new Error('Authentication required');
       }
 
-      // OIDC re-auth is owned by oidc-client-ts / OIDCProvider / ProtectedRoute.
-      if (_apiAuthMode === 'oidc') {
-        throw new Error('Authentication required');
-      }
-
       const isRefreshEndpoint = endpoint.includes('/auth/refresh');
       if (!_isRetryAfterRefresh && !isRefreshEndpoint) {
-        const refreshed = await this._doRefresh();
-        if (refreshed) {
-          // Cookie may have rotated — rebuild headers on retry.
+        const renewed = await this.renewSession();
+        if (renewed) {
+          // Token or cookie changed — rebuild headers on retry.
           return this.request(endpoint, options, true, _requestOptions);
         }
       }
-      this.clearClientAuthAndRedirect();
-      throw new Error('Authentication required');
+      this.expireSession();
+      throw new ApiError('Your session has expired. Please sign in again.', 401);
     }
 
     if (!response.ok) {
@@ -816,6 +904,77 @@ class ApiService {
 
   async getAgentMCPUsage(appId: number, agentId: number): Promise<AgentMCPUsage> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}/mcp-usage`);
+  }
+
+  async getScheduledTasks(appId: number, agentId?: number): Promise<ScheduledTask[]> {
+    const query = agentId === undefined ? '' : `?agent_id=${agentId}`;
+    return this.request(`/internal/apps/${appId}/scheduled-tasks${query}`);
+  }
+
+  async getScheduledTask(appId: number, taskId: number): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`);
+  }
+
+  async createScheduledTask(appId: number, data: ScheduledTaskCreate): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks`, { method: 'POST', body: JSON.stringify(data) });
+  }
+
+  async updateScheduledTask(appId: number, taskId: number, data: ScheduledTaskUpdate): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) });
+  }
+
+  async deleteScheduledTask(appId: number, taskId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`, { method: 'DELETE' });
+  }
+
+  async getScheduledTaskRuns(appId: number, taskId: number, page = 1, perPage = 50): Promise<ScheduledTaskRunList> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs?page=${page}&per_page=${perPage}`);
+  }
+
+  async getScheduledTaskRun(appId: number, taskId: number, runId: number): Promise<ScheduledTaskRun> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}`);
+  }
+
+  async getScheduledTaskRunFileUrl(appId: number, taskId: number, runId: number, fileId: string): Promise<string> {
+    const result: { download_url: string } = await this.request(
+      `/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}/files/${encodeURIComponent(fileId)}/download`,
+    );
+    return result.download_url;
+  }
+
+  async runScheduledTaskNow(appId: number, taskId: number): Promise<ScheduledTaskTriggerResponse> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/run-now`, { method: 'POST' });
+  }
+
+  async getMarketplaceScheduledTasks(
+    params: { search?: string; my_apps_only?: boolean; page?: number; page_size?: number } = {},
+  ): Promise<MarketplaceScheduledTaskCatalog> {
+    const qs = new URLSearchParams();
+    if (params.search) qs.set('search', params.search);
+    if (params.my_apps_only) qs.set('my_apps_only', 'true');
+    if (params.page) qs.set('page', String(params.page));
+    if (params.page_size) qs.set('page_size', String(params.page_size));
+    const query = qs.toString();
+    return this.request(`/internal/marketplace/scheduled-tasks${query ? `?${query}` : ''}`);
+  }
+
+  async getMarketplaceScheduledTask(taskId: number): Promise<MarketplaceScheduledTask> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}`);
+  }
+
+  async getMarketplaceScheduledTaskRuns(taskId: number, page = 1, perPage = 50): Promise<ScheduledTaskRunList> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}/runs?page=${page}&per_page=${perPage}`);
+  }
+
+  async getMarketplaceScheduledTaskRun(taskId: number, runId: number): Promise<ScheduledTaskRun> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}/runs/${runId}`);
+  }
+
+  async getMarketplaceScheduledTaskRunFileUrl(taskId: number, runId: number, fileId: string): Promise<string> {
+    const result: { download_url: string } = await this.request(
+      `/internal/marketplace/scheduled-tasks/${taskId}/runs/${runId}/files/${encodeURIComponent(fileId)}/download`,
+    );
+    return result.download_url;
   }
 
   async updateAgentPrompt(appId: number, agentId: number, promptType: 'system' | 'template', prompt: string): Promise<Agent> {
@@ -1313,6 +1472,96 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`, {
       method: 'DELETE',
     });
+  }
+
+  async importSkill(appId: number, file: File): Promise<Skill> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/skills/import`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  async importClaudePlugin(appId: number, file: File): Promise<ClaudePluginImportResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/skills/import-claude-plugin`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  async exportSkill(appId: number, skillId: number): Promise<Blob> {
+    const headers = this.buildAuthHeaders('GET', false);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/skills/${skillId}/export`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.blob();
+  }
+
+  async setSkillEnabled(appId: number, skillId: number, isEnabled: boolean): Promise<Skill> {
+    return this.request(`/internal/apps/${appId}/skills/${skillId}/enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_enabled: isEnabled }),
+    });
+  }
+
+  /**
+   * Fetch the text content of a single package file of an app-scoped skill, on demand (never
+   * bulk-fetched with the skill). A 404 means the preview is unavailable (e.g. binary file, or
+   * the file no longer resolves) — callers should treat it as "preview unavailable", not a hard
+   * failure.
+   */
+  async getSkillFileContent(appId: number, skillId: number, path: string): Promise<{ path: string; content: string; media_type?: string; truncated?: boolean }> {
+    return this.request(`/internal/apps/${appId}/skills/${skillId}/files/content?path=${encodeURIComponent(path)}`);
+  }
+
+  /**
+   * Fetch the text content of a single package file of a SYSTEM skill (platform admin route —
+   * no app scoping). Same response shape and 404 semantics as {@link getSkillFileContent}.
+   */
+  async getSystemSkillFileContent(skillId: number, path: string): Promise<{ path: string; content: string; media_type?: string; truncated?: boolean }> {
+    return this.request(`/internal/admin/system-skills/${skillId}/files/content?path=${encodeURIComponent(path)}`);
   }
 
   // ==================== MCP SERVERS (Expose Agents as MCP Tools) ====================
@@ -2033,12 +2282,11 @@ class ApiService {
     // (it needs a Blob, not JSON) — so an expired access-token cookie used to
     // surface as a raw fetch failure instead of transparently refreshing,
     // like every other endpoint does.
-    if (response.status === 401 && !_isRetryAfterRefresh && _apiAuthMode !== 'oidc') {
-      const refreshed = await this._doRefresh();
-      if (refreshed) {
+    if (response.status === 401 && !_isRetryAfterRefresh) {
+      if (await this.renewSession()) {
         return this.getSiloResourceFile(appId, siloId, resourceId, true);
       }
-      this.clearClientAuthAndRedirect();
+      this.expireSession();
     }
     if (!response.ok) {
       await this.handleResponseError(response);
@@ -2638,7 +2886,7 @@ class ApiService {
     return this.request(`/internal/conversations/${conversationId}`);
   }
 
-  async getConversationWithHistory(conversationId: number): Promise<{ session_id?: string; messages: Array<{ role: string; content: string }> }> {
+  async getConversationWithHistory(conversationId: number): Promise<{ session_id?: string | null; messages: Array<{ role: string; content: string }> }> {
     return this.request(`/internal/conversations/${conversationId}/history`);
   }
 
@@ -3165,6 +3413,105 @@ class ApiService {
   async deleteSystemAIService(serviceId: number): Promise<void> {
     return this.request(`/internal/admin/system-ai-services/${serviceId}`, {
       method: 'DELETE',
+    });
+  }
+
+  async getSystemSkills(): Promise<Skill[]> {
+    return this.request('/internal/admin/system-skills');
+  }
+
+  async getSystemSkill(skillId: number): Promise<Skill> {
+    return this.request(`/internal/admin/system-skills/${skillId}`);
+  }
+
+  async createSystemSkill(data: {
+    name: string;
+    description?: string;
+    content: string;
+    display_name?: string;
+    when_to_use?: string;
+    allowed_tools?: string[];
+    runtime?: string;
+    bootstrap_script_path?: string;
+    runtime_options?: Record<string, unknown>;
+    is_enabled?: boolean;
+  }): Promise<Skill> {
+    return this.request('/internal/admin/system-skills', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSystemSkill(skillId: number, data: {
+    name: string;
+    description?: string;
+    content: string;
+    display_name?: string;
+    when_to_use?: string;
+    allowed_tools?: string[];
+    runtime?: string;
+    bootstrap_script_path?: string;
+    runtime_options?: Record<string, unknown>;
+    is_enabled?: boolean;
+  }): Promise<Skill> {
+    return this.request(`/internal/admin/system-skills/${skillId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteSystemSkill(skillId: number): Promise<void> {
+    return this.request(`/internal/admin/system-skills/${skillId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async importSystemSkill(file: File): Promise<Skill> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/admin/system-skills/import`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  async exportSystemSkill(skillId: number): Promise<Blob> {
+    const headers = this.buildAuthHeaders('GET', false);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/admin/system-skills/${skillId}/export`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.blob();
+  }
+
+  async setSystemSkillEnabled(skillId: number, isEnabled: boolean): Promise<Skill> {
+    return this.request(`/internal/admin/system-skills/${skillId}/enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_enabled: isEnabled }),
     });
   }
 

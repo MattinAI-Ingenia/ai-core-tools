@@ -159,6 +159,7 @@ class AgentDetailSchema(BaseModel):
     is_tool: bool
     has_memory: bool
     enable_code_interpreter: bool = False
+    skill_router_enabled: bool = False
     server_tools: List[str] = []
     memory_max_messages: int = 20
     memory_max_tokens: Optional[int] = 4000
@@ -230,6 +231,7 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     is_tool: bool = False
     has_memory: bool = False
     enable_code_interpreter: bool = False
+    skill_router_enabled: bool = False
     server_tools: Optional[List[str]] = []
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000
@@ -251,9 +253,9 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     # Media processing configuration (playground media upload)
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
-    # Required: embedding service used to vectorize media/documents into the
-    # session's temp playground silo. No fallback — the agent cannot be
-    # created/updated without it.
+    # Optional embedding service used to vectorize media/documents into the
+    # session's temp playground silo. Agents that do not use media/document
+    # processing do not need to configure one.
     media_embedding_service_id: Optional[int] = None
     media_forced_language: Optional[str] = None
     media_chunk_min_duration: Optional[int] = Field(default=30, ge=1, le=3600)
@@ -262,11 +264,6 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
 
     @model_validator(mode="after")
     def _validate_media_config(self) -> "CreateUpdateAgentSchema":
-        if self.media_embedding_service_id is None:
-            raise ValueError(
-                "media_embedding_service_id is required: select an embedding "
-                "service for media/document processing."
-            )
         mn = self.media_chunk_min_duration
         mx = self.media_chunk_max_duration
         ov = self.media_chunk_overlap

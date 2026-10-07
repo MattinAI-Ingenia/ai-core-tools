@@ -29,7 +29,12 @@ class App(Base):
     
     api_keys = relationship('APIKey', back_populates='app', lazy=True)
     mcp_configs = relationship('MCPConfig', back_populates='app', lazy=True)
-    skills = relationship('Skill', back_populates='app', lazy=True)
+    # passive_deletes='all': never let the ORM UPDATE Skill.app_id=NULL on app deletion. Skill.app_id
+    # IS NULL means "system/platform skill" (see models/skill.py), so an ORM-driven nullify on a
+    # leftover row would silently promote a tenant's skill into a platform-wide one visible to every
+    # app. With the FK's default NO ACTION, any leftover Skill row instead raises IntegrityError,
+    # which AppService.delete_app already catches -> rollback -> return False (FR-15/AC-12 hardening).
+    skills = relationship('Skill', back_populates='app', lazy=True, passive_deletes='all')
     middlewares = relationship('Middleware', back_populates='app', lazy=True)
 
     silos = relationship('Silo', back_populates='app', lazy=True)
@@ -62,8 +67,3 @@ class App(Base):
                         nullable=True)
     default_sandbox_service = relationship('SandboxService',
                         foreign_keys=[default_sandbox_service_id])
-
-    def get_user_role(self, user_id):
-        """Get the role of a user in this app"""
-        from services.app_collaboration_service import AppCollaborationService
-        return AppCollaborationService.get_user_app_role(user_id, self.app_id) 

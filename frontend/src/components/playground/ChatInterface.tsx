@@ -209,6 +209,7 @@ function ChatInterface({
     const loadConversationHistory = async () => {
       try {
         setIsLoadingHistory(true);
+        setMessages([]);
 
         if (currentConversationId) {
           const response = await apiService.getConversationWithHistory(currentConversationId);
@@ -267,8 +268,8 @@ function ChatInterface({
       }
     };
 
-    loadConversationHistory();
-    loadPersistentFiles();
+    void loadConversationHistory();
+    void loadPersistentFiles();
 
     // Load playground media if session exists
     if (currentSessionId) {
@@ -673,7 +674,7 @@ function ChatInterface({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      if (canSend) handleSendMessage();
+      if (canSend) void handleSendMessage();
     }
   };
 
