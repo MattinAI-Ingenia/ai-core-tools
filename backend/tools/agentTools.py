@@ -582,6 +582,20 @@ class _TimingMiddleware(AgentMiddleware):
             )
 
 
+def _router_skill_attached(agent: Agent) -> bool:
+    """True while the LightRAG router skill is attached to the agent AND enabled.
+
+    Upstream's per-skill kill switch (``is_enabled``) applies to it like to any skill:
+    a disabled router skill must not be inlined nor register the dynamic tools.
+    """
+    return any(
+        getattr(a.skill, "name", None) == LIGHTRAG_ROUTER_SKILL_NAME
+        and getattr(a.skill, "is_enabled", True) is not False
+        for a in (getattr(agent, "skill_associations", None) or [])
+        if a.skill
+    )
+
+
 async def _resolve_skills_for_prompt(
     agent: Agent,
     *,
@@ -674,11 +688,7 @@ async def create_agent(
     # drop it from the generic on-demand skill list so it isn't offered twice.
     router_skill_active = (
         getattr(agent, "lightrag_query_mode", None) == "skill-routed"
-        and any(
-            getattr(a.skill, "name", None) == LIGHTRAG_ROUTER_SKILL_NAME
-            for a in (getattr(agent, "skill_associations", None) or [])
-            if a.skill
-        )
+        and _router_skill_attached(agent)
     )
 
     llm = get_llm(agent)
@@ -1367,9 +1377,7 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
     resolved_sp, resolved_pinned = resolve_search_params(agent, caller_search_params)
 
     if lightrag_mode == "skill-routed":
-        skill_assocs = getattr(agent, "skill_associations", None) or []
-        if any(getattr(a.skill, "name", None) == LIGHTRAG_ROUTER_SKILL_NAME
-               for a in skill_assocs if a.skill):
+        if _router_skill_attached(agent):
             # The dynamic tool sets lightrag_query_mode itself, per call. Both
             # tools share ONE citation offset so numbering stays global across
             # a turn that calls both (see _append_lightrag_citation_sources).
