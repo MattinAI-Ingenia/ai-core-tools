@@ -248,7 +248,7 @@ class TestBuildLlmModelFunc:
             result = await llm_func("chunk text")
 
         assert isinstance(result, TruncatedResponse)
-        assert result.content == '{"entities": ['
+        assert result == '{"entities": ['  # a str subclass: the partial text itself
 
     async def test_normal_response_is_not_wrapped_as_truncated(self):
         from lightrag.utils import TruncatedResponse  # noqa: WPS433
