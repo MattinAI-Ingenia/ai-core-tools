@@ -102,12 +102,8 @@ class TestIndexingMetricsIsolation:
         db.add(silo_other)
         db.flush()
 
-        # Use dev login for the user
-        login = client.post(
-            "/internal/auth/dev-login",
-            json={"email": user.email},
-        )
-        token = login.json().get("access_token") or login.json().get("token")
+        from utils.local_auth_tokens import mint_access_token
+        token, _ = mint_access_token(user.user_id, user.email, user.name)
         headers = {"Authorization": f"Bearer {token}"}
 
         # Request metrics on silo_other via app — should be 403 or 404

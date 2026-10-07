@@ -18,9 +18,9 @@ pytestmark = pytest.mark.integration
 class TestSiloGraphGuards:
     """HTTP guard conditions for GET /internal/apps/{app_id}/silos/{silo_id}/graph."""
 
-    def _login(self, client, email: str) -> dict:
-        resp = client.post("/internal/auth/dev-login", json={"email": email})
-        token = resp.json().get("access_token") or resp.json().get("token")
+    def _login(self, user) -> dict:
+        from utils.local_auth_tokens import mint_access_token
+        token, _ = mint_access_token(user.user_id, user.email, user.name)
         return {"Authorization": f"Bearer {token}"}
 
     def test_non_lightrag_silo_returns_409(self, client, db):
@@ -41,7 +41,7 @@ class TestSiloGraphGuards:
         db.add(silo)
         db.flush()
 
-        headers = self._login(client, user.email)
+        headers = self._login(user)
         resp = client.get(
             f"/internal/apps/{app.app_id}/silos/{silo.silo_id}/graph",
             headers=headers,
@@ -70,7 +70,7 @@ class TestSiloGraphGuards:
         db.add(silo_b)
         db.flush()
 
-        headers = self._login(client, user.email)
+        headers = self._login(user)
         # Request silo_b via app_a — ownership mismatch
         resp = client.get(
             f"/internal/apps/{app_a.app_id}/silos/{silo_b.silo_id}/graph",
@@ -98,7 +98,7 @@ class TestSiloGraphGuards:
         db.add(silo)
         db.flush()
 
-        headers = self._login(client, user.email)
+        headers = self._login(user)
 
         with patch(
             "services.silo_graph_service.SiloGraphService.get_silo_graph",
