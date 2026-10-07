@@ -20,8 +20,13 @@ from utils.local_auth_tokens import mint_access_token
 
 
 @pytest.fixture
-def real_client(test_engine):
+def real_client(test_engine, monkeypatch):
     from main import app
+
+    # The real lifespan seeds the system skills with its own committed session, which
+    # would leak into other tests' exact-count assertions (same hazard as tests/conftest.py's `client`).
+    import services.system_skills_seeder as _seeder
+    monkeypatch.setattr(_seeder, "seed_system_skills", lambda _db: None)
 
     db = SessionLocal()
     repository, app_id = setup_repository_and_app(db)
