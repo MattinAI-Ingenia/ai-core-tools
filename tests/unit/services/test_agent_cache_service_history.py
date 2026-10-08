@@ -39,6 +39,18 @@ async def _history_for(messages):
         return await CheckpointerCacheService.get_conversation_history_async(agent_id=1, session_id="s1")
 
 
+async def _history_for_router(messages):
+    fake_state = SimpleNamespace(checkpoint={"channel_values": {"messages": messages}})
+    fake_checkpointer = AsyncMock()
+    fake_checkpointer.aget_tuple = AsyncMock(return_value=fake_state)
+    with patch.object(
+        CheckpointerCacheService, "get_async_checkpointer", AsyncMock(return_value=fake_checkpointer)
+    ):
+        return await CheckpointerCacheService.get_conversation_history_async(
+            agent_id=1, session_id="s1", tool_answers=True
+        )
+
+
 @pytest.mark.asyncio
 async def test_final_ai_answer_gets_the_preceding_tool_messages_graph():
     messages = [
@@ -111,3 +123,71 @@ async def test_non_lightrag_tool_calls_do_not_attach_a_graph():
     history = await _history_for(messages)
 
     assert "lightrag_graph" not in history[1]
+
+
+@pytest.mark.asyncio
+async def test_turns_ending_on_tool_message_show_it_as_the_answer():
+    """Knowledge-router pass-through (return_direct): the specialist's ToolMessage
+    IS the answer — no AI message follows it."""
+    messages = [
+        HumanMessage(content="q1"),
+        AIMessage(content="", tool_calls=[{"name": "ES", "args": {}, "id": "call_1"}]),
+        _lightrag_tool_message("call_1"),
+        HumanMessage(content="q2"),
+        AIMessage(content="", tool_calls=[{"name": "EN", "args": {}, "id": "call_2"}]),
+        ToolMessage(content="EN answer", tool_call_id="call_2"),
+    ]
+
+    history = await _history_for_router(messages)
+
+    assert [(h["role"], h["content"]) for h in history] == [
+        ("user", "q1"), ("agent", "tool text"), ("user", "q2"), ("agent", "EN answer"),
+    ]
+    assert history[1]["lightrag_graph"]["data"]["chunks"] == [{"id": "c1"}]
+    assert "lightrag_graph" not in history[3]
+
+
+@pytest.mark.asyncio
+async def test_classic_agent_never_shows_a_dangling_tool_message_as_an_answer():
+    """A turn cut off after a tool ran (disconnect, error) must not surface raw
+    tool output as the agent's reply on reload."""
+    messages = [
+        HumanMessage(content="q"),
+        AIMessage(content="", tool_calls=[{"name": "lightrag_search", "args": {}, "id": "call_1"}]),
+        _lightrag_tool_message("call_1"),
+    ]
+
+    history = await _history_for(messages)
+
+    assert [h["role"] for h in history] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_router_turn_with_two_specialists_in_one_step_joins_both_answers():
+    messages = [
+        HumanMessage(content="q"),
+        AIMessage(content="", tool_calls=[
+            {"name": "ES", "args": {}, "id": "c1"}, {"name": "EN", "args": {}, "id": "c2"},
+        ]),
+        ToolMessage(content="ES answer", tool_call_id="c1"),
+        ToolMessage(content="EN answer", tool_call_id="c2"),
+    ]
+
+    history = await _history_for_router(messages)
+
+    assert history[1]["content"] == "ES answer\n\nEN answer"
+
+
+@pytest.mark.asyncio
+async def test_router_tool_answer_from_an_earlier_step_is_not_carried_over():
+    messages = [
+        HumanMessage(content="q"),
+        AIMessage(content="", tool_calls=[{"name": "ES", "args": {}, "id": "c1"}]),
+        ToolMessage(content="ES answer", tool_call_id="c1"),
+        AIMessage(content="", tool_calls=[{"name": "EN", "args": {}, "id": "c2"}]),
+        ToolMessage(content="EN answer", tool_call_id="c2"),
+    ]
+
+    history = await _history_for_router(messages)
+
+    assert history[1]["content"] == "EN answer"

@@ -283,3 +283,47 @@ def test_code_output_custom_event_preserves_subagent_context():
             },
         }
     ]
+
+
+def test_merge_keeps_same_entity_name_from_two_silos_apart():
+    from tools.streaming_utils import merge_lightrag_graph
+
+    es = {"data": {"entities": [{"id": "Domusa", "silo_id": 7}], "relationships": [], "chunks": []}}
+    en = {"data": {"entities": [{"id": "Domusa", "silo_id": 8}], "relationships": [], "chunks": []}}
+
+    merged = merge_lightrag_graph(es, en)
+
+    assert [(e["id"], e["silo_id"]) for e in merged["data"]["entities"]] == [("Domusa", 7), ("Domusa", 8)]
+
+
+def test_merge_still_dedups_untagged_entities_by_id():
+    from tools.streaming_utils import merge_lightrag_graph
+
+    a = {"data": {"entities": [{"id": "X", "v": 1}], "relationships": [], "chunks": []}}
+    b = {"data": {"entities": [{"id": "X", "v": 2}], "relationships": [], "chunks": []}}
+
+    assert merge_lightrag_graph(a, b)["data"]["entities"] == [{"id": "X", "v": 2}]
+
+
+def test_final_tool_answer_when_turn_ends_on_tool_message():
+    from langchain_core.messages import ToolMessage
+    from tools.streaming_utils import final_tool_answer
+
+    msg = ToolMessage(content="ES answer [1](cite://1)", tool_call_id="c1")
+    assert final_tool_answer([msg], "") == "ES answer [1](cite://1)"
+
+
+def test_final_tool_answer_joins_every_return_direct_call_of_the_step():
+    from langchain_core.messages import ToolMessage
+    from tools.streaming_utils import final_tool_answer
+
+    msgs = [ToolMessage(content="ES", tool_call_id="c1"), ToolMessage(content="EN", tool_call_id="c2")]
+    assert final_tool_answer(msgs, "") == "ES\n\nEN"
+
+
+def test_final_tool_answer_ignored_when_model_answered():
+    from langchain_core.messages import ToolMessage
+    from tools.streaming_utils import final_tool_answer
+
+    assert final_tool_answer([ToolMessage(content="x", tool_call_id="c1")], "model text") is None
+    assert final_tool_answer([], "") is None

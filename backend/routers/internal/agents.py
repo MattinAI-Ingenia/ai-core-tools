@@ -380,6 +380,7 @@ async def create_or_update_agent(
         'has_memory': agent_data.has_memory,
         'enable_code_interpreter': agent_data.enable_code_interpreter,
         'skill_router_enabled': agent_data.skill_router_enabled,
+        'is_knowledge_router': agent_data.is_knowledge_router,
         'server_tools': agent_data.server_tools or [],
         'memory_max_messages': agent_data.memory_max_messages,
         'memory_max_tokens': agent_data.memory_max_tokens,

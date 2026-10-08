@@ -55,6 +55,9 @@ export interface LightRAGEntity {
   /** <SEP>-joined chunk ids this entity was extracted from (empty for partial nodes). */
   source_id?: string;
   partial?: boolean;
+  /** Source silo — only on knowledge-router payloads (one per specialist). */
+  silo_id?: number;
+  silo_name?: string;
   [key: string]: unknown;
 }
 
@@ -64,6 +67,9 @@ export interface LightRAGRelationship {
   target?: string;
   /** <SEP>-joined chunk ids this relationship was extracted from. */
   source_id?: string;
+  /** Source silo — only on knowledge-router payloads (one per specialist). */
+  silo_id?: number;
+  silo_name?: string;
   [key: string]: unknown;
 }
 
@@ -75,6 +81,9 @@ export interface LightRAGChunk {
    * feature shipped) — lets the UI open the source PDF at this page. */
   resource_id?: number;
   page?: number;
+  /** Source silo — only on knowledge-router payloads (one per specialist). */
+  silo_id?: number;
+  silo_name?: string;
   [key: string]: unknown;
 }
 

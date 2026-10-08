@@ -86,7 +86,7 @@ async def test_iact_tool_create_builds_react_agent():
     agent = _make_agent()
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()),
         patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
     ):
@@ -106,7 +106,7 @@ async def test_iact_tool_create_loads_sub_agent_mcp_tools():
     fake_client.get_tools = AsyncMock(return_value=[fake_mcp_tool])
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
         patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=fake_client)),
     ):
@@ -124,7 +124,7 @@ async def test_iact_tool_create_survives_mcp_load_failure():
     agent = _make_agent("MCP Sub-Agent")
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
         patch.object(
             agentTools.MCPClientManager,
@@ -156,7 +156,7 @@ async def test_iact_tool_create_uses_sub_agent_rag_config():
     sentinel_tool = MagicMock()
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
         patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
         patch(
@@ -198,7 +198,7 @@ async def test_iact_tool_create_wires_both_tools_for_skill_routed_sub_agent():
     sentinel_coverage = MagicMock(name="coverage_tool")
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
         patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
         patch(
@@ -222,7 +222,7 @@ async def test_iact_tool_create_skips_retriever_without_silo():
     agent.silo_id = None
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()),
         patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
         patch("services.silo_service.resolve_search_params") as mock_resolve,
@@ -250,7 +250,7 @@ async def test_iact_tool_create_adds_shared_sandbox_tools(tmp_path):
     repl_tool.name = "python_repl"
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as mock_create,
         patch.object(agentTools.MCPClientManager, "get_client", new=AsyncMock(return_value=None)),
         patch("tools.agentTools.create_sandbox_repl_tools", return_value=[repl_tool]) as make_repl_tools,
@@ -281,7 +281,7 @@ async def test_iact_tool_arun_forwards_subagent_tool_events():
     agent.agent_id = 42
     emitted_events = []
 
-    with patch("tools.agentTools.get_llm", return_value=object()):
+    with patch("tools.agentTools.get_llm", return_value=MagicMock()):
         tool = agentTools.IACTTool(agent)
     tool.react_agent = _StreamingReactAgent()
 
@@ -331,7 +331,7 @@ async def test_iact_ocr_tool_detects_ocr_agent():
     ocr_agent = _make_ocr_agent()
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()),
         patch.object(
             agentTools.MCPClientManager,
@@ -362,7 +362,7 @@ async def test_iact_ocr_tool_falls_back_to_chat_when_no_files():
     )
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch(
             "tools.agentTools.create_langchain_agent",
             return_value=fake_react,
@@ -393,7 +393,7 @@ async def test_iact_ocr_tool_uses_attached_pdf_files():
     ]
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch(
             "tools.agentTools._execute_tool_agent_ocr",
             new=AsyncMock(return_value={"amount": 100}),
@@ -435,7 +435,7 @@ async def test_iact_ocr_tool_reports_missing_pdf():
     ]
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch(
             "tools.agentTools.create_langchain_agent",
             return_value=MagicMock(),
@@ -475,7 +475,7 @@ async def test_iact_ocr_tool_processes_multiple_pdfs():
     ]
 
     with (
-        patch("tools.agentTools.get_llm", return_value=object()),
+        patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch(
             "tools.agentTools._execute_tool_agent_ocr",
             new=AsyncMock(return_value={"ok": True}),

@@ -221,3 +221,60 @@ async def test_streaming_fails_cleanly_when_no_checkpoint_to_roll_back_to():
     assert len(create_agent.call_args_list) == 1
     assert any('"error"' in event and "resend" in event for event in events)
     execution_service._finalize_turn.assert_not_awaited()
+
+
+async def _resumed_specialist_stream():
+    from langchain_core.documents import Document
+    from langchain_core.messages import ToolMessage
+
+    graph = {"data": {"chunks": [{"id": "c1", "silo_id": 7}], "entities": [], "relationships": []}}
+    yield (
+        "updates",
+        {"tools": {"messages": [ToolMessage(
+            content="ES answer [1](cite://1)", tool_call_id="call_1", id="tm-1",
+            artifact=[Document(page_content="", metadata={"lightrag_raw_data": graph})],
+        )]}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_resumed_turn_ending_on_a_specialist_keeps_answer_and_graph():
+    """HITL resume of a knowledge-router turn: the specialist's ToolMessage is the
+    answer (no model tokens) and its graph must reach the client like on a normal
+    turn, not leak as a raw internal event."""
+    import json
+
+    from services.agent_streaming_service import AgentStreamingService
+
+    ctx = SimpleNamespace(
+        effective_conv_id=5, conversation=None,
+        agent=SimpleNamespace(name="Router", has_memory=True),
+        fresh_agent=SimpleNamespace(agent_id=1, has_memory=True),
+        search_params={}, session_id_for_cache="5", user_context={"user_id": "u1"}, working_dir=None,
+    )
+    execution_service = MagicMock()
+    execution_service._prepare_turn = AsyncMock(return_value=ctx)
+    execution_service._finalize_turn = AsyncMock(
+        side_effect=lambda _ctx, raw, _db: {"parsed_response": raw, "effective_conv_id": 5, "files_data": []}
+    )
+    agent_chain = MagicMock()
+    agent_chain.astream.return_value = _resumed_specialist_stream()
+    agent_chain.aget_state = AsyncMock(return_value=SimpleNamespace(tasks=[]))
+
+    service = AgentStreamingService()
+    service.execution_service = execution_service
+
+    with (
+        patch("services.agent_streaming_service.create_agent", AsyncMock(return_value=(agent_chain, None, None, None))),
+        patch("services.agent_streaming_service.prepare_agent_config", return_value={"configurable": {}}),
+    ):
+        events = [e async for e in service.stream_resume_agent_chat(
+            agent_id=1, decisions=[{"type": "approve"}], user_context={"user_id": "u1"},
+            conversation_id=5, db=MagicMock(),
+        )]
+
+    parsed = [json.loads(e.split("data: ", 1)[1]) for e in events]
+    assert "_lightrag_graph" not in [p["type"] for p in parsed]
+    payload = next(p["data"] for p in parsed if p["type"] == "done")
+    assert payload["response"] == "ES answer [1](cite://1)"
+    assert payload["lightrag_graph"]["data"]["chunks"] == [{"id": "c1", "silo_id": 7}]

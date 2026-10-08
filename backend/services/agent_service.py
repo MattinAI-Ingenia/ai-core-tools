@@ -293,6 +293,7 @@ class AgentService:
             has_memory=getattr(agent, 'has_memory', False) or False,
             enable_code_interpreter=getattr(agent, 'enable_code_interpreter', False) or False,
             skill_router_enabled=getattr(agent, 'skill_router_enabled', False) or False,
+            is_knowledge_router=getattr(agent, 'is_knowledge_router', False) or False,
             server_tools=getattr(agent, 'server_tools', None) or [],
             memory_max_messages=getattr(agent, 'memory_max_messages', 20) or 20,
             memory_max_tokens=getattr(agent, 'memory_max_tokens', 4000),
@@ -533,6 +534,7 @@ class AgentService:
 
         enable_ci_value = data.get('enable_code_interpreter', False)
         agent.enable_code_interpreter = bool(enable_ci_value)
+        agent.is_knowledge_router = bool(data.get('is_knowledge_router', False))
 
         # Gated on presence (unlike the sibling enable_code_interpreter field above): the
         # public API route builds its update dict via model_dump(exclude_unset=True), so
@@ -634,7 +636,7 @@ class AgentService:
         existing_tools = {assoc.tool_id: assoc for assoc in AgentRepository.get_agent_tool_associations(db, agent_id)}
         
         # Convert tool_ids to set of integers and filter out non-tool agents
-        valid_tool_ids = set(AgentRepository.get_valid_tool_ids(db, [int(id) for id in tool_ids if id]))
+        valid_tool_ids = set(AgentRepository.get_valid_tool_ids(db, [int(id) for id in tool_ids if id], agent.app_id))
         
         # Remove associations that are no longer needed
         for tool_id in existing_tools.keys():

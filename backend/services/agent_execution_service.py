@@ -1657,7 +1657,9 @@ class AgentExecutionService:
                 if session:
                     # Get history from checkpointer
                     from services.agent_cache_service import CheckpointerCacheService
-                    history = await CheckpointerCacheService.get_conversation_history_async(agent_id, session.id)
+                    history = await CheckpointerCacheService.get_conversation_history_async(
+                        agent_id, session.id, tool_answers=bool(getattr(agent, 'is_knowledge_router', False))
+                    )
                     logger.info(f"Retrieved {len(history)} messages for agent {agent_id}, session {session.id}")
                     
                     # Clean history for frontend display (handle multimodal content)

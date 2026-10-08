@@ -11,6 +11,15 @@ from models.silo import Silo
 from langchain.tools import BaseTool, tool
 from tools.outputParserTools import get_parser_model_by_id
 from tools.coverage_union import augment_with_semantic, excerpt_around
+from tools.knowledge_router import (
+    KNOWLEDGE_ROUTER_INSTRUCTION,
+    SPECIALIST_MAX_TOOL_CALLS,
+    chunk_count,
+    create_consultar_varios_tool,
+    graph_artifact,
+    rebase_citations,
+    tag_graph_with_silo,
+)
 from tools.aiServiceTools import get_llm, get_output_parser
 from tools.ai.fileTools import fetch_file_in_base64
 from tools.ai.workspaceTools import create_download_url_tool
@@ -27,6 +36,7 @@ from langchain_core.callbacks import UsageMetadataCallbackHandler
 import langsmith as ls
 from langchain_core.tools import StructuredTool
 import asyncio
+import re
 import json
 import time
 import uuid
@@ -1016,9 +1026,15 @@ async def create_agent(
         else:
             logger.warning("Server-side tool '%s' not supported by provider %s — skipped", tool_name, provider_name)
 
+    # Knowledge router: every agent-tool becomes a pass-through specialist sharing
+    # one turn-wide citation counter, plus consultar_varios for questions that
+    # span several of them. See tools/knowledge_router.py.
+    router_offset: Optional[List[int]] = [0] if getattr(agent, "is_knowledge_router", False) else None
+    router_lock = asyncio.Lock()
+    specialists: List[IACTTool] = []
     for tool in agent.tool_associations:
         sub_agent = tool.tool
-        tools.append(await discover_tool(
+        built = await discover_tool(
             sub_agent,
             user_context=user_context,
             working_dir=working_dir,
@@ -1028,13 +1044,23 @@ async def create_agent(
             sandbox_session_service=sandbox_session_service,
             attached_files=attached_files,
             user_message=user_message,
-        ))
+            max_tool_calls=SPECIALIST_MAX_TOOL_CALLS if router_offset is not None else None,
+        )
+        if router_offset is not None and isinstance(built, IACTTool):
+            built.enable_router_mode(router_offset, router_lock)
+            specialists.append(built)
+        tools.append(built)
+    if specialists:
+        tools.append(create_consultar_varios_tool(specialists, router_lock))
+        system_prompt_content += "\n\n" + KNOWLEDGE_ROUTER_INSTRUCTION
 
     # Base tools — always available for every agent
     if working_dir:
         tools.append(create_download_url_tool(working_dir))
 
-    if agent.silo_id is not None:
+    # A knowledge router's knowledge lives in its specialists; its own silo
+    # would number citations on a separate counter, so it is not used.
+    if agent.silo_id is not None and not specialists:
         # Resolve precedence (caller > agent RAG config > system) AND build the tool
         # off the event loop: both precedence resolution (lazy-loads
         # silo.metadata_definition) and construction (distinct-value sampling) do
@@ -1342,7 +1368,7 @@ def _load_recursion_limit() -> int:
 AICT_AGENT_RECURSION_LIMIT: int = _load_recursion_limit()
 
 
-def _resolve_and_build_retriever_tool(agent, caller_search_params):
+def _resolve_and_build_retriever_tool(agent, caller_search_params, citation_counter=None):
     """Resolve RAG precedence then build the dynamic retriever tool for *agent*.
 
     Runs synchronous DB work — precedence resolution lazy-loads
@@ -1405,7 +1431,7 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
             # inference-time/latency work (e.g. renumber after merge instead
             # of during execution, to get the parallelism back) if that
             # latency becomes a problem.
-            offset: List[int] = [0]
+            offset: List[int] = citation_counter if citation_counter is not None else [0]
             lock = asyncio.Lock()
             return [
                 _create_dynamic_lightrag_tool(silo, resolved_sp, offset, lock),
@@ -1421,6 +1447,7 @@ def _resolve_and_build_retriever_tool(agent, caller_search_params):
         resolved_sp,
         getattr(agent, "rag_max_retrieval_calls", None),
         resolved_pinned,
+        citation_counter,
     )
 
 
@@ -1640,6 +1667,14 @@ class IACTTool(BaseTool):
     sandbox_session_key: Optional[str] = None
     sandbox_session_service: Any = None
     attached_files: Optional[List[Dict]] = None
+    silo_name: Optional[str] = None
+    # Knowledge-router mode (enable_router_mode): the parent turn's citation
+    # counter + lock, shared by all its router tools.
+    citation_offset: Optional[List[int]] = None
+    citation_lock: Any = None
+    # The sub-agent's own cite counter (shared with its retriever tools), reset on
+    # every router-mode run so each run numbers its chunks from 1.
+    run_counter: List[int] = [0]
 
     def __init__(
         self,
@@ -1691,8 +1726,13 @@ class IACTTool(BaseTool):
         sandbox_session_service: Optional[Any] = None,
         attached_files: Optional[List[Dict]] = None,
         user_message: Optional[str] = None,
+        max_tool_calls: Optional[int] = None,
     ) -> "IACTTool":
         """Build an agent-as-tool, including the sub-agent's MCP tools.
+
+        max_tool_calls: per-run ceiling on the sub-agent's tool calls (knowledge-router
+        specialists); calls beyond it are blocked and the sub-agent answers with what
+        it already has.
 
         MCP tools are loaded with an awaited MultiServerMCPClient, which is not
         possible inside a synchronous ``__init__``; hence this async factory. It
@@ -1713,6 +1753,9 @@ class IACTTool(BaseTool):
             sandbox_session_service=sandbox_session_service,
             attached_files=attached_files,
         )
+        if agent.silo_id is not None:
+            # Off the event loop: lazy-loads the Silo row.
+            instance.silo_name = await asyncio.to_thread(lambda: agent.silo.name if agent.silo else None)
 
         tools = []
         # Add nested tool agents recursively
@@ -1735,7 +1778,7 @@ class IACTTool(BaseTool):
             # Caller params NOT propagated (None) — the sub-agent uses its OWN config.
             # Off the event loop: resolution + construction do synchronous DB work.
             retriever_tool = await asyncio.to_thread(
-                _resolve_and_build_retriever_tool, agent, None
+                _resolve_and_build_retriever_tool, agent, None, instance.run_counter
             )
             if retriever_tool is not None:
                 if isinstance(retriever_tool, list):
@@ -1848,11 +1891,21 @@ class IACTTool(BaseTool):
                 + "</code_interpreter>"
             )
 
+        # Same pre-bind as create_agent: retrieval and coverage tools number citations
+        # off one shared counter, so they must run one at a time; fanned out in the same
+        # step, the order they claim numbers can differ from the order their chunks land
+        # in the payload and cite://N opens another document.
+        try:
+            sub_llm = instance.llm.bind_tools(tools, parallel_tool_calls=False)
+        except TypeError:
+            sub_llm = instance.llm.bind_tools(tools)
+
         # Create sub-agent
         instance.react_agent = create_langchain_agent(
-            model=instance.llm,
+            model=sub_llm,
             tools=tools,
             system_prompt=tool_system_prompt if tool_system_prompt else None,
+            **({"middleware": [ToolCallLimitMiddleware(run_limit=max_tool_calls)]} if max_tool_calls else {}),
         )
         return instance
 
@@ -1916,6 +1969,17 @@ class IACTTool(BaseTool):
         return query
 
     @staticmethod
+    def _last_ai_text(result: Any) -> str:
+        """Text of the sub-agent's final AI message; "" when it came back empty.
+
+        Router mode must not fall back to earlier messages (the raw retrieval
+        output of a ToolMessage, say): the answer goes straight to the user."""
+        for msg in reversed(result.get("messages") or []) if isinstance(result, dict) else []:
+            if getattr(msg, "type", None) == "ai":
+                return str(msg.content) if msg.content else ""
+        return ""
+
+    @staticmethod
     def _extract_last_message_content(result: Any) -> str:
         """Return the last non-empty message content from a LangGraph result/state."""
         if isinstance(result, dict) and "messages" in result:
@@ -1977,60 +2041,116 @@ class IACTTool(BaseTool):
             except Exception:
                 pass
 
-    async def _arun(self, query: str, *args, **kwargs) -> str:
+    def enable_router_mode(self, offset: List[int], lock: asyncio.Lock) -> None:
+        """Knowledge-router specialist: its answer goes straight to the user
+        (return_direct) and it hands back its sub-agent's LightRAG chunks as an
+        artifact, renumbered onto the parent turn's citation counter."""
+        self.citation_offset = offset
+        self.citation_lock = lock
+        self.response_format = "content_and_artifact"
+        self.return_direct = True
+
+    async def run_subagent(self, query: str) -> Tuple[str, Optional[dict]]:
+        """Run the sub-agent once: (final answer, merged LightRAG payload of this run).
+
+        Cite markers in the answer use the sub-agent's own numbering — see
+        claim_citations. Records the run as an AGENT_AS_TOOL execution."""
+        started_at = datetime.utcnow()
+        turn_messages: list = []
+        error = None
+        try:
+            return await self._run_subagent(query, turn_messages)
+        except Exception as e:
+            error = e
+            raise
+        finally:
+            self._record_metrics(query, started_at, {"messages": turn_messages}, error)
+
+    async def _run_subagent(self, query: str, turn_messages: list) -> Tuple[str, Optional[dict]]:
+        from tools.streaming_utils import (
+            extract_lightrag_graph_from_artifact,
+            map_stream_event,
+            merge_lightrag_graph,
+        )
+
+        messages = [HumanMessage(content=self._format_tool_query(query))]
+        stream_writer = self._get_stream_writer_or_none()
+        graph: Optional[dict] = None
+        router = self.citation_offset is not None
+        if router:
+            # This run numbers its chunks from 1, whatever earlier (or failed)
+            # runs of this specialist did; claim_citations shifts it onto the turn.
+            self.run_counter[0] = 0
+        extract = self._last_ai_text if router else self._extract_last_message_content
+
+        if stream_writer is None or not hasattr(self.react_agent, "astream"):
+            result = await self.react_agent.ainvoke({"messages": messages})
+            for msg in (result.get("messages") or []) if isinstance(result, dict) else []:
+                turn_messages.append(msg)
+                raw = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
+                if raw:
+                    graph = merge_lightrag_graph(graph, raw)
+            return extract(result) or self._empty_notice(router), graph
+
+        latest_state: Any = None
+        async for mode, chunk in self.react_agent.astream(
+            {"messages": messages},
+            stream_mode=["updates", "custom"],
+        ):
+            if mode == "updates" and isinstance(chunk, dict):
+                for state_delta in chunk.values():
+                    if isinstance(state_delta, dict) and "messages" in state_delta:
+                        latest_state = state_delta
+                        turn_messages.extend(state_delta["messages"] or [])
+
+            for event in map_stream_event(mode, chunk) or []:
+                if event.get("type") == "_lightrag_graph":
+                    graph = merge_lightrag_graph(graph, event["data"])
+                else:
+                    self._emit_subagent_stream_event(stream_writer, event)
+
+        text = extract(latest_state) if latest_state is not None else ""
+        return text or self._empty_notice(router), graph
+
+    @staticmethod
+    def _empty_notice(router: bool) -> str:
+        return "The specialist returned no answer." if router else ""
+
+    def claim_citations(self, text: str, graph: Optional[dict]) -> Tuple[str, Optional[dict]]:
+        """Renumber this run's cite markers onto the parent turn's counter and tag
+        the payload with its silo. Caller must hold citation_lock.
+
+        run_subagent reset the sub-agent's counter, so this run's markers are 1..count:
+        n -> n + offset, and any marker outside that range is dropped.
+        """
+        count = chunk_count(graph)
+        delta = self.citation_offset[0]
+        self.citation_offset[0] += count
+        if graph:
+            graph = tag_graph_with_silo(graph, self.agent.silo_id, self.silo_name)
+        return rebase_citations(text, delta, valid=count), graph
+
+    async def _arun(self, query: str, *args, **kwargs):
         """Asynchronous execution of the agent tool"""
         if self.react_agent is None:
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
-        started_at = datetime.utcnow()
-        result = None
-        error = None
         try:
-            formatted_prompt = self._format_tool_query(query)
-            messages = [HumanMessage(content=formatted_prompt)]
-            stream_writer = self._get_stream_writer_or_none()
-
-            if stream_writer is None:
-                result = await self.react_agent.ainvoke({"messages": messages})
-                return self._extract_last_message_content(result)
-
-            if not hasattr(self.react_agent, "astream"):
-                result = await self.react_agent.ainvoke({"messages": messages})
-                return self._extract_last_message_content(result)
-
-            from tools.streaming_utils import map_stream_event
-
-            latest_state: Any = None
-            turn_messages: list = []
-            async for mode, chunk in self.react_agent.astream(
-                {"messages": messages},
-                stream_mode=["updates", "custom"],
-            ):
-                if mode == "updates" and isinstance(chunk, dict):
-                    for state_delta in chunk.values():
-                        if isinstance(state_delta, dict) and "messages" in state_delta:
-                            latest_state = state_delta
-                            turn_messages.extend(state_delta["messages"] or [])
-
-                events = map_stream_event(mode, chunk)
-                if not events:
-                    continue
-                for event in events:
-                    self._emit_subagent_stream_event(stream_writer, event)
-
-            result = {"messages": turn_messages}
-            if latest_state is not None:
-                return self._extract_last_message_content(latest_state)
-
-            return ""
-
+            if self.citation_offset is None:
+                text, _ = await self.run_subagent(query)
+                return text
+            async with self.citation_lock:
+                text, graph = await self.run_subagent(query)
+                text, graph = self.claim_citations(text, graph)
+            return text, graph_artifact(graph)
         except Exception as e:
-            error = e
             logger.error(f"Error executing agent tool {self.name} (async): {str(e)}")
-            return f"Error executing agent tool: {str(e)}"
-        finally:
-            self._record_metrics(query, started_at, result, error)
+            if self.citation_offset is None:
+                return f"Error executing agent tool: {str(e)}"
+            # Router mode: this text is shown to the end user as the answer
+            # (return_direct), so no exception details; they stay in the log.
+            return "The specialist could not answer right now. Please try again.", None
 
 
 async def _execute_tool_agent_ocr(
@@ -2368,6 +2488,7 @@ async def discover_tool(
     sandbox_session_service: Optional[Any] = None,
     attached_files: Optional[List[Dict]] = None,
     user_message: Optional[str] = None,
+    max_tool_calls: Optional[int] = None,
 ) -> BaseTool:
     """Return the appropriate tool wrapper for *agent*.
 
@@ -2396,6 +2517,7 @@ async def discover_tool(
         sandbox_session_service=sandbox_session_service,
         attached_files=attached_files,
         user_message=user_message,
+        max_tool_calls=max_tool_calls,
     )
 
 
@@ -2440,6 +2562,21 @@ _CITATION_INSTRUCTION = (
 )
 
 
+# LightRAG's own context carries a second numbering: a "Reference Document List"
+# ([1] file (p. X) ...) plus a reference_id on each chunk. It collides with ours
+# (the model sometimes cites with LightRAG's [30] instead of our [30] and the link
+# opens another document), so the model must only see our numbered SOURCES block.
+_LIGHTRAG_REF_LIST_RE = re.compile(r"Reference Document List \(.*?\):\n\n```\n.*?\n```\n?", re.S)
+_LIGHTRAG_REF_ID_RE = re.compile(r'\{"reference_id": "[^"]*", ')
+_LIGHTRAG_CHUNKS_HEADER = "Each entry has a reference_id refer to the `Reference Document List`; the optional"
+
+
+def _strip_lightrag_references(content: str) -> str:
+    content = _LIGHTRAG_REF_LIST_RE.sub("", content)
+    content = _LIGHTRAG_REF_ID_RE.sub("{", content)
+    return content.replace(_LIGHTRAG_CHUNKS_HEADER, "the optional")
+
+
 def _append_lightrag_citation_sources(
     content: str, docs: List[Document], offset: Optional[List[int]] = None,
     labels: Optional[Dict[int, str]] = None,
@@ -2473,6 +2610,7 @@ def _append_lightrag_citation_sources(
             lines.append(f"[{counter[0]}] (source: {src}) {excerpt}")
     if not lines:
         return content
+    content = _strip_lightrag_references(content)
     return f"{content}\n\n{_CITATION_INSTRUCTION}\n\n" + "\n".join(lines)
 
 
@@ -2651,6 +2789,7 @@ def get_retriever_tool(
     search_params: Optional[dict] = None,
     max_retrieval_calls: Optional[int] = None,
     pinned_filter: Optional[dict] = None,
+    citation_counter: Optional[List[int]] = None,
 ) -> Optional[StructuredTool]:
     """Build the dynamic retrieval tool for *silo*.
 
@@ -2720,7 +2859,7 @@ def get_retriever_tool(
     # Not async-safe under parallel tool calls; safe with LangGraph's serialized model.
     _call_count: List[int] = [0]
     # Shared across calls within the same turn — see _append_lightrag_citation_sources.
-    _citation_offset: List[int] = [0]
+    _citation_offset: List[int] = citation_counter if citation_counter is not None else [0]
 
     async def _search(query: str, **metadata_kwargs: Any) -> Tuple[str, List[Document]]:
         if max_retrieval_calls is not None and _call_count[0] >= max_retrieval_calls:

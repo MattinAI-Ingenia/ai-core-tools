@@ -313,6 +313,33 @@ class TestCreateAgent:
         assert response.status_code in (200, 201)
         assert response.json()["is_tool"] is True
 
+    def test_create_agent_as_knowledge_router(
+        self, client, fake_app, fake_ai_service, owner_headers, db
+    ):
+        """The knowledge-router flag round-trips through create and detail."""
+        from models.embedding_service import EmbeddingService
+
+        embedding = EmbeddingService(
+            name="Test Embeddings", provider="OpenAI", api_key="sk-test-key",  # pragma: allowlist secret
+            app_id=fake_app.app_id,
+        )
+        db.add(embedding)
+        db.flush()
+        payload = agent_payload(name="Router", service_id=fake_ai_service.service_id)
+        payload["is_knowledge_router"] = True
+        payload["media_embedding_service_id"] = embedding.service_id
+        response = client.post(
+            f"/internal/apps/{fake_app.app_id}/agents/0",
+            json=payload,
+            headers=owner_headers,
+        )
+        assert response.status_code in (200, 201)
+        assert response.json()["is_knowledge_router"] is True
+
+        agent_id = response.json()["agent_id"]
+        detail = client.get(f"/internal/apps/{fake_app.app_id}/agents/{agent_id}", headers=owner_headers)
+        assert detail.json()["is_knowledge_router"] is True
+
     def test_create_agent_requires_editor_role(
         self, client, fake_app, fake_ai_service, auth_headers, db
     ):

@@ -17,7 +17,9 @@ Usage example:
 """
 
 import json
-from typing import Any
+from typing import Any, Optional
+
+from langchain_core.messages import ToolMessage
 
 from utils.logger import get_logger
 
@@ -276,7 +278,9 @@ def merge_lightrag_graph(accumulated: dict | None, new: dict) -> dict:
     are positional (cite://N -> chunks[N-1]) and must keep matching across every
     call in the turn, same as the offset param on _append_lightrag_citation_sources.
 
-    Entities are deduped by id (stable — it's the entity name). Relationships are
+    Entities are deduped by (silo_id, id): id is the entity name (stable) and
+    silo_id (set only on knowledge-router payloads, None otherwise) keeps the same
+    name from two silos as two nodes. Relationships are
     concatenated without dedup: ponytail — when LightRAG gives no real id,
     lightrag_store.py falls back to a call-local "rel_{i}" that collides across
     calls, so dedup-by-id could wrongly merge two unrelated relationships. A
@@ -288,8 +292,8 @@ def merge_lightrag_graph(accumulated: dict | None, new: dict) -> dict:
     acc_data = accumulated.get("data", {}) or {}
     new_data = new.get("data", {}) or {}
 
-    entities_by_id = {e.get("id"): e for e in acc_data.get("entities", [])}
-    entities_by_id.update({e.get("id"): e for e in new_data.get("entities", [])})
+    entities_by_id = {(e.get("silo_id"), e.get("id")): e for e in acc_data.get("entities", [])}
+    entities_by_id.update({(e.get("silo_id"), e.get("id")): e for e in new_data.get("entities", [])})
 
     return {
         **accumulated,
@@ -300,6 +304,17 @@ def merge_lightrag_graph(accumulated: dict | None, new: dict) -> dict:
             "chunks": [*acc_data.get("chunks", []), *new_data.get("chunks", [])],
         },
     }
+
+
+def final_tool_answer(trailing_tool_msgs: list, streamed_text: str) -> Optional[str]:
+    """Answer of a turn that ended on ToolMessage(s) (return_direct tools, e.g.
+    knowledge-router specialists): no model tokens were streamed for it. Several
+    return_direct calls in one step are all part of the answer. None when the
+    model wrote the answer itself."""
+    if streamed_text.strip() or not trailing_tool_msgs:
+        return None
+    texts = [m.content if isinstance(m.content, str) else str(m.content) for m in trailing_tool_msgs]
+    return "\n\n".join(t for t in texts if t.strip()) or None
 
 
 def _map_updates_chunk(chunk: Any) -> list[dict] | None:

@@ -160,6 +160,7 @@ class AgentDetailSchema(BaseModel):
     has_memory: bool
     enable_code_interpreter: bool = False
     skill_router_enabled: bool = False
+    is_knowledge_router: bool = False
     server_tools: List[str] = []
     memory_max_messages: int = 20
     memory_max_tokens: Optional[int] = 4000
@@ -232,6 +233,7 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin):
     has_memory: bool = False
     enable_code_interpreter: bool = False
     skill_router_enabled: bool = False
+    is_knowledge_router: bool = False
     server_tools: Optional[List[str]] = []
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = 4000

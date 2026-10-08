@@ -114,6 +114,7 @@ export interface Agent {
   has_memory: boolean;
   enable_code_interpreter: boolean;
   skill_router_enabled?: boolean;
+  is_knowledge_router?: boolean;
   status?: string;
   server_tools?: string[];
   memory_max_messages: number;

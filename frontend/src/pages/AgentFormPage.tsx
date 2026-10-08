@@ -32,6 +32,7 @@ interface Agent {
   has_memory: boolean;
   enable_code_interpreter: boolean;
   skill_router_enabled?: boolean;
+  is_knowledge_router?: boolean;
   memory_max_messages: number;
   memory_max_tokens: number;
   memory_summarize_threshold: number;
@@ -90,6 +91,7 @@ interface AgentFormData {
   has_memory: boolean;
   enable_code_interpreter: boolean;
   skill_router_enabled: boolean;
+  is_knowledge_router: boolean;
   server_tools: string[];
   memory_max_messages: number;
   memory_max_tokens: number;
@@ -251,6 +253,7 @@ function AgentFormPage() {
     has_memory: false,
     enable_code_interpreter: false,
     skill_router_enabled: false,
+    is_knowledge_router: false,
     server_tools: [],
     memory_max_messages: 20,
     memory_max_tokens: 4000,
@@ -375,6 +378,7 @@ function AgentFormPage() {
         has_memory: response.has_memory || false,
         enable_code_interpreter: response.enable_code_interpreter || false,
         skill_router_enabled: response.skill_router_enabled || false,
+        is_knowledge_router: response.is_knowledge_router || false,
         server_tools: response.server_tools || [],
         memory_max_messages: response.memory_max_messages || 20,
         memory_max_tokens: response.memory_max_tokens || 4000,
@@ -700,6 +704,7 @@ function AgentFormPage() {
       has_memory: formData.has_memory,
       enable_code_interpreter: formData.enable_code_interpreter,
       skill_router_enabled: formData.skill_router_enabled,
+      is_knowledge_router: formData.is_knowledge_router,
       server_tools: formData.server_tools,
       memory_max_messages: formData.memory_max_messages,
       memory_max_tokens: formData.memory_max_tokens,
@@ -1278,6 +1283,25 @@ function AgentFormPage() {
                           <p id="skill_router_enabled_help" className="text-xs text-gray-500">Let the model pre-select at most 2 skills per turn; off by default.</p>
                         </div>
                       </div>
+
+                      {formData.tool_ids.length > 0 && (
+                        <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                          <input
+                            id="is_knowledge_router"
+                            type="checkbox"
+                            checked={formData.is_knowledge_router}
+                            onChange={(e) => handleInputChange('is_knowledge_router', e.target.checked)}
+                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="ml-3">
+                            <label htmlFor="is_knowledge_router" className="text-sm font-medium text-gray-900">Knowledge router</label>
+                            <p className="text-xs text-gray-500">
+                              Routes each question to the specialist agent(s) whose description matches; a single
+                              specialist's answer is shown as-is. This agent's own silo is not used.
+                            </p>
+                          </div>
+                        </div>
+                      )}
 
                       {formData.enable_code_interpreter && (
                         <div className="md:col-span-2">

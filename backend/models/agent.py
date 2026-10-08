@@ -84,6 +84,8 @@ class Agent(Base):
     has_memory = Column(Boolean)
     enable_code_interpreter = Column(Boolean, default=False, nullable=False, server_default='false')
     skill_router_enabled = Column(Boolean, nullable=False, server_default=text('false'), default=False)
+    # Knowledge router: agent-tools become pass-through specialists (see tools/knowledge_router.py)
+    is_knowledge_router = Column(Boolean, default=False, nullable=False, server_default='false')
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
 
     # LightRAG query mode — the only per-agent retrieval knob that is LightRAG-specific
