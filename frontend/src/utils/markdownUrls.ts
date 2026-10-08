@@ -3,15 +3,17 @@ import { configService } from '../core/ConfigService';
 
 /**
  * react-markdown `urlTransform`: the library's safe default (http, https, mailto,
- * relative…) plus `file://` (internal file references resolved by the app) and
- * `data:image/*` for images. Anything else (e.g. `javascript:`) becomes empty.
+ * relative…) plus `file://` (internal file references resolved by the app),
+ * `cite://N` (LightRAG citation markers, rendered as a CitationBadge — never
+ * navigated) and `data:image/*` for images. Anything else (e.g. `javascript:`)
+ * becomes empty.
  */
 export function markdownUrlTransform(
   url: string,
   key: string,
   defaultTransform: (value: string) => string,
 ): string {
-  if (url.startsWith('file://')) return url;
+  if (url.startsWith('file://') || url.startsWith('cite://')) return url;
   if (key === 'src' && /^data:image\//i.test(url)) return url;
   return defaultTransform(url);
 }
