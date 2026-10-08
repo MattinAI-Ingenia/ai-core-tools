@@ -13,6 +13,10 @@ interface Props {
   citedChunkIds?: string[];
   appId?: number;
   siloId?: number;
+  /** Silo name shown before the counts when the turn spans several silos. */
+  title?: string;
+  /** Global citation number of each chunk (defaults to its position + 1). */
+  chunkNumbers?: number[];
 }
 
 // LightRAG joins the chunk ids an entity/relationship was extracted from with
@@ -57,7 +61,7 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Se
     });
 }
 
-export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, siloId }: Props) {
+export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, siloId, title, chunkNumbers }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [openChunk, setOpenChunk] = useState<number | null>(null);
@@ -182,6 +186,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
             )}
           </svg>
           <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300 flex-1">
+            {title ? `${title} · ` : ''}
             {hasGraph
               ? `Knowledge subgraph · ${entityCount} ${entityCount === 1 ? 'entity' : 'entities'} · ${relCount} ${relCount === 1 ? 'relationship' : 'relationships'}${chunkCount > 0 ? ` · ${chunkCount} ${chunkCount === 1 ? 'chunk' : 'chunks'}` : ''}`
               : `${chunkCount} ${chunkCount === 1 ? 'chunk' : 'chunks'}`}
@@ -270,7 +275,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                 {chunks[openChunk].file_path && chunks[openChunk].file_path !== 'unknown_source'
                   ? chunks[openChunk].file_path
                   : 'Unknown source'}
-                <span className="ml-1 font-normal text-gray-400">· Chunk {openChunk + 1}</span>
+                <span className="ml-1 font-normal text-gray-400">· Chunk {chunkNumbers?.[openChunk] ?? openChunk + 1}</span>
               </span>
               <button
                 onClick={() => { setOpenChunk(null); setPopoverPos(null); }}

@@ -107,7 +107,7 @@ export default function CitationBadge({ index, chunk, appId, siloId }: Props) {
             <div className="max-h-80 overflow-y-auto p-3">
               <p className="whitespace-pre-wrap leading-relaxed">{chunk.content ?? '(no content)'}</p>
             </div>
-            <OpenPdfButton appId={appId} siloId={siloId} resourceId={chunk.resource_id} page={chunk.page} />
+            <OpenPdfButton appId={appId} siloId={chunk.silo_id ?? siloId} resourceId={chunk.resource_id} page={chunk.page} />
           </div>
         </>,
         document.body,

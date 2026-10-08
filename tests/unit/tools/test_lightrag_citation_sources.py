@@ -68,3 +68,56 @@ def test_offset_continues_numbering_across_calls_in_the_same_turn():
 def test_offset_omitted_keeps_old_single_call_behavior():
     doc = _lightrag_doc([{"id": "c1", "content": "x", "file_path": "a.pdf"}])
     assert "[1] (source: a.pdf) x" in _append_lightrag_citation_sources("A", [doc])
+
+
+# --- LightRAG's own reference numbering must not compete with ours -------------
+# Measured 2026-10-07 (9 traces): every citation mismatch came from the model citing
+# with LightRAG's "Reference Document List" numbers instead of our SOURCES numbers
+# (e.g. LightRAG [30] = CDOC001961 while our [30] was THERMAPRO).
+
+_LIGHTRAG_CONTEXT = (
+    "Content: Knowledge Graph Data (Entity):\n\n```json\n"
+    '{"entity": "Función Anti-Hielo", "type": "función", "description": "protege"}\n```\n\n'
+    "Document Chunks (Each entry has a reference_id refer to the `Reference Document List`; "
+    "the optional `content_headings` field gives the chunk's heading path):\n\n```json\n"
+    '{"reference_id": "1", "content": "Protección antihielo ..."}\n'
+    '{"reference_id": "2", "content": "Precaución contra heladas ..."}\n```\n\n'
+    "Reference Document List (Each entry starts with a [reference_id] that corresponds to "
+    "entries in the Document Chunks):\n\n```\n[1] DSAT000008.pdf (p. 20)\n[2] CDOC001961.pdf (p. 23)\n```\n"
+    'Metadata: {"source": "lightrag", "query_mode": "global"}'
+)
+
+
+def _lightrag_docs():
+    return [Document(page_content="x", metadata={"lightrag_raw_data": {"data": {"chunks": [
+        {"file_path": "DSAT000008.pdf (p. 20)", "content": "a"},
+        {"file_path": "CDOC001961.pdf (p. 23)", "content": "b"},
+    ]}}})]
+
+
+def test_lightrag_reference_list_and_ids_are_removed_from_what_the_model_sees():
+    out = _append_lightrag_citation_sources(_LIGHTRAG_CONTEXT, _lightrag_docs(), [40])
+
+    assert "Reference Document List" not in out
+    assert "reference_id" not in out
+    assert "[1] DSAT000008.pdf (p. 20)" not in out
+    # our own numbering is the only one left, continuing from the offset
+    assert "[41] (source: DSAT000008.pdf (p. 20))" in out
+    assert "[42] (source: CDOC001961.pdf (p. 23))" in out
+
+
+def test_chunk_json_stays_valid_and_graph_context_untouched():
+    import json
+    import re as _re
+
+    out = _append_lightrag_citation_sources(_LIGHTRAG_CONTEXT, _lightrag_docs(), [0])
+
+    chunk_lines = [l for l in out.splitlines() if l.startswith('{"content"')]
+    assert [json.loads(l)["content"] for l in chunk_lines] == ["Protección antihielo ...", "Precaución contra heladas ..."]
+    assert '"entity": "Función Anti-Hielo"' in out
+    assert not _re.search(r"Reference Document List|reference_id", out)
+
+
+def test_non_lightrag_content_is_left_alone():
+    plain = Document(page_content="p", metadata={})
+    assert _append_lightrag_citation_sources(_LIGHTRAG_CONTEXT, [plain], [0]) == _LIGHTRAG_CONTEXT

@@ -445,7 +445,8 @@ class ConversationService:
         # fallback so an existing scheduled conversation is never shown empty.
         history = await CheckpointerCacheService.get_conversation_history_async(
             agent_id=conversation.agent_id,
-            session_id=conversation.session_id
+            session_id=conversation.session_id,
+            tool_answers=bool(getattr(conversation.agent, 'is_knowledge_router', False)),
         )
         if not history and conversation.session_id.startswith(f"conv_{conversation.agent_id}_"):
             session_suffix = conversation.session_id.replace(

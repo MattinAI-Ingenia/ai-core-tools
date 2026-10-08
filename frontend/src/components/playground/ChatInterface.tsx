@@ -14,6 +14,7 @@ import MediaUploadModal from './MediaUploadModal';
 import VideoPlayer from './VideoPlayer';
 import type { VideoTimestamp } from './VideoPlayer';
 import LightRAGGraphBubble from './LightRAGGraphBubble';
+import { splitGraphBySilo } from '../../utils/splitGraphBySilo';
 import type { LightRAGGraphData } from '../../types/streaming';
 
 interface Message {
@@ -1129,9 +1130,17 @@ function ChatInterface({
                               />
                             );
                           })}
-                        {message.lightragGraph && (
-                          <LightRAGGraphBubble graphData={message.lightragGraph} citedChunkIds={citedChunkIds} appId={appId} siloId={siloId} />
-                        )}
+                        {message.lightragGraph && splitGraphBySilo(message.lightragGraph).map((g) => (
+                          <LightRAGGraphBubble
+                            key={g.siloId ?? 'all'}
+                            graphData={g.graph}
+                            citedChunkIds={citedChunkIds}
+                            appId={appId}
+                            siloId={g.siloId ?? siloId}
+                            title={g.siloName}
+                            chunkNumbers={g.chunkNumbers}
+                          />
+                        ))}
                         <div className="mt-1">
                           <span className="text-xs text-gray-400 dark:text-gray-500">
                             {message.timestamp.toLocaleTimeString([], {

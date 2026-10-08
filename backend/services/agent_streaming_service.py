@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Any
 
 import psycopg.errors
+from langchain_core.messages import ToolMessage
 from sqlalchemy.orm import Session
 
 from tools.agentTools import create_agent, prepare_agent_config, build_human_message
@@ -22,6 +23,7 @@ from tools.langsmith_config import (
     resolve_langsmith_settings,
 )
 from tools.streaming_utils import (
+    final_tool_answer,
     format_sse_event,
     map_stream_event,
     merge_lightrag_graph,
@@ -314,6 +316,7 @@ class AgentStreamingService:
 
                 accumulated_content = ""
                 structured_response = None
+                trailing_tool_msgs: list = []
                 # A retry (attempt > 0) reruns the whole turn from a rolled-back
                 # checkpoint, so any citations/graph data captured on a failed
                 # attempt belong to a generation that's being discarded — reset
@@ -384,6 +387,10 @@ class AgentStreamingService:
                                         for msg in msgs:
                                             if msg is None:
                                                 continue
+                                            if isinstance(msg, ToolMessage):
+                                                trailing_tool_msgs.append(msg)
+                                            else:
+                                                trailing_tool_msgs.clear()
                                             msg_id = getattr(msg, "id", None)
                                             if not msg_id:
                                                 continue
@@ -430,6 +437,13 @@ class AgentStreamingService:
                                     first_token_at = datetime.utcnow()
                                 accumulated_content += text
                                 yield format_sse_event(SSE_TOKEN, {"content": text})
+                    # Knowledge-router pass-through: the turn ended on the
+                    # specialist's ToolMessage (return_direct), so no model
+                    # tokens carried the answer.
+                    tool_answer = None if structured_response is not None else final_tool_answer(trailing_tool_msgs, accumulated_content)
+                    if tool_answer:
+                        accumulated_content = tool_answer
+                        yield format_sse_event(SSE_TOKEN, {"content": tool_answer})
                     break
                 except Exception as stream_exc:
                     if (
@@ -731,6 +745,8 @@ class AgentStreamingService:
 
             # 4. Stream resumed execution
             accumulated_content = ""
+            lightrag_graph_data = None
+            trailing_tool_msgs: list = []
             _token_buf: dict[str, list[str]] = {}
             _discarded_ids: set[str] = set()
 
@@ -773,6 +789,10 @@ class AgentStreamingService:
                             for msg in msgs:
                                 if msg is None:
                                     continue
+                                if isinstance(msg, ToolMessage):
+                                    trailing_tool_msgs.append(msg)
+                                else:
+                                    trailing_tool_msgs.clear()
                                 msg_id = getattr(msg, "id", None)
                                 if not msg_id:
                                     continue
@@ -787,7 +807,9 @@ class AgentStreamingService:
                     events = map_stream_event(mode, chunk)
                     if events:
                         for event in events:
-                            if event["type"] != SSE_TOKEN:
+                            if event["type"] == "_lightrag_graph":
+                                lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
+                            elif event["type"] != SSE_TOKEN:
                                 yield format_sse_event(event["type"], event["data"])
                     continue
 
@@ -796,6 +818,8 @@ class AgentStreamingService:
                     for event in events:
                         if event["type"] == SSE_TOKEN:
                             accumulated_content += event["data"].get("content", "")
+                        elif event["type"] == "_lightrag_graph":
+                            lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
                         else:
                             yield format_sse_event(event["type"], event["data"])
 
@@ -804,6 +828,13 @@ class AgentStreamingService:
                     for text in texts:
                         accumulated_content += text
                         yield format_sse_event(SSE_TOKEN, {"content": text})
+
+            # Knowledge-router pass-through: the resumed turn ended on the
+            # specialist's ToolMessage (return_direct), so no model tokens.
+            tool_answer = final_tool_answer(trailing_tool_msgs, accumulated_content)
+            if tool_answer:
+                accumulated_content = tool_answer
+                yield format_sse_event(SSE_TOKEN, {"content": tool_answer})
 
             # 5. Check for further interrupts (chained HITL)
             has_pending_interrupt = False
@@ -859,6 +890,7 @@ class AgentStreamingService:
                         "response": result["parsed_response"],
                         "conversation_id": result["effective_conv_id"],
                         "files": result["files_data"],
+                        "lightrag_graph": lightrag_graph_data,
                     },
                 )
 

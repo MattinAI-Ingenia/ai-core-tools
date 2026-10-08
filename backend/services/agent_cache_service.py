@@ -33,6 +33,14 @@ def is_missing_tool_output_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _MISSING_TOOL_OUTPUT_MARKERS)
 
 
+def _tool_answer_entry(content: str, lightrag_graph) -> dict:
+    """History entry for a turn whose answer is a ToolMessage (return_direct)."""
+    entry = {"role": "agent", "content": content}
+    if lightrag_graph:
+        entry["lightrag_graph"] = lightrag_graph
+    return entry
+
+
 def _content_blocks_to_str(blocks: list) -> str:
     """Convert a LangChain multimodal content block list to a display string.
 
@@ -308,13 +316,19 @@ class CheckpointerCacheService:
             logger.error(f"Error invalidating session checkpointers: {str(e)}")
 
     @classmethod
-    async def get_conversation_history_async(cls, agent_id: int, session_id: str = "default"):
+    async def get_conversation_history_async(
+        cls, agent_id: int, session_id: str = "default", tool_answers: bool = False
+    ):
         """
         Retrieve conversation history from PostgreSQL checkpointer.
 
         Args:
             agent_id: Agent ID
             session_id: Session ID
+            tool_answers: True for knowledge-router agents, whose turns can end on a
+                return_direct specialist's ToolMessage: show it as the agent's reply.
+                Off otherwise, so a turn cut short after a tool ran never surfaces
+                raw tool output.
 
         Returns:
             List of message dicts with role and content
@@ -336,13 +350,21 @@ class CheckpointerCacheService:
                 # trims the turn away (it deletes ToolMessages permanently, not
                 # just from view) — see docs/LIGHTRAG_FOLLOWUPS.md.
                 pending_lightrag_graph = None
+                # Answer of a turn that ended on a ToolMessage (knowledge-router
+                # pass-through): no AI message follows it.
+                pending_tool_answer = None
                 for msg in messages:
                     if hasattr(msg, 'type'):
                         msg_type = msg.type
                         if msg_type in ['human', 'user']:
+                            if pending_tool_answer:
+                                history.append(_tool_answer_entry(pending_tool_answer, pending_lightrag_graph))
+                                pending_tool_answer = pending_lightrag_graph = None
                             role = 'user'
                         elif msg_type in ['ai', 'assistant']:
                             role = 'agent'
+                            # A tool answer only counts if nothing else follows it in its step.
+                            pending_tool_answer = None
 
                             content = msg.content if hasattr(msg, 'content') else str(msg)
 
@@ -367,6 +389,11 @@ class CheckpointerCacheService:
                             raw_data = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
                             if raw_data:
                                 pending_lightrag_graph = merge_lightrag_graph(pending_lightrag_graph, raw_data)
+                            tool_content = msg.content
+                            tool_text = _content_blocks_to_str(tool_content) if isinstance(tool_content, list) else str(tool_content or "")
+                            if tool_answers and tool_text.strip():
+                                # Several return_direct specialists in one step: all are the answer.
+                                pending_tool_answer = f"{pending_tool_answer}\n\n{tool_text}" if pending_tool_answer else tool_text
                             continue
                         else:
                             role = msg_type
@@ -388,7 +415,11 @@ class CheckpointerCacheService:
                         if role == 'agent' and pending_lightrag_graph:
                             entry["lightrag_graph"] = pending_lightrag_graph
                         pending_lightrag_graph = None
+                        pending_tool_answer = None
                         history.append(entry)
+
+                if pending_tool_answer:
+                    history.append(_tool_answer_entry(pending_tool_answer, pending_lightrag_graph))
 
                 logger.info(f"Retrieved {len(history)} messages from thread {thread_id}")
                 return history
