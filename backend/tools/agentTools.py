@@ -14,7 +14,6 @@ from tools.coverage_union import augment_with_semantic, excerpt_around
 from tools.knowledge_router import (
     KNOWLEDGE_ROUTER_INSTRUCTION,
     SPECIALIST_MAX_TOOL_CALLS,
-    chunk_count,
     create_consultar_varios_tool,
     graph_artifact,
     rebase_citations,
@@ -2090,7 +2089,7 @@ class IACTTool(BaseTool):
                 raw = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
                 if raw:
                     graph = merge_lightrag_graph(graph, raw)
-            return extract(result) or self._empty_notice(router), graph
+            return extract(result) or ("The specialist returned no answer." if router else ""), graph
 
         latest_state: Any = None
         async for mode, chunk in self.react_agent.astream(
@@ -2110,11 +2109,7 @@ class IACTTool(BaseTool):
                     self._emit_subagent_stream_event(stream_writer, event)
 
         text = extract(latest_state) if latest_state is not None else ""
-        return text or self._empty_notice(router), graph
-
-    @staticmethod
-    def _empty_notice(router: bool) -> str:
-        return "The specialist returned no answer." if router else ""
+        return text or ("The specialist returned no answer." if router else ""), graph
 
     def claim_citations(self, text: str, graph: Optional[dict]) -> Tuple[str, Optional[dict]]:
         """Renumber this run's cite markers onto the parent turn's counter and tag
@@ -2123,7 +2118,7 @@ class IACTTool(BaseTool):
         run_subagent reset the sub-agent's counter, so this run's markers are 1..count:
         n -> n + offset, and any marker outside that range is dropped.
         """
-        count = chunk_count(graph)
+        count = len(((graph or {}).get("data") or {}).get("chunks") or [])
         delta = self.citation_offset[0]
         self.citation_offset[0] += count
         if graph:

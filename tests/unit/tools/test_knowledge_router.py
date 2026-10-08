@@ -1,7 +1,7 @@
 """Knowledge router: specialists' citations renumbered onto one turn-wide
 counter so cite://N keeps resolving to chunks[N-1] of the merged payload.
 See docs/superpowers/specs/2026-10-07-knowledge-router-design.md."""
-from tools.knowledge_router import chunk_count, graph_artifact, rebase_citations, tag_graph_with_silo
+from tools.knowledge_router import graph_artifact, rebase_citations, tag_graph_with_silo
 
 
 def test_rebase_citations_shifts_number_and_link():
@@ -34,11 +34,6 @@ def test_graph_artifact_shape_and_none():
     assert graph_artifact(None) is None
     graph = {"data": {"chunks": [{"id": "c"}]}}
     assert graph_artifact(graph)[0].metadata["lightrag_raw_data"] == graph
-
-
-def test_chunk_count():
-    assert chunk_count(None) == 0
-    assert chunk_count({"data": {"chunks": [{"id": "a"}, {"id": "b"}]}}) == 2
 
 
 import asyncio

@@ -52,9 +52,6 @@ def rebase_citations(text: str, delta: int, valid: Optional[int] = None) -> str:
     whose chunks never reach the payload), and after shifting they would open
     another specialist's chunk instead.
     """
-    if delta == 0 and valid is None:
-        return text
-
     def _shift(m: re.Match) -> str:
         n = int(m.group(2))
         if valid is not None and not 1 <= n <= valid:
@@ -83,10 +80,6 @@ def graph_artifact(graph: Optional[dict]) -> Optional[List[Document]]:
     if not graph:
         return None
     return [Document(page_content="", metadata={"lightrag_raw_data": graph})]
-
-
-def chunk_count(graph: Optional[dict]) -> int:
-    return len(((graph or {}).get("data") or {}).get("chunks") or [])
 
 
 class _ConsultarVariosInput(BaseModel):
