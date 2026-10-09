@@ -108,6 +108,15 @@ export interface App {
 }
 
 /** RAG retrieval-time filter applied on top of an agent's fixed silo. Mirrors RagConfigSection's RagFixedFilter shape. */
+import type {
+  SystemOneConnectionResult,
+  SystemOneQuestion,
+  SystemOneResult,
+  SystemOneService,
+  SystemOneServiceDetail,
+  SystemOneServicePayload,
+} from '../types/systemOne';
+
 export interface AgentRagFixedFilter {
   field: string;
   op: '$eq' | '$ne' | '$gt' | '$gte' | '$lt' | '$lte' | '$in';
@@ -154,6 +163,11 @@ export interface Agent {
   vision_service_id?: number;
   vision_system_prompt?: string;
   text_system_prompt?: string;
+  // System One-specific fields (type 'system_one_agent')
+  system_one_service_id?: number | null;
+  questions?: SystemOneQuestion[] | null;
+  summarization_service_id?: number | null;
+  max_state_chars?: number | null;
   // Media processing configuration
   transcription_service_id?: number | null;
   video_ai_service_id?: number | null;
@@ -185,6 +199,7 @@ export interface Agent {
   };
   output_parsers: Array<{ parser_id: number; name: string }>;
   sandbox_services: Array<{ service_id: number; name: string }>;
+  system_one_services?: Array<{ service_id: number; name: string }>;
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
@@ -711,9 +726,13 @@ class ApiService {
 
     if (typeof data['error'] === 'string') return data['error'];
     if (data['detail'] !== undefined) {
-      return typeof data['detail'] === 'string'
-        ? data['detail']
-        : JSON.stringify(data['detail']);
+      const detail = data['detail'];
+      if (typeof detail === 'string') return detail;
+      // e.g. 409 {detail: {message, agents}}: show the readable part, not raw JSON
+      if (detail && typeof detail === 'object' && typeof (detail as Record<string, unknown>)['message'] === 'string') {
+        return (detail as Record<string, string>)['message'];
+      }
+      return JSON.stringify(detail);
     }
     if (typeof data['message'] === 'string') return data['message'];
     return null;
@@ -1357,6 +1376,70 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/sandbox-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  // ==================== SYSTEM ONE SERVICES ====================
+  async getSystemOneServices(appId: number): Promise<SystemOneService[]> {
+    return this.request(`/internal/apps/${appId}/system-one-services/`);
+  }
+
+  async getSystemOneService(appId: number, serviceId: number): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}`);
+  }
+
+  async createSystemOneService(appId: number, data: SystemOneServicePayload): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/0`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSystemOneService(appId: number, serviceId: number, data: SystemOneServicePayload): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async copySystemOneService(appId: number, serviceId: number): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}/copy`, {
+      method: 'POST',
+    });
+  }
+
+  async deleteSystemOneService(appId: number, serviceId: number) {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testSystemOneService(appId: number, serviceId: number): Promise<SystemOneConnectionResult> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}/test`, {
+      method: 'POST',
+    });
+  }
+
+  async testSystemOneServiceWithConfig(
+    appId: number,
+    data: SystemOneServicePayload,
+    serviceId?: number,
+  ): Promise<SystemOneConnectionResult> {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/apps/${appId}/system-one-services/test-connection${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async evaluateSystemOne(appId: number, agentId: number, text: string, files: File[] = []): Promise<SystemOneResult> {
+    const formData = new FormData();
+    formData.append('text', text);
+    for (const file of files) formData.append('files', file);
+
+    return this.request(`/internal/apps/${appId}/system-one/${agentId}/evaluate`, {
+      method: 'POST',
+      body: formData,
     });
   }
 
