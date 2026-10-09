@@ -24,7 +24,7 @@ import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import { randomId } from '../utils/randomId';
 import SystemOneAgentSection from '../components/agents/SystemOneAgentSection';
-import { toEditorQuestions, toPayload, validateQuestions, type EditorQuestion } from '../utils/systemOneQuestions';
+import { toEditorQuestions, toPayload, validateMaxStateChars, validateQuestions, type EditorQuestion } from '../utils/systemOneQuestions';
 import type { SystemOneQuestion } from '../types/systemOne';
 
 // Define the Agent types
@@ -645,6 +645,8 @@ function AgentFormPage() {
       return;
     }
     const problems = validateQuestions(formData.questions);
+    const maxCharsProblem = validateMaxStateChars(formData.max_state_chars);
+    if (maxCharsProblem) problems.unshift(maxCharsProblem);
     if (!formData.system_one_service_id) problems.unshift('Select a System One service');
     if (problems.length > 0) {
       setShowQuestionProblems(true);
