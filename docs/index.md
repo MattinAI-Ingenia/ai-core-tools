@@ -53,6 +53,7 @@
 - [SaaS Mode](guides/saas-mode.md) — SaaS deployment: Stripe billing, subscription tiers, quota enforcement, and `system_defaults.yaml` configuration
 - [Platform Chatbot](guides/platform-chatbot.md) — Configure a global AI assistant widget backed by any agent; includes knowledge base files and prompt template for a platform guide agent
 - [Skills](guides/skills.md) — Skill packages (SKILL.md frontmatter contract), zip import/export, system skills, sandbox activation, the opt-in skill router, and Claude Code plugin import
+- [System One](guides/system-one.md) — System One (Nimble) decision-model services and agents: classify, judge or decide over a text; use as a tool; public API
 - [Git Workflow & Release Process](guides/git-workflow.md) — GitFlow branching model, release workflow, hotfix process, versioning convention, and commit rules
 - [SharePoint Sync](guides/sharepoint-sync.md) — Index SharePoint and OneDrive drives into silos via Microsoft Graph delta queries; Azure setup and sync behaviour
 - [Agent Metrics](guides/agent-metrics.md) — Platform, app and agent dashboards: executions, errors, latency, time to first token, tokens, tools and channels; how runs are captured and counted
