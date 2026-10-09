@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
+from schemas.system_one_schemas import QuestionList
 
 _VALID_RAG_SEARCH_TYPES = {"similarity", "mmr", "similarity_score_threshold"}
 
@@ -296,6 +297,11 @@ class AgentDetailSchema(BaseModel):
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = None
     text_system_prompt: Optional[str] = None
+    # System One-specific fields
+    system_one_service_id: Optional[int] = None
+    questions: Optional[List[Dict[str, Any]]] = None
+    summarization_service_id: Optional[int] = None
+    max_state_chars: Optional[int] = None
     # Media processing configuration (playground media upload)
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
@@ -311,6 +317,7 @@ class AgentDetailSchema(BaseModel):
     # Form data for editing
     ai_services: List[Dict[str, Any]]
     sandbox_services: List[Dict[str, Any]]
+    system_one_services: List[Dict[str, Any]] = []
     silos: List[Dict[str, Any]]
     output_parsers: List[Dict[str, Any]]
     tools: List[Dict[str, Any]]
@@ -345,7 +352,7 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin, A2AAgentFieldsMixin):
     description: Optional[str] = ""
     system_prompt: Optional[str] = ""
     prompt_template: Optional[str] = ""
-    type: str = "agent"  # "agent", "ocr_agent"
+    type: str = "agent"  # "agent", "ocr_agent", "system_one_agent"
     is_tool: bool = False
     has_memory: bool = False
     enable_code_interpreter: bool = False
@@ -368,6 +375,11 @@ class CreateUpdateAgentSchema(RagConfigFieldsMixin, A2AAgentFieldsMixin):
     vision_service_id: Optional[int] = None
     vision_system_prompt: Optional[str] = None
     text_system_prompt: Optional[str] = None
+    # System One-specific fields (type "system_one_agent")
+    system_one_service_id: Optional[int] = None
+    questions: Optional[QuestionList] = None
+    summarization_service_id: Optional[int] = None
+    max_state_chars: Optional[int] = Field(default=None, ge=500, le=20000)
     # Media processing configuration (playground media upload)
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
