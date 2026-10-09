@@ -353,6 +353,7 @@ class AgentRepository:
                 "service_id": s.service_id,
                 "name": f"[System] {s.name}" if s.app_id is None else s.name,
                 "supports_video": s.supports_video,
+                "is_system": s.app_id is None,
             }
             for s in ai_services
         ]
