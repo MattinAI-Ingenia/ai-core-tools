@@ -20,6 +20,8 @@ interface Agent {
   system_prompt?: string;
   prompt_template?: string;
   questions?: SystemOneQuestion[] | null;
+  max_state_chars?: number | null;
+  summarization_service_id?: number | null;
   silo?: {
     silo_id: number;
     name: string;
@@ -299,6 +301,8 @@ function AgentPlaygroundPage() {
                     agentId={Number.parseInt(agentId!)}
                     agentName={agent.name}
                     questions={agent.questions ?? []}
+                    maxStateChars={agent.max_state_chars ?? 6000}
+                    summarizes={agent.summarization_service_id != null}
                   />
                 )}
                 {!isOCRAgent && !isSystemOneAgent && (
