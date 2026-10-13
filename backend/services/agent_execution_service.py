@@ -1751,7 +1751,7 @@ class AgentExecutionService:
         if empty:
             raise HTTPException(
                 status_code=400,
-                detail=f"No extractable text in: {', '.join(empty)} (a scanned PDF has no text layer and needs OCR first)",
+                detail=f"No extractable text in: {', '.join(empty)}",
             )
 
         snapshot = SystemOneEvaluator.snapshot(agent)
