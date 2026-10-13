@@ -303,6 +303,7 @@ function AgentPlaygroundPage() {
                     questions={agent.questions ?? []}
                     maxStateChars={agent.max_state_chars ?? 6000}
                     summarizes={agent.summarization_service_id != null}
+                    serviceId={agent.system_one_service_id}
                   />
                 )}
                 {!isOCRAgent && !isSystemOneAgent && (
