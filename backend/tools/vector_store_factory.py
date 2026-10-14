@@ -173,4 +173,7 @@ class VectorStoreFactory:
             lightrag_max_source_ids_per_entity=kwargs.get('lightrag_max_source_ids_per_entity'),
             lightrag_max_source_ids_per_relation=kwargs.get('lightrag_max_source_ids_per_relation'),
             lightrag_entity_types=kwargs.get('lightrag_entity_types'),
+            # A fresh store is built per call; share the built LightRAG instances
+            # between them instead of opening new Neo4j/Qdrant connections each time.
+            shared_runtime=True,
         )

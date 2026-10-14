@@ -15,8 +15,10 @@ Note: Requires ``lightrag-hku`` and its storage extras:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
+import shutil
 import threading
 import time
 import tempfile
@@ -1286,9 +1288,9 @@ class _CollectionEventLoop:
         finally:
             loop.close()
 
-    def run(self, coro):
+    def run(self, coro, timeout: Optional[float] = None):
         """Run *coro* on this loop from a SYNC caller (any thread); blocks for the result."""
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
 
     async def arun(self, coro):
         """Run *coro* on this loop from an ASYNC caller, without blocking the caller's own loop."""
@@ -1301,6 +1303,101 @@ class _CollectionEventLoop:
             return
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
+
+
+# Seconds an evicted LightRAG instance keeps running before it is finalised, so a
+# request that started on it just before a configuration change can still finish
+# (an agent turn that searches both silos can take several minutes).
+_RETIRE_GRACE_S = 900
+
+
+def _close_retired_instance(collection_name: str, rag, loop: "_CollectionEventLoop") -> None:
+    """Release what an evicted *rag* holds (Neo4j driver, Qdrant client, its
+    reference on the shared Postgres pool) on its own loop, then stop that loop."""
+    try:
+        loop.run(rag.finalize_storages(), timeout=30)
+    except Exception:
+        logger.warning("Error finalising LightRAG storages of '%s'", collection_name, exc_info=True)
+    finally:
+        loop.close()
+
+
+class _SharedRagRuntime:
+    """The built ``LightRAG`` instances, their dedicated loops and init locks,
+    shared by every ``LightRAGStore`` created with ``shared_runtime=True``.
+
+    ``VectorStoreFactory`` builds a fresh store per call, and each store used to
+    build (and never close) its own ``LightRAG`` per collection: a Neo4j driver,
+    a Qdrant client, an embedding probe and a 1-13 s handshake per agent turn,
+    until the backend held ~100 sockets and Postgres refused new connections.
+    Stores that carry the same configuration now reuse one instance per
+    collection; ``fingerprints`` records the configuration each cached instance
+    was built with, so a changed silo setting replaces it (see ``retire``).
+    """
+
+    def __init__(self):
+        self.rag_instances: Dict[str, Any] = {}
+        self.init_locks: Dict[str, threading.RLock] = {}
+        self.collection_loops: Dict[str, "_CollectionEventLoop"] = {}
+        self.fingerprints: Dict[str, str] = {}
+        self._dir_lock = threading.Lock()
+        self._working_dir: Optional[str] = None
+
+    def working_dir(self) -> str:
+        """One scratch directory for the whole process (LightRAG only needs a
+        path for ancillary local caches; the data lives in Neo4j/Qdrant/Postgres)."""
+        if self._working_dir is None:
+            with self._dir_lock:
+                if self._working_dir is None:
+                    self._working_dir = tempfile.mkdtemp(prefix="lightrag_")
+        return self._working_dir
+
+    def retire(self, collection_name: str) -> None:
+        """Drop *collection_name*'s cached instance and finalise it after the
+        grace period. The init lock is kept: a concurrent builder may hold it."""
+        rag = self.rag_instances.pop(collection_name, None)
+        loop = self.collection_loops.pop(collection_name, None)
+        self.fingerprints.pop(collection_name, None)
+        if loop is None:
+            return
+        if rag is None:
+            loop.close()
+            return
+        timer = threading.Timer(
+            _RETIRE_GRACE_S, _close_retired_instance, args=(collection_name, rag, loop)
+        )
+        timer.daemon = True
+        timer.start()
+
+
+def _service_signature(service) -> Optional[Tuple[str, str]]:
+    """Stable digest of an ``AIService``/``EmbeddingService`` row, or ``None``
+    when *service* is not a readable ORM object (the caller then keeps a private
+    runtime). Hashed so no api key is kept in memory beyond the row itself."""
+    if service is None:
+        return ("none", "")
+    try:
+        from sqlalchemy import inspect as sa_inspect  # noqa: WPS433
+
+        values = [
+            (attr.key, repr(getattr(service, attr.key)))
+            for attr in sa_inspect(service).mapper.column_attrs
+        ]
+    except Exception:  # noqa: BLE001 - not an ORM row, or detached/expired
+        return None
+    return (type(service).__name__, hashlib.sha256(repr(values).encode()).hexdigest())
+
+
+def _config_fingerprint(services: Tuple[Any, ...], settings: Tuple[Any, ...]) -> Optional[str]:
+    """Digest of everything a built ``LightRAG`` instance depends on, or ``None``
+    when any service cannot be fingerprinted."""
+    signatures = [_service_signature(service) for service in services]
+    if any(signature is None for signature in signatures):
+        return None
+    return hashlib.sha256(repr((signatures, settings)).encode()).hexdigest()
+
+
+_SHARED_RUNTIME = _SharedRagRuntime()
 
 
 def _close_all_collection_loops(loops: Dict[str, "_CollectionEventLoop"]) -> None:
@@ -1692,6 +1789,7 @@ class LightRAGStore(VectorStoreInterface):
         lightrag_max_source_ids_per_entity: Optional[int] = None,
         lightrag_max_source_ids_per_relation: Optional[int] = None,
         lightrag_entity_types: Optional[str] = None,
+        shared_runtime: bool = False,
     ):
         self.db = db
         # ``ai_service`` is the legacy single-LLM parameter — it acts as the
@@ -1715,29 +1813,49 @@ class LightRAGStore(VectorStoreInterface):
         self.entity_types = lightrag_entity_types
         self.embedding_service = embedding_service
         self.workspace_prefix = workspace_prefix
-        self._rag_instances: Dict[str, Any] = {}
-        # Per-collection reentrant locks guarding "check cache, build+cache if
-        # absent" for BOTH the rag instance and its dedicated event loop below
-        # — reentrant because _get_rag_instance calls
-        # _get_or_create_collection_loop while already holding this same lock.
-        self._init_locks: Dict[str, threading.RLock] = {}
-        # One persistent background thread+loop per collection — see
-        # _CollectionEventLoop. Every coroutine touching a collection's cached
-        # ``rag``/Neo4j-driver instance runs on ITS loop (never a throwaway
-        # one), for as long as that instance stays cached.
-        self._collection_loops: Dict[str, "_CollectionEventLoop"] = {}
-        # This store is not a process-wide singleton (a fresh one is built per
-        # call — see VectorStoreFactory/SiloService._get_vector_store), so
-        # there is no app-shutdown hook to tear these down from. Close every
-        # dedicated loop this store ever created once the store itself is
-        # garbage collected, so a short-lived store (the common case) never
-        # leaks a thread + live Neo4j connection per call.
-        weakref.finalize(self, _close_all_collection_loops, self._collection_loops)
-        # Shared temp directory so LightRAG's working_dir requirement is met
-        # without polluting the project tree.  The directory is only used for
-        # ancillary local caches (e.g. tiktoken); actual data lives in
-        # Neo4j / Qdrant / PostgreSQL.
-        self._working_dir = tempfile.mkdtemp(prefix="lightrag_")
+        # With ``shared_runtime`` the built instances, their loops and locks live
+        # in the process-wide _SHARED_RUNTIME and are reused by every store with
+        # the same configuration (``_fingerprint``); the store only borrows them.
+        # A configuration that cannot be fingerprinted keeps the private runtime.
+        self._fingerprint: Optional[str] = None
+        if shared_runtime:
+            self._fingerprint = _config_fingerprint(
+                (self.extract_service, keywords_service, vlm_service, embedding_service),
+                (
+                    self.lightrag_vector_db_type, lightrag_chunk_token_size,
+                    lightrag_chunk_overlap_token_size, lightrag_chunk_strategy,
+                    lightrag_language, lightrag_entity_extract_max_gleaning,
+                    lightrag_max_source_ids_per_entity, lightrag_max_source_ids_per_relation,
+                    lightrag_entity_types, workspace_prefix,
+                ),
+            )
+        if self._fingerprint is not None:
+            self._rag_instances = _SHARED_RUNTIME.rag_instances
+            self._init_locks = _SHARED_RUNTIME.init_locks
+            self._collection_loops = _SHARED_RUNTIME.collection_loops
+            self._working_dir = _SHARED_RUNTIME.working_dir()
+        else:
+            self._rag_instances: Dict[str, Any] = {}
+            # Per-collection reentrant locks guarding "check cache, build+cache if
+            # absent" for BOTH the rag instance and its dedicated event loop below
+            # — reentrant because _get_rag_instance calls
+            # _get_or_create_collection_loop while already holding this same lock.
+            self._init_locks: Dict[str, threading.RLock] = {}
+            # One persistent background thread+loop per collection — see
+            # _CollectionEventLoop. Every coroutine touching a collection's cached
+            # ``rag``/Neo4j-driver instance runs on ITS loop (never a throwaway
+            # one), for as long as that instance stays cached.
+            self._collection_loops: Dict[str, "_CollectionEventLoop"] = {}
+            # A private store owns what it builds: close every dedicated loop it
+            # ever created once the store itself is garbage collected, so a
+            # short-lived store never leaks a thread + live Neo4j connection.
+            weakref.finalize(self, _close_all_collection_loops, self._collection_loops)
+            # Scratch directory so LightRAG's working_dir requirement is met
+            # without polluting the project tree.  The directory is only used for
+            # ancillary local caches (e.g. tiktoken); actual data lives in
+            # Neo4j / Qdrant / PostgreSQL. Removed together with the store.
+            self._working_dir = tempfile.mkdtemp(prefix="lightrag_")
+            weakref.finalize(self, shutil.rmtree, self._working_dir, True)
 
     def _get_or_create_init_lock(self, collection_name: str) -> threading.RLock:
         """Return the per-collection lock, creating it race-free if absent.
@@ -1795,6 +1913,7 @@ class LightRAGStore(VectorStoreInterface):
         Used by synchronous callers (indexing, background threads); async
         callers should use ``_aget_rag_instance`` instead.
         """
+        self._evict_if_stale(collection_name)
         if collection_name in self._rag_instances:
             return self._rag_instances[collection_name]
 
@@ -1814,8 +1933,28 @@ class LightRAGStore(VectorStoreInterface):
             with _INIT_STORAGES_LOCK:
                 collection_loop.run(rag.initialize_storages())
             self._rag_instances[collection_name] = rag
+            if self._fingerprint is not None:
+                _SHARED_RUNTIME.fingerprints[collection_name] = self._fingerprint
             logger.info("Created LightRAG instance for workspace '%s'", collection_name)
             return rag
+
+    def _evict_if_stale(self, collection_name: str) -> None:
+        """Replace the shared instance of *collection_name* when it was built with
+        another configuration (the silo's settings changed since). No-op for a
+        private store and on the common path, where the fingerprints match."""
+        fingerprint = self._fingerprint
+        if fingerprint is None:
+            return
+        fingerprints = _SHARED_RUNTIME.fingerprints
+        if fingerprints.get(collection_name, fingerprint) == fingerprint:
+            return
+        with self._get_or_create_init_lock(collection_name):
+            if fingerprints.get(collection_name, fingerprint) != fingerprint:
+                logger.info(
+                    "LightRAG configuration of '%s' changed; replacing its cached instance",
+                    collection_name,
+                )
+                _SHARED_RUNTIME.retire(collection_name)
 
     def _build_rag(self, collection_name: str):
         """Build a fresh (uninitialised) LightRAG instance for *collection_name*."""
@@ -1945,6 +2084,7 @@ class LightRAGStore(VectorStoreInterface):
         guarantees the sync and async entry points can never race each other,
         or build two different dedicated loops for the same collection_name.
         """
+        self._evict_if_stale(collection_name)
         if collection_name in self._rag_instances:
             return self._rag_instances[collection_name]
         return await asyncio.to_thread(self._get_rag_instance, collection_name)
@@ -2246,6 +2386,8 @@ class LightRAGStore(VectorStoreInterface):
         # Now drop the cached instance and tear down its dedicated loop/thread.
         self._rag_instances.pop(collection_name, None)
         self._init_locks.pop(collection_name, None)
+        if self._fingerprint is not None:
+            _SHARED_RUNTIME.fingerprints.pop(collection_name, None)
         collection_loop = self._collection_loops.pop(collection_name, None)
         if collection_loop is not None:
             collection_loop.close()
