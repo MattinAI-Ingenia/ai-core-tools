@@ -327,3 +327,15 @@ def test_final_tool_answer_ignored_when_model_answered():
 
     assert final_tool_answer([ToolMessage(content="x", tool_call_id="c1")], "model text") is None
     assert final_tool_answer([], "") is None
+
+
+def test_twin_chunks_with_the_same_id_keep_their_positions():
+    """cite://N is positional (chunks[N-1]). The coverage tool and the normal
+    search can return the same page, hence two chunks with one id in a turn:
+    both must stay, in order, or every later citation would point elsewhere."""
+    from tools.streaming_utils import merge_lightrag_graph
+
+    first = {"data": {"chunks": [{"id": "res271-p10-chunk-000", "content": "cobertura"}]}}
+    second = {"data": {"chunks": [{"id": "res271-p10-chunk-000", "content": "búsqueda"}]}}
+    merged = merge_lightrag_graph(first, second)
+    assert [c["content"] for c in merged["data"]["chunks"]] == ["cobertura", "búsqueda"]

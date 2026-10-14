@@ -31,7 +31,7 @@ MAX_POSSIBLE_DOCS = 10
 _SNIPPET_CHARS = 1500
 EXCERPT_CHARS = 300  # what the LLM reads of a page: a window on the part that matters
 
-Snippet = Tuple[str, str, Optional[int]]  # (file_path, content, page)
+Snippet = Tuple[str, str, Optional[int], Optional[str]]  # (file_path, content, page, chunk_id)
 Grouped = Dict[Any, List[Snippet]]
 
 
@@ -126,7 +126,7 @@ async def augment_with_semantic(
         rid = c.get("resource_id")
         if rid is None or int(rid) in known:
             continue  # a chunk of a document already found literally adds nothing
-        candidates.append((rid, (c.get("file_path", ""), c.get("content", ""), c.get("page")), True))
+        candidates.append((rid, (c.get("file_path", ""), c.get("content", ""), c.get("page"), c.get("id")), True))
 
     if not candidates:  # the rerank API rejects an empty list (422) and retries before failing
         return grouped, {}

@@ -275,3 +275,62 @@ async def test_shared_lock_serializes_sibling_lightrag_tool():
         ["coverage:start", "coverage:end", "lightrag:start", "lightrag:end"],
         ["lightrag:start", "lightrag:end", "coverage:start", "coverage:end"],
     )
+
+
+@pytest.mark.asyncio
+async def test_every_coverage_chunk_carries_the_lightrag_chunk_id():
+    """The playground marks a cited chunk, and the entities whose source_id lists
+    its id, by matching that id: a chunk without one can never turn green."""
+    tool = _create_coverage_tool(_fake_silo(), app_id=1)
+    grouped = {
+        "271": [
+            ("CDOC004043.pdf (p. 10)", "aparece SG Ready aquí", 10, "res271-p10-chunk-000"),
+            ("CDOC004043.pdf (p. 42)", "otra mención de SG Ready", 42, "res271-p42-chunk-001"),
+        ],
+        "275": [("CDOC004425.pdf (p. 5)", "también menciona SG Ready", 5, "res275-p5-chunk-000")],
+    }
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(grouped, False)),
+        patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
+        patch("tools.agentTools.augment_with_semantic", new=AsyncMock(side_effect=lambda g, *a, **k: (g, {}))),
+    ):
+        _, artifact = await tool.coroutine(term="SG Ready")
+    chunks = artifact[0].metadata["lightrag_raw_data"]["data"]["chunks"]
+    # first snippet of each document (the ones the numbered list cites), then the rest
+    assert [c["id"] for c in chunks] == ["res271-p10-chunk-000", "res275-p5-chunk-000", "res271-p42-chunk-001"]
+
+
+@pytest.mark.asyncio
+async def test_whole_document_mode_carries_the_chunk_id_of_every_page():
+    tool = _create_coverage_tool(_fake_silo(), app_id=1)
+    grouped = {"271": [
+        ("CDOC004043.pdf p.9", "P00...", 9, "res271-p9-chunk-000"),
+        ("CDOC004043.pdf p.15", "P81...", 15, "res271-p15-chunk-000"),
+    ]}
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(grouped, False)),
+        patch("services.silo_service.SiloService.resolve_document_by_name", return_value=[271]),
+    ):
+        _, artifact = await tool.coroutine(doc="Dual Clima R")
+    chunks = artifact[0].metadata["lightrag_raw_data"]["data"]["chunks"]
+    assert [c["id"] for c in chunks] == ["res271-p9-chunk-000", "res271-p15-chunk-000"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snippet", [
+    ("CDOC004043.pdf p.10", "aparece SG Ready aquí", 10),                # legacy 3-tuple
+    ("CDOC004043.pdf p.10", "aparece SG Ready aquí", 10, None),          # semantic chunk with no id
+    ("CDOC004043.pdf p.10", "aparece SG Ready aquí", 10, ""),
+])
+async def test_a_snippet_without_a_chunk_id_omits_the_id_key(snippet):
+    """Never None or "": the frontend builds its set of cited ids from this key."""
+    tool = _create_coverage_tool(_fake_silo(), app_id=1)
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=({"271": [snippet]}, False)),
+        patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
+        patch("tools.agentTools.augment_with_semantic", new=AsyncMock(side_effect=lambda g, *a, **k: (g, {}))),
+    ):
+        _, artifact = await tool.coroutine(term="SG Ready")
+    chunk = artifact[0].metadata["lightrag_raw_data"]["data"]["chunks"][0]
+    assert "id" not in chunk
+    assert chunk["resource_id"] == 271 and chunk["page"] == 10

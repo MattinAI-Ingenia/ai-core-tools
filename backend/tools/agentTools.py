@@ -152,6 +152,21 @@ def _create_dynamic_lightrag_tool(
     return retrieve_from_knowledge_base
 
 
+def _coverage_chunk(resource_id, snippet) -> dict:
+    """Payload chunk for one coverage snippet ``(file_path, content, page[, chunk_id])``.
+
+    ``id`` is LightRAG's own id for the chunk: the playground marks a cited chunk,
+    and the entities whose ``source_id`` lists that id, by matching it, so a chunk
+    without one can never be marked. It is omitted (never None or "") when the
+    snippet does not carry one.
+    """
+    file_path, content, page, *rest = snippet
+    chunk = {"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page}
+    if rest and rest[0]:
+        chunk["id"] = rest[0]
+    return chunk
+
+
 def _create_coverage_tool(
     silo: Silo, app_id: int, offset: Optional[List[int]] = None, lock: Optional[asyncio.Lock] = None,
 ):
@@ -276,16 +291,16 @@ def _create_coverage_tool(
                     # summarized away.
                     enumerated_lines = []
                     for resource_id, snippets in grouped.items():
-                        file_path, content, page = snippets[0]
+                        file_path, content = snippets[0][:2]
                         n = _citation_offset[0] + len(chunks) + 1
                         flag = {"semantic": " (coincidencia semántica)", "possible": " (posible)"}.get(
                             semantic_tiers.get(resource_id), "")
                         label = f" — {labels[int(resource_id)]}" if int(resource_id) in labels else ""
                         enumerated_lines.append(f"- {file_path}{label} [{n}](cite://{n}){flag}")
-                        chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page, "excerpt": _excerpt(file_path, content)})
+                        chunks.append({**_coverage_chunk(resource_id, snippets[0]), "excerpt": _excerpt(file_path, content)})
                     for resource_id, snippets in grouped.items():
-                        for file_path, content, page in snippets[1:]:
-                            chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page, "excerpt": _excerpt(file_path, content)})
+                        for snippet in snippets[1:]:
+                            chunks.append({**_coverage_chunk(resource_id, snippet), "excerpt": _excerpt(snippet[0], snippet[1])})
                     summary = f"{len(grouped) - len(semantic_tiers)} documento(s) mencionan '{term}'."
                     n_sem = sum(1 for t in semantic_tiers.values() if t == "semantic")
                     n_pos = len(semantic_tiers) - n_sem
@@ -312,8 +327,8 @@ def _create_coverage_tool(
                     # extraction, not something a pre-built list can shortcut; the
                     # only lever here is telling the model not to stop early.
                     for resource_id, snippets in grouped.items():
-                        for file_path, content, page in snippets:
-                            chunks.append({"file_path": file_path, "content": content, "resource_id": int(resource_id), "page": page})
+                        for snippet in snippets:
+                            chunks.append(_coverage_chunk(resource_id, snippet))
                     doc_word = "documento" if len(grouped) == 1 else f"{len(grouped)} documentos"
                     summary = f"Páginas del/de los {doc_word} solicitado(s) ({doc}): {len(chunks)} fragmento(s), uno por página."
                     instruction = (
