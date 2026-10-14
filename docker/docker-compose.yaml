@@ -95,6 +95,10 @@ services:
       # Uvicorn worker pool. Documented in .env.example but never forwarded,
       # so the Dockerfile CMD's own default (2) silently won.
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      # SQLAlchemy pools PER worker (the sync and the async engine each get one).
+      # Same defaults as backend/db/database.py, so unset means no change.
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
       LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-true}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
