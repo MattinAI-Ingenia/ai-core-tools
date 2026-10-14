@@ -852,6 +852,30 @@ different loop" (`lightrag_store.py`). `_run_async`
 (`lightrag_store.py`) reusa el loop del hilo en contexto síncrono y
 descarga a un hilo worker si ya hay un loop corriendo.
 
+### 10.6 Ciclo de vida de las instancias `LightRAG` (conexiones)
+
+`VectorStoreFactory` construye un `LightRAGStore` nuevo en cada llamada, pero las
+instancias `LightRAG` que construye (driver de Neo4j, cliente de Qdrant, sonda de
+embeddings; 1-13 s) **se comparten por proceso**: viven en `_SHARED_RUNTIME`
+(`lightrag_store.py`), una por colección (`silo_{id}`) y worker, con su loop
+dedicado. Los stores creados desde el factory (`shared_runtime=True`) las reutilizan
+mientras coincida la huella de configuración (`_fingerprint`: servicios LLM/embeddings
+y ajustes del silo). Si se edita el silo, la siguiente consulta reemplaza la instancia
+y la vieja se finaliza (`finalize_storages`) tras `_RETIRE_GRACE_S` (900 s, para que
+termine un turno en curso). `delete_collection` también la cierra.
+
+Antes, cada llamada construía y abandonaba su instancia: en ~3 h de uso el backend
+llegó a 1121 inicializaciones, 100 sockets abiertos y cientos de directorios
+`/tmp/lightrag_*`. Un store con servicios que no son filas ORM (tests) conserva el
+comportamiento privado anterior (se cierra al recolectarse).
+
+Presupuesto de conexiones a Postgres: con `UVICORN_WORKERS=8` y los pools por defecto,
+solo DBOS (4/worker) y el checkpointer (1/worker) ocupan 40 de las 100 de
+`max_connections`; cada worker añade sus pools de SQLAlchemy según la concurrencia.
+Con 4 consultas pesadas en paralelo se midió un pico de 85. Para consultas con mucha
+concurrencia, bajar `UVICORN_WORKERS`, `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` o subir
+`max_connections` de Postgres.
+
 ---
 
 ## 11. Checklist de verificación rápida
