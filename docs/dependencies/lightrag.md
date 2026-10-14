@@ -827,6 +827,15 @@ en `indexing_metric`.
   (`agentTools.py`) numera los chunks de `lightrag_raw_data.data.chunks`
   y pide al LLM citar como `[N](cite://N)`. La numeración es global en el turno
   (patrón de `offset` mutable) para soportar multi-silo.
+- **Chunks de cobertura con `id`**: `list_documents_mentioning` construye sus
+  chunks con `_coverage_chunk` (`agentTools.py`), que publica el `id` de LightRAG
+  del chunk (columna `lightrag_doc_chunks.id`, leída por `find_chunks_mentioning`
+  y propagada en el cuarto elemento de cada snippet). El playground marca en verde
+  un chunk citado y las entidades cuyo `source_id` lo contiene comparando ese `id`;
+  sin él, las citas de las listas de cobertura no se pintan. Un chunk de cobertura
+  y su gemelo de `retrieve_from_knowledge_base` pueden compartir `id` en un mismo
+  payload: la numeración sigue siendo posicional y los chips usan el índice en su
+  clave de React.
 - **Streaming del grafo**: `agent_streaming_service.py` acumula los
   eventos `_lightrag_graph` del turno con `merge_lightrag_graph`
   (`tools/streaming_utils.py`) y los emite como `lightrag_graph` en la respuesta
