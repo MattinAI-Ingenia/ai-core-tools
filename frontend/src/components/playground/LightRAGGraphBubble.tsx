@@ -5,6 +5,7 @@ import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
 import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship, LightRAGChunk } from '../../types/streaming';
 import OpenPdfButton from './OpenPdfButton';
+import { groupChunksById } from '../../utils/groupChunksById';
 
 interface Props {
   graphData: LightRAGGraphData;
@@ -122,7 +123,12 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   // Partial nodes are synthesized endpoints, not real returned entities — exclude
   // them from the count so the header reflects the entities LightRAG actually returned.
   const entityCount = entities.filter((e) => !e.partial).length;
-  const chunkCount = chunks.length;
+  // A turn's payload repeats a page whenever several tool calls return it; show each chunk once.
+  const chunkGroups = useMemo(() => groupChunksById(chunks), [chunks]);
+  const chunkCount = chunkGroups.length;
+  const openGroup = openChunk !== null ? chunkGroups[openChunk] : undefined;
+  // Every [N] the answer can use for this chunk (one per copy in the payload).
+  const openNumbers = openGroup?.positions.map((p) => chunkNumbers?.[p] ?? p + 1) ?? [];
 
   // Memoize the cited-chunk set on a stable key so identity churn in the parent
   // doesn't force the graph to re-layout every render.
@@ -203,7 +209,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
           <div className="px-3 py-2 bg-white dark:bg-gray-800/50 space-y-2">
             {chunkCount > 0 && (
               <div className="flex flex-wrap gap-1.5">
-                {chunks.map((c, idx) => {
+                {chunkGroups.map(({ chunk: c }, idx) => {
                   const isOpen = openChunk === idx;
                   const isCited = citedSet.has(c.id);
                   const srcLabel = c.file_path && c.file_path !== 'unknown_source'
@@ -251,7 +257,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
 
       {/* Chunk popover — rendered in a portal with fixed positioning so it
           escapes the bubble's and the chat scroll container's overflow. */}
-      {openChunk !== null && popoverPos && chunks[openChunk] && createPortal(
+      {openChunk !== null && popoverPos && openGroup && createPortal(
         <>
           {/* click-outside catcher */}
           <div
@@ -271,11 +277,11 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-600">
-              <span className="font-semibold text-gray-800 dark:text-gray-100 break-all" title={chunks[openChunk].file_path ?? ''}>
-                {chunks[openChunk].file_path && chunks[openChunk].file_path !== 'unknown_source'
-                  ? chunks[openChunk].file_path
+              <span className="font-semibold text-gray-800 dark:text-gray-100 break-all" title={openGroup.chunk.file_path ?? ''}>
+                {openGroup.chunk.file_path && openGroup.chunk.file_path !== 'unknown_source'
+                  ? openGroup.chunk.file_path
                   : 'Unknown source'}
-                <span className="ml-1 font-normal text-gray-400">· Chunk {chunkNumbers?.[openChunk] ?? openChunk + 1}</span>
+                <span className="ml-1 font-normal text-gray-400">· {openNumbers.length === 1 ? 'Chunk' : 'Chunks'} {openNumbers.join(', ')}</span>
               </span>
               <button
                 onClick={() => { setOpenChunk(null); setPopoverPos(null); }}
@@ -289,14 +295,14 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
             </div>
             <div className="max-h-80 overflow-y-auto p-3">
               <p className="whitespace-pre-wrap leading-relaxed">
-                {chunks[openChunk].content ?? '(no content)'}
+                {openGroup.chunk.content ?? '(no content)'}
               </p>
             </div>
             <OpenPdfButton
               appId={appId}
               siloId={siloId}
-              resourceId={chunks[openChunk].resource_id}
-              page={chunks[openChunk].page}
+              resourceId={openGroup.chunk.resource_id}
+              page={openGroup.chunk.page}
             />
           </div>
         </>,
