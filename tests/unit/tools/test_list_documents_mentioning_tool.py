@@ -334,3 +334,58 @@ async def test_a_snippet_without_a_chunk_id_omits_the_id_key(snippet):
     chunk = artifact[0].metadata["lightrag_raw_data"]["data"]["chunks"][0]
     assert "id" not in chunk
     assert chunk["resource_id"] == 271 and chunk["page"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_semantic_only_document_reaches_the_payload_with_its_chunk_id():
+    """End to end through the real augment_with_semantic: the semantic search
+    returns a chunk of a document the literal search missed, and the chunk the
+    tool publishes keeps its LightRAG id (a reordered snippet tuple in
+    coverage_union would silently drop it)."""
+    tool = _create_coverage_tool(_fake_silo(), app_id=1)
+    literal = {"271": [("CDOC004043.pdf (p. 10)", "aparece SG Ready aquí", 10, "res271-p10-chunk-000")]}
+    semantic_chunk = {
+        "id": "res275-p5-chunk-000", "file_path": "CDOC004425.pdf (p. 5)",
+        "content": "preparada para SG Ready", "resource_id": 275, "page": 5,
+    }
+    doc = SimpleNamespace(metadata={"lightrag_raw_data": {"data": {"chunks": [semantic_chunk]}}})
+    retriever = SimpleNamespace(ainvoke=AsyncMock(return_value=[doc]))
+
+    async def rerank(query, documents):
+        return [{"index": i, "relevance_score": 0.9} for i in range(len(documents))]
+
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(literal, False)),
+        patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
+        patch("services.silo_service.SiloService.get_silo_retriever", return_value=retriever),
+        patch("tools.vector_stores.lightrag_store._build_rerank_func", return_value=rerank),
+    ):
+        _, artifact = await tool.coroutine(term="SG Ready")
+    chunks = artifact[0].metadata["lightrag_raw_data"]["data"]["chunks"]
+    assert {c["id"] for c in chunks} == {"res271-p10-chunk-000", "res275-p5-chunk-000"}
+
+
+@pytest.mark.asyncio
+async def test_a_window_computed_for_one_chunk_is_not_shown_for_another_chunk_of_the_same_page():
+    """The excerpt map used to be keyed by file_path ("unique per page"), but a page
+    can hold several chunks: the second one showed the window of the first."""
+    tool = _create_coverage_tool(_fake_silo(), app_id=1)
+    page = "CDOC004043.pdf (p. 10)"
+    grouped = {"271": [
+        (page, "primer trozo de SG Ready", 10, "res271-p10-chunk-000"),
+        (page, "segundo trozo de SG Ready", 10, "res271-p10-chunk-001"),
+    ]}
+
+    async def fake_augment(g, term, **kwargs):
+        kwargs["excerpts_out"]["res271-p10-chunk-000"] = "VENTANA DEL PRIMERO"
+        return g, {"271": "semantic"}
+
+    with (
+        patch("services.silo_service.SiloService.find_chunks_mentioning", return_value=(grouped, False)),
+        patch("services.silo_service.SiloService.resolve_term_variants", return_value=[]),
+        patch("tools.agentTools.augment_with_semantic", new=fake_augment),
+    ):
+        _, artifact = await tool.coroutine(term="SG Ready")
+    by_id = {c["id"]: c for c in artifact[0].metadata["lightrag_raw_data"]["data"]["chunks"]}
+    assert by_id["res271-p10-chunk-000"]["excerpt"] == "VENTANA DEL PRIMERO"
+    assert by_id["res271-p10-chunk-001"]["excerpt"] != "VENTANA DEL PRIMERO"

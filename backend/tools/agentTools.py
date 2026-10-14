@@ -10,7 +10,7 @@ from models.agent import Agent, DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMAR
 from models.silo import Silo
 from langchain.tools import BaseTool, tool
 from tools.outputParserTools import get_parser_model_by_id
-from tools.coverage_union import augment_with_semantic, excerpt_around
+from tools.coverage_union import augment_with_semantic, excerpt_around, snippet_key
 from tools.knowledge_router import (
     KNOWLEDGE_ROUTER_INSTRUCTION,
     SPECIALIST_MAX_TOOL_CALLS,
@@ -22,7 +22,7 @@ from tools.knowledge_router import (
 from tools.aiServiceTools import get_llm, get_output_parser
 from tools.ai.fileTools import fetch_file_in_base64
 from tools.ai.workspaceTools import create_download_url_tool
-from typing import Any, Optional, Dict, List, Tuple, Type
+from typing import Any, Optional, Dict, List, Sequence, Tuple, Type, Union
 from pydantic import BaseModel, Field
 import types as _types
 from services.silo_service import SiloService
@@ -152,7 +152,7 @@ def _create_dynamic_lightrag_tool(
     return retrieve_from_knowledge_base
 
 
-def _coverage_chunk(resource_id, snippet) -> dict:
+def _coverage_chunk(resource_id: Union[str, int], snippet: Sequence[Any]) -> dict:
     """Payload chunk for one coverage snippet ``(file_path, content, page[, chunk_id])``.
 
     ``id`` is LightRAG's own id for the chunk: the playground marks a cited chunk,
@@ -261,11 +261,11 @@ def _create_coverage_tool(
                 # ("EN 303- 5", "pressure relief valve"): the literal search only
                 # matches the exact phrase. Skipped when scoped to one document.
                 semantic_tiers: dict = {}
-                excerpts: Dict[str, str] = {}  # file_path -> window the LLM reads for a semantic-only page
+                excerpts: Dict[str, str] = {}  # snippet_key -> window the LLM reads for a semantic-only page
 
-                def _excerpt(file_path: str, content: str) -> Optional[str]:
+                def _excerpt(snippet: Sequence[Any]) -> Optional[str]:
                     # centred on the term (literal hits) or on the best window (semantic-only pages)
-                    return excerpts.get(file_path) or (excerpt_around(content, term) if term else None)
+                    return excerpts.get(snippet_key(snippet)) or (excerpt_around(snippet[1], term) if term else None)
 
                 if term and resolved_doc_filter is None:
                     from tools.vector_stores.lightrag_store import _build_rerank_func
@@ -291,16 +291,16 @@ def _create_coverage_tool(
                     # summarized away.
                     enumerated_lines = []
                     for resource_id, snippets in grouped.items():
-                        file_path, content = snippets[0][:2]
+                        file_path = snippets[0][0]
                         n = _citation_offset[0] + len(chunks) + 1
                         flag = {"semantic": " (coincidencia semántica)", "possible": " (posible)"}.get(
                             semantic_tiers.get(resource_id), "")
                         label = f" — {labels[int(resource_id)]}" if int(resource_id) in labels else ""
                         enumerated_lines.append(f"- {file_path}{label} [{n}](cite://{n}){flag}")
-                        chunks.append({**_coverage_chunk(resource_id, snippets[0]), "excerpt": _excerpt(file_path, content)})
+                        chunks.append({**_coverage_chunk(resource_id, snippets[0]), "excerpt": _excerpt(snippets[0])})
                     for resource_id, snippets in grouped.items():
                         for snippet in snippets[1:]:
-                            chunks.append({**_coverage_chunk(resource_id, snippet), "excerpt": _excerpt(snippet[0], snippet[1])})
+                            chunks.append({**_coverage_chunk(resource_id, snippet), "excerpt": _excerpt(snippet)})
                     summary = f"{len(grouped) - len(semantic_tiers)} documento(s) mencionan '{term}'."
                     n_sem = sum(1 for t in semantic_tiers.values() if t == "semantic")
                     n_pos = len(semantic_tiers) - n_sem

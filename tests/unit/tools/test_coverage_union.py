@@ -266,3 +266,18 @@ def test_a_semantic_chunk_without_id_gives_a_snippet_with_no_chunk_id():
         rerank_fn=_scores({"Boiler class (according to EN 303- 5)": 0.9}),
     ))
     assert grouped[3][0][3] is None
+
+
+def test_a_window_is_keyed_by_the_chunk_id_when_the_snippet_has_one():
+    """Two chunks of one page share a file_path ("DOC.pdf (p. 1)"); the window is
+    computed for one chunk only, so it must be stored under that chunk's id."""
+    chunk = {**_chunk(3, "word " * 400, 1, name="DOC3.pdf (p. 1)"), "id": "res3-p1-chunk-001"}
+
+    async def rerank(query, documents):
+        return [{"index": i, "relevance_score": 0.9} for i in range(len(documents))]
+
+    excerpts = {}
+    _run(augment_with_semantic(
+        {}, "x", semantic_chunks_fn=_semantic([chunk]), rerank_fn=rerank, excerpts_out=excerpts,
+    ))
+    assert list(excerpts) == ["res3-p1-chunk-001"]
