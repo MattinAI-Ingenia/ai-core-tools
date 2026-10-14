@@ -14,7 +14,7 @@ from tools.coverage_union import augment_with_semantic, excerpt_around, snippet_
 from tools.knowledge_router import (
     KNOWLEDGE_ROUTER_INSTRUCTION,
     SPECIALIST_MAX_TOOL_CALLS,
-    create_consultar_varios_tool,
+    create_query_specialists_tool,
     graph_artifact,
     rebase_citations,
     tag_graph_with_silo,
@@ -1041,7 +1041,7 @@ async def create_agent(
             logger.warning("Server-side tool '%s' not supported by provider %s — skipped", tool_name, provider_name)
 
     # Knowledge router: every agent-tool becomes a pass-through specialist sharing
-    # one turn-wide citation counter, plus consultar_varios for questions that
+    # one turn-wide citation counter, plus query_specialists for questions that
     # span several of them. See tools/knowledge_router.py.
     router_offset: Optional[List[int]] = [0] if getattr(agent, "is_knowledge_router", False) else None
     router_lock = asyncio.Lock()
@@ -1065,7 +1065,7 @@ async def create_agent(
             specialists.append(built)
         tools.append(built)
     if specialists:
-        tools.append(create_consultar_varios_tool(specialists, router_lock))
+        tools.append(create_query_specialists_tool(specialists, router_lock))
         system_prompt_content += "\n\n" + KNOWLEDGE_ROUTER_INSTRUCTION
 
     # Base tools — always available for every agent

@@ -123,7 +123,7 @@ holds, C avoids the migration, otherwise go with B. Either path then runs as
 
 **Update 2026-10-07:** went with C, generalised as a "knowledge router" flag. Citation
 numbering uses rebase onto a turn-wide counter (not namespaced keys): specialists are
-claimed in list order inside `consultar_varios`, so finish order never matters and the
+claimed in list order inside `query_specialists`, so finish order never matters and the
 frontend keeps resolving `cite://N` by position.
 
 ## Known limitations / deferred decisions (2026-10-07)

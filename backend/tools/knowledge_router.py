@@ -19,7 +19,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-KNOWLEDGE_ROUTER_TOOL_NAME = "consultar_varios"
+KNOWLEDGE_ROUTER_TOOL_NAME = "query_specialists"
 
 # Tool calls each specialist may make per question. A general question runs every
 # specialist, each looping retrieval + coverage + retries on a slow local LLM:
@@ -34,9 +34,9 @@ You answer by delegating to specialist agents; you have no knowledge base of you
 Each specialist tool's description says which knowledge it covers.
 - The language the question is written in says NOTHING about which specialist to use: the knowledge may be split by language while every question arrives in the same one.
 - Use a single specialist only when the question explicitly restricts itself to that specialist's knowledge (it names its domain, language, product line...). Call that specialist's tool once with the user's question; its answer is shown to the user as-is.
-- Otherwise (a general question, nothing restricts it, or it spans several specialists), call `consultar_varios` ONCE with the names of every relevant specialist (include all of them when unsure), then write the final answer from their replies.
+- Otherwise (a general question, nothing restricts it, or it spans several specialists), call `query_specialists` ONCE with the names of every relevant specialist (include all of them when unsure), then write the final answer from their replies.
 - Your final answer must include the findings of EVERY specialist that answered, in one section per specialist (named after its knowledge area). Never drop a specialist's documents or conclusions because another specialist reached a similar one: if they agree, say so and still list each one's documents.
-- Never call two specialist tools one after another for the same question; use `consultar_varios` instead.
+- Never call two specialist tools one after another for the same question; use `query_specialists` instead.
 - Keep every [N](cite://N) citation exactly as the specialists wrote it, next to the claim it supports. Never invent, renumber or drop citations.
 </knowledge_router>"""
 
@@ -82,12 +82,12 @@ def graph_artifact(graph: Optional[dict]) -> Optional[List[Document]]:
     return [Document(page_content="", metadata={"lightrag_raw_data": graph})]
 
 
-class _ConsultarVariosInput(BaseModel):
+class _QuerySpecialistsInput(BaseModel):
     especialistas: List[str] = Field(description="Names of the specialist tools to ask")
     pregunta: str = Field(description="The user's question, as asked")
 
 
-def create_consultar_varios_tool(specialists: List[Any], lock: asyncio.Lock) -> StructuredTool:
+def create_query_specialists_tool(specialists: List[Any], lock: asyncio.Lock) -> StructuredTool:
     """Ask several specialists the same question in parallel; merge in list order.
 
     *specialists* are router-mode IACTTools. Their sub-agents run concurrently,
@@ -98,7 +98,7 @@ def create_consultar_varios_tool(specialists: List[Any], lock: asyncio.Lock) -> 
     valid_names = ", ".join(t.name for t in specialists)
     catalog = "\n".join(f"- {t.name}: {t.description}" for t in specialists)
 
-    async def _consultar(especialistas: List[str], pregunta: str) -> Tuple[str, Optional[List[Document]]]:
+    async def _query_specialists(especialistas: List[str], pregunta: str) -> Tuple[str, Optional[List[Document]]]:
         requested = list(dict.fromkeys(n.lower() for n in especialistas))
         chosen = [by_name[n] for n in requested if n in by_name]
         unknown = [n for n in dict.fromkeys(especialistas) if n.lower() not in by_name]
@@ -122,12 +122,12 @@ def create_consultar_varios_tool(specialists: List[Any], lock: asyncio.Lock) -> 
         return "\n\n".join(parts), graph_artifact(merged)
 
     return StructuredTool.from_function(
-        coroutine=_consultar,
+        coroutine=_query_specialists,
         name=KNOWLEDGE_ROUTER_TOOL_NAME,
         description=(
             "Ask several specialists the same question at once and get all their answers.\n"
             "Specialists:\n" + catalog
         ),
-        args_schema=_ConsultarVariosInput,
+        args_schema=_QuerySpecialistsInput,
         response_format="content_and_artifact",
     )
