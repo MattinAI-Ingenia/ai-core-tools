@@ -181,7 +181,7 @@ async def test_classic_mode_still_returns_plain_text(no_writer):
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from tools.knowledge_router import create_consultar_varios_tool
+from tools.knowledge_router import create_query_specialists_tool
 
 
 class _BrokenReactAgent:
@@ -200,11 +200,11 @@ def _es_en(es_agent, en_agent):
     offset, lock = [0], asyncio.Lock()
     es = _router_tool("ES", es_agent, offset, lock, silo_id=7)
     en = _router_tool("EN", en_agent, offset, lock, silo_id=8, silo_name="Manuals EN")
-    return create_consultar_varios_tool([es, en], lock), offset
+    return create_query_specialists_tool([es, en], lock), offset
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_numbers_in_list_order_not_finish_order(no_writer):
+async def test_query_specialists_numbers_in_list_order_not_finish_order(no_writer):
     # ES finishes last but is first in the list: its chunks must still be 1,2.
     tool, offset = _es_en(_CitingReactAgent(["a", "b"], delay=0.05), _CitingReactAgent(["c"]))
 
@@ -218,7 +218,7 @@ async def test_consultar_varios_numbers_in_list_order_not_finish_order(no_writer
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_survives_one_specialist_failing(no_writer):
+async def test_query_specialists_survives_one_specialist_failing(no_writer):
     tool, offset = _es_en(_BrokenReactAgent(), _CitingReactAgent(["c"]))
 
     text, artifact = await tool.coroutine(especialistas=["ES", "EN"], pregunta="q")
@@ -230,7 +230,7 @@ async def test_consultar_varios_survives_one_specialist_failing(no_writer):
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_ignores_unknown_and_duplicate_names(no_writer):
+async def test_query_specialists_ignores_unknown_and_duplicate_names(no_writer):
     tool, _ = _es_en(_CitingReactAgent(["a"]), _CitingReactAgent(["c"]))
 
     text, _ = await tool.coroutine(especialistas=["EN", "EN", "Nope"], pregunta="q")
@@ -239,7 +239,7 @@ async def test_consultar_varios_ignores_unknown_and_duplicate_names(no_writer):
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_matches_names_ignoring_case(no_writer):
+async def test_query_specialists_matches_names_ignoring_case(no_writer):
     tool, _ = _es_en(_CitingReactAgent(["a"]), _CitingReactAgent(["c"]))
 
     text, _ = await tool.coroutine(especialistas=["en", "Es"], pregunta="q")
@@ -248,7 +248,7 @@ async def test_consultar_varios_matches_names_ignoring_case(no_writer):
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_with_no_valid_names_lists_valid_ones(no_writer):
+async def test_query_specialists_with_no_valid_names_lists_valid_ones(no_writer):
     tool, _ = _es_en(_CitingReactAgent(["a"]), _CitingReactAgent(["c"]))
 
     text, artifact = await tool.coroutine(especialistas=["Nope"], pregunta="q")
@@ -258,7 +258,7 @@ async def test_consultar_varios_with_no_valid_names_lists_valid_ones(no_writer):
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_mixes_plain_and_lightrag_specialists(no_writer):
+async def test_query_specialists_mixes_plain_and_lightrag_specialists(no_writer):
     tool, offset = _es_en(_PlainReactAgent(), _CitingReactAgent(["c"]))
 
     text, artifact = await tool.coroutine(especialistas=["ES", "EN"], pregunta="q")
@@ -307,7 +307,7 @@ async def test_create_agent_wires_knowledge_router():
     kwargs, own_silo = await _build(_router_agent(True, silo_id=5), specialist)
 
     specialist.enable_router_mode.assert_called_once()
-    assert "consultar_varios" in [getattr(t, "name", None) for t in kwargs["tools"]]
+    assert "query_specialists" in [getattr(t, "name", None) for t in kwargs["tools"]]
     assert "<knowledge_router>" in kwargs["system_prompt"]
     own_silo.assert_not_called()
 
@@ -319,7 +319,7 @@ async def test_create_agent_without_flag_leaves_agent_tools_alone():
     kwargs, _ = await _build(_router_agent(False, silo_id=None), specialist)
 
     specialist.enable_router_mode.assert_not_called()
-    assert "consultar_varios" not in [getattr(t, "name", None) for t in kwargs["tools"]]
+    assert "query_specialists" not in [getattr(t, "name", None) for t in kwargs["tools"]]
     assert "<knowledge_router>" not in kwargs["system_prompt"]
 
 
@@ -342,7 +342,7 @@ from langchain.agents import create_agent as _lc_create_agent
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import HumanMessage
 
-from tools.knowledge_router import create_consultar_varios_tool as _make_consultar
+from tools.knowledge_router import create_query_specialists_tool as _make_query_specialists
 
 
 class _ScriptedModel(GenericFakeChatModel):
@@ -372,15 +372,15 @@ async def test_single_specialist_ends_the_turn_with_text_and_artifact(no_writer)
 
 
 @pytest.mark.asyncio
-async def test_consultar_varios_hands_back_to_the_model_with_merged_artifact(no_writer):
+async def test_query_specialists_hands_back_to_the_model_with_merged_artifact(no_writer):
     offset, lock = [0], asyncio.Lock()
     es = _router_tool("ES", _CitingReactAgent(["a"]), offset, lock, silo_id=7)
     en = _router_tool("EN", _CitingReactAgent(["c"]), offset, lock, silo_id=8, silo_name="Manuals EN")
-    varios = _make_consultar([es, en], lock)
+    varios = _make_query_specialists([es, en], lock)
 
     msgs = await _run_graph(
         [es, en, varios],
-        _call("consultar_varios", {"especialistas": ["ES", "EN"], "pregunta": "q"}, "c1"),
+        _call("query_specialists", {"especialistas": ["ES", "EN"], "pregunta": "q"}, "c1"),
         AIMessage(content="Final [1](cite://1)[2](cite://2)"),
     )
 

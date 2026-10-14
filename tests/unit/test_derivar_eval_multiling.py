@@ -94,13 +94,13 @@ def test_parse_sse_done_counts_tool_calls_per_sub_agent():
     run = _runner()
     stats = {}
     lines = [
-        b'data: {"type": "tool_start", "data": {"tool_name": "consultar_varios"}}\n',
+        b'data: {"type": "tool_start", "data": {"tool_name": "query_specialists"}}\n',
         b'data: {"type": "tool_start", "data": {"tool_name": "retrieve", "subagent_name": "kr_es"}}\n',
         b'data: {"type": "tool_start", "data": {"tool_name": "retrieve", "subagent_name": "kr_es"}}\n',
         b'data: {"type": "done", "data": {"response": "r"}}\n',
     ]
     run.parse_sse_done(lines, stats)
-    assert stats["tool_calls"] == {"router:consultar_varios": 1, "kr_es:retrieve": 2}
+    assert stats["tool_calls"] == {"router:query_specialists": 1, "kr_es:retrieve": 2}
 
 
 def test_parse_sse_done_raises_on_error_event_and_on_missing_done():
