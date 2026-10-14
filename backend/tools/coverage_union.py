@@ -31,8 +31,15 @@ MAX_POSSIBLE_DOCS = 10
 _SNIPPET_CHARS = 1500
 EXCERPT_CHARS = 300  # what the LLM reads of a page: a window on the part that matters
 
-Snippet = Tuple[str, str, Optional[int]]  # (file_path, content, page)
+Snippet = Tuple[str, str, Optional[int], Optional[str]]  # (file_path, content, page, chunk_id)
 Grouped = Dict[Any, List[Snippet]]
+
+
+def snippet_key(snippet: Tuple[Any, ...]) -> str:
+    """Key of a snippet in the excerpts map: its chunk id when it has one, else its
+    file_path ("DOC.pdf (p. 7)"). A page can hold several chunks that share a
+    file_path, and a window is computed for one chunk only."""
+    return (snippet[3] if len(snippet) > 3 else None) or snippet[0]
 
 
 def excerpt_around(text: str, term: str, width: int = EXCERPT_CHARS) -> str:
@@ -126,7 +133,7 @@ async def augment_with_semantic(
         rid = c.get("resource_id")
         if rid is None or int(rid) in known:
             continue  # a chunk of a document already found literally adds nothing
-        candidates.append((rid, (c.get("file_path", ""), c.get("content", ""), c.get("page")), True))
+        candidates.append((rid, (c.get("file_path", ""), c.get("content", ""), c.get("page"), c.get("id")), True))
 
     if not candidates:  # the rerank API rejects an empty list (422) and retries before failing
         return grouped, {}
@@ -160,8 +167,8 @@ async def augment_with_semantic(
     result.update({rid: best_first(by_doc[rid])[:1] for rid in possible})
     tiers = {**dict.fromkeys(semantic, "semantic"), **dict.fromkeys(possible, "possible")}
     if excerpts_out is not None and tiers:
-        # excerpts_out is keyed by file_path ("DOC.pdf (p. 7)"), unique per page
+        # excerpts_out is keyed by snippet_key: the chunk id, or file_path for a legacy snippet
         await _fill_best_windows(
-            term, {result[rid][0][0]: result[rid][0][1] for rid in tiers}, rerank_fn, excerpts_out,
+            term, {snippet_key(result[rid][0]): result[rid][0][1] for rid in tiers}, rerank_fn, excerpts_out,
         )
     return result, tiers

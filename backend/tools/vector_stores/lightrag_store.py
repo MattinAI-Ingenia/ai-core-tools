@@ -208,9 +208,9 @@ _FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)-p(\d+)$")
 
 
 def _group_chunk_rows(
-    rows: list[tuple[str, str, str]], per_doc_cap: int = 3,
-) -> dict[str, list[tuple[str, str, int]]]:
-    """Group (full_doc_id, file_path, content) rows by resource id.
+    rows: list[tuple[str, str, str, str]], per_doc_cap: int = 3,
+) -> dict[str, list[tuple[str, str, int, str]]]:
+    """Group (full_doc_id, file_path, content, chunk_id) rows by resource id.
 
     Rows whose full_doc_id doesn't match the res{N}-p{N} shape (non-PDF
     sources, e.g. crawled Domain pages — see _lightrag_doc_id's content-hash
@@ -225,16 +225,21 @@ def _group_chunk_rows(
     synthetic one. page travels too — the frontend's "Open PDF at page N"
     button needs it (see agentTools.py's chunk dicts), and it was otherwise
     discarded here despite being right there in full_doc_id.
+
+    chunk_id is LightRAG's own id for the chunk ("res319-p71-chunk-000"), the
+    string the graph's source_id fields use: the playground marks a cited chunk
+    and the entities extracted from it by matching it. It is read from the row,
+    never rebuilt from the page — a page can hold more than one chunk.
     """
-    grouped: dict[str, list[tuple[str, str, int]]] = {}
-    for full_doc_id, file_path, content in rows:
+    grouped: dict[str, list[tuple[str, str, int, str]]] = {}
+    for full_doc_id, file_path, content, chunk_id in rows:
         match = _FULL_DOC_ID_RESOURCE_RE.match(full_doc_id)
         if not match:
             continue
         resource_id, page = match.group(1), int(match.group(2))
         snippets = grouped.setdefault(resource_id, [])
         if len(snippets) < per_doc_cap:
-            snippets.append((file_path, content.strip(), page))
+            snippets.append((file_path, content.strip(), page, chunk_id))
     return grouped
 
 
@@ -2545,7 +2550,7 @@ class LightRAGStore(VectorStoreInterface):
     def find_chunks_mentioning(
         self, collection_name: str, term: Optional[Union[str, List[str]]],
         doc_filter: Optional[Union[str, int, List[Union[str, int]]]] = None,
-    ) -> tuple[dict[str, list[tuple[str, str]]], bool]:
+    ) -> tuple[dict[str, list[tuple[str, str, int, str]]], bool]:
         """Every document whose chunks literally contain *term* — no chunk_top_k,
         no similarity ranking. See _group_chunk_rows for the per-document cap.
 
@@ -2577,7 +2582,7 @@ class LightRAGStore(VectorStoreInterface):
         doc_ids = [doc_filter] if doc_filter is not None and not isinstance(doc_filter, list) else doc_filter
         terms = [term] if term is not None and not isinstance(term, list) else term
 
-        sql = "SELECT full_doc_id, file_path, content FROM lightrag_doc_chunks WHERE workspace = :ws"
+        sql = "SELECT full_doc_id, file_path, content, id FROM lightrag_doc_chunks WHERE workspace = :ws"
         params: dict = {"ws": collection_name}
         if terms:
             term_clauses = []
@@ -2609,7 +2614,7 @@ class LightRAGStore(VectorStoreInterface):
         per_doc_cap = (
             self._COVERAGE_QUERY_ROW_CAP if term is None else (15 if doc_ids else 3)
         )
-        return _group_chunk_rows([(r[0], r[1], r[2]) for r in rows], per_doc_cap=per_doc_cap), cap_hit
+        return _group_chunk_rows([(r[0], r[1], r[2], r[3]) for r in rows], per_doc_cap=per_doc_cap), cap_hit
 
     def terms_present_literally(self, collection_name: str, terms: List[str]) -> List[str]:
         """Which of *terms* are an accent-insensitive literal substring of at

@@ -19,9 +19,9 @@ from tools.vector_stores.lightrag_store import LightRAGStore, _group_chunk_rows
 
 def test_groups_snippets_by_resource_id():
     rows = [
-        ("res271-p10", "CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí."),
-        ("res271-p42", "CDOC004043.pdf p.42", "Revisar la válvula de seguridad cada año."),
-        ("res275-p3", "CDOC001961.pdf p.3", "La válvula de seguridad debe purgarse."),
+        ("res271-p10", "CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.", "res271-p10-chunk-000"),
+        ("res271-p42", "CDOC004043.pdf p.42", "Revisar la válvula de seguridad cada año.", "res271-p42-chunk-000"),
+        ("res275-p3", "CDOC001961.pdf p.3", "La válvula de seguridad debe purgarse.", "res275-p3-chunk-000"),
     ]
     grouped = _group_chunk_rows(rows)
     assert set(grouped.keys()) == {"271", "275"}
@@ -29,13 +29,16 @@ def test_groups_snippets_by_resource_id():
     assert len(grouped["275"]) == 1
     # file_path and page travel with the snippet — Task 3's citations need the
     # real "file.pdf p.N" label, and the frontend's "Open PDF" button needs
-    # the page number, not just the resource id.
-    assert grouped["271"][0] == ("CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.", 10)
+    # the page number, not just the resource id. The chunk id travels too: the
+    # playground marks a cited chunk by it.
+    assert grouped["271"][0] == (
+        "CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.", 10, "res271-p10-chunk-000",
+    )
 
 
 def test_caps_snippets_per_document():
     rows = [
-        (f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"mención {i}")
+        (f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"mención {i}", f"res271-p{i}-chunk-000")
         for i in range(10)
     ]
     grouped = _group_chunk_rows(rows, per_doc_cap=3)
@@ -45,9 +48,20 @@ def test_caps_snippets_per_document():
 def test_ignores_rows_with_unparseable_doc_id():
     """Non-PDF sources (crawled Domain pages) get a content-hash id, not
     res{N}-p{N} — see _lightrag_doc_id's fallback. Skip them rather than crash."""
-    rows = [("doc-abc123hash", "https://example.com/page", "algo de contenido")]
+    rows = [("doc-abc123hash", "https://example.com/page", "algo de contenido", "doc-abc123hash-chunk-000")]
     grouped = _group_chunk_rows(rows)
     assert grouped == {}
+
+
+def test_a_page_with_several_chunks_keeps_each_chunks_own_id():
+    """The id cannot be derived from document and page: a page can be split in
+    several chunks, and the second one is res5-p3-chunk-001, not -chunk-000."""
+    rows = [
+        ("res5-p3", "D.pdf (p. 3)", "primera parte", "res5-p3-chunk-000"),
+        ("res5-p3", "D.pdf (p. 3)", "segunda parte", "res5-p3-chunk-001"),
+    ]
+    grouped = _group_chunk_rows(rows, per_doc_cap=15)
+    assert [s[3] for s in grouped["5"]] == ["res5-p3-chunk-000", "res5-p3-chunk-001"]
 
 
 def test_empty_rows_returns_empty_dict():
@@ -95,10 +109,21 @@ def test_term_none_does_not_cap_snippets_to_three():
     store = _make_store()
     conn = store.db.engine.connect.return_value.__enter__.return_value
     conn.execute.return_value.fetchall.return_value = [
-        (f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"contenido {i}") for i in range(10)
+        (f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"contenido {i}", f"res271-p{i}-chunk-000")
+        for i in range(10)
     ]
     grouped, _ = store.find_chunks_mentioning("silo_1", term=None, doc_filter="271")
     assert len(grouped["271"]) == 10
+    assert grouped["271"][3][3] == "res271-p3-chunk-000"
+
+
+def test_the_query_selects_the_lightrag_chunk_id():
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = []
+    store.find_chunks_mentioning("silo_1", term="P20", doc_filter=None)
+    sql_arg = str(conn.execute.call_args[0][0])
+    assert "SELECT full_doc_id, file_path, content, id FROM lightrag_doc_chunks" in sql_arg
 
 
 def test_doc_filter_accepts_a_list_and_ors_the_conditions():
@@ -195,7 +220,7 @@ def test_a_term_made_only_of_separators_does_not_become_a_match_everything_patte
 # --- how many snippets a document gets with a term ---------------------------
 
 def _rows_of_one_document(n):
-    return [(f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"P20 aparece aquí {i}") for i in range(n)]
+    return [(f"res271-p{i}", f"CDOC004043.pdf p.{i}", f"P20 aparece aquí {i}", f"res271-p{i}-chunk-000") for i in range(n)]
 
 
 def test_with_a_term_and_no_document_a_document_gets_three_snippets():

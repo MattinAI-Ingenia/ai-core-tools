@@ -211,7 +211,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                     : 'Unknown source';
                   return (
                     <button
-                      key={c.id ?? idx}
+                      key={`${c.id ?? 'chunk'}-${idx}`}
                       onClick={(e) => toggleChunk(idx, e)}
                       aria-expanded={isOpen}
                       title={isCited ? `${srcLabel} (citado en la respuesta)` : srcLabel}

@@ -245,3 +245,39 @@ def test_the_citation_block_uses_the_excerpt_when_a_chunk_has_one():
     out = _append_lightrag_citation_sources("body", [doc])
     assert "…the middle part…" in out and "start of the page" not in out
     assert "[2] (source: B.pdf (p. 2)) plain page" in out, "chunks without an excerpt behave as before"
+
+
+def test_a_semantic_only_snippet_carries_the_id_of_its_chunk():
+    chunk = {**_chunk(3, "Boiler class (according to EN 303- 5)"), "id": "res3-p1-chunk-000"}
+    grouped, _ = _run(augment_with_semantic(
+        _literal(), "EN 303-5",
+        semantic_chunks_fn=_semantic([chunk]),
+        rerank_fn=_scores({"Boiler class (according to EN 303- 5)": 0.9}),
+    ))
+    assert grouped[3][0] == (
+        "DOC3.pdf (p. 1)", "Boiler class (according to EN 303- 5)", 1, "res3-p1-chunk-000",
+    )
+
+
+def test_a_semantic_chunk_without_id_gives_a_snippet_with_no_chunk_id():
+    grouped, _ = _run(augment_with_semantic(
+        _literal(), "EN 303-5",
+        semantic_chunks_fn=_semantic([_chunk(3, "Boiler class (according to EN 303- 5)")]),
+        rerank_fn=_scores({"Boiler class (according to EN 303- 5)": 0.9}),
+    ))
+    assert grouped[3][0][3] is None
+
+
+def test_a_window_is_keyed_by_the_chunk_id_when_the_snippet_has_one():
+    """Two chunks of one page share a file_path ("DOC.pdf (p. 1)"); the window is
+    computed for one chunk only, so it must be stored under that chunk's id."""
+    chunk = {**_chunk(3, "word " * 400, 1, name="DOC3.pdf (p. 1)"), "id": "res3-p1-chunk-001"}
+
+    async def rerank(query, documents):
+        return [{"index": i, "relevance_score": 0.9} for i in range(len(documents))]
+
+    excerpts = {}
+    _run(augment_with_semantic(
+        {}, "x", semantic_chunks_fn=_semantic([chunk]), rerank_fn=rerank, excerpts_out=excerpts,
+    ))
+    assert list(excerpts) == ["res3-p1-chunk-001"]
