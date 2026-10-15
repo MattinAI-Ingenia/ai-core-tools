@@ -463,6 +463,7 @@ class AgentImportService:
             return import_system_one_agent(
                 self.session, export_data, app_id, conflict_mode, new_name,
                 service_id_map=system_one_service_id_map,
+                bundled_services=export_data.system_one_services,
             )
 
         # Step 0: Determine agent's final name (needed for dependency naming)
@@ -746,6 +747,7 @@ class AgentImportService:
                     agent=tool_agent,
                     ai_service=export_data.ai_service,  # Share AI service
                     middlewares=export_data.middlewares,
+                    system_one_services=export_data.system_one_services,
                 )
                 tool_import_result = self.import_agent(
                     tool_export_data,
@@ -811,6 +813,8 @@ class AgentImportService:
                 )
                 existing_agent.temperature = export_data.agent.temperature
                 existing_agent.lightrag_query_mode = export_data.agent.lightrag_query_mode
+                if export_data.agent.is_tool is not None:
+                    existing_agent.is_tool = export_data.agent.is_tool
 
                 # Restore A2A fields (FR-24, AC-39) via the shared helper, so
                 # this path and the create paths below can never drift apart
@@ -918,7 +922,7 @@ class AgentImportService:
                 text_system_prompt=export_data.agent.text_system_prompt,
                 create_date=datetime.now(),
                 request_count=0,
-                is_tool=bool(export_data.agent.is_tool),
+                is_tool=bool(export_data.agent.is_tool),  # None (old files): False
                 # A2A fields restored (FR-24, AC-39) via the shared helper;
                 # a2a_enabled is always forced to False there.
                 **_a2a_import_fields(export_data.agent),
@@ -944,7 +948,7 @@ class AgentImportService:
                 lightrag_query_mode=export_data.agent.lightrag_query_mode,
                 create_date=datetime.now(),
                 request_count=0,
-                is_tool=bool(export_data.agent.is_tool),
+                is_tool=bool(export_data.agent.is_tool),  # None (old files): False
                 type="agent",
                 # A2A fields restored (FR-24, AC-39) via the shared helper;
                 # a2a_enabled is always forced to False there.
