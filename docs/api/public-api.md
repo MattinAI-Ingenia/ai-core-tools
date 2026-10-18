@@ -505,8 +505,11 @@ See [A2A Integration](../ai/a2a-integration.md) for the full reference: URLs, vi
 | 401 | Unauthorized (invalid API key) |
 | 403 | Forbidden (revoked API key) |
 | 404 | Not Found |
+| 409 | Conflict: a service the request needs is past its end of service (`error_code: "SERVICE_RETIRED"`) |
 | 429 | Too Many Requests (rate limit exceeded) |
 | 500 | Internal Server Error |
+
+**Retired services**: chat and silo endpoints (including indexing and search) return `409` with `{"detail": "<service name, retirement date and deprecation notice>", "error_code": "SERVICE_RETIRED"}` when the agent's LLM, or the silo's embedding, transcription or video service, is retired. Streaming responses send an SSE `error` event with `code: "service_retired"`. The OpenAI-compatible endpoint returns `409`, or an error chunk when streaming. Retired services are not retried, so fix it by selecting another service. Public silo responses do not include `lifecycle_warnings` (internal API only). See [Service End of Service](../guides/chat-bot/kb-ai-services.md#service-end-of-service).
 
 **Example error responses**:
 
