@@ -18,6 +18,7 @@ from repositories.mcp_config_repository import MCPConfigRepository
 from repositories.skill_repository import SkillRepository
 from repositories.middleware_repository import MiddlewareRepository
 from utils.logger import get_logger
+from utils.service_lifecycle import to_utc
 
 logger = get_logger(__name__)
 
@@ -342,6 +343,8 @@ class AgentRepository:
                 "service_id": s.service_id,
                 "name": f"[System] {s.name}" if s.app_id is None else s.name,
                 "supports_video": s.supports_video,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
             }
             for s in ai_services
         ]

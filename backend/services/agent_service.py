@@ -9,8 +9,10 @@ from repositories.middleware_repository import MiddlewareRepository
 from models.middleware import AgentMiddleware, MiddlewareType
 from repositories.app_repository import AppRepository
 from services.a2a_server.lifecycle_service import schedule_owner_purge
+from services.service_lifecycle_service import ServiceLifecycleService
 from utils import a2a_config
 from utils.logger import get_logger
+from types import SimpleNamespace
 
 logger = get_logger(__name__)
 
@@ -76,7 +78,10 @@ class AgentService:
         
         # Get AI services for this app
         ai_services_dict = AgentRepository.get_ai_services_dict_by_app_id(db, app_id)
-        
+
+        # Dependency warnings: one lookup context for the whole list, never per agent.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id, all_agents=True)
+
         result = []
         for agent in agents:
             # Get AI service details if agent has one
@@ -100,6 +105,9 @@ class AgentService:
                     else None
                 ),
                 a2a_enabled=bool(_typed_attr(agent, 'a2a_enabled', bool, False)),
+                lifecycle_warnings=ServiceLifecycleService.warnings_for_agent(
+                    lifecycle_ctx.agent_refs.get(agent.agent_id), lifecycle_ctx
+                ),
             ))
 
         return result
@@ -123,6 +131,19 @@ class AgentService:
         
         # Get form data for dropdowns
         form_data = self._get_form_data(db, app_id, agent_id)
+
+        # Lifecycle: status of every offered AI service and the agent's dependency warnings, computed
+        # from one warning-days read and one lookup context.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id, [agent_id] if agent_id != 0 else [])
+        ai_service_options = [
+            {**option, **ServiceLifecycleService.option_fields(
+                SimpleNamespace(**option), lifecycle_ctx.warning_days)}
+            for option in form_data['ai_services']
+        ]
+        lifecycle_warnings = (
+            ServiceLifecycleService.warnings_for_agent(lifecycle_ctx.agent_refs.get(agent_id), lifecycle_ctx)
+            if agent_id != 0 else []
+        )
         
         # Get agent associations
         associations = self._get_agent_associations(db, agent_id)
@@ -200,7 +221,7 @@ class AgentService:
             silo=silo_info,
             output_parser=output_parser_info,
             # Form data
-            ai_services=form_data['ai_services'],
+            ai_services=ai_service_options,
             sandbox_services=form_data['sandbox_services'],
             silos=form_data['silos'],
             output_parsers=form_data['output_parsers'],
@@ -232,6 +253,7 @@ class AgentService:
             a2a_examples=_typed_attr(agent, 'a2a_examples', list, []) or [],
             a2a_card_url=a2a_card_url,
             a2a_rpc_url=a2a_rpc_url,
+            lifecycle_warnings=lifecycle_warnings,
         )
 
     def _get_agent_for_detail(self, db: Session, agent_id: int, app_id: Optional[int] = None):

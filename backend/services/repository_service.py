@@ -21,6 +21,7 @@ from datetime import datetime
 from utils.logger import get_logger
 from utils.error_handlers import ValidationError
 from utils.service_lifecycle import SERVICE_KIND_EMBEDDING, RetiredServiceAssignmentError, ensure_assignable
+from services.service_lifecycle_service import ServiceLifecycleService
 from tools.vector_store_factory import VectorStoreFactory
 
 load_dotenv()
@@ -232,7 +233,10 @@ class RepositoryService:
         
         # Use repository to get repositories
         repositories = RepositoryRepository.get_by_app_id(db, app_id)
-        
+
+        # Dependency warnings (via each repository's silo): one lookup context for the whole list.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id)
+
         result = []
         for repo in repositories:
             resource_count = ResourceRepository.count_by_repository_id(db, repo.repository_id)
@@ -249,10 +253,44 @@ class RepositoryService:
                 status=repo.status,
                 created_at=repo.create_date,
                 resource_count=resource_count,
-                vector_db_type=repo_vector_db_type
+                vector_db_type=repo_vector_db_type,
+                lifecycle_warnings=ServiceLifecycleService.warnings_for_silo(
+                    repo.silo.silo_id if repo.silo else None, lifecycle_ctx
+                ),
             ))
         
         return result
+
+    @staticmethod
+    def _embedding_service_options(db: Session, app_id: int, warning_days: int) -> List[Dict[str, Any]]:
+        """Embedding services (app + system) offered in the repository form, with lifecycle data."""
+        app_es = EmbeddingServiceRepository.get_by_app_id(db, app_id)
+        system_es = EmbeddingServiceRepository.get_system_services(db)
+        return [
+            {
+                "service_id": s.service_id,
+                "name": s.name,
+                "is_system": is_system,
+                **ServiceLifecycleService.option_fields(s, warning_days),
+            }
+            for is_system, services in ((False, app_es), (True, system_es))
+            for s in services
+        ]
+
+    @staticmethod
+    def _ai_service_options(db: Session, app_id: int, warning_days: int) -> List[Dict[str, Any]]:
+        """AI services (app + system) offered as transcription / video services, with lifecycle data."""
+        from repositories.ai_service_repository import AIServiceRepository
+        services = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
+        return [
+            {
+                "service_id": s.service_id,
+                "name": s.name,
+                "supports_video": s.supports_video,
+                **ServiceLifecycleService.option_fields(s, warning_days),
+            }
+            for s in services
+        ]
 
     @staticmethod
     def get_repository_detail(app_id: int, repository_id: int, db: Session) -> RepositoryDetailSchema:
@@ -275,17 +313,9 @@ class RepositoryService:
         if repository_id == 0:
             # New repository
             vector_db_options = VectorStoreFactory.get_available_type_options()
-            app_es = EmbeddingServiceRepository.get_by_app_id(db, app_id)
-            system_es = EmbeddingServiceRepository.get_system_services(db)
-            embedding_services = (
-                [{"service_id": s.service_id, "name": s.name, "is_system": False} for s in app_es]
-                + [{"service_id": s.service_id, "name": s.name, "is_system": True} for s in system_es]
-            )
-            
-            # Get AI services for media transcription
-            from repositories.ai_service_repository import AIServiceRepository
-            ai_services_query = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
-            ai_services = [{"service_id": s.service_id, "name": s.name, "supports_video": s.supports_video} for s in ai_services_query]
+            warning_days = ServiceLifecycleService.warning_days(db)
+            embedding_services = RepositoryService._embedding_service_options(db, app_id, warning_days)
+            ai_services = RepositoryService._ai_service_options(db, app_id, warning_days)
             
             return RepositoryDetailSchema(
                 repository_id=0,
@@ -328,18 +358,13 @@ class RepositoryService:
                 "error_message": resource.error_message,
             })
         
-        # Get embedding services for form data
-        app_es = EmbeddingServiceRepository.get_by_app_id(db, app_id)
-        system_es = EmbeddingServiceRepository.get_system_services(db)
-        embedding_services = (
-            [{"service_id": s.service_id, "name": s.name, "is_system": False} for s in app_es]
-            + [{"service_id": s.service_id, "name": s.name, "is_system": True} for s in system_es]
-        )
-        
-        # Get AI services for media transcription
-        from repositories.ai_service_repository import AIServiceRepository
-        ai_services_query = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
-        ai_services = [{"service_id": s.service_id, "name": s.name, "supports_video": s.supports_video} for s in ai_services_query]
+        # One warning-days read and one lookup context for the whole detail
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id)
+        warning_days = lifecycle_ctx.warning_days
+
+        # Service options for the form (with their end-of-service data)
+        embedding_services = RepositoryService._embedding_service_options(db, app_id, warning_days)
+        ai_services = RepositoryService._ai_service_options(db, app_id, warning_days)
         
         # Get folders for the repository
         from services.folder_service import FolderService
@@ -414,6 +439,7 @@ class RepositoryService:
             transcription_service_id=repo.transcription_service_id,
             video_ai_service_id=repo.video_ai_service_id,
             service_warnings=SiloService.service_warnings(repo.silo),
+            lifecycle_warnings=ServiceLifecycleService.warnings_for_silo(silo_id, lifecycle_ctx),
         )
 
     @staticmethod

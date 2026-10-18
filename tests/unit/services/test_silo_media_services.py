@@ -319,10 +319,11 @@ class TestSiloServiceMediaWiring:
         with patch("repositories.ai_service_repository.AIServiceRepository.get_by_app_id", return_value=[app_service]), \
                 patch("repositories.ai_service_repository.AIServiceRepository.get_system_services",
                       return_value=[system_service]):
-            options = SiloService.media_ai_service_options(3, MagicMock())
+            options = SiloService.media_ai_service_options(3, MagicMock(), warning_days=30)
+        no_lifecycle = {"end_of_service_at": None, "deprecation_notice": None, "lifecycle_status": "active"}
         assert options == [
-            {"service_id": 1, "name": "whisper", "supports_video": False},
-            {"service_id": 2, "name": "gemini", "supports_video": True},
+            {"service_id": 1, "name": "whisper", "supports_video": False, **no_lifecycle},
+            {"service_id": 2, "name": "gemini", "supports_video": True, **no_lifecycle},
         ]
 
 

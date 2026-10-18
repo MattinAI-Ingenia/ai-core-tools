@@ -28,6 +28,7 @@ from schemas.silo_schemas import SiloListItemSchema, SiloDetailSchema, CreateUpd
 from repositories.silo_repository import SiloRepository
 from services.folder_service import FolderService
 from services.service_health_service import ServiceHealthService
+from services.service_lifecycle_service import ServiceLifecycleService
 from utils.provider_errors import classify_provider_error
 from utils.service_lifecycle import (
     SERVICE_KIND_AI,
@@ -591,12 +592,24 @@ class SiloService:
         return warnings
 
     @staticmethod
-    def media_ai_service_options(app_id: int, db: Session) -> List[Dict[str, Any]]:
-        """AI services (app + system) selectable as transcription / video services."""
+    def media_ai_service_options(
+        app_id: int, db: Session, warning_days: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """AI services (app + system) selectable as transcription / video services.
+
+        Each option carries its end-of-service data so the form can flag deprecated / retired ones.
+        """
         from repositories.ai_service_repository import AIServiceRepository
+        if warning_days is None:
+            warning_days = ServiceLifecycleService.warning_days(db)
         services = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
         return [
-            {"service_id": s.service_id, "name": s.name, "supports_video": bool(s.supports_video)}
+            {
+                "service_id": s.service_id,
+                "name": s.name,
+                "supports_video": bool(s.supports_video),
+                **ServiceLifecycleService.option_fields(s, warning_days),
+            }
             for s in services
         ]
 
@@ -1694,7 +1707,10 @@ class SiloService:
         """
         # Get silos using the existing service
         silos = SiloService.get_silos_by_app_id(app_id, db)
-        
+
+        # Dependency warnings: one lookup context for the whole list, never per silo.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id)
+
         result = []
         for silo in silos:
             # Get document count
@@ -1707,7 +1723,8 @@ class SiloService:
                 type=silo.silo_type if silo.silo_type else None,
                 created_at=silo.create_date,
                 docs_count=docs_count,
-                vector_db_type=silo.vector_db_type
+                vector_db_type=silo.vector_db_type,
+                lifecycle_warnings=ServiceLifecycleService.warnings_for_silo(silo.silo_id, lifecycle_ctx),
             ))
         
         return result
@@ -1724,6 +1741,7 @@ class SiloService:
             logger.info("Returning new silo template")
             vector_db_options = VectorStoreFactory.get_available_type_options()
             default_vector_db_type = _resolve_vector_db_type()
+            warning_days = ServiceLifecycleService.warning_days(db)
             return SiloDetailSchema(
                 silo_id=0,
                 name="",
@@ -1736,7 +1754,7 @@ class SiloService:
                 output_parsers=[],
                 embedding_services=[],
                 vector_db_options=vector_db_options,
-                ai_services=SiloService.media_ai_service_options(app_id, db),
+                ai_services=SiloService.media_ai_service_options(app_id, db, warning_days),
             )
         
         # Existing silo
@@ -1757,15 +1775,28 @@ class SiloService:
             logger.error(f"Error counting docs in silo {silo_id}: {str(e)}")
             docs_count = 0
         
+        # One warning-days read and one lookup context for the whole detail.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id)
+        warning_days = lifecycle_ctx.warning_days
+
         # Get form data using repository consolidation
         try:
             logger.info(f"Getting form data for app_id: {app_id}")
             form_data = SiloRepository.get_form_data_for_silo(app_id, 0, db)  # We already have the silo
             output_parsers = [{"parser_id": p.parser_id, "name": p.name} for p in form_data['output_parsers']]
             from schemas.embedding_service_schemas import EmbeddingServiceOptionSchema
+            def _embedding_option(s, is_system: bool) -> EmbeddingServiceOptionSchema:
+                return EmbeddingServiceOptionSchema(
+                    service_id=s.service_id,
+                    name=s.name,
+                    provider=s.provider.value if hasattr(s.provider, 'value') else s.provider,
+                    is_system=is_system,
+                    **ServiceLifecycleService.option_fields(s, warning_days),
+                )
+
             embedding_services = (
-                [EmbeddingServiceOptionSchema(service_id=s.service_id, name=s.name, provider=s.provider.value if hasattr(s.provider, 'value') else s.provider, is_system=False) for s in form_data['embedding_services']]
-                + [EmbeddingServiceOptionSchema(service_id=s.service_id, name=s.name, provider=s.provider.value if hasattr(s.provider, 'value') else s.provider, is_system=True) for s in form_data.get('system_embedding_services', [])]
+                [_embedding_option(s, False) for s in form_data['embedding_services']]
+                + [_embedding_option(s, True) for s in form_data.get('system_embedding_services', [])]
             )
             logger.info(f"Found {len(output_parsers)} parsers and {len(embedding_services)} embedding services")
         except Exception as e:
@@ -1813,9 +1844,10 @@ class SiloService:
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
                 vector_db_options=vector_db_options,
-                ai_services=SiloService.media_ai_service_options(app_id, db),
+                ai_services=SiloService.media_ai_service_options(app_id, db, warning_days),
                 # Metadata definition fields for playground
-                metadata_fields=metadata_fields
+                metadata_fields=metadata_fields,
+                lifecycle_warnings=ServiceLifecycleService.warnings_for_silo(silo.silo_id, lifecycle_ctx),
             )
         except Exception as e:
             logger.error(f"Error creating SiloDetailSchema: {str(e)}")
