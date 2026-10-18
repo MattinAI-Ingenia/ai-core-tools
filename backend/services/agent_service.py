@@ -140,6 +140,11 @@ class AgentService:
                 SimpleNamespace(**option), lifecycle_ctx.warning_days)}
             for option in form_data['ai_services']
         ]
+        sandbox_service_options = [
+            {**option, **ServiceLifecycleService.option_fields(
+                SimpleNamespace(**option), lifecycle_ctx.warning_days)}
+            for option in form_data['sandbox_services']
+        ]
         lifecycle_warnings = (
             ServiceLifecycleService.warnings_for_agent(lifecycle_ctx.agent_refs.get(agent_id), lifecycle_ctx)
             if agent_id != 0 else []
@@ -222,7 +227,7 @@ class AgentService:
             output_parser=output_parser_info,
             # Form data
             ai_services=ai_service_options,
-            sandbox_services=form_data['sandbox_services'],
+            sandbox_services=sandbox_service_options,
             silos=form_data['silos'],
             output_parsers=form_data['output_parsers'],
             tools=form_data['tools'],
@@ -435,7 +440,6 @@ class AgentService:
 
         Without this check, an editor of one app could point their agent at another
         tenant's AI service, silo, output parser, or media-processing service (IDOR).
-        ``sandbox_service_id`` is validated separately in ``_update_normal_agent``, and
         ``tool_ids`` / ``mcp_config_ids`` are validated in ``update_agent_tools`` /
         ``update_agent_mcps`` respectively (they're only known after this call).
 
@@ -443,7 +447,9 @@ class AgentService:
         one ``existing_agent`` already has (``None`` for a new agent).
         Raises ``RetiredServiceAssignmentError`` (a ``ValueError``).
         """
-        from utils.service_lifecycle import ensure_assignable, SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING
+        from utils.service_lifecycle import (
+            ensure_assignable, SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, SERVICE_KIND_SANDBOX,
+        )
 
         app_id = data['app_id']
 
@@ -456,6 +462,16 @@ class AgentService:
             service = AIServiceRepository.get_by_id(db, service_id)
             self._validate_owned_resource(service, app_id, 'service_id', allow_system=True)
             ensure_assignable(service, _current('service_id'), 'service_id', SERVICE_KIND_AI)
+
+        # A sandbox service of another app would run code against that app's provider credentials/quota.
+        sandbox_service_id = data.get('sandbox_service_id') or None
+        if sandbox_service_id:
+            from repositories.sandbox_service_repository import SandboxServiceRepository
+            sandbox_service = SandboxServiceRepository.get_by_id(db, sandbox_service_id)
+            self._validate_owned_resource(sandbox_service, app_id, 'sandbox_service_id', allow_system=True)
+            ensure_assignable(
+                sandbox_service, _current('sandbox_service_id'), 'sandbox_service_id', SERVICE_KIND_SANDBOX
+            )
 
         silo_id = data.get('silo_id') or None
         if silo_id:
@@ -520,21 +536,8 @@ class AgentService:
         agent.status = data.get('status')
         agent.service_id = data.get('service_id') or None
 
-        # Validate sandbox_service_id belongs to the target app (or is system-scoped)
-        # before assigning it. Without this check, any caller could point an agent at
-        # a SandboxService owned by a different App, silently running code execution
-        # against that other App's provider credentials/endpoint/quota.
+        # Ownership and lifecycle of sandbox_service_id are validated in _validate_referenced_resource_ids.
         sandbox_service_id = data.get('sandbox_service_id') or None
-        if sandbox_service_id:
-            from repositories.sandbox_service_repository import SandboxServiceRepository
-            sandbox_service = SandboxServiceRepository.get_by_id(db, sandbox_service_id)
-            if sandbox_service is None or (
-                sandbox_service.app_id is not None and sandbox_service.app_id != data['app_id']
-            ):
-                raise ValueError(
-                    f"sandbox_service_id {sandbox_service_id} does not exist or does not "
-                    "belong to this app"
-                )
         agent.sandbox_service_id = sandbox_service_id
         if is_new_agent:
             agent.app_id = data['app_id']

@@ -1288,20 +1288,10 @@ async def list_system_sandbox_services(
     """List all platform-level Sandbox Services (OMNIADMIN only, available in all deployment modes)."""
     from repositories.sandbox_service_repository import SandboxServiceRepository
     from services.sandbox_service_service import SandboxServiceService
-    from utils.secret_utils import mask_api_key
+    from services.service_lifecycle_service import ServiceLifecycleService
     services = SandboxServiceRepository.get_system_services(db)
-    return [
-        SandboxServiceDetailSchema(
-            service_id=svc.service_id,
-            name=svc.name,
-            provider=svc.provider,
-            api_key=mask_api_key(svc.api_key) if svc.api_key else "",
-            base_url=svc.endpoint or "",
-            created_at=svc.create_date,
-            **SandboxServiceService._extra_config_fields(svc.provider, svc.extra_config),
-        )
-        for svc in services
-    ]
+    warning_days = ServiceLifecycleService.warning_days(db)
+    return [SandboxServiceService.to_detail(svc, warning_days) for svc in services]
 
 
 @router.get("/system-sandbox-services/{service_id}", response_model=SandboxServiceDetailSchema)
@@ -1313,20 +1303,28 @@ async def get_system_sandbox_service(
     """Get a single platform-level Sandbox Service by ID (OMNIADMIN only)."""
     from repositories.sandbox_service_repository import SandboxServiceRepository
     from services.sandbox_service_service import SandboxServiceService
-    from utils.secret_utils import mask_api_key
+    from services.service_lifecycle_service import ServiceLifecycleService
 
     svc = SandboxServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
         raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
-    return SandboxServiceDetailSchema(
-        service_id=svc.service_id,
-        name=svc.name,
-        provider=svc.provider,
-        api_key=mask_api_key(svc.api_key) if svc.api_key else "",
-        base_url=svc.endpoint or "",
-        created_at=svc.create_date,
-        **SandboxServiceService._extra_config_fields(svc.provider, svc.extra_config),
-    )
+    return SandboxServiceService.to_detail(svc, ServiceLifecycleService.warning_days(db))
+
+
+@router.get("/system-sandbox-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_sandbox_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level sandbox service, across all apps (platform admin only)."""
+    from services.service_lifecycle_service import ServiceLifecycleService
+    from utils.service_lifecycle import SERVICE_KIND_SANDBOX
+
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_SANDBOX, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+    return usage
 
 
 @router.post("/system-sandbox-services", response_model=SandboxServiceListItemSchema, status_code=201)
@@ -1339,8 +1337,10 @@ async def create_system_sandbox_service(
     from models.sandbox_service import SandboxService
     from repositories.sandbox_service_repository import SandboxServiceRepository
     from services.sandbox_service_service import SandboxServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     from tools.sandbox.factory import SandboxProviderUnavailableError
     from tools.sandbox_service_utils import build_extra_config
+    from utils.service_lifecycle import SERVICE_KIND_SANDBOX
     from datetime import datetime
 
     try:
@@ -1348,6 +1348,7 @@ async def create_system_sandbox_service(
     except SandboxProviderUnavailableError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    actor_id = int(auth_context.identity.id)
     svc = SandboxService()
     svc.app_id = None
     svc.name = body.name
@@ -1364,8 +1365,13 @@ async def create_system_sandbox_service(
         template=body.e2b_template,
     )
     svc.create_date = datetime.now()
+    SandboxServiceService.apply_lifecycle_fields(svc, body, actor_id)
     svc = SandboxServiceRepository.create(db, svc)
-    return SandboxServiceService._to_list_item(svc, is_system=True)
+    if svc.end_of_service_at is not None:
+        ServiceLifecycleService.log_change(svc, SERVICE_KIND_SANDBOX, None, svc.end_of_service_at, actor_id)
+    return SandboxServiceService._to_list_item(
+        svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
+    )
 
 
 @router.put("/system-sandbox-services/{service_id}", response_model=SandboxServiceListItemSchema)
@@ -1378,6 +1384,7 @@ async def update_system_sandbox_service(
     """Update a platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
     from repositories.sandbox_service_repository import SandboxServiceRepository
     from services.sandbox_service_service import SandboxServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     from tools.sandbox.factory import SandboxProviderUnavailableError
     from utils.secret_utils import is_masked_key
     from tools.sandbox_service_utils import build_extra_config
@@ -1405,8 +1412,11 @@ async def update_system_sandbox_service(
         memory_gb=body.daytona_memory_gb,
         template=body.e2b_template,
     )
+    SandboxServiceService.apply_lifecycle_fields(svc, body, int(auth_context.identity.id))
     svc = SandboxServiceRepository.update(db, svc)
-    return SandboxServiceService._to_list_item(svc, is_system=True)
+    return SandboxServiceService._to_list_item(
+        svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
+    )
 
 
 @router.delete("/system-sandbox-services/{service_id}", status_code=204)

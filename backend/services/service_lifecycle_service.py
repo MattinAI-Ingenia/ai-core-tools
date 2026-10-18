@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
+from models.sandbox_service import SandboxService
 from repositories.service_usage_repository import (
     AgentRefs,
     ServiceSnapshot,
@@ -20,6 +21,7 @@ from schemas.service_lifecycle_schemas import (
     MoveAgentsResponseSchema,
     ServiceLifecycleWarningSchema,
     ServiceUsageAgentSchema,
+    ServiceUsageAppSchema,
     ServiceUsageMiddlewareSchema,
     ServiceUsageRepositorySchema,
     ServiceUsageSchema,
@@ -34,6 +36,7 @@ from utils.logger import get_logger
 from utils.service_lifecycle import (
     SERVICE_KIND_AI,
     SERVICE_KIND_EMBEDDING,
+    SERVICE_KIND_SANDBOX,
     LifecycleStatus,
     compute_lifecycle_status,
     is_retired,
@@ -50,8 +53,7 @@ DEFAULT_WARNING_DAYS = 30
 class LifecycleContext:
     """Everything the warning builders need, loaded once per request.
 
-    ``services`` is keyed by service kind (``ai`` / ``embedding``; a sandbox entry can be added without
-    touching the builders) and then by service id. The builders only read these dicts, never ORM
+    ``services`` is keyed by service kind (``ai`` / ``embedding`` / ``sandbox``) and then by service id. The builders only read these dicts, never ORM
     relationships, so building warnings for N resources costs no extra queries.
     """
 
@@ -63,6 +65,7 @@ class LifecycleContext:
     middlewares: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
     agent_middlewares: Dict[int, List[int]] = field(default_factory=dict)
     agent_refs: Dict[int, AgentRefs] = field(default_factory=dict)
+    app_default_sandbox_service_id: Optional[int] = None
 
 
 class ServiceLifecycleService:
@@ -131,7 +134,7 @@ class ServiceLifecycleService:
     ) -> LifecycleContext:
         """Load the lookup context for warnings in one fixed set of queries.
 
-        Always: the warning-days setting, AI and embedding services, the app's silos. Agent data
+        Always: the warning-days setting, AI, embedding and sandbox services, the app's default sandbox, the app's silos. Agent data
         (service references, middleware links, middlewares) is loaded only when ``all_agents`` is
         true (every agent of the app, for list endpoints) or ``agent_ids`` is non-empty. The count
         does not depend on how many agents/silos are involved.
@@ -154,7 +157,9 @@ class ServiceLifecycleService:
             services={
                 SERVICE_KIND_AI: ServiceUsageRepository.ai_service_snapshots(db, app_id),
                 SERVICE_KIND_EMBEDDING: ServiceUsageRepository.embedding_service_snapshots(db, app_id),
+                SERVICE_KIND_SANDBOX: ServiceUsageRepository.sandbox_service_snapshots(db, app_id),
             },
+            app_default_sandbox_service_id=ServiceUsageRepository.app_default_sandbox_service_id(db, app_id),
             silos=ServiceUsageRepository.silo_refs(db, app_id),
             middlewares=middlewares,
             agent_middlewares=(
@@ -232,6 +237,13 @@ class ServiceLifecycleService:
         for middleware_id in ctx.agent_middlewares.get(getattr(agent_row, "agent_id", None), []):
             name, service_ids = ctx.middlewares.get(middleware_id, (None, []))
             entries.extend(entry(ctx, ai, service_id, "middleware", name) for service_id in service_ids)
+        if getattr(agent_row, "enable_code_interpreter", False):
+            own = getattr(agent_row, "sandbox_service_id", None)
+            if own is not None:
+                entries.append(entry(ctx, SERVICE_KIND_SANDBOX, own, "sandbox"))
+            else:
+                entries.append(entry(
+                    ctx, SERVICE_KIND_SANDBOX, ctx.app_default_sandbox_service_id, "sandbox", "app default"))
         return ServiceLifecycleService._finish(entries)
 
     @staticmethod
@@ -254,12 +266,22 @@ class ServiceLifecycleService:
 
     # ==================== "Used by" and bulk move (AD-10) ====================
 
-    _USAGE_MODELS = {SERVICE_KIND_AI: AIService, SERVICE_KIND_EMBEDDING: EmbeddingService}
+    _USAGE_MODELS = {
+        SERVICE_KIND_AI: AIService,
+        SERVICE_KIND_EMBEDDING: EmbeddingService,
+        SERVICE_KIND_SANDBOX: SandboxService,
+    }
 
     @staticmethod
     def agent_roles(row: Any, kind: str, service_id: int, embedding_silo_ids: Optional[set] = None) -> List[str]:
         """Roles in which an agent row uses the service, in a stable order."""
         roles: List[str] = []
+        if kind == SERVICE_KIND_SANDBOX:
+            if getattr(row, "sandbox_service_id", None) == service_id:
+                roles.append("sandbox")
+            elif getattr(row, "sandbox_service_id", None) is None and getattr(row, "enable_code_interpreter", False):
+                roles.append("sandbox_app_default")
+            return roles
         if kind == SERVICE_KIND_AI:
             for attr, role in (
                 ("service_id", "llm"),
@@ -312,7 +334,16 @@ class ServiceLifecycleService:
 
         warning_days = ServiceLifecycleService.warning_days(db)
         q = ServiceUsageQueries
-        if kind == SERVICE_KIND_AI:
+        apps_default: List[ServiceUsageAppSchema] = []
+        if kind == SERVICE_KIND_SANDBOX:
+            agents, silos, repos = q.sandbox_agents(db, service_id, app_id), [], []
+            tasks = q.sandbox_tasks(db, service_id, app_id)
+            embedding_silo_ids = set()
+            apps_default = [
+                ServiceUsageAppSchema(app_id=a.app_id, app_name=a.app_name)
+                for a in q.sandbox_apps(db, service_id, app_id)
+            ]
+        elif kind == SERVICE_KIND_AI:
             agents, silos = q.ai_agents(db, service_id, app_id), q.ai_silos(db, service_id, app_id)
             repos, tasks = q.ai_repositories(db, service_id, app_id), q.ai_tasks(db, service_id, app_id)
             embedding_silo_ids: set = set()
@@ -377,6 +408,7 @@ class ServiceLifecycleService:
                     task_id=r.task_id, name=r.name, agent_id=r.agent_id, app_id=r.app_id, app_name=name_of(r))
                 for r in tasks
             ],
+            apps_using_as_default=apps_default,
         )
 
     @staticmethod

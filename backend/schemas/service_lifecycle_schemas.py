@@ -34,11 +34,12 @@ class ServiceLifecycleWarningSchema(BaseModel):
 
     service_id: int
     service_name: str
-    kind: Literal["ai", "embedding"]
+    kind: Literal["ai", "embedding", "sandbox"]
     role: Literal[
-        "llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding", "middleware", "embedding"
+        "llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding", "middleware", "embedding",
+        "sandbox",
     ]
-    # Silo name (role silo_embedding) or middleware name (role middleware).
+    # Silo name (role silo_embedding), middleware name (role middleware) or "app default" (role sandbox).
     via: Optional[str] = None
     lifecycle_status: Literal["deprecated", "retired"]
     end_of_service_at: datetime
@@ -47,8 +48,11 @@ class ServiceLifecycleWarningSchema(BaseModel):
 
 # ==================== "Used by" and bulk move of agents ====================
 
-ServiceUsageKind = Literal["ai", "embedding"]
-AgentUsageRole = Literal["llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding"]
+ServiceUsageKind = Literal["ai", "embedding", "sandbox"]
+AgentUsageRole = Literal[
+    "llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding", "sandbox",
+    "sandbox_app_default",
+]
 SiloUsageRole = Literal["embedding", "transcription", "video"]
 ServiceLifecycleStatusLiteral = Literal["active", "deprecated", "retired"]
 
@@ -95,6 +99,13 @@ class ServiceUsageScheduledTaskSchema(BaseModel):
     app_name: Optional[str] = None
 
 
+class ServiceUsageAppSchema(BaseModel):
+    """An app that uses a sandbox service as its default."""
+
+    app_id: int
+    app_name: str
+
+
 class ServiceUsageSchema(BaseModel):
     """Who depends on a service. Extended by the sandbox step with further lists."""
 
@@ -110,6 +121,8 @@ class ServiceUsageSchema(BaseModel):
     repositories: List[ServiceUsageRepositorySchema] = Field(default_factory=list)
     middlewares: List[ServiceUsageMiddlewareSchema] = Field(default_factory=list)
     scheduled_tasks: List[ServiceUsageScheduledTaskSchema] = Field(default_factory=list)
+    # Sandbox services only: apps that use the service as their default sandbox.
+    apps_using_as_default: List[ServiceUsageAppSchema] = Field(default_factory=list)
 
 
 class MoveAgentsRequestSchema(BaseModel):

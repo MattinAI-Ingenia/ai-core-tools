@@ -19,7 +19,10 @@ from schemas.sandbox_service_schemas import (
 )
 from .auth_utils import get_current_user_oauth
 from routers.controls.role_authorization import require_min_role, AppRole
+from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from services.service_lifecycle_service import ServiceLifecycleService
 from tools.sandbox.factory import SandboxProviderUnavailableError
+from utils.service_lifecycle import SERVICE_KIND_SANDBOX
 
 # Import logger
 from utils.logger import get_logger
@@ -196,6 +199,24 @@ async def get_sandbox_service(
         )
 
 
+@sandbox_services_router.get("/{service_id}/used-by",
+                             summary="List what depends on a sandbox service",
+                             tags=["Sandbox Services"],
+                             response_model=ServiceUsageSchema)
+async def get_sandbox_service_used_by(
+    app_id: int,
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    db: Annotated[Session, Depends(get_db)]
+):
+    """Agents (own or inheriting the app default), apps using it as default and scheduled tasks of this app."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_SANDBOX, service_id, app_id)
+    if usage is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SANDBOX_SERVICE_NOT_FOUND_ERROR)
+    return usage
+
+
 @sandbox_services_router.post("/{service_id}",
                               summary="Create or update sandbox service",
                               tags=["Sandbox Services"],
@@ -213,7 +234,9 @@ async def create_or_update_sandbox_service(
     """
 
     try:
-        result = SandboxServiceService.create_or_update_sandbox_service(db, app_id, service_id, service_data)
+        result = SandboxServiceService.create_or_update_sandbox_service(
+            db, app_id, service_id, service_data, actor_id=int(auth_context.identity.id)
+        )
         if result is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

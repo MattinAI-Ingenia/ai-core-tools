@@ -45,7 +45,7 @@ from tools.sandbox import (
     create_sandbox_repl_tools,
     resolve_provider,
 )
-from tools.sandbox.factory import SandboxProviderUnavailableError
+from tools.sandbox.factory import SandboxProviderUnavailableError, SandboxServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -347,9 +347,12 @@ async def create_agent(
             ci_provider_for_prompt = sandbox_provider or resolve_provider(agent)
             ci_languages = ci_provider_for_prompt.get_supported_languages()
         except SandboxProviderUnavailableError as exc:
-            logger.warning(
-                "Code interpreter unavailable for agent %s: %s", agent.agent_id, exc
-            )
+            if isinstance(exc, SandboxServiceRetiredError):
+                logger.debug("Code interpreter unavailable for agent %s: sandbox service retired", agent.agent_id)
+            else:
+                logger.warning(
+                    "Code interpreter unavailable for agent %s: %s", agent.agent_id, exc
+                )
             ci_provider_for_prompt = None
             ci_languages = []
 
@@ -578,11 +581,15 @@ async def create_agent(
             try:
                 sandbox_provider = ci_provider_for_prompt or resolve_provider(agent)
             except SandboxProviderUnavailableError as exc:
-                logger.warning(
-                    "Skipping code interpreter tools for agent %s: %s",
-                    agent.agent_id,
-                    exc,
-                )
+                if isinstance(exc, SandboxServiceRetiredError):
+                    logger.debug("Skipping code interpreter tools for agent %s: sandbox service retired",
+                                 agent.agent_id)
+                else:
+                    logger.warning(
+                        "Skipping code interpreter tools for agent %s: %s",
+                        agent.agent_id,
+                        exc,
+                    )
                 sandbox_provider = None
         if sandbox_provider is not None and sandbox_handle is None:
             logger.warning(
@@ -1145,11 +1152,15 @@ class IACTTool(BaseTool):
                 sandbox_provider = resolve_provider(agent)
                 instance.sandbox_provider = sandbox_provider
             except SandboxProviderUnavailableError as exc:
-                logger.warning(
-                    "Skipping code interpreter tools for sub-agent %s: %s",
-                    agent.agent_id,
-                    exc,
-                )
+                if isinstance(exc, SandboxServiceRetiredError):
+                    logger.debug("Skipping code interpreter tools for sub-agent %s: sandbox service retired",
+                                 agent.agent_id)
+                else:
+                    logger.warning(
+                        "Skipping code interpreter tools for sub-agent %s: %s",
+                        agent.agent_id,
+                        exc,
+                    )
 
         if agent.enable_code_interpreter and working_dir and sandbox_handle is not None and sandbox_provider is not None:
             repl_tools = create_sandbox_repl_tools(

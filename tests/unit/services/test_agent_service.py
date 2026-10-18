@@ -479,6 +479,7 @@ class TestSandboxServiceIdValidation:
 
         system_sandbox_service = MagicMock()
         system_sandbox_service.app_id = None  # system/platform-scoped
+        system_sandbox_service.end_of_service_at = None
 
         mocker.patch('services.agent_service.AgentRepository.get_agent_by_id_and_type', return_value=None)
         mocker.patch(
@@ -501,6 +502,7 @@ class TestSandboxServiceIdValidation:
 
         same_app_sandbox_service = MagicMock()
         same_app_sandbox_service.app_id = 1
+        same_app_sandbox_service.end_of_service_at = None
 
         mocker.patch('services.agent_service.AgentRepository.get_agent_by_id_and_type', return_value=None)
         mocker.patch(

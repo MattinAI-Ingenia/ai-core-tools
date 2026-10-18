@@ -18,6 +18,7 @@ from models.embedding_service import EmbeddingService
 from models.middleware import AgentMiddleware, Middleware, MiddlewareType
 from models.ocr_agent import OCRAgent
 from models.repository import Repository
+from models.sandbox_service import SandboxService
 from models.scheduled_task import ScheduledTask
 from models.silo import Silo
 
@@ -55,6 +56,8 @@ class AgentRefs:
     video_ai_service_id: Optional[int]
     media_embedding_service_id: Optional[int]
     silo_id: Optional[int]
+    sandbox_service_id: Optional[int] = None
+    enable_code_interpreter: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,16 @@ class ServiceUsageRepository:
     def embedding_service_snapshots(db: Session, app_id: int) -> Dict[int, ServiceSnapshot]:
         """Embedding services visible to the app (its own + system), keyed by id. One query."""
         return ServiceUsageRepository._snapshots(db, EmbeddingService, app_id)
+
+    @staticmethod
+    def sandbox_service_snapshots(db: Session, app_id: int) -> Dict[int, ServiceSnapshot]:
+        """Sandbox services visible to the app (its own + system), keyed by id. One query."""
+        return ServiceUsageRepository._snapshots(db, SandboxService, app_id)
+
+    @staticmethod
+    def app_default_sandbox_service_id(db: Session, app_id: int) -> Optional[int]:
+        """The app's ``default_sandbox_service_id``. One query."""
+        return db.execute(select(App.default_sandbox_service_id).where(App.app_id == app_id)).scalar_one_or_none()
 
     @staticmethod
     def silo_refs(db: Session, app_id: int) -> Dict[int, SiloRefs]:
@@ -145,6 +158,7 @@ class ServiceUsageRepository:
             select(
                 Agent.agent_id, Agent.service_id, ocr.c.vision_service_id, Agent.transcription_service_id,
                 Agent.video_ai_service_id, Agent.media_embedding_service_id, Agent.silo_id,
+                Agent.sandbox_service_id, Agent.enable_code_interpreter,
             )
             .select_from(Agent)
             .outerjoin(ocr, ocr.c.agent_id == Agent.agent_id)
@@ -172,6 +186,8 @@ class UsageAgentRow:
     video_ai_service_id: Optional[int]
     media_embedding_service_id: Optional[int]
     silo_id: Optional[int]
+    sandbox_service_id: Optional[int] = None
+    enable_code_interpreter: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,6 +219,12 @@ class UsageTaskRow:
     app_name: Optional[str]
 
 
+@dataclass(frozen=True)
+class UsageAppRow:
+    app_id: int
+    app_name: str
+
+
 class ServiceUsageQueries:
     """"Used by" lookups. ``app_id`` set -> only that app's rows (tenant scope); ``None`` -> every app
     (platform-admin scope). Each method is one statement; ``App`` is joined for the app name."""
@@ -232,7 +254,8 @@ class ServiceUsageQueries:
             select(
                 Agent.agent_id, Agent.name, Agent.app_id, App.name.label("app_name"), Agent.service_id,
                 ocr.c.vision_service_id, Agent.transcription_service_id, Agent.video_ai_service_id,
-                Agent.media_embedding_service_id, Agent.silo_id,
+                Agent.media_embedding_service_id, Agent.silo_id, Agent.sandbox_service_id,
+                Agent.enable_code_interpreter,
             )
             .select_from(Agent)
             .join(App, App.app_id == Agent.app_id)
@@ -342,6 +365,34 @@ class ServiceUsageQueries:
     @staticmethod
     def embedding_tasks(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageTaskRow]:
         return ServiceUsageQueries._tasks(db, ServiceUsageQueries._embedding_agent_condition(service_id, app_id), app_id)
+
+    # ---- Sandbox service ----
+
+    @staticmethod
+    def sandbox_apps(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageAppRow]:
+        """Apps whose ``default_sandbox_service_id`` is this service (only ``app_id`` in app scope)."""
+        stmt = select(App.app_id, App.name).where(App.default_sandbox_service_id == service_id).order_by(App.app_id)
+        if app_id is not None:
+            stmt = stmt.where(App.app_id == app_id)
+        return [UsageAppRow(*r) for r in db.execute(stmt)]
+
+    @staticmethod
+    def _sandbox_agent_condition(service_id: int, app_id: Optional[int]):
+        """Agents pointing at the service, or inheriting it from their app's default."""
+        default_app_ids = select(App.app_id).where(App.default_sandbox_service_id == service_id)
+        return or_(
+            Agent.sandbox_service_id == service_id,
+            (Agent.sandbox_service_id.is_(None)) & Agent.enable_code_interpreter.is_(True)
+            & Agent.app_id.in_(default_app_ids),
+        )
+
+    @staticmethod
+    def sandbox_agents(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageAgentRow]:
+        return ServiceUsageQueries._agents(db, ServiceUsageQueries._sandbox_agent_condition(service_id, app_id), app_id)
+
+    @staticmethod
+    def sandbox_tasks(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageTaskRow]:
+        return ServiceUsageQueries._tasks(db, ServiceUsageQueries._sandbox_agent_condition(service_id, app_id), app_id)
 
     # ---- Middlewares (app scope only) ----
 

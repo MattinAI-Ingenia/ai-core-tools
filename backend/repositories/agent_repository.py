@@ -352,7 +352,12 @@ class AgentRepository:
         # Get sandbox services
         sandbox_services = AgentRepository.get_sandbox_services_by_app_id(db, app_id)
         sandbox_services_list = [
-            {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+            {
+                "service_id": s.service_id,
+                "name": f"[System] {s.name}" if s.app_id is None else s.name,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
+            }
             for s in sandbox_services
         ]
 

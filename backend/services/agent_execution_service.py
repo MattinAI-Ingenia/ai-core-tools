@@ -1289,6 +1289,7 @@ class AgentExecutionService:
             from tools.sandbox.factory import (
                 resolve_provider_and_service_id,
                 SandboxProviderUnavailableError,
+                SandboxServiceRetiredError,
             )
             from services.sandbox_session_service import SandboxSessionService
 
@@ -1302,7 +1303,11 @@ class AgentExecutionService:
                 # fields unset. Callers (e.g. tools/agentTools.py) already treat
                 # a None sandbox_handle/sandbox_provider as "code interpreter
                 # unusable this turn" and continue with the rest of the chain.
-                logger.warning("Sandbox provider unavailable for agent %s: %s", agent_id, exc)
+                if isinstance(exc, SandboxServiceRetiredError):
+                    # The resolution guard already logged the structured WARNING.
+                    logger.debug("Sandbox provider unavailable for agent %s: sandbox service retired", agent_id)
+                else:
+                    logger.warning("Sandbox provider unavailable for agent %s: %s", agent_id, exc)
                 resolved_sandbox_provider = None
                 resolved_sandbox_service_id = None
 
