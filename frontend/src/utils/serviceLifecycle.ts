@@ -1,3 +1,5 @@
+import type { LifecycleStatus } from '../types/services';
+
 /**
  * End-of-service helpers and centralised strings (NFR-6: no hardcoded copy in components).
  * Lifecycle status is computed by the backend (D-9) — only dates are handled here.
@@ -24,6 +26,39 @@ export function isoFromDateInput(value: string): string | null {
   return value ? `${value}T00:00:00Z` : null;
 }
 
+/** Minimal shape of a service offered in a selection dropdown (AI, embedding or sandbox). */
+export interface ServiceOptionLike {
+  readonly service_id: number;
+  readonly name: string;
+  readonly lifecycle_status?: LifecycleStatus;
+  readonly end_of_service_at?: string | null;
+  readonly deprecation_notice?: string | null;
+}
+
+/**
+ * D-4: retired services are not offered for new selection. A retired service stays in the list only
+ * when it is the field's saved value (`currentValue` must come from the loaded entity, not the form).
+ */
+export function selectableServiceOptions<T extends ServiceOptionLike>(
+  options: readonly T[] | null | undefined,
+  currentValue: number | null | undefined,
+): T[] {
+  return (options ?? []).filter(
+    (o) => o.lifecycle_status !== 'retired' || (currentValue != null && o.service_id === currentValue),
+  );
+}
+
+/** Option text: `label` (default the service name) plus "(retired)" / "(ends <date>)" when applicable. */
+export function serviceOptionLabel(option: ServiceOptionLike, label: string = option.name): string {
+  if (option.lifecycle_status === 'retired') {
+    return `${label} ${SERVICE_LIFECYCLE_STRINGS.optionRetired}`;
+  }
+  if (option.lifecycle_status === 'deprecated' && option.end_of_service_at) {
+    return `${label} ${SERVICE_LIFECYCLE_STRINGS.optionEnds(formatEndOfServiceDate(option.end_of_service_at))}`;
+  }
+  return label;
+}
+
 /** True when the picked day is today or earlier (UTC), i.e. saving retires the service now. */
 export function isDateInputRetiredNow(value: string): boolean {
   if (!value) return false;
@@ -32,6 +67,12 @@ export function isDateInputRetiredNow(value: string): boolean {
 }
 
 export const SERVICE_LIFECYCLE_STRINGS = {
+  optionRetired: '(retired)',
+  optionEnds: (date: string) => `(ends ${date})`,
+  optionStatusRetired: (date: string | null) =>
+    date ? `This service was retired on ${date}. Choose another one to save a change here.` : 'This service is retired. Choose another one to save a change here.',
+  optionStatusDeprecated: (date: string | null) =>
+    date ? `This service is deprecated and ends on ${date}.` : 'This service is deprecated.',
   retired: 'Retired',
   retiredOn: (date: string) => `Retired on ${date}`,
   deprecatedNoDate: 'Deprecated',
