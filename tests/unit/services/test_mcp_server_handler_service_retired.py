@@ -29,7 +29,7 @@ async def test_tools_call_returns_is_error_result_with_message(caplog):
     session = MagicMock()
     with (
         patch.object(module, "SessionLocal", return_value=session),
-        patch.object(handler, "_get_mcp_server", create=True, return_value=MagicMock()),
+        patch.object(handler, "_get_mcp_server", return_value=MagicMock()),
         patch.object(handler, "_find_agent_by_tool_name", return_value=agent),
         caplog.at_level(logging.WARNING),
     ):
