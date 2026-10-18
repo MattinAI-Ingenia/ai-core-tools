@@ -24,7 +24,7 @@ const alertStyles = {
     container: 'bg-red-50 border-red-200 dark:bg-red-900/30 dark:border-red-800',
     iconColor: 'text-red-400 dark:text-red-300',
     titleColor: 'text-red-800 dark:text-red-200',
-    messageColor: 'text-red-600 dark:text-red-200',
+    messageColor: 'text-red-700 dark:text-red-200',
     buttonColor: 'text-red-600 hover:text-red-800 dark:text-red-300 dark:hover:text-red-100',
   },
   warning: {
@@ -74,7 +74,7 @@ const Alert: React.FC<AlertProps> = ({
           <h3 className={`text-sm font-medium ${styles.titleColor}`}>
             {title || defaultTitle}
           </h3>
-          <p className={`text-sm ${styles.messageColor} mt-1 whitespace-pre-line`}>{message}</p>
+          <div className={`text-sm ${styles.messageColor} mt-1 whitespace-pre-line`}>{message}</div>
           {onDismiss && (
             <button
               type="button"

@@ -23,6 +23,8 @@ import type { A2ACardVisibility, AgentA2AFieldErrors, AgentA2AValue } from '../c
 import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import { randomId } from '../utils/randomId';
+import type { ServiceLifecycleWarning } from '../types/services';
+import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
 
 // Define the Agent types
 interface Agent {
@@ -35,6 +37,7 @@ interface Agent {
   is_tool: boolean;
   has_memory: boolean;
   enable_code_interpreter: boolean;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   skill_router_enabled?: boolean;
   service_id?: number;
   sandbox_service_id?: number;
@@ -788,6 +791,10 @@ function AgentFormPage() {
             Back to Agents
           </button>
         </div>
+
+        {agent && (
+          <ServiceLifecycleAlert warnings={agent.lifecycle_warnings} variant="full" className="mb-6" />
+        )}
 
         {/* Error Message */}
         {error && (

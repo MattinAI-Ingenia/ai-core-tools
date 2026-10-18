@@ -78,8 +78,7 @@ export type ServiceLifecycleWarningRole =
   | 'silo_embedding'
   | 'middleware'
   | 'embedding'
-  | 'sandbox'
-  | 'sandbox_app_default';
+  | 'sandbox';
 
 /** Mirrors `ServiceLifecycleWarningSchema` (backend/schemas/service_lifecycle_schemas.py). */
 export interface ServiceLifecycleWarning {

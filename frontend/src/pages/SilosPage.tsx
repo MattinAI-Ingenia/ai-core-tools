@@ -12,6 +12,8 @@ import ImportModal, { type ConflictMode, type ImportResponse } from '../componen
 import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
+import type { ServiceLifecycleWarning } from '../types/services';
+import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
 
 // ...existing code...
 interface Silo {
@@ -22,6 +24,7 @@ interface Silo {
   created_at?: string;
   docs_count: number;
   vector_db_type?: string;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 function SilosPage() {
@@ -309,6 +312,7 @@ function SilosPage() {
                         </span>
                       )}
                     </div>
+                    <ServiceLifecycleAlert warnings={silo.lifecycle_warnings} variant="compact" className="mt-0.5" />
                   </div>
                 </div>
               )

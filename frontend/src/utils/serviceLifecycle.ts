@@ -51,6 +51,30 @@ export const SERVICE_LIFECYCLE_STRINGS = {
     `Agents using this AI service stop working on ${date}. Move them to another AI service before then.`,
 } as const;
 
+export const SERVICE_WARNING_STRINGS = {
+  titleRetired: 'Retired services in use',
+  titleDeprecated: 'Deprecated services in use',
+  retiredStatus: (date: string) => `Retired on ${date}`,
+  deprecatedStatus: (date: string) => `Deprecated, ends ${date}`,
+  roles: {
+    llm: 'LLM',
+    ocr_vision: 'OCR vision',
+    transcription: 'Transcription',
+    video: 'Video',
+    media_embedding: 'Media embedding',
+    embedding: 'Embedding',
+    sandbox: 'Code interpreter sandbox',
+    sandbox_app_default: 'Code interpreter sandbox (app default)',
+  },
+  silo_embedding: (via: string) => `Embedding (via silo ${via})`,
+  middleware: (via: string) => `Middleware ${via}`,
+  sandboxWarning: (date: string) =>
+    `The code interpreter stops working on ${date}. Select another sandbox service before then.`,
+  compactRetired: (n: number) => `Retired ${n === 1 ? 'service' : 'services'} (${n})`,
+  compactDeprecated: (n: number) => `Deprecated ${n === 1 ? 'service' : 'services'} (${n})`,
+  compactAria: (items: string) => `Service lifecycle: ${items}`,
+} as const;
+
 export const SERVICE_USAGE_STRINGS = {
   action: 'Used by',
   title: (name: string) => `Used by: ${name}`,

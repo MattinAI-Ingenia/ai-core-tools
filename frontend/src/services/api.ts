@@ -2,7 +2,7 @@ import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { HitlCancelResult, HitlDecision, HitlPendingApproval, StreamEvent } from '../types/streaming';
-import type { MoveAgentsResult, ServiceLifecycleFields, ServiceUsage } from '../types/services';
+import type { MoveAgentsResult, ServiceLifecycleFields, ServiceLifecycleWarning, ServiceUsage } from '../types/services';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
@@ -120,6 +120,7 @@ export interface AgentRagFixedFilter {
 }
 
 export interface Agent {
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   agent_id: number;
   name: string;
   description?: string;
@@ -218,6 +219,7 @@ export interface ScheduledTask {
   created_at: string;
   updated_at: string;
   next_run_at?: string | null;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export type OutputContentMode = 'result' | 'excerpt' | 'link_only';
@@ -368,6 +370,7 @@ export interface Silo {
   description?: string;
   type?: string;
   created_at?: string;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   docs_count: number;
   vector_db_type?: string;
   metadata_definition_id?: number;
@@ -406,6 +409,7 @@ export interface RepositoryListItem {
   name: string;
   created_at: string;
   resource_count: number;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export interface Media {
@@ -423,6 +427,7 @@ export interface Media {
 }
 
 export interface Repository {
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   repository_id: number;
   name: string;
   created_at: string;
