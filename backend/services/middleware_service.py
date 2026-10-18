@@ -147,9 +147,9 @@ class MiddlewareService:
                 raise MiddlewareValidationError(str(exc)) from exc
 
     @staticmethod
-    def names_using_ai_service(db: Session, app_id: int, service_id: int) -> List[str]:
-        """Names of the app's middlewares whose config references this AI service."""
-        names = []
+    def using_ai_service(db: Session, app_id: int, service_id: int) -> List[Middleware]:
+        """The app's middlewares whose config references this AI service (sorted by name)."""
+        found = []
         types = (MiddlewareType.PII, MiddlewareType.SUMMARIZATION)
         for middleware in MiddlewareRepository.get_by_app_id_and_types(db, app_id, types):
             try:
@@ -157,8 +157,13 @@ class MiddlewareService:
             except ValidationError:
                 continue
             if service_id in referenced_ai_service_ids(config):
-                names.append(middleware.name)
-        return sorted(names)
+                found.append(middleware)
+        return sorted(found, key=lambda m: m.name)
+
+    @staticmethod
+    def names_using_ai_service(db: Session, app_id: int, service_id: int) -> List[str]:
+        """Names of the app's middlewares whose config references this AI service."""
+        return [m.name for m in MiddlewareService.using_ai_service(db, app_id, service_id)]
 
     @staticmethod
     def rename_tool_in_approval_rules(db: Session, app_id: Optional[int], old_name: str, new_name: str) -> None:

@@ -8,14 +8,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from models.agent import Agent
 from models.ai_service import AIService
+from models.app import App
 from models.embedding_service import EmbeddingService
 from models.middleware import AgentMiddleware, Middleware, MiddlewareType
 from models.ocr_agent import OCRAgent
+from models.repository import Repository
+from models.scheduled_task import ScheduledTask
 from models.silo import Silo
 
 
@@ -150,3 +153,234 @@ class ServiceUsageRepository:
         if ids is not None:
             stmt = stmt.where(Agent.agent_id.in_(ids))
         return {row.agent_id: AgentRefs(*row) for row in db.execute(stmt)}
+
+
+# ==================== "Used by" and bulk move ====================
+
+
+@dataclass(frozen=True)
+class UsageAgentRow:
+    """An agent that points at the service, with the raw reference columns (roles are computed by the service)."""
+
+    agent_id: int
+    name: str
+    app_id: int
+    app_name: Optional[str]
+    service_id: Optional[int]
+    vision_service_id: Optional[int]
+    transcription_service_id: Optional[int]
+    video_ai_service_id: Optional[int]
+    media_embedding_service_id: Optional[int]
+    silo_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class UsageSiloRow:
+    silo_id: int
+    name: str
+    app_id: int
+    app_name: Optional[str]
+    embedding_service_id: Optional[int]
+    transcription_service_id: Optional[int]
+    video_ai_service_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class UsageRepositoryRow:
+    repository_id: int
+    name: Optional[str]
+    silo_id: int
+    app_id: int
+    app_name: Optional[str]
+
+
+@dataclass(frozen=True)
+class UsageTaskRow:
+    task_id: int
+    name: str
+    agent_id: int
+    app_id: int
+    app_name: Optional[str]
+
+
+class ServiceUsageQueries:
+    """"Used by" lookups. ``app_id`` set -> only that app's rows (tenant scope); ``None`` -> every app
+    (platform-admin scope). Each method is one statement; ``App`` is joined for the app name."""
+
+    @staticmethod
+    def _scope(stmt, model, app_id: Optional[int]):
+        return stmt if app_id is None else stmt.where(model.app_id == app_id)
+
+    @staticmethod
+    def service_snapshot(db: Session, model, service_id: int) -> Optional[ServiceSnapshot]:
+        """Lifecycle columns of one AI / embedding service, whichever app owns it."""
+        row = db.execute(
+            select(model.service_id, model.name, model.app_id, model.end_of_service_at, model.deprecation_notice)
+            .where(model.service_id == service_id)
+        ).first()
+        return ServiceSnapshot(*row) if row else None
+
+    @staticmethod
+    def _silo_ids_where(condition, app_id: Optional[int]):
+        stmt = select(Silo.silo_id).where(condition)
+        return ServiceUsageQueries._scope(stmt, Silo, app_id)
+
+    @staticmethod
+    def _agents(db: Session, condition, app_id: Optional[int]) -> List[UsageAgentRow]:
+        ocr = OCRAgent.__table__
+        stmt = (
+            select(
+                Agent.agent_id, Agent.name, Agent.app_id, App.name.label("app_name"), Agent.service_id,
+                ocr.c.vision_service_id, Agent.transcription_service_id, Agent.video_ai_service_id,
+                Agent.media_embedding_service_id, Agent.silo_id,
+            )
+            .select_from(Agent)
+            .join(App, App.app_id == Agent.app_id)
+            .outerjoin(ocr, ocr.c.agent_id == Agent.agent_id)
+            .where(condition)
+            .order_by(Agent.agent_id)
+        )
+        return [UsageAgentRow(*r) for r in db.execute(ServiceUsageQueries._scope(stmt, Agent, app_id))]
+
+    @staticmethod
+    def _silos(db: Session, condition, app_id: Optional[int]) -> List[UsageSiloRow]:
+        stmt = (
+            select(
+                Silo.silo_id, Silo.name, Silo.app_id, App.name.label("app_name"), Silo.embedding_service_id,
+                Silo.transcription_service_id, Silo.video_ai_service_id,
+            )
+            .join(App, App.app_id == Silo.app_id)
+            .where(condition)
+            .order_by(Silo.silo_id)
+        )
+        return [UsageSiloRow(*r) for r in db.execute(ServiceUsageQueries._scope(stmt, Silo, app_id))]
+
+    @staticmethod
+    def _repositories(db: Session, silo_condition, app_id: Optional[int]) -> List[UsageRepositoryRow]:
+        silo_ids = ServiceUsageQueries._silo_ids_where(silo_condition, app_id)
+        stmt = (
+            select(Repository.repository_id, Repository.name, Repository.silo_id, Repository.app_id,
+                   App.name.label("app_name"))
+            .join(App, App.app_id == Repository.app_id)
+            .where(Repository.silo_id.in_(silo_ids))
+            .order_by(Repository.repository_id)
+        )
+        return [UsageRepositoryRow(*r) for r in db.execute(ServiceUsageQueries._scope(stmt, Repository, app_id))]
+
+    @staticmethod
+    def _tasks(db: Session, agent_condition, app_id: Optional[int]) -> List[UsageTaskRow]:
+        agent_ids = ServiceUsageQueries._scope(select(Agent.agent_id).where(agent_condition), Agent, app_id)
+        stmt = (
+            select(ScheduledTask.id, ScheduledTask.name, ScheduledTask.agent_id, ScheduledTask.app_id,
+                   App.name.label("app_name"))
+            .join(App, App.app_id == ScheduledTask.app_id)
+            .where(ScheduledTask.agent_id.in_(agent_ids))
+            .order_by(ScheduledTask.id)
+        )
+        return [UsageTaskRow(*r) for r in db.execute(ServiceUsageQueries._scope(stmt, ScheduledTask, app_id))]
+
+    # ---- AI service ----
+
+    @staticmethod
+    def _ai_agent_condition(service_id: int):
+        ocr = OCRAgent.__table__
+        return or_(
+            Agent.service_id == service_id,
+            ocr.c.vision_service_id == service_id,
+            Agent.transcription_service_id == service_id,
+            Agent.video_ai_service_id == service_id,
+        )
+
+    @staticmethod
+    def _ai_silo_condition(service_id: int):
+        return or_(Silo.transcription_service_id == service_id, Silo.video_ai_service_id == service_id)
+
+    @staticmethod
+    def ai_agents(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageAgentRow]:
+        return ServiceUsageQueries._agents(db, ServiceUsageQueries._ai_agent_condition(service_id), app_id)
+
+    @staticmethod
+    def ai_silos(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageSiloRow]:
+        return ServiceUsageQueries._silos(db, ServiceUsageQueries._ai_silo_condition(service_id), app_id)
+
+    @staticmethod
+    def ai_repositories(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageRepositoryRow]:
+        return ServiceUsageQueries._repositories(db, ServiceUsageQueries._ai_silo_condition(service_id), app_id)
+
+    @staticmethod
+    def ai_tasks(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageTaskRow]:
+        # The subquery selects from Agent only, so the OCR-table condition is rewritten on Agent ids.
+        ocr = OCRAgent.__table__
+        ocr_agent_ids = select(ocr.c.agent_id).where(ocr.c.vision_service_id == service_id)
+        condition = or_(
+            Agent.service_id == service_id,
+            Agent.transcription_service_id == service_id,
+            Agent.video_ai_service_id == service_id,
+            Agent.agent_id.in_(ocr_agent_ids),
+        )
+        return ServiceUsageQueries._tasks(db, condition, app_id)
+
+    # ---- Embedding service ----
+
+    @staticmethod
+    def _embedding_agent_condition(service_id: int, app_id: Optional[int]):
+        silo_ids = ServiceUsageQueries._silo_ids_where(Silo.embedding_service_id == service_id, app_id)
+        return or_(Agent.media_embedding_service_id == service_id, Agent.silo_id.in_(silo_ids))
+
+    @staticmethod
+    def embedding_agents(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageAgentRow]:
+        return ServiceUsageQueries._agents(db, ServiceUsageQueries._embedding_agent_condition(service_id, app_id), app_id)
+
+    @staticmethod
+    def embedding_silos(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageSiloRow]:
+        return ServiceUsageQueries._silos(db, Silo.embedding_service_id == service_id, app_id)
+
+    @staticmethod
+    def embedding_repositories(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageRepositoryRow]:
+        return ServiceUsageQueries._repositories(db, Silo.embedding_service_id == service_id, app_id)
+
+    @staticmethod
+    def embedding_tasks(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageTaskRow]:
+        return ServiceUsageQueries._tasks(db, ServiceUsageQueries._embedding_agent_condition(service_id, app_id), app_id)
+
+    # ---- Middlewares (app scope only) ----
+
+    @staticmethod
+    def middleware_agent_ids(db: Session, app_id: int, middleware_ids: Sequence[int]) -> Dict[int, List[int]]:
+        """``{middleware_id: [agent_id, ...]}`` for the app's agents attached to these middlewares. One query."""
+        result: Dict[int, List[int]] = {}
+        if not middleware_ids:
+            return result
+        stmt = (
+            select(AgentMiddleware.middleware_id, AgentMiddleware.agent_id)
+            .join(Agent, Agent.agent_id == AgentMiddleware.agent_id)
+            .where(Agent.app_id == app_id, AgentMiddleware.middleware_id.in_(list(middleware_ids)))
+            .order_by(AgentMiddleware.agent_id)
+        )
+        for middleware_id, agent_id in db.execute(stmt):
+            result.setdefault(middleware_id, []).append(agent_id)
+        return result
+
+    # ---- Bulk move ----
+
+    @staticmethod
+    def count_agents_on_ai_service(db: Session, app_id: int, service_id: int) -> int:
+        """Agents of the app whose text model (``Agent.service_id``) is this service."""
+        return db.execute(
+            select(func.count()).select_from(Agent).where(Agent.app_id == app_id, Agent.service_id == service_id)
+        ).scalar_one()
+
+    @staticmethod
+    def move_agents(db: Session, app_id: int, source_id: int, target_id: int) -> List[int]:
+        """Repoint ``Agent.service_id`` of every agent of the app in ONE statement; returns the moved ids.
+
+        Does not commit. OCR agents live in the Agent table (STI), so their text model moves as well.
+        """
+        stmt = (
+            update(Agent)
+            .where(Agent.app_id == app_id, Agent.service_id == source_id)
+            .values(service_id=target_id)
+            .returning(Agent.agent_id)
+            .execution_options(synchronize_session=False)
+        )
+        return sorted(db.execute(stmt).scalars().all())

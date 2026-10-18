@@ -6,21 +6,37 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from models.ai_service import AIService
+from models.embedding_service import EmbeddingService
 from repositories.service_usage_repository import (
     AgentRefs,
     ServiceSnapshot,
+    ServiceUsageQueries,
     ServiceUsageRepository,
     SiloRefs,
 )
 from schemas.middleware_schemas import parse_middleware_config, referenced_ai_service_ids
-from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
+from schemas.service_lifecycle_schemas import (
+    MoveAgentsResponseSchema,
+    ServiceLifecycleWarningSchema,
+    ServiceUsageAgentSchema,
+    ServiceUsageMiddlewareSchema,
+    ServiceUsageRepositorySchema,
+    ServiceUsageSchema,
+    ServiceUsageScheduledTaskSchema,
+    ServiceUsageSiloSchema,
+)
+from services.middleware_service import MiddlewareService
 from services.system_settings_service import SystemSettingsService
+from utils.error_handlers import ConflictError, NotFoundError
+from utils.error_handlers import ValidationError as AppValidationError
 from utils.logger import get_logger
 from utils.service_lifecycle import (
     SERVICE_KIND_AI,
     SERVICE_KIND_EMBEDDING,
     LifecycleStatus,
     compute_lifecycle_status,
+    is_retired,
     to_utc,
 )
 
@@ -235,3 +251,183 @@ class ServiceLifecycleService:
     def warnings_for_task(task: Any, ctx: LifecycleContext) -> List[ServiceLifecycleWarningSchema]:
         """A scheduled task depends on what its agent depends on."""
         return ServiceLifecycleService.warnings_for_agent(ctx.agent_refs.get(getattr(task, "agent_id", None)), ctx)
+
+    # ==================== "Used by" and bulk move (AD-10) ====================
+
+    _USAGE_MODELS = {SERVICE_KIND_AI: AIService, SERVICE_KIND_EMBEDDING: EmbeddingService}
+
+    @staticmethod
+    def agent_roles(row: Any, kind: str, service_id: int, embedding_silo_ids: Optional[set] = None) -> List[str]:
+        """Roles in which an agent row uses the service, in a stable order."""
+        roles: List[str] = []
+        if kind == SERVICE_KIND_AI:
+            for attr, role in (
+                ("service_id", "llm"),
+                ("vision_service_id", "ocr_vision"),
+                ("transcription_service_id", "transcription"),
+                ("video_ai_service_id", "video"),
+            ):
+                if getattr(row, attr, None) == service_id:
+                    roles.append(role)
+        else:
+            if getattr(row, "media_embedding_service_id", None) == service_id:
+                roles.append("media_embedding")
+            if row.silo_id is not None and row.silo_id in (embedding_silo_ids or set()):
+                roles.append("silo_embedding")
+        return roles
+
+    @staticmethod
+    def silo_roles(row: Any, kind: str, service_id: int) -> List[str]:
+        """Roles in which a silo uses the service."""
+        if kind == SERVICE_KIND_EMBEDDING:
+            return ["embedding"] if row.embedding_service_id == service_id else []
+        roles = []
+        if row.transcription_service_id == service_id:
+            roles.append("transcription")
+        if row.video_ai_service_id == service_id:
+            roles.append("video")
+        return roles
+
+    @staticmethod
+    def get_usage(
+        db: Session, kind: str, service_id: int, app_id: Optional[int]
+    ) -> Optional[ServiceUsageSchema]:
+        """Everything that depends on an AI / embedding service, or ``None`` (-> 404) when the caller may not see it.
+
+        ``app_id`` set (app scope): the service must be the app's or a system one, and only that
+        app's resources are listed. ``app_id=None`` (platform-admin scope): the service must be a
+        system service, resources are listed across apps with their app name.
+        """
+        model = ServiceLifecycleService._USAGE_MODELS.get(kind)
+        if model is None:
+            raise ValueError(f"Unsupported service kind: {kind}")
+        snapshot = ServiceUsageQueries.service_snapshot(db, model, service_id)
+        if snapshot is None:
+            return None
+        if app_id is None:
+            if snapshot.app_id is not None:
+                return None
+        elif snapshot.app_id is not None and snapshot.app_id != app_id:
+            return None
+
+        warning_days = ServiceLifecycleService.warning_days(db)
+        q = ServiceUsageQueries
+        if kind == SERVICE_KIND_AI:
+            agents, silos = q.ai_agents(db, service_id, app_id), q.ai_silos(db, service_id, app_id)
+            repos, tasks = q.ai_repositories(db, service_id, app_id), q.ai_tasks(db, service_id, app_id)
+            embedding_silo_ids: set = set()
+        else:
+            agents, silos = q.embedding_agents(db, service_id, app_id), q.embedding_silos(db, service_id, app_id)
+            repos, tasks = q.embedding_repositories(db, service_id, app_id), q.embedding_tasks(db, service_id, app_id)
+            embedding_silo_ids = {s.silo_id for s in silos}
+
+        admin = app_id is None
+
+        def name_of(row: Any) -> Optional[str]:
+            return row.app_name if admin else None
+
+        middlewares: List[ServiceUsageMiddlewareSchema] = []
+        if kind == SERVICE_KIND_AI and not admin:
+            # Middleware validation forbids referencing system services, but a system id can still be
+            # looked at from an app; the app's own middlewares are checked either way.
+            found = MiddlewareService.using_ai_service(db, app_id, service_id)
+            attached = q.middleware_agent_ids(db, app_id, [m.middleware_id for m in found])
+            middlewares = [
+                ServiceUsageMiddlewareSchema(
+                    middleware_id=m.middleware_id,
+                    name=m.name,
+                    middleware_type=getattr(m.middleware_type, "value", str(m.middleware_type)),
+                    agent_ids=attached.get(m.middleware_id, []),
+                    app_id=m.app_id,
+                )
+                for m in found
+            ]
+
+        agent_items = []
+        for row in agents:
+            roles = ServiceLifecycleService.agent_roles(row, kind, service_id, embedding_silo_ids)
+            if roles:
+                agent_items.append(ServiceUsageAgentSchema(
+                    agent_id=row.agent_id, name=row.name, roles=roles, app_id=row.app_id, app_name=name_of(row)))
+        silo_items = [
+            ServiceUsageSiloSchema(
+                silo_id=r.silo_id, name=r.name, roles=ServiceLifecycleService.silo_roles(r, kind, service_id),
+                app_id=r.app_id, app_name=name_of(r))
+            for r in silos
+        ]
+        return ServiceUsageSchema(
+            service_id=snapshot.service_id,
+            service_name=snapshot.name,
+            kind=kind,
+            is_system=snapshot.app_id is None,
+            lifecycle_status=compute_lifecycle_status(snapshot.end_of_service_at, warning_days).value,
+            end_of_service_at=to_utc(snapshot.end_of_service_at),
+            deprecation_notice=snapshot.deprecation_notice,
+            agents=agent_items,
+            silos=silo_items,
+            repositories=[
+                ServiceUsageRepositorySchema(
+                    repository_id=r.repository_id, name=r.name or "", silo_id=r.silo_id, app_id=r.app_id,
+                    app_name=name_of(r))
+                for r in repos
+            ],
+            middlewares=middlewares,
+            scheduled_tasks=[
+                ServiceUsageScheduledTaskSchema(
+                    task_id=r.task_id, name=r.name, agent_id=r.agent_id, app_id=r.app_id, app_name=name_of(r))
+                for r in tasks
+            ],
+        )
+
+    @staticmethod
+    def _visible_ai_service(db: Session, app_id: int, service_id: int) -> Optional[ServiceSnapshot]:
+        snapshot = ServiceUsageQueries.service_snapshot(db, AIService, service_id)
+        if snapshot is None or (snapshot.app_id is not None and snapshot.app_id != app_id):
+            return None
+        return snapshot
+
+    @staticmethod
+    def move_agents(
+        db: Session,
+        app_id: int,
+        source_service_id: int,
+        target_service_id: int,
+        expected_count: Optional[int],
+        actor_id: Optional[int],
+    ) -> MoveAgentsResponseSchema:
+        """Point every agent of the app that uses ``source`` as its text model at ``target``.
+
+        Raises:
+            NotFoundError: the source is not an AI service of the app or a system one.
+            AppValidationError: the target is the source, not visible to the app, or retired.
+            ConflictError: ``expected_count`` differs from the current number of agents (nothing changes).
+        """
+        if ServiceLifecycleService._visible_ai_service(db, app_id, source_service_id) is None:
+            raise NotFoundError("AI service not found", "ai_service")
+        if target_service_id == source_service_id:
+            raise AppValidationError("The target service must be different from the source service", "target_service_id")
+        target = ServiceLifecycleService._visible_ai_service(db, app_id, target_service_id)
+        if target is None:
+            raise AppValidationError("Target AI service not found", "target_service_id")
+        if is_retired(target):
+            raise AppValidationError("The target AI service is retired and cannot be selected", "target_service_id")
+
+        try:
+            moved = ServiceUsageQueries.move_agents(db, app_id, source_service_id, target_service_id)
+            if expected_count is not None and len(moved) != expected_count:
+                db.rollback()
+                raise ConflictError(
+                    f"The number of agents using this service changed (now {len(moved)}); review and confirm again",
+                    "MOVE_COUNT_MISMATCH",
+                )
+            db.commit()
+        except ConflictError:
+            raise
+        except Exception:
+            db.rollback()
+            raise
+        logger.info(
+            "service_lifecycle.agents_moved app_id=%s actor_id=%s source=%s target=%s count=%s",
+            app_id, actor_id, source_service_id, target_service_id, len(moved),
+        )
+        return MoveAgentsResponseSchema(moved_agent_ids=moved, count=len(moved))

@@ -58,6 +58,13 @@ class NotFoundError(AppError):
         super().__init__(message, 'NOT_FOUND', 404)
 
 
+class ConflictError(AppError):
+    """The request conflicts with the current state of the resource (HTTP 409)."""
+
+    def __init__(self, message: str, error_code: str = 'CONFLICT'):
+        super().__init__(message, error_code, 409)
+
+
 def _is_service_retired(exc: BaseException) -> bool:
     """True for ServiceRetiredError. Lazy import: service_lifecycle imports this module."""
     from utils.service_lifecycle import ServiceRetiredError  # noqa: PLC0415

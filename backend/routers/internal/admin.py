@@ -26,7 +26,10 @@ from schemas.admin_schemas import (
 )
 from schemas.system_setting_schemas import SystemSettingRead, SystemSettingUpdate
 from services.marketplace_quota_service import MarketplaceQuotaService
+from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from services.service_lifecycle_service import ServiceLifecycleService
 from services.system_settings_service import SystemSettingsService
+from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING
 from services.user_service import UserService
 from utils.config import is_omniadmin
 from utils.logger import get_logger
@@ -910,6 +913,32 @@ async def update_system_embedding_service(
     return EmbeddingServiceService._to_list_item(
         svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
     )
+
+
+@router.get("/system-ai-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_ai_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level AI service, across all apps (platform admin only)."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_AI, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail="System AI service not found")
+    return usage
+
+
+@router.get("/system-embedding-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_embedding_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level embedding service, across all apps (platform admin only)."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_EMBEDDING, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=SYSTEM_EMBEDDING_SERVICE_NOT_FOUND)
+    return usage
 
 
 @router.get("/system-embedding-services/{service_id}/impact", response_model=SystemEmbeddingServiceImpactSchema)

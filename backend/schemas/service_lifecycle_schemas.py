@@ -1,7 +1,7 @@
 """Shared end-of-service schema fragments for AI, embedding and sandbox services."""
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -43,3 +43,81 @@ class ServiceLifecycleWarningSchema(BaseModel):
     lifecycle_status: Literal["deprecated", "retired"]
     end_of_service_at: datetime
     deprecation_notice: Optional[str] = None
+
+
+# ==================== "Used by" and bulk move of agents ====================
+
+ServiceUsageKind = Literal["ai", "embedding"]
+AgentUsageRole = Literal["llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding"]
+SiloUsageRole = Literal["embedding", "transcription", "video"]
+ServiceLifecycleStatusLiteral = Literal["active", "deprecated", "retired"]
+
+
+class ServiceUsageAgentSchema(BaseModel):
+    agent_id: int
+    name: str
+    roles: List[AgentUsageRole]
+    app_id: int
+    # Only filled in the admin (cross-app) view.
+    app_name: Optional[str] = None
+
+
+class ServiceUsageSiloSchema(BaseModel):
+    silo_id: int
+    name: str
+    roles: List[SiloUsageRole]
+    app_id: int
+    app_name: Optional[str] = None
+
+
+class ServiceUsageRepositorySchema(BaseModel):
+    repository_id: int
+    name: str
+    silo_id: int
+    app_id: int
+    app_name: Optional[str] = None
+
+
+class ServiceUsageMiddlewareSchema(BaseModel):
+    middleware_id: int
+    name: str
+    middleware_type: str
+    agent_ids: List[int] = Field(default_factory=list)
+    app_id: int
+    app_name: Optional[str] = None
+
+
+class ServiceUsageScheduledTaskSchema(BaseModel):
+    task_id: int
+    name: str
+    agent_id: int
+    app_id: int
+    app_name: Optional[str] = None
+
+
+class ServiceUsageSchema(BaseModel):
+    """Who depends on a service. Extended by the sandbox step with further lists."""
+
+    service_id: int
+    service_name: str
+    kind: ServiceUsageKind
+    is_system: bool
+    lifecycle_status: ServiceLifecycleStatusLiteral
+    end_of_service_at: Optional[datetime] = None
+    deprecation_notice: Optional[str] = None
+    agents: List[ServiceUsageAgentSchema] = Field(default_factory=list)
+    silos: List[ServiceUsageSiloSchema] = Field(default_factory=list)
+    repositories: List[ServiceUsageRepositorySchema] = Field(default_factory=list)
+    middlewares: List[ServiceUsageMiddlewareSchema] = Field(default_factory=list)
+    scheduled_tasks: List[ServiceUsageScheduledTaskSchema] = Field(default_factory=list)
+
+
+class MoveAgentsRequestSchema(BaseModel):
+    target_service_id: int
+    # Number of agents the user saw and confirmed; a different current count aborts with 409.
+    expected_count: Optional[int] = Field(None, ge=0)
+
+
+class MoveAgentsResponseSchema(BaseModel):
+    moved_agent_ids: List[int]
+    count: int

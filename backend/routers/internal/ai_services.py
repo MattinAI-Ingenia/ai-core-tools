@@ -13,6 +13,14 @@ from db.database import get_db
 from services.ai_service_service import AIServiceInUseError, AIServiceService
 from services.ai_service_export_service import AIServiceExportService
 from services.ai_service_import_service import AIServiceImportService
+from services.service_lifecycle_service import ServiceLifecycleService
+from schemas.service_lifecycle_schemas import (
+    MoveAgentsRequestSchema,
+    MoveAgentsResponseSchema,
+    ServiceUsageSchema,
+)
+from utils.error_handlers import AppError
+from utils.service_lifecycle import SERVICE_KIND_AI
 from services.provider_models_service import (
     PROVIDER_ERROR_STATUS,
     ProviderModelsService,
@@ -256,6 +264,46 @@ async def get_ai_service(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving AI service: {str(e)}"
         )
+
+
+@ai_services_router.get("/{service_id}/used-by",
+                        summary="List what depends on an AI service",
+                        tags=["AI Services"],
+                        response_model=ServiceUsageSchema)
+async def get_ai_service_used_by(
+    app_id: int,
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    db: Annotated[Session, Depends(get_db)]
+):
+    """Agents (by role), silos, repositories, middlewares and scheduled tasks of this app using the service."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_AI, service_id, app_id)
+    if usage is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=AI_SERVICE_NOT_FOUND_ERROR)
+    return usage
+
+
+@ai_services_router.post("/{service_id}/move-agents",
+                         summary="Move all agents from this AI service to another",
+                         tags=["AI Services"],
+                         response_model=MoveAgentsResponseSchema)
+async def move_agents_to_ai_service(
+    app_id: int,
+    service_id: int,
+    body: MoveAgentsRequestSchema,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("administrator"))],
+    db: Annotated[Session, Depends(get_db)]
+):
+    """Atomically point every agent of the app using this service at the target service."""
+    try:
+        return ServiceLifecycleService.move_agents(
+            db, app_id, service_id, body.target_service_id, body.expected_count,
+            int(auth_context.identity.id),
+        )
+    except AppError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
 @ai_services_router.post("/{service_id}",

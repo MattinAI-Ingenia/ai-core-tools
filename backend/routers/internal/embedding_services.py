@@ -21,6 +21,9 @@ from db.database import get_db
 
 # Import services
 from services.embedding_service_service import EmbeddingServiceService
+from services.service_lifecycle_service import ServiceLifecycleService
+from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from utils.service_lifecycle import SERVICE_KIND_EMBEDDING
 from services.embedding_service_export_service import EmbeddingServiceExportService
 from services.embedding_service_import_service import EmbeddingServiceImportService
 from services.provider_models_service import (
@@ -259,6 +262,24 @@ async def get_embedding_service(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving embedding service: {str(e)}"
         )
+
+
+@embedding_services_router.get("/{service_id}/used-by",
+                               summary="List what depends on an embedding service",
+                               tags=["Embedding Services"],
+                               response_model=ServiceUsageSchema)
+async def get_embedding_service_used_by(
+    app_id: int,
+    service_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Silos, repositories, agents and scheduled tasks of this app using the embedding service."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_EMBEDDING, service_id, app_id)
+    if usage is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=EMBEDDING_SERVICE_NOT_FOUND_MSG)
+    return usage
 
 
 @embedding_services_router.post("/{service_id}",
