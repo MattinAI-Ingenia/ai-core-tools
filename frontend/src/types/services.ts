@@ -58,6 +58,42 @@ export type ServiceKind = 'ai' | 'embedding' | 'sandbox';
 export type ServiceScope = 'app' | 'system';
 export type ServiceWizardMode = 'create' | 'edit-model';
 
+/** Lifecycle status computed by the backend (never recomputed in the browser). */
+export type LifecycleStatus = 'active' | 'deprecated' | 'retired';
+
+/** Read-only lifecycle fields returned on every service. */
+export interface ServiceLifecycleFields {
+  readonly end_of_service_at: string | null;
+  readonly deprecation_notice: string | null;
+  readonly lifecycle_status: LifecycleStatus;
+}
+
+export type ServiceLifecycleWarningKind = 'ai' | 'embedding' | 'sandbox';
+export type ServiceLifecycleWarningRole =
+  | 'llm'
+  | 'ocr_vision'
+  | 'transcription'
+  | 'video'
+  | 'media_embedding'
+  | 'silo_embedding'
+  | 'middleware'
+  | 'embedding'
+  | 'sandbox'
+  | 'sandbox_app_default';
+
+/** Mirrors `ServiceLifecycleWarningSchema` (backend/schemas/service_lifecycle_schemas.py). */
+export interface ServiceLifecycleWarning {
+  readonly service_id: number;
+  readonly service_name: string;
+  readonly kind: ServiceLifecycleWarningKind;
+  readonly role: ServiceLifecycleWarningRole;
+  /** Silo name, middleware name, or "app default". */
+  readonly via?: string | null;
+  readonly lifecycle_status: 'deprecated' | 'retired';
+  readonly end_of_service_at: string;
+  readonly deprecation_notice?: string | null;
+}
+
 /** Shape persisted on create/update — same fields the legacy form sent. */
 export interface ServiceFormData {
   name: string;
@@ -71,10 +107,13 @@ export interface ServiceFormData {
   // via `api_key`; these carry the access key id and region.
   aws_access_key_id?: string;
   aws_region?: string;
+  /** ISO datetime (00:00 UTC of the picked day) or null to clear. Omitted = keep on update. */
+  end_of_service_at?: string | null;
+  deprecation_notice?: string | null;
 }
 
 /** Existing service shape returned by getAIService / getEmbeddingService. */
-export interface ExistingService {
+export interface ExistingService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;

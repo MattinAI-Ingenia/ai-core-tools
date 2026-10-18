@@ -2,6 +2,7 @@ import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { HitlCancelResult, HitlDecision, HitlPendingApproval, StreamEvent } from '../types/streaming';
+import type { ServiceLifecycleFields } from '../types/services';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
@@ -335,7 +336,7 @@ export interface ScheduledTaskTriggerResponse {
   status: string;
 }
 
-export interface AIService {
+export interface AIService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -346,7 +347,7 @@ export interface AIService {
   is_system?: boolean;
 }
 
-export interface EmbeddingService {
+export interface EmbeddingService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -614,7 +615,7 @@ export interface TierConfigEntry {
   limit_value: number;
 }
 
-export interface SystemAIService {
+export interface SystemAIService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -627,7 +628,7 @@ export interface SystemAIService {
   available_providers: Array<{ value: string; name: string }>;
 }
 
-export interface SystemEmbeddingService {
+export interface SystemEmbeddingService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -3226,6 +3227,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemAIService> {
     return this.request('/internal/admin/system-ai-services', {
       method: 'POST',
@@ -3239,6 +3242,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemAIService> {
     return this.request(`/internal/admin/system-ai-services/${serviceId}`, {
       method: 'PUT',
@@ -3339,6 +3344,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemEmbeddingService> {
     return this.request('/internal/admin/system-embedding-services', {
       method: 'POST',
@@ -3352,6 +3359,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemEmbeddingService> {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}`, {
       method: 'PUT',

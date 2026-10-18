@@ -7,6 +7,8 @@ import Alert from '../ui/Alert';
 import { getProviderBadgeColor } from '../ui/providerBadges';
 import { getProviderDescriptor } from './wizard/providers';
 import ServiceWizard from './wizard/ServiceWizard';
+import { dateInputValueFromIso, isoFromDateInput } from '../../utils/serviceLifecycle';
+import ServiceLifecycleInputs from './ServiceLifecycleInputs';
 import type {
   ExistingSandboxService,
   ExistingService,
@@ -72,6 +74,10 @@ function CompactServiceEditor({
   const [image, setImage] = useState(sandboxService?.opensandbox_image || '');
   const [target, setTarget] = useState(sandboxService?.daytona_target || '');
   const [template, setTemplate] = useState(sandboxService?.e2b_template || '');
+  const [endOfServiceDate, setEndOfServiceDate] = useState(
+    dateInputValueFromIso(aiService?.end_of_service_at),
+  );
+  const [deprecationNotice, setDeprecationNotice] = useState(aiService?.deprecation_notice || '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showWizard, setShowWizard] = useState(false);
@@ -89,6 +95,8 @@ function CompactServiceEditor({
     setImage(sandboxService?.opensandbox_image || '');
     setTarget(sandboxService?.daytona_target || '');
     setTemplate(sandboxService?.e2b_template || '');
+    setEndOfServiceDate(dateInputValueFromIso(aiService?.end_of_service_at));
+    setDeprecationNotice(aiService?.deprecation_notice || '');
     setError(null);
   }, [service.service_id]);
 
@@ -145,6 +153,14 @@ function CompactServiceEditor({
           supports_video: supportsVideo,
           aws_access_key_id: showAwsFields ? awsAccessKeyId.trim() || undefined : undefined,
           aws_region: showAwsFields ? awsRegion.trim() || undefined : undefined,
+          // Always sent: an omitted field keeps its value, an explicit null clears it.
+          end_of_service_at:
+            // Keep a stored non-midnight timestamp untouched unless the day was changed.
+            aiService?.end_of_service_at &&
+            dateInputValueFromIso(aiService.end_of_service_at) === endOfServiceDate
+              ? aiService.end_of_service_at
+              : isoFromDateInput(endOfServiceDate),
+          deprecation_notice: deprecationNotice.trim() || null,
         };
     try {
       await onSave(payload);
@@ -312,6 +328,15 @@ function CompactServiceEditor({
               onChange={(e) => setTemplate(e.target.value)}
               placeholder="base"
               helpText="E2B sandbox template id. Leave empty to use the default template."
+            />
+          )}
+
+          {!isSandbox && (
+            <ServiceLifecycleInputs
+              date={endOfServiceDate}
+              notice={deprecationNotice}
+              onDateChange={setEndOfServiceDate}
+              onNoticeChange={setDeprecationNotice}
             />
           )}
 

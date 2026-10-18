@@ -3,7 +3,7 @@ import { Pencil, Trash2 } from 'lucide-react';
 import { apiService } from '../../services/api';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
-import type { ServiceFormData } from '../../types/services';
+import type { ServiceLifecycleFields, ServiceFormData } from '../../types/services';
 import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
@@ -12,7 +12,7 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
-interface SystemAIService {
+interface SystemAIService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;
@@ -183,7 +183,7 @@ const SystemAIServicesPage: React.FC = () => {
                     {svc.model_name}
                   </td>
                   <td className="px-6 py-4 text-sm">
-                    <ServiceStatusBadge lastError={svc.last_error} lastErrorAt={svc.last_error_at} />
+                    <ServiceStatusBadge lastError={svc.last_error} lastErrorAt={svc.last_error_at} lifecycleStatus={svc.lifecycle_status} endOfServiceAt={svc.end_of_service_at} deprecationNotice={svc.deprecation_notice} />
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right">
                     <div className="inline-flex justify-end">
