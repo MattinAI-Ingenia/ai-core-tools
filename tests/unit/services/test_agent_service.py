@@ -570,6 +570,7 @@ class TestReferencedResourceIdValidation:
 
         system_service = MagicMock()
         system_service.app_id = None
+        system_service.end_of_service_at = None
 
         mocker.patch('services.agent_service.AgentRepository.get_agent_by_id_and_type', return_value=None)
         mocker.patch(
@@ -676,6 +677,7 @@ class TestReferencedResourceIdValidation:
 
         system_embedding = MagicMock()
         system_embedding.app_id = None
+        system_embedding.end_of_service_at = None
 
         mocker.patch('services.agent_service.AgentRepository.get_agent_by_id_and_type', return_value=None)
         mocker.patch(

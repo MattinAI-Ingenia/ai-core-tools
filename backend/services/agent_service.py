@@ -326,7 +326,7 @@ class AgentService:
         # services) that doesn't belong to this app (or isn't a system-wide resource
         # where that's allowed) before persisting anything — otherwise a caller could
         # point an agent at another tenant's resource (IDOR).
-        self._validate_referenced_resource_ids(db, agent_data)
+        self._validate_referenced_resource_ids(db, agent_data, None if is_new_agent else agent)
 
         # Validate rag_fixed_filters fields against the silo's metadata_definition.
         # Fixed filters are only meaningful with a silo; reject them otherwise so a
@@ -405,7 +405,9 @@ class AgentService:
             return
         raise ValueError(f"{field_name} does not exist or does not belong to this app")
 
-    def _validate_referenced_resource_ids(self, db: Session, data: dict) -> None:
+    def _validate_referenced_resource_ids(
+        self, db: Session, data: dict, existing_agent: Optional[Agent] = None
+    ) -> None:
         """Ensure every foreign-key id referenced by an agent create/update payload
         belongs to ``data['app_id']`` (or is a system-wide resource, where allowed).
 
@@ -414,14 +416,24 @@ class AgentService:
         ``sandbox_service_id`` is validated separately in ``_update_normal_agent``, and
         ``tool_ids`` / ``mcp_config_ids`` are validated in ``update_agent_tools`` /
         ``update_agent_mcps`` respectively (they're only known after this call).
+
+        A retired AI/embedding service cannot be newly assigned: the value must equal the
+        one ``existing_agent`` already has (``None`` for a new agent).
+        Raises ``RetiredServiceAssignmentError`` (a ``ValueError``).
         """
+        from utils.service_lifecycle import ensure_assignable, SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING
+
         app_id = data['app_id']
+
+        def _current(field_name: str) -> Optional[int]:
+            return getattr(existing_agent, field_name, None) if existing_agent is not None else None
 
         service_id = data.get('service_id') or None
         if service_id:
             from repositories.ai_service_repository import AIServiceRepository
             service = AIServiceRepository.get_by_id(db, service_id)
             self._validate_owned_resource(service, app_id, 'service_id', allow_system=True)
+            ensure_assignable(service, _current('service_id'), 'service_id', SERVICE_KIND_AI)
 
         silo_id = data.get('silo_id') or None
         if silo_id:
@@ -442,6 +454,7 @@ class AgentService:
                 from repositories.ai_service_repository import AIServiceRepository
                 service = AIServiceRepository.get_by_id(db, value)
                 self._validate_owned_resource(service, app_id, field_name, allow_system=True)
+                ensure_assignable(service, _current(field_name), field_name, SERVICE_KIND_AI)
 
         media_embedding_service_id = data.get('media_embedding_service_id') or None
         if media_embedding_service_id:
@@ -449,6 +462,10 @@ class AgentService:
             embedding_service = EmbeddingServiceRepository.get_by_id(db, media_embedding_service_id)
             self._validate_owned_resource(
                 embedding_service, app_id, 'media_embedding_service_id', allow_system=True
+            )
+            ensure_assignable(
+                embedding_service, _current('media_embedding_service_id'),
+                'media_embedding_service_id', SERVICE_KIND_EMBEDDING,
             )
 
     @staticmethod

@@ -118,6 +118,30 @@ class PlaygroundMediaService:
         )
 
     @staticmethod
+    def _ensure_media_services_active(
+        db: Session,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        embedding_service_id: Optional[int],
+    ) -> None:
+        """Raise ``ServiceRetiredError`` if a media service about to be used is retired.
+
+        The ids come from the agent's own configuration, so a retired one is a runtime
+        block (409), not a "cannot be newly selected" validation error.
+        """
+        from repositories.ai_service_repository import AIServiceRepository
+        from repositories.embedding_service_repository import EmbeddingServiceRepository
+        from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, ensure_service_active
+
+        for service_id in (transcription_service_id, video_ai_service_id):
+            if service_id:
+                ensure_service_active(AIServiceRepository.get_by_id(db, service_id), SERVICE_KIND_AI)
+        if embedding_service_id:
+            ensure_service_active(
+                EmbeddingServiceRepository.get_by_id(db, embedding_service_id), SERVICE_KIND_EMBEDDING
+            )
+
+    @staticmethod
     def get_or_create_temp_repository(
         app_id: int,
         agent_id: int,
@@ -144,6 +168,15 @@ class PlaygroundMediaService:
             # must not wipe an in-flight transcription's service configuration.
             updated = False
             silo = existing.silo
+            if silo is not None:
+                PlaygroundMediaService._ensure_media_services_active(
+                    db,
+                    transcription_service_id
+                    if transcription_service_id not in (None, silo.transcription_service_id) else None,
+                    video_ai_service_id
+                    if video_ai_service_id not in (None, silo.video_ai_service_id) else None,
+                    None,
+                )
             if (
                 silo is not None
                 and transcription_service_id is not None
@@ -181,6 +214,10 @@ class PlaygroundMediaService:
                 "No media embedding service configured for this agent. Set it in "
                 "the agent's Media Processing configuration before uploading media."
             )
+
+        PlaygroundMediaService._ensure_media_services_active(
+            db, transcription_service_id, video_ai_service_id, embedding_service_id
+        )
 
         repo = Repository(
             name=_temp_repo_name(agent_id, session_id),

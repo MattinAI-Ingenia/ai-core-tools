@@ -19,6 +19,8 @@ from schemas.repository_schemas import RepositoryListItemSchema, RepositoryDetai
 from utils.vector_db_immutability import assert_vector_db_type_immutable, assert_embedding_service_immutable
 from datetime import datetime
 from utils.logger import get_logger
+from utils.error_handlers import ValidationError
+from utils.service_lifecycle import SERVICE_KIND_EMBEDDING, RetiredServiceAssignmentError, ensure_assignable
 from tools.vector_store_factory import VectorStoreFactory
 
 load_dotenv()
@@ -137,6 +139,15 @@ class RepositoryService:
             assert_embedding_service_immutable(
                 repository.silo.embedding_service_id, embedding_service_id, "repository"
             )
+            if repository.silo.embedding_service_id != embedding_service_id:
+                new_embedding = EmbeddingServiceRepository.get_by_id(db, embedding_service_id)
+                try:
+                    ensure_assignable(
+                        new_embedding, repository.silo.embedding_service_id,
+                        'embedding_service_id', SERVICE_KIND_EMBEDDING,
+                    )
+                except RetiredServiceAssignmentError as exc:
+                    raise ValidationError(str(exc)) from exc
             repository.silo.embedding_service_id = embedding_service_id
 
         if repository.silo:

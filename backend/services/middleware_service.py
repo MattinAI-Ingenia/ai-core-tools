@@ -16,6 +16,7 @@ from schemas.middleware_schemas import (
     referenced_ai_service_ids,
 )
 from utils.logger import get_logger
+from utils.service_lifecycle import SERVICE_KIND_AI, RetiredServiceAssignmentError, ensure_assignable
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,26 @@ def _to_detail(mw: Middleware) -> MiddlewareDetailSchema:
         config=mw.config,
         created_at=mw.create_date,
     )
+
+
+def _raw_ai_service_ids(config: object) -> set:
+    """Tolerant extraction of ``ai_service:<id>`` references from an unvalidated config dict."""
+    found: set = set()
+
+    def _walk(node: object) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                _walk(value)
+        elif isinstance(node, str) and node.startswith("ai_service:"):
+            tail = node.split(":", 1)[1]
+            if tail.isdigit():
+                found.add(int(tail))
+
+    _walk(config)
+    return found
 
 
 class MiddlewareService:
@@ -76,6 +97,7 @@ class MiddlewareService:
             found = MiddlewareRepository.get_existing_ai_service_ids_for_app(db, service_ids, app_id)
             if set(service_ids) - found:
                 raise MiddlewareValidationError("The selected AI service does not exist in this app")
+            MiddlewareService._reject_new_retired_services(db, middleware, middleware_id, service_ids)
 
         if (
             middleware_id
@@ -98,6 +120,31 @@ class MiddlewareService:
             raise MiddlewareValidationError(f"A middleware named '{data.name}' already exists in this app")
         db.refresh(middleware)
         return _to_detail(middleware)
+
+    @staticmethod
+    def _reject_new_retired_services(
+        db: Session, middleware: Middleware, middleware_id: int, new_ids: List[int]
+    ) -> None:
+        """Raise MiddlewareValidationError if a newly referenced AI service is retired.
+
+        Services the stored config already referenced are kept as they are.
+        """
+        old_ids: set = set()
+        if middleware_id:
+            try:
+                old_config = parse_middleware_config(middleware.middleware_type, middleware.config)
+                old_ids = set(referenced_ai_service_ids(old_config))
+            except ValidationError:
+                # Stored config no longer parses: still keep the refs it names so an unchanged
+                # retired service is not rejected.
+                old_ids = _raw_ai_service_ids(middleware.config)
+        from repositories.ai_service_repository import AIServiceRepository
+        for service_id in sorted(set(new_ids) - old_ids):
+            service = AIServiceRepository.get_by_id(db, service_id)
+            try:
+                ensure_assignable(service, None, "AI service", SERVICE_KIND_AI)
+            except RetiredServiceAssignmentError as exc:
+                raise MiddlewareValidationError(str(exc)) from exc
 
     @staticmethod
     def names_using_ai_service(db: Session, app_id: int, service_id: int) -> List[str]:

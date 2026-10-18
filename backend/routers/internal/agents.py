@@ -1376,7 +1376,7 @@ async def upload_playground_media(
             ],
             "failed_files": result["failed_files"],
         }
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1433,7 +1433,7 @@ async def add_playground_youtube(
             "silo_id": result["silo_id"],
             "media": MR.model_validate(result["media"], from_attributes=True),
         }
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

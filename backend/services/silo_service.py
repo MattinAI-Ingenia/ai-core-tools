@@ -30,8 +30,11 @@ from services.folder_service import FolderService
 from services.service_health_service import ServiceHealthService
 from utils.provider_errors import classify_provider_error
 from utils.service_lifecycle import (
+    SERVICE_KIND_AI,
     SERVICE_KIND_EMBEDDING,
+    RetiredServiceAssignmentError,
     ServiceRetiredError,
+    ensure_assignable,
     ensure_service_active,
     service_call_context,
 )
@@ -522,6 +525,13 @@ class SiloService:
             # still has none (None → value is allowed). Changing an already-set
             # service is blocked by assert_embedding_service_immutable above.
             if silo_data.get('embedding_service_id') and silo.embedding_service_id is None:
+                new_embedding = SiloRepository.get_embedding_service_by_id(silo_data['embedding_service_id'], session)
+                try:
+                    ensure_assignable(
+                        new_embedding, None, 'embedding_service_id', SERVICE_KIND_EMBEDDING
+                    )
+                except RetiredServiceAssignmentError as exc:
+                    raise ValidationError(str(exc)) from exc
                 silo.embedding_service_id = silo_data['embedding_service_id']
             
             # Handle metadata definition (output parser) - explicitly handle None to clear it
@@ -595,7 +605,9 @@ class SiloService:
         """
         from models.ai_service import AIService
 
-        def _check(service_id: Optional[int], label: str, needs_video: bool = False) -> Optional[int]:
+        def _check(
+            service_id: Optional[int], label: str, current_id: Optional[int], needs_video: bool = False
+        ) -> Optional[int]:
             if not service_id:
                 return None
             service = db.query(AIService).filter(AIService.service_id == int(service_id)).first()
@@ -603,10 +615,19 @@ class SiloService:
                 raise ValidationError(f"{label} {service_id} not found")
             if needs_video and not service.supports_video:
                 raise ValidationError(f"{label} {service_id} does not support video")
+            try:
+                ensure_assignable(service, current_id, label, SERVICE_KIND_AI)
+            except RetiredServiceAssignmentError as exc:
+                raise ValidationError(str(exc)) from exc
             return service.service_id
 
-        silo.transcription_service_id = _check(transcription_service_id, "Transcription service")
-        silo.video_ai_service_id = _check(video_ai_service_id, "Video AI service", needs_video=True)
+        # Both checks run before either field is assigned, so a rejection changes nothing.
+        new_transcription = _check(transcription_service_id, "Transcription service", silo.transcription_service_id)
+        new_video = _check(
+            video_ai_service_id, "Video AI service", silo.video_ai_service_id, needs_video=True
+        )
+        silo.transcription_service_id = new_transcription
+        silo.video_ai_service_id = new_video
 
     @staticmethod
     def _update_silo(silo: Silo, data: dict):
