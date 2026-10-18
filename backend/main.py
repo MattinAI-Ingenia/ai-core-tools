@@ -59,6 +59,7 @@ from utils.provider import initialize_provider, shutdown_provider, get_provider
 from lks_idprovider_fastapi.dependencies import get_default_provider
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from utils.auth_config import AuthConfig
 from utils.secret_key import validate_secret_key
 from deployment_mode import is_saas_mode, validate_saas_env
@@ -380,6 +381,12 @@ async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout
         content={"detail": "Service temporarily unavailable, please retry shortly."},
         headers={"Retry-After": "5"},
     )
+
+
+@app.exception_handler(ServiceRetiredError)
+async def _service_retired_handler(_request: Request, exc: ServiceRetiredError) -> JSONResponse:
+    """Map a retired service to 409 with its message (the guard already logged it)."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message, "error_code": exc.error_code})
 
 
 # Mount routers - clean structure with no nesting
