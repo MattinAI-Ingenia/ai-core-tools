@@ -7,6 +7,7 @@ is, so runtime guards need no settings; the warning window only decides between
 """
 
 from contextlib import contextmanager
+import unicodedata
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -23,6 +24,9 @@ SERVICE_KIND_SANDBOX = "sandbox"
 
 _UNKNOWN = "unknown"
 
+MAX_DEPRECATION_NOTICE_LENGTH = 1000
+_NOTICE_REPLACED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
 
 class LifecycleStatus(str, Enum):
     ACTIVE = "active"
@@ -37,6 +41,25 @@ def to_utc(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def normalize_deprecation_notice(value: Optional[str]) -> Optional[str]:
+    """Clean an admin-authored deprecation notice.
+
+    Control and invisible formatting characters (Unicode categories Cc: CR, LF, tab, NUL; Cf: bidi
+    overrides, zero-width; Zl/Zp: U+2028/9) become a space so a notice cannot forge lines in logs; the result is stripped, empty -> ``None``.
+
+    Raises:
+        ValueError: if the cleaned notice is longer than 1000 characters.
+    """
+    if value is None:
+        return None
+    cleaned = "".join(" " if unicodedata.category(ch) in _NOTICE_REPLACED_CATEGORIES else ch for ch in str(value)).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_DEPRECATION_NOTICE_LENGTH:
+        raise ValueError(f"deprecation_notice must be at most {MAX_DEPRECATION_NOTICE_LENGTH} characters")
+    return cleaned
 
 
 def compute_lifecycle_status(

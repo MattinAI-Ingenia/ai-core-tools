@@ -200,7 +200,8 @@ async def import_embedding_service(
             export_data,
             app_id,
             conflict_mode,
-            new_name
+            new_name,
+            user_id=int(auth_context.identity.id),
         )
         
         return ImportResponseSchema(
@@ -278,7 +279,7 @@ async def create_or_update_embedding_service(
     
     try:
         service = EmbeddingServiceService.create_or_update_embedding_service(
-            db, app_id, service_id, service_data
+            db, app_id, service_id, service_data, actor_id=int(auth_context.identity.id)
         )
         
         if service is None:

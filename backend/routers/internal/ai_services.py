@@ -199,7 +199,7 @@ async def import_ai_service(
         summary = import_service.import_ai_service(
             export_data,
             app_id,
-            getattr(auth_context, 'user_id', None),
+            int(auth_context.identity.id),
             conflict_mode,
             new_name
         )
@@ -275,7 +275,9 @@ async def create_or_update_ai_service(
     """
     
     try:
-        result = AIServiceService.create_or_update_ai_service(db, app_id, service_id, service_data)
+        result = AIServiceService.create_or_update_ai_service(
+            db, app_id, service_id, service_data, actor_id=int(auth_context.identity.id)
+        )
         if result is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

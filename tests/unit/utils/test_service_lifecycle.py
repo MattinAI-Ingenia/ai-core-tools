@@ -166,3 +166,37 @@ def test_ensure_assignable():
         ensure_assignable(retired, 1, "Agent LLM", "ai")
     with pytest.raises(RetiredServiceAssignmentError):
         ensure_assignable(retired, None, "Agent LLM", "ai")
+
+
+class TestNormalizeDeprecationNotice:
+    def test_none_and_empty(self):
+        from utils.service_lifecycle import normalize_deprecation_notice
+
+        assert normalize_deprecation_notice(None) is None
+        assert normalize_deprecation_notice("") is None
+        assert normalize_deprecation_notice("  \n\t ") is None
+
+    def test_strips(self):
+        from utils.service_lifecycle import normalize_deprecation_notice
+
+        assert normalize_deprecation_notice("  use model X  ") == "use model X"
+
+    def test_control_characters_become_spaces(self):
+        from utils.service_lifecycle import normalize_deprecation_notice
+
+        cleaned = normalize_deprecation_notice("line1\r\nFAKE LOG\x00tab\there")
+        assert cleaned == "line1  FAKE LOG tab here"
+        assert not any(c in cleaned for c in "\r\n\t\x00")
+
+    def test_max_length(self):
+        import pytest
+        from utils.service_lifecycle import normalize_deprecation_notice
+
+        assert normalize_deprecation_notice("a" * 1000) == "a" * 1000
+        with pytest.raises(ValueError):
+            normalize_deprecation_notice("a" * 1001)
+
+    def test_format_and_separator_characters_replaced(self):
+        from utils.service_lifecycle import normalize_deprecation_notice
+
+        assert normalize_deprecation_notice("a\u202eb\u2028c\u2029d\u200be") == "a b c d e"
