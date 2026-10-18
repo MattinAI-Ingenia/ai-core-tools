@@ -167,3 +167,70 @@ export interface ExistingSandboxService {
   readonly e2b_template?: string;
   readonly e2b_workspace?: string;
 }
+
+// ==================== "Used by" and bulk move ====================
+
+export type AgentUsageRole =
+  | 'llm'
+  | 'ocr_vision'
+  | 'transcription'
+  | 'video'
+  | 'media_embedding'
+  | 'silo_embedding'
+  | 'sandbox'
+  | 'sandbox_app_default';
+export type SiloUsageRole = 'embedding' | 'transcription' | 'video';
+
+/** Mirrors `ServiceUsageSchema` (backend/schemas/service_lifecycle_schemas.py). `app_name` only in admin views. */
+export interface ServiceUsage {
+  readonly service_id: number;
+  readonly service_name: string;
+  readonly kind: ServiceKind;
+  readonly is_system: boolean;
+  readonly lifecycle_status: LifecycleStatus;
+  readonly end_of_service_at: string | null;
+  readonly deprecation_notice: string | null;
+  readonly agents: readonly {
+    readonly agent_id: number;
+    readonly name: string;
+    readonly roles: readonly AgentUsageRole[];
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly silos: readonly {
+    readonly silo_id: number;
+    readonly name: string;
+    readonly roles: readonly SiloUsageRole[];
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly repositories: readonly {
+    readonly repository_id: number;
+    readonly name: string;
+    readonly silo_id: number;
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly middlewares: readonly {
+    readonly middleware_id: number;
+    readonly name: string;
+    readonly middleware_type: string;
+    readonly agent_ids: readonly number[];
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly scheduled_tasks: readonly {
+    readonly task_id: number;
+    readonly name: string;
+    readonly agent_id: number;
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  /** Sandbox services only (rendered by the sandbox step). */
+  readonly apps_using_as_default?: readonly { readonly app_id: number; readonly app_name: string }[];
+}
+
+export interface MoveAgentsResult {
+  readonly moved_agent_ids: readonly number[];
+  readonly count: number;
+}

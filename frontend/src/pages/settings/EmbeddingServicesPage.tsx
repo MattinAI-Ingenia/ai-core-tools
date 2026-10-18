@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
-import { Upload, ArrowDownToLine, Loader2, Pencil, Trash2, CheckCircle2, XCircle, X, BarChart2 } from 'lucide-react';
+import { Users, Upload, ArrowDownToLine, Loader2, Pencil, Trash2, CheckCircle2, XCircle, X, BarChart2 } from 'lucide-react';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
 import ActionDropdown from '../../components/ui/ActionDropdown';
@@ -15,6 +15,9 @@ import { getProviderBadgeColor } from '../../components/ui/providerBadges';
 import { AppRole } from '../../types/roles';
 import type { ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import UsedByButton from '../../components/services/UsedByButton';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import type { ConflictMode, ImportResponse } from '../../components/ui/ImportModal';
 
 interface EmbeddingService extends Partial<ServiceLifecycleFields> {
@@ -66,6 +69,7 @@ function EmbeddingServicesPage() {
   } = useServicesManager<EmbeddingService>(appId, api as any, cache as any, { entity: 'embedding service' });
 
   const [showImportModal, setShowImportModal] = useState(false);
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [exportingServiceId, setExportingServiceId] = useState<number | null>(null);
   const [notification, setNotification] = useState<{message: string; type: 'success' | 'error'} | null>(null);
 
@@ -233,9 +237,13 @@ function EmbeddingServicesPage() {
           { header: 'Created', render: (service: EmbeddingService) => (service.created_at ? new Date(service.created_at).toLocaleDateString() : 'N/A') },
           { header: 'Actions', className: 'relative', render: (service: EmbeddingService) => (
             service.is_system ? (
-              <span className="text-gray-400 text-sm">System</span>
+              <span className="inline-flex items-center gap-3">
+                <span className="text-gray-400 text-sm">System</span>
+                <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
+              </span>
             ) : canEdit ? (
-              <ActionDropdown actions={[
+              <ActionDropdown triggerAriaLabel={`Actions for ${service.name}`} actions={[
+                { label: SERVICE_USAGE_STRINGS.action, onClick: () => setUsageService({ id: service.service_id, name: service.name }), icon: <Users className="w-4 h-4" /> },
                 {
                   label: exportingServiceId === service.service_id ? 'Exporting...' : 'Export',
                   onClick: () => void handleExport(service.service_id),
@@ -247,7 +255,7 @@ function EmbeddingServicesPage() {
                 { label: 'Delete', onClick: () => void handleDelete(service.service_id), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' }
               ]} size="sm" />
             ) : (
-              <span className="text-gray-400 text-sm">View only</span>
+              <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
             )
           ) }
         ]}
@@ -287,6 +295,18 @@ function EmbeddingServicesPage() {
           existingNames={services.map((s) => s.name)}
           onClose={handleClose}
           onSave={handleSave}
+        />
+      )}
+
+      {usageService && appId && (
+        <ServiceUsageModal
+          kind="embedding"
+          scope="app"
+          canNavigate={hasMinRole(AppRole.EDITOR)}
+          appId={Number.parseInt(appId, 10)}
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          onClose={() => setUsageService(null)}
         />
       )}
 

@@ -51,4 +51,59 @@ export const SERVICE_LIFECYCLE_STRINGS = {
     `Agents using this AI service stop working on ${date}. Move them to another AI service before then.`,
 } as const;
 
+export const SERVICE_USAGE_STRINGS = {
+  action: 'Used by',
+  title: (name: string) => `Used by: ${name}`,
+  loading: 'Loading usage...',
+  loadError: 'Could not load what uses this service.',
+  retry: 'Retry',
+  close: 'Close',
+  nothing: 'Nothing uses this service.',
+  empty: 'None',
+  sections: {
+    agents: 'Agents',
+    silos: 'Silos',
+    repositories: 'Repositories',
+    middlewares: 'Middlewares',
+    scheduledTasks: 'Scheduled tasks',
+  },
+  appLabel: (name: string) => `App: ${name}`,
+  agentRoles: {
+    llm: 'LLM',
+    ocr_vision: 'OCR vision',
+    transcription: 'Transcription',
+    video: 'Video',
+    media_embedding: 'Media embedding',
+    silo_embedding: 'Via silo',
+    sandbox: 'Sandbox',
+    sandbox_app_default: 'Sandbox (app default)',
+  },
+  siloRoles: {
+    embedding: 'Embedding',
+    transcription: 'Transcription',
+    video: 'Video',
+  },
+  reindexWarning:
+    'Retiring this embedding service makes the silos listed here unusable. Re-index each silo into another embedding service before the end-of-service date.',
+  moveTitle: 'Move agents to another AI service',
+  moveCount: (n: number) => `${n} ${n === 1 ? 'agent uses' : 'agents use'} this service as their main LLM`,
+  moveNone: 'No agents use this service as their main LLM.',
+  moveTargetLabel: 'Target AI service',
+  moveTargetPlaceholder: 'Select a service...',
+  moveTargetEnds: (name: string, date: string) => `${name} (ends ${date})`,
+  moveNoTargets: 'There is no other available AI service to move the agents to.',
+  moveButton: 'Move agents...',
+  moveConfirm: (n: number, from: string, to: string) =>
+    `Move ${n} ${n === 1 ? 'agent' : 'agents'} from ${from} to ${to}?`,
+  moveConfirmButton: 'Confirm move',
+  moveConfirming: 'Moving...',
+  moveCancel: 'Cancel',
+  moveSuccess: (n: number) => `Moved ${n} ${n === 1 ? 'agent' : 'agents'}`,
+  moveCountChanged: (n: number) =>
+    `The number of agents changed (now ${n}). Review the list and confirm again.`,
+  moveNote:
+    'Transcription, video, OCR vision and middleware references are not moved. They are listed above and must be changed manually.',
+  moveError: 'Could not move the agents.',
+} as const;
+
 export const MAX_DEPRECATION_NOTICE_LENGTH = 1000;

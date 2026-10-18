@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Users, Pencil, Trash2 } from 'lucide-react';
 import { apiService } from '../../services/api';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
@@ -8,6 +8,8 @@ import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
@@ -47,6 +49,7 @@ const SystemEmbeddingServicesPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [editingService, setEditingService] = useState<SystemEmbeddingService | null>(null);
 
   const fetchServices = useCallback(async () => {
@@ -249,7 +252,13 @@ const SystemEmbeddingServicesPage: React.FC = () => {
                     <div className="inline-flex justify-end">
                       <ActionDropdown
                         size="sm"
+                        triggerAriaLabel={`Actions for ${svc.name}`}
                         actions={[
+                          {
+                            label: SERVICE_USAGE_STRINGS.action,
+                            icon: <Users className="w-4 h-4" />,
+                            onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
+                          },
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -294,6 +303,16 @@ const SystemEmbeddingServicesPage: React.FC = () => {
           existingNames={services.map((s) => s.name)}
           onClose={handleCancel}
           onSave={handleSave}
+        />
+      )}
+
+      {usageService && (
+        <ServiceUsageModal
+          kind="embedding"
+          scope="system"
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          onClose={() => setUsageService(null)}
         />
       )}
     </div>

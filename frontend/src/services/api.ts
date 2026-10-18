@@ -2,7 +2,7 @@ import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { HitlCancelResult, HitlDecision, HitlPendingApproval, StreamEvent } from '../types/streaming';
-import type { ServiceLifecycleFields } from '../types/services';
+import type { MoveAgentsResult, ServiceLifecycleFields, ServiceUsage } from '../types/services';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
@@ -1123,6 +1123,34 @@ class ApiService {
     }
 
     return response.json();
+  }
+
+  async getAIServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/used-by`);
+  }
+
+  async getEmbeddingServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}/used-by`);
+  }
+
+  async getSystemAIServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-ai-services/${serviceId}/used-by`);
+  }
+
+  async getSystemEmbeddingServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-embedding-services/${serviceId}/used-by`);
+  }
+
+  async moveAgentsToAIService(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedCount: number,
+  ): Promise<MoveAgentsResult> {
+    return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/move-agents`, {
+      method: 'POST',
+      body: JSON.stringify({ target_service_id: targetServiceId, expected_count: expectedCount }),
+    });
   }
 
   async getAIServices(appId: number): Promise<AIService[]> {

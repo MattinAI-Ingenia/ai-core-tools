@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
-import { Bot, Plug, ArrowDownToLine, ClipboardCopy, Pencil, Trash2, Loader2, Upload, CheckCircle2, XCircle, X, Lightbulb } from 'lucide-react';
+import { Bot, Users, Plug, ArrowDownToLine, ClipboardCopy, Pencil, Trash2, Loader2, Upload, CheckCircle2, XCircle, X, Lightbulb } from 'lucide-react';
 import Modal from '../../components/ui/Modal';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
@@ -16,6 +16,9 @@ import { getProviderBadgeColor } from '../../components/ui/providerBadges';
 import { AppRole } from '../../types/roles';
 import type { ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import UsedByButton from '../../components/services/UsedByButton';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 
 interface AIService extends Partial<ServiceLifecycleFields> {
   service_id: number;
@@ -71,6 +74,7 @@ function AIServicesPage() {
   const [testingServiceId, setTestingServiceId] = useState<number | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [exportingServiceId, setExportingServiceId] = useState<number | null>(null);
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [notification, setNotification] = useState<{message: string; type: 'success' | 'error'} | null>(null);
 
   async function handleTestConnection(serviceId: number) {
@@ -233,7 +237,8 @@ function AIServicesPage() {
           { header: 'Created', render: (service: any) => (service.created_at ? new Date(service.created_at).toLocaleDateString() : 'N/A') },
           { header: 'Actions', className: 'relative', render: (service: AIService) => (
             canEdit ? (
-              <ActionDropdown actions={[
+              <ActionDropdown triggerAriaLabel={`Actions for ${service.name}`} actions={[
+                { label: SERVICE_USAGE_STRINGS.action, onClick: () => setUsageService({ id: service.service_id, name: service.name }), icon: <Users className="w-4 h-4" /> },
                 {
                   label: testingServiceId === service.service_id ? 'Testing...' : 'Test Connection',
                   onClick: () => void handleTestConnection(service.service_id),
@@ -252,7 +257,7 @@ function AIServicesPage() {
                 { label: 'Delete', onClick: () => void handleDelete(service.service_id), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
               ]} size="sm" />
             ) : (
-               <span className="text-gray-400 text-sm">View only</span>
+              <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
             )
           ) }
         ]}
@@ -371,6 +376,20 @@ function AIServicesPage() {
           )}
         </div>
       </Modal>
+
+      {usageService && appId && (
+        <ServiceUsageModal
+          kind="ai"
+          scope="app"
+          canNavigate={hasMinRole(AppRole.EDITOR)}
+          appId={Number.parseInt(appId, 10)}
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          canMove={canEdit}
+          onMoved={() => void forceReload()}
+          onClose={() => setUsageService(null)}
+        />
+      )}
 
       {/* Import Modal */}
       <ImportModal
