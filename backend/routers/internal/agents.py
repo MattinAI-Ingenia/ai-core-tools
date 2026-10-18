@@ -40,6 +40,7 @@ from routers.controls.role_authorization import require_min_role, AppRole
 from models.agent import MarketplaceVisibility
 
 from utils.logger import get_logger
+from utils.error_handlers import ValidationError
 from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
@@ -1378,7 +1379,7 @@ async def upload_playground_media(
         }
     except (HTTPException, ServiceRetiredError):
         raise
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error uploading playground media: {e}", exc_info=True)
@@ -1435,7 +1436,7 @@ async def add_playground_youtube(
         }
     except (HTTPException, ServiceRetiredError):
         raise
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error adding playground YouTube: {e}", exc_info=True)

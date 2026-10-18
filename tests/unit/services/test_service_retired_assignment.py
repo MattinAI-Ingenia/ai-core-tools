@@ -188,6 +188,7 @@ class TestSiloAssignment:
 class TestRepositoryAssignment:
     def _repo(self, embedding=None):
         repo = MagicMock()
+        repo.app_id = 10
         repo.silo = _silo(embedding=embedding)
         repo.silo.vector_db_type = "PGVECTOR"
         return repo
@@ -330,3 +331,149 @@ class TestMiddlewareUnparsableStoredConfig:
             repo.get_existing_ai_service_ids_for_app.return_value = {5}
             repo.get_by_id_and_app_id.return_value = mw
             assert MiddlewareService.create_or_update_middleware(MagicMock(), 10, 3, _mw_data(5)) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant embedding service ownership
+# ---------------------------------------------------------------------------
+
+GENERIC = "embedding_service_id does not exist or does not belong to this app"
+
+
+class TestEmbeddingOwnership:
+    @pytest.mark.parametrize("retired", [False, True])
+    def test_silo_foreign_embedding_rejected_without_leaking_name(self, retired):
+        silo = _silo()
+        foreign = _svc(7, retired=retired, app_id=99)
+        foreign.name = "SECRET-NAME"
+        with patch("services.silo_service.SiloService.get_silo", return_value=silo), patch(
+            "services.silo_service.SiloRepository.get_embedding_service_by_id", return_value=foreign
+        ):
+            with pytest.raises(ValidationError) as exc:
+                SiloService.create_or_update_silo(_silo_data(embedding_service_id=7), db=_db())
+        assert str(exc.value) == GENERIC or GENERIC in str(exc.value)
+        assert "SECRET-NAME" not in str(exc.value)
+        assert silo.embedding_service_id is None
+
+    def test_silo_nonexistent_embedding_same_message(self):
+        with patch("services.silo_service.SiloService.get_silo", return_value=_silo()), patch(
+            "services.silo_service.SiloRepository.get_embedding_service_by_id", return_value=None
+        ):
+            with pytest.raises(ValidationError) as exc:
+                SiloService.create_or_update_silo(_silo_data(embedding_service_id=7), db=_db())
+        assert GENERIC in str(exc.value)
+
+    @pytest.mark.parametrize("app_id", [10, None])
+    def test_silo_own_or_system_embedding_ok(self, app_id):
+        silo = _silo()
+        with patch("services.silo_service.SiloService.get_silo", return_value=silo), patch(
+            "services.silo_service.SiloRepository.get_embedding_service_by_id",
+            return_value=_svc(7, app_id=app_id),
+        ):
+            SiloService.create_or_update_silo(_silo_data(embedding_service_id=7), db=_db())
+        assert silo.embedding_service_id == 7
+
+    @pytest.mark.parametrize("svc", [None, "foreign"])
+    def test_repository_update_foreign_or_missing_rejected(self, svc):
+        repo = MagicMock()
+        repo.app_id = 10
+        repo.silo = _silo()
+        found = None if svc is None else _svc(5, retired=True, app_id=99)
+        with patch("services.repository_service.EmbeddingServiceRepository.get_by_id", return_value=found):
+            with pytest.raises(ValidationError) as exc:
+                RepositoryService.update_repository(repo, 5, None, MagicMock())
+        assert GENERIC in str(exc.value)
+        assert repo.silo.embedding_service_id is None
+
+    def test_repository_update_system_embedding_ok(self):
+        repo = MagicMock()
+        repo.app_id = 10
+        repo.silo = _silo()
+        with patch("services.repository_service.EmbeddingServiceRepository.get_by_id", return_value=_svc(5, app_id=None)):
+            RepositoryService.update_repository(repo, 5, None, MagicMock())
+        assert repo.silo.embedding_service_id == 5
+
+
+# ---------------------------------------------------------------------------
+# Playground temp repo ownership, silo creation ownership, repository delete ownership
+# ---------------------------------------------------------------------------
+
+class TestPlaygroundExistingRepoOwnership:
+    def _existing(self):
+        existing = MagicMock()
+        existing.silo = _silo(transcription=1)
+        return existing
+
+    def test_foreign_transcription_service_rejected_silo_unchanged(self):
+        from services.playground_media_service import PlaygroundMediaService
+
+        existing = self._existing()
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = _svc(2, app_id=99)
+        with patch.object(PlaygroundMediaService, "get_temp_repository", return_value=existing), patch(
+            AI_REPO, return_value=_svc(2, app_id=99)
+        ):
+            with pytest.raises(ValidationError):
+                PlaygroundMediaService.get_or_create_temp_repository(
+                    10, 1, "s", db, transcription_service_id=2
+                )
+        assert existing.silo.transcription_service_id == 1
+        db.commit.assert_not_called()
+
+    def test_own_transcription_service_applied(self):
+        from services.playground_media_service import PlaygroundMediaService
+
+        existing = self._existing()
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = _svc(2)
+        with patch.object(PlaygroundMediaService, "get_temp_repository", return_value=existing), patch(
+            AI_REPO, return_value=_svc(2)
+        ):
+            PlaygroundMediaService.get_or_create_temp_repository(10, 1, "s", db, transcription_service_id=2)
+        assert existing.silo.transcription_service_id == 2
+        db.commit.assert_called_once()
+
+
+class TestSiloCreationEmbeddingOwnership:
+    def test_creation_with_foreign_embedding_rejected_nothing_persisted(self):
+        foreign = _svc(7, app_id=99)
+        foreign.name = "SECRET-NAME"
+        db = _db()
+        with patch("services.tier_enforcement_service.TierEnforcementService.check_resource_limit"), patch(
+            "services.silo_service.SiloRepository.get_embedding_service_by_id", return_value=foreign
+        ):
+            with pytest.raises(ValidationError) as exc:
+                SiloService.create_or_update_silo(_silo_data(silo_id=0, embedding_service_id=7), db=db)
+        assert GENERIC in str(exc.value)
+        assert "SECRET-NAME" not in str(exc.value)
+        db.add.assert_not_called()
+        db.commit.assert_not_called()
+
+
+class TestRepositoryDeleteOwnership:
+    def test_cross_app_delete_returns_404_and_does_not_delete(self):
+        import asyncio
+        from fastapi import HTTPException
+        from routers.internal import repositories as repo_router
+
+        foreign = MagicMock()
+        foreign.app_id = 99
+        with patch.object(repo_router.RepositoryService, "get_repository", return_value=foreign), patch.object(
+            repo_router.RepositoryService, "delete_repository_router"
+        ) as delete:
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(repo_router.delete_repository(10, 5, MagicMock(), MagicMock(), MagicMock()))
+        assert exc.value.status_code == 404
+        delete.assert_not_called()
+
+    def test_own_app_delete_proceeds(self):
+        import asyncio
+        from routers.internal import repositories as repo_router
+
+        own = MagicMock()
+        own.app_id = 10
+        with patch.object(repo_router.RepositoryService, "get_repository", return_value=own), patch.object(
+            repo_router.RepositoryService, "delete_repository_router"
+        ) as delete:
+            asyncio.run(repo_router.delete_repository(10, 5, MagicMock(), MagicMock(), MagicMock()))
+        delete.assert_called_once()

@@ -526,6 +526,7 @@ class SiloService:
             # service is blocked by assert_embedding_service_immutable above.
             if silo_data.get('embedding_service_id') and silo.embedding_service_id is None:
                 new_embedding = SiloRepository.get_embedding_service_by_id(silo_data['embedding_service_id'], session)
+                SiloService.ensure_embedding_service_owned(new_embedding, int(silo_data['app_id']))
                 try:
                     ensure_assignable(
                         new_embedding, None, 'embedding_service_id', SERVICE_KIND_EMBEDDING
@@ -568,6 +569,15 @@ class SiloService:
             if should_close:
                 session.close()
     
+    @staticmethod
+    def ensure_embedding_service_owned(service: Optional[EmbeddingService], app_id: int) -> None:
+        """Reject an embedding service that is missing or owned by another app (system services are allowed).
+
+        The message is the same for both cases so it cannot be used to probe other tenants' ids.
+        """
+        if service is None or (service.app_id is not None and service.app_id != app_id):
+            raise ValidationError("embedding_service_id does not exist or does not belong to this app")
+
     @staticmethod
     def service_warnings(silo: Optional[Silo]) -> List[str]:
         """Recorded failures (rejected key, exhausted quota) of the services this silo indexes with."""

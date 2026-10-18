@@ -143,6 +143,7 @@ class TestSiloServiceEmbeddingServiceGuard:
         data = _make_silo_data(embedding_service_id=42)
         new_service = MagicMock()
         new_service.end_of_service_at = None
+        new_service.app_id = None
 
         with patch(
             "services.silo_service.SiloRepository.get_embedding_service_by_id", return_value=new_service

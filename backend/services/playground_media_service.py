@@ -177,20 +177,14 @@ class PlaygroundMediaService:
                     if video_ai_service_id not in (None, silo.video_ai_service_id) else None,
                     None,
                 )
-            if (
-                silo is not None
-                and transcription_service_id is not None
-                and silo.transcription_service_id != transcription_service_id
-            ):
-                silo.transcription_service_id = transcription_service_id
-                updated = True
-            if (
-                silo is not None
-                and video_ai_service_id is not None
-                and silo.video_ai_service_id != video_ai_service_id
-            ):
-                silo.video_ai_service_id = video_ai_service_id
-                updated = True
+            if silo is not None and (transcription_service_id is not None or video_ai_service_id is not None):
+                new_t = transcription_service_id or silo.transcription_service_id
+                new_v = video_ai_service_id or silo.video_ai_service_id
+                if (new_t, new_v) != (silo.transcription_service_id, silo.video_ai_service_id):
+                    # Ownership (app or system) and supports_video are validated here; the ids
+                    # come from the request form, so they must not be assigned unchecked.
+                    SiloService.apply_media_services(silo, new_t, new_v, app_id, db)
+                    updated = True
             if updated:
                 db.commit()
                 logger.info(

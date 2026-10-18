@@ -141,6 +141,7 @@ class RepositoryService:
             )
             if repository.silo.embedding_service_id != embedding_service_id:
                 new_embedding = EmbeddingServiceRepository.get_by_id(db, embedding_service_id)
+                SiloService.ensure_embedding_service_owned(new_embedding, repository.app_id)
                 try:
                     ensure_assignable(
                         new_embedding, repository.silo.embedding_service_id,

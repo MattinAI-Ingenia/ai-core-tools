@@ -49,9 +49,10 @@ def _validate_repository_app_ownership(repository_id: int, app_id: int, db) -> N
         logger.warning(
             f"Access violation: repository {repository_id} (app {repo.app_id}) accessed from app {app_id}"
         )
+        # Same response as a missing repository: no oracle on other tenants' ids.
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Repository does not belong to this app",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
         )
 
 
@@ -234,7 +235,7 @@ async def delete_repository(
     Delete a repository and all its resources.
     """
     
-    # Use RepositoryService for business logic
+    _validate_repository_app_ownership(repository_id, app_id, db)
     RepositoryService.delete_repository_router(repository_id, db)
     
     return {"message": "Repository deleted successfully"}
