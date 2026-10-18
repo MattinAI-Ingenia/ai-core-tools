@@ -80,7 +80,7 @@ interface Agent {
   media_chunk_max_duration?: number | null;
   media_chunk_overlap?: number | null;
   ai_services: Array<ServiceOptionLike & { supports_video?: boolean }>;
-  sandbox_services: Array<{ service_id: number; name: string }>;
+  sandbox_services: ServiceOptionLike[];
   silos: Array<{ silo_id: number; name: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
   tools: Array<{ agent_id: number; name: string }>;
@@ -1162,17 +1162,15 @@ function AgentFormPage() {
                           </label>
                           <select
                             id="sandbox_service"
+                            aria-describedby={serviceStatusId(agent?.sandbox_services, formData.sandbox_service_id, 'sandbox_service')}
                             value={formData.sandbox_service_id || ''}
                             onChange={(e) => handleInputChange('sandbox_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                             className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                           >
                             <option value="">Use app/system default</option>
-                            {agent?.sandbox_services.map((service) => (
-                              <option key={service.service_id} value={service.service_id}>
-                                {service.name}
-                              </option>
-                            ))}
+                            <ServiceSelectOptions options={agent?.sandbox_services} savedValue={agent?.sandbox_service_id} />
                           </select>
+                          <ServiceOptionStatus selectId="sandbox_service" options={agent?.sandbox_services} selectedId={formData.sandbox_service_id} />
                           <p className="text-xs text-gray-500 mt-1">
                             Overrides the sandbox environment used to run this agent's Python code. Leave unset to use the app's default Sandbox Service.
                           </p>

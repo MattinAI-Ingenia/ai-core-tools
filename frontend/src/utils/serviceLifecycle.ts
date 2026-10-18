@@ -127,6 +127,7 @@ export const SERVICE_USAGE_STRINGS = {
   empty: 'None',
   sections: {
     agents: 'Agents',
+    appsDefault: 'Apps using it as default',
     silos: 'Silos',
     repositories: 'Repositories',
     middlewares: 'Middlewares',

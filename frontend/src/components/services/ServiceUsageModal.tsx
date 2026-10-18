@@ -12,7 +12,7 @@ import {
 
 export interface ServiceUsageModalProps {
   readonly onClose: () => void;
-  readonly kind: 'ai' | 'embedding';
+  readonly kind: 'ai' | 'embedding' | 'sandbox';
   /** `app`: app-scoped endpoints. `system`: platform-admin cross-app endpoints (shows app names). */
   readonly scope: 'app' | 'system';
   /** Required when scope is `app`. */
@@ -121,17 +121,15 @@ function ServiceUsageModal({
     setError(null);
     let request: Promise<ServiceUsage>;
     if (scope === 'system') {
-      request =
-        kind === 'ai'
-          ? apiService.getSystemAIServiceUsedBy(serviceId)
-          : apiService.getSystemEmbeddingServiceUsedBy(serviceId);
+      if (kind === 'ai') request = apiService.getSystemAIServiceUsedBy(serviceId);
+      else if (kind === 'sandbox') request = apiService.getSystemSandboxServiceUsedBy(serviceId);
+      else request = apiService.getSystemEmbeddingServiceUsedBy(serviceId);
     } else if (appId === undefined) {
       request = Promise.reject(new Error(S.loadError));
     } else {
-      request =
-        kind === 'ai'
-          ? apiService.getAIServiceUsedBy(appId, serviceId)
-          : apiService.getEmbeddingServiceUsedBy(appId, serviceId);
+      if (kind === 'ai') request = apiService.getAIServiceUsedBy(appId, serviceId);
+      else if (kind === 'sandbox') request = apiService.getSandboxServiceUsedBy(appId, serviceId);
+      else request = apiService.getEmbeddingServiceUsedBy(appId, serviceId);
     }
     request
       .then((data) => {
@@ -316,8 +314,15 @@ function ServiceUsageModal({
   }
 
   function renderBody(u: ServiceUsage) {
+    const isSandbox = kind === 'sandbox';
+    const defaultApps = u.apps_using_as_default ?? [];
     const total =
-      u.agents.length + u.silos.length + u.repositories.length + u.middlewares.length + u.scheduled_tasks.length;
+      u.agents.length +
+      u.silos.length +
+      u.repositories.length +
+      u.middlewares.length +
+      u.scheduled_tasks.length +
+      defaultApps.length;
     return (
       <>
         <div className="mb-4">
@@ -350,6 +355,19 @@ function ServiceUsageModal({
             />
           ))}
         </Section>
+        {isSandbox && (
+          <Section title={S.sections.appsDefault} count={defaultApps.length}>
+            {defaultApps.map((a) => (
+              <Entry
+                key={a.app_id}
+                to={`${base(a.app_id)}/settings`}
+                name={a.app_name}
+                canNavigate={canNavigate}
+              />
+            ))}
+          </Section>
+        )}
+        {!isSandbox && (<>
         <Section title={S.sections.silos} count={u.silos.length}>
           {u.silos.map((s) => (
             <Entry
@@ -385,6 +403,7 @@ function ServiceUsageModal({
             />
           ))}
         </Section>
+        </>)}
         <Section title={S.sections.scheduledTasks} count={u.scheduled_tasks.length}>
           {u.scheduled_tasks.map((t) => (
             <Entry

@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Pencil, Trash2, Users } from 'lucide-react';
 import { apiService } from '../../services/api';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
-import type { SandboxServiceFormData } from '../../types/services';
+import type { SandboxServiceFormData, ServiceLifecycleFields } from '../../types/services';
+import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
@@ -11,13 +14,14 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
-interface SystemSandboxService {
+interface SystemSandboxService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;
   readonly api_key: string;
   readonly base_url: string;
   readonly is_system: boolean;
+  readonly needs_api_key?: boolean;
   readonly created_at: string;
 }
 
@@ -28,6 +32,7 @@ const SystemSandboxServicesPage: React.FC = () => {
   const [services, setServices] = useState<SystemSandboxService[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingService, setEditingService] = useState<SystemSandboxService | null>(null);
 
@@ -148,6 +153,9 @@ const SystemSandboxServicesPage: React.FC = () => {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Provider
               </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Status
+              </th>
               <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Actions
               </th>
@@ -156,7 +164,7 @@ const SystemSandboxServicesPage: React.FC = () => {
           <tbody className="bg-white divide-y divide-gray-200">
             {services.length === 0 ? (
               <tr>
-                <td colSpan={3} className="px-6 py-8 text-center text-sm text-gray-500">
+                <td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-500">
                   No system sandbox services configured.
                 </td>
               </tr>
@@ -167,11 +175,20 @@ const SystemSandboxServicesPage: React.FC = () => {
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
                     {svc.provider}
                   </td>
+                  <td className="px-6 py-4 text-sm">
+                    <ServiceStatusBadge needsApiKey={svc.needs_api_key} lifecycleStatus={svc.lifecycle_status} endOfServiceAt={svc.end_of_service_at} deprecationNotice={svc.deprecation_notice} />
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right">
                     <div className="inline-flex justify-end">
                       <ActionDropdown
                         size="sm"
+                        triggerAriaLabel={`Actions for ${svc.name}`}
                         actions={[
+                          {
+                            label: SERVICE_USAGE_STRINGS.action,
+                            icon: <Users className="w-4 h-4" />,
+                            onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
+                          },
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -218,6 +235,16 @@ const SystemSandboxServicesPage: React.FC = () => {
           existingNames={services.map((s) => s.name)}
           onClose={handleCancel}
           onSave={handleSave}
+        />
+      )}
+
+      {usageService && (
+        <ServiceUsageModal
+          kind="sandbox"
+          scope="system"
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          onClose={() => setUsageService(null)}
         />
       )}
     </div>

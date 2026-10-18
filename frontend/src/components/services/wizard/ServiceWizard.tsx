@@ -207,6 +207,13 @@ function ServiceWizard({
         opensandbox_image: credentials.image?.trim() || undefined,
         daytona_target: credentials.target?.trim() || undefined,
         e2b_template: credentials.template?.trim() || undefined,
+        // Create flow only: in edit-model mode omitting the fields keeps the stored values.
+        ...(mode === 'create'
+          ? {
+              end_of_service_at: isoFromDateInput(endOfServiceDate),
+              deprecation_notice: deprecationNotice.trim() || null,
+            }
+          : {}),
       };
       return sandboxPayload;
     }
@@ -348,7 +355,7 @@ function ServiceWizard({
                 testResult={testResult}
               />
             )}
-            {steps[currentStep].id === 'confirm' && mode === 'create' && kind !== 'sandbox' && (
+            {steps[currentStep].id === 'confirm' && mode === 'create' && (
               <div className="mt-4">
                 <ServiceLifecycleInputs
                   date={endOfServiceDate}

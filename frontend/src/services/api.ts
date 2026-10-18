@@ -1146,6 +1146,14 @@ class ApiService {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}/used-by`);
   }
 
+  async getSandboxServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/used-by`);
+  }
+
+  async getSystemSandboxServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-sandbox-services/${serviceId}/used-by`);
+  }
+
   async moveAgentsToAIService(
     appId: number,
     serviceId: number,

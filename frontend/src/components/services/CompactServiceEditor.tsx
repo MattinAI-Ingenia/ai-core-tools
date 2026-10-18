@@ -59,6 +59,8 @@ function CompactServiceEditor({
   const aiService = !isSandbox ? (service as ExistingService) : null;
   const sandboxService = isSandbox ? (service as ExistingSandboxService) : null;
 
+  const storedEndOfService = service.end_of_service_at;
+
   const descriptor = useMemo(
     () => getProviderDescriptor(service.provider),
     [service.provider],
@@ -75,9 +77,9 @@ function CompactServiceEditor({
   const [target, setTarget] = useState(sandboxService?.daytona_target || '');
   const [template, setTemplate] = useState(sandboxService?.e2b_template || '');
   const [endOfServiceDate, setEndOfServiceDate] = useState(
-    dateInputValueFromIso(aiService?.end_of_service_at),
+    dateInputValueFromIso(storedEndOfService),
   );
-  const [deprecationNotice, setDeprecationNotice] = useState(aiService?.deprecation_notice || '');
+  const [deprecationNotice, setDeprecationNotice] = useState(service.deprecation_notice || '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showWizard, setShowWizard] = useState(false);
@@ -95,8 +97,8 @@ function CompactServiceEditor({
     setImage(sandboxService?.opensandbox_image || '');
     setTarget(sandboxService?.daytona_target || '');
     setTemplate(sandboxService?.e2b_template || '');
-    setEndOfServiceDate(dateInputValueFromIso(aiService?.end_of_service_at));
-    setDeprecationNotice(aiService?.deprecation_notice || '');
+    setEndOfServiceDate(dateInputValueFromIso(storedEndOfService));
+    setDeprecationNotice(service.deprecation_notice || '');
     setError(null);
   }, [service.service_id]);
 
@@ -133,6 +135,14 @@ function CompactServiceEditor({
     const resolvedApiKey =
       apiKeyChanged || !apiKey.startsWith(MASKED_KEY_PREFIX) ? apiKey : service.api_key;
 
+    // Always sent: an omitted field keeps its value, an explicit null clears it.
+    // Keep a stored non-midnight timestamp untouched unless the day was changed.
+    const resolvedEndOfService =
+      storedEndOfService && dateInputValueFromIso(storedEndOfService) === endOfServiceDate
+        ? storedEndOfService
+        : isoFromDateInput(endOfServiceDate);
+    const resolvedNotice = deprecationNotice.trim() || null;
+
     const payload: ServiceFormData | SandboxServiceFormData = isSandbox
       ? {
           name: name.trim(),
@@ -142,6 +152,8 @@ function CompactServiceEditor({
           opensandbox_image: showImage ? image.trim() || undefined : undefined,
           daytona_target: showTarget ? target.trim() || undefined : undefined,
           e2b_template: showTemplate ? template.trim() || undefined : undefined,
+          end_of_service_at: resolvedEndOfService,
+          deprecation_notice: resolvedNotice,
         }
       : {
           name: name.trim(),
@@ -153,14 +165,8 @@ function CompactServiceEditor({
           supports_video: supportsVideo,
           aws_access_key_id: showAwsFields ? awsAccessKeyId.trim() || undefined : undefined,
           aws_region: showAwsFields ? awsRegion.trim() || undefined : undefined,
-          // Always sent: an omitted field keeps its value, an explicit null clears it.
-          end_of_service_at:
-            // Keep a stored non-midnight timestamp untouched unless the day was changed.
-            aiService?.end_of_service_at &&
-            dateInputValueFromIso(aiService.end_of_service_at) === endOfServiceDate
-              ? aiService.end_of_service_at
-              : isoFromDateInput(endOfServiceDate),
-          deprecation_notice: deprecationNotice.trim() || null,
+          end_of_service_at: resolvedEndOfService,
+          deprecation_notice: resolvedNotice,
         };
     try {
       await onSave(payload);
@@ -331,14 +337,12 @@ function CompactServiceEditor({
             />
           )}
 
-          {!isSandbox && (
-            <ServiceLifecycleInputs
-              date={endOfServiceDate}
-              notice={deprecationNotice}
-              onDateChange={setEndOfServiceDate}
-              onNoticeChange={setDeprecationNotice}
-            />
-          )}
+          <ServiceLifecycleInputs
+            date={endOfServiceDate}
+            notice={deprecationNotice}
+            onDateChange={setEndOfServiceDate}
+            onNoticeChange={setDeprecationNotice}
+          />
 
           {showSupportsVideo && (
             <FormCheckbox

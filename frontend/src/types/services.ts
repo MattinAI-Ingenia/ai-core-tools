@@ -146,10 +146,13 @@ export interface SandboxServiceFormData {
   daytona_memory_gb?: number;
   e2b_template?: string;
   e2b_workspace?: string;
+  /** ISO datetime (00:00 UTC of the picked day) or null to clear. Omitted = keep on update. */
+  end_of_service_at?: string | null;
+  deprecation_notice?: string | null;
 }
 
 /** Existing sandbox service shape returned by the sandbox service detail endpoints. */
-export interface ExistingSandboxService {
+export interface ExistingSandboxService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;
@@ -225,7 +228,7 @@ export interface ServiceUsage {
     readonly app_id: number;
     readonly app_name?: string | null;
   }[];
-  /** Sandbox services only (rendered by the sandbox step). */
+  /** Sandbox services only: apps that use the service as their default sandbox. */
   readonly apps_using_as_default?: readonly { readonly app_id: number; readonly app_name: string }[];
 }
 

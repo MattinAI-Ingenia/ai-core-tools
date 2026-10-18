@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
-import { Box, Plug, Pencil, ClipboardCopy, Trash2, Loader2, AlertTriangle } from 'lucide-react';
+import { Box, Plug, Pencil, ClipboardCopy, Trash2, Loader2, Users } from 'lucide-react';
 import Modal from '../../components/ui/Modal';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
@@ -13,8 +13,13 @@ import Table from '../../components/ui/Table';
 import { useServicesManager } from '../../hooks/useServicesManager';
 import { getProviderBadgeColor } from '../../components/ui/providerBadges';
 import { AppRole } from '../../types/roles';
+import type { ServiceLifecycleFields } from '../../types/services';
+import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import UsedByButton from '../../components/services/UsedByButton';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 
-interface SandboxService {
+interface SandboxService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -59,6 +64,7 @@ function SandboxServicesPage() {
     setEditingService,
   } = useServicesManager<SandboxService>(appId, api as any, cache as any, { entity: 'sandbox service' });
 
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [testResult, setTestResult] = useState<any>(null);
   const [isTestModalOpen, setIsTestModalOpen] = useState(false);
   const [testingServiceId, setTestingServiceId] = useState<number | null>(null);
@@ -137,20 +143,13 @@ function SandboxServicesPage() {
             </span>
           )},
           { header: 'Status', render: (service: SandboxService) => (
-            service.needs_api_key ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                <AlertTriangle className="w-3 h-3" /> API Key Required
-              </span>
-            ) : (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                Ready
-              </span>
-            )
+            <ServiceStatusBadge needsApiKey={service.needs_api_key} lifecycleStatus={service.lifecycle_status} endOfServiceAt={service.end_of_service_at} deprecationNotice={service.deprecation_notice} />
           )},
           { header: 'Created', render: (service: any) => (service.created_at ? new Date(service.created_at).toLocaleDateString() : 'N/A') },
           { header: 'Actions', className: 'relative', render: (service: SandboxService) => (
             canEdit ? (
-              <ActionDropdown actions={[
+              <ActionDropdown triggerAriaLabel={`Actions for ${service.name}`} actions={[
+                { label: SERVICE_USAGE_STRINGS.action, onClick: () => setUsageService({ id: service.service_id, name: service.name }), icon: <Users className="w-4 h-4" /> },
                 {
                   label: testingServiceId === service.service_id ? 'Testing...' : 'Test Connection',
                   onClick: () => void handleTestConnection(service.service_id),
@@ -162,7 +161,7 @@ function SandboxServicesPage() {
                 { label: 'Delete', onClick: () => void handleDelete(service.service_id), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
               ]} size="sm" />
             ) : (
-               <span className="text-gray-400 text-sm">View only</span>
+              <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
             )
           ) }
         ]}
@@ -212,6 +211,18 @@ function SandboxServicesPage() {
           existingNames={services.map((s) => s.name)}
           onClose={handleClose}
           onSave={handleSave}
+        />
+      )}
+
+      {usageService && appId && (
+        <ServiceUsageModal
+          kind="sandbox"
+          scope="app"
+          canNavigate={hasMinRole(AppRole.EDITOR)}
+          appId={Number.parseInt(appId, 10)}
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          onClose={() => setUsageService(null)}
         />
       )}
 
