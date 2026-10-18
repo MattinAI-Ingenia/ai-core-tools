@@ -177,6 +177,22 @@ def service_call_context(
         _call_context.reset(token)
 
 
+def agent_turn_context_kwargs(channel: Any, user_context: Optional[Dict[str, Any]], agent_id: Any) -> Dict[str, Any]:
+    """Keyword arguments for ``set_service_call_context`` / ``service_call_context`` of an agent chat turn.
+
+    ``channel`` may be an enum (its ``.value`` is used) or a string. A scheduled-task run is
+    reported as the task, anything else as the agent.
+    """
+    ctx = user_context or {}
+    task_id = ctx.get("scheduled_task_id")
+    return {
+        "channel": getattr(channel, "value", channel),
+        "app_id": ctx.get("app_id"),
+        "resource_type": "scheduled_task" if task_id is not None else "agent",
+        "resource_id": task_id if task_id is not None else agent_id,
+    }
+
+
 def get_service_call_context() -> Dict[str, Any]:
     """Current call context (empty dict when none was set)."""
     return dict(_call_context.get() or {})
