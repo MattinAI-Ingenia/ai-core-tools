@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any
 import os
 import re
+from contextlib import ExitStack
 import uuid
 from models.media import Media
 from models.silo import Silo
@@ -28,6 +29,12 @@ from repositories.silo_repository import SiloRepository
 from services.folder_service import FolderService
 from services.service_health_service import ServiceHealthService
 from utils.provider_errors import classify_provider_error
+from utils.service_lifecycle import (
+    SERVICE_KIND_EMBEDDING,
+    ServiceRetiredError,
+    ensure_service_active,
+    service_call_context,
+)
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv("REPO_BASE_FOLDER"))
 COLLECTION_PREFIX = 'silo_'
@@ -39,6 +46,14 @@ INDEX_BATCH_FIELD = 'index_batch'
 
 class ResourceIndexingError(Exception):
     """Indexing a resource failed. The message is user-facing (stored on the resource)."""
+
+
+def _ensure_embedding_active(embedding_service: Optional[EmbeddingService]) -> None:
+    """Block embedding computation with a retired embedding service (AD-5).
+
+    Only call this where text is embedded; delete/count/cleanup paths must keep working.
+    """
+    ensure_service_active(embedding_service, SERVICE_KIND_EMBEDDING)
 
 
 class ResourceNotIndexableError(ResourceIndexingError, ValueError):
@@ -335,6 +350,8 @@ class SiloService:
             if not silo.embedding_service:
                 raise ValidationError(f"Silo {silo_id} has no embedding service configured")
 
+            _ensure_embedding_active(silo.embedding_service)
+
             logger.debug(f"Getting retriever for silo {silo_id} with embedding service: {silo.embedding_service.name}")
             
             collection_name = COLLECTION_PREFIX + str(silo_id)
@@ -385,6 +402,9 @@ class SiloService:
                 use_async=True,  # Use async psycopg engine for LangGraph compatibility
                 search_type=retriever_search_type,
             )
+        except ServiceRetiredError:
+            # Already logged once (WARNING) by ensure_service_active.
+            raise
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
             raise
@@ -747,6 +767,7 @@ class SiloService:
         if silo.embedding_service_id:
             embedding_service = SiloRepository.get_embedding_service_by_id(silo.embedding_service_id, db)
         
+        _ensure_embedding_active(embedding_service)
         logger.debug(f"Usando embedding service: {embedding_service.name if embedding_service else 'None'}")
         
         docs = SiloService._create_documents_for_indexing(silo_id, documents)
@@ -952,15 +973,36 @@ class SiloService:
             ResourceIndexingError: indexing failed; the message is safe to show to users.
         """
         index_batch = index_batch or uuid.uuid4().hex
+        return SiloService._index_resource(resource, index_batch)
+
+    @staticmethod
+    def _index_resource(resource: Resource, index_batch: str) -> str:
+        """Body of ``index_resource`` (runs inside the call context)."""
         # For resource operations, we need a fresh session since this might be called from other contexts
         session = SessionLocal()
         resource_with_relations = None
+        call_stack = ExitStack()
         try:
             # Load resource with relationships within the session to avoid detached instance issues
             resource_with_relations = session.query(Resource).filter(Resource.resource_id == resource.resource_id).first()
             if not resource_with_relations:
                 logger.error(f"Resource {resource.resource_id} not found for indexing")
                 return index_batch
+
+            # Set from the loaded resource (no lazy loading of the caller's instance).
+            call_stack.enter_context(service_call_context(
+                channel="repository_indexing",
+                app_id=getattr(resource_with_relations.repository, "app_id", None),
+                resource_type="resource",
+                resource_id=resource_with_relations.resource_id,
+            ))
+
+            # Fail before extracting documents when the embedding service is retired.
+            try:
+                _ensure_embedding_active(resource_with_relations.repository.silo.embedding_service)
+            except ServiceRetiredError as exc:
+                SiloService._set_index_status(resource_with_relations, session, exc.message)
+                raise ResourceIndexingError(exc.message) from exc
 
             collection_name = COLLECTION_PREFIX + str(resource_with_relations.repository.silo_id)
             
@@ -1037,6 +1079,8 @@ class SiloService:
                 logger.warning("metadata_values_cache: invalidation failed after index_resource for silo=%d: %s", silo_id, _cache_exc)
         except ResourceIndexingError as e:
             # Outcome already stored on the resource.
+            if isinstance(e.__cause__, ServiceRetiredError):
+                raise  # already logged once (WARNING) by ensure_service_active
             logger.exception(f"Error indexing resource {resource.resource_id}: {e}")
             raise
         except Exception as e:
@@ -1046,6 +1090,7 @@ class SiloService:
                 SiloService._set_index_status(resource_with_relations, session, message)
             raise ResourceIndexingError(message) from e
         finally:
+            call_stack.close()
             session.close()
 
         return index_batch
@@ -1204,6 +1249,8 @@ class SiloService:
             logger.warning(f"Silo {media.silo_id} has no embedding service, skipping indexing for media {media.media_id}")
             return
 
+        _ensure_embedding_active(embedding_service)
+
         try:
             _get_vector_store(silo).index_documents(
                 collection_name,
@@ -1216,6 +1263,8 @@ class SiloService:
                 MetadataValuesCacheService.invalidate(media.silo_id)
             except Exception as _cache_exc:
                 logger.warning("metadata_values_cache: invalidation failed after index_media_chunk for silo=%d: %s", media.silo_id, _cache_exc)
+        except ServiceRetiredError:
+            raise
         except Exception as e:
             logger.error(f"Error indexing media chunk for media {media.media_id}: {str(e)}")
             raise
@@ -1497,7 +1546,8 @@ class SiloService:
         embedding_service = None
         if silo.embedding_service_id:
             embedding_service = SiloRepository.get_embedding_service_by_id(silo.embedding_service_id, db)
-        
+        _ensure_embedding_active(embedding_service)
+
         results_limit = limit if limit and limit > 0 else DEFAULT_SEARCH_LIMIT
         if results_limit > MAX_SEARCH_LIMIT:
             results_limit = MAX_SEARCH_LIMIT
@@ -1870,6 +1920,9 @@ class SiloService:
         source_id:   str value of media_id or resource_id (as stored in metadata)
 
         Raises ValueError for unsupported source_type.
+
+        Known limitation: this calls ``find_docs_in_collection("")``, which embeds a blank query,
+        so it is blocked (``ServiceRetiredError``) for silos whose embedding service is retired.
         """
         if source_type not in ("media", "resource"):
             raise ValueError(f"Unsupported source_type '{source_type}'. Must be 'media' or 'resource'.")
