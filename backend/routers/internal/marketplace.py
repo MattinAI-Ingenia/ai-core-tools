@@ -38,6 +38,7 @@ from schemas.marketplace_schemas import (
 from schemas.conversation_schemas import ConversationWithHistoryResponse, MarketplaceConversationResponse
 from schemas.chat_schemas import ChatResponseSchema
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -346,6 +347,7 @@ def _build_file_user_context(auth_context: AuthContext, app_id: int) -> Dict:
 @marketplace_router.post(
     "/conversations/{conversation_id}/upload-file",
     summary="Upload file for marketplace conversation",
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def upload_marketplace_file(
     conversation_id: int,
@@ -390,6 +392,11 @@ async def upload_marketplace_file(
                     content=file_ref.content,
                     db=db,
                 )
+            except ServiceRetiredError:
+                await file_service.discard_uploaded_file(
+                    file_ref.file_id, agent.agent_id, user_context, conversation_id
+                )
+                raise
             except Exception as vec_err:
                 logger.warning(f"Marketplace file vectorization at upload failed: {vec_err}")
 
@@ -406,7 +413,7 @@ async def upload_marketplace_file(
             "has_extractable_content": file_ref.has_extractable_content,
             "mime_type": file_ref.mime_type,
         }
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error uploading marketplace file: {e}")
@@ -633,6 +640,7 @@ def _prepare_marketplace_chat(
     "/conversations/{conversation_id}/chat",
     summary="Chat in marketplace conversation",
     response_model=ChatResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def marketplace_chat(
     conversation_id: int,
@@ -689,7 +697,7 @@ async def marketplace_chat(
         )
         return ChatResponseSchema(**result)
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in marketplace chat: {e}")
@@ -704,7 +712,10 @@ async def marketplace_chat(
 @marketplace_router.post(
     "/conversations/{conversation_id}/chat/stream",
     summary="Chat in marketplace conversation (streaming)",
-    responses={500: {"description": "Internal server error"}},
+    responses={
+        409: {"description": "A service used by this resource was retired"},
+        500: {"description": "Internal server error"},
+    },
 )
 async def marketplace_chat_stream(
     conversation_id: int,
@@ -789,7 +800,7 @@ async def marketplace_chat_stream(
             },
         )
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in marketplace streaming chat: {e}")

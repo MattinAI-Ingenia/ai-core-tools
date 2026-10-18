@@ -167,7 +167,8 @@ async def list_models(
             "content": {
                 "text/event-stream": {"schema": {"type": "string"}}
             }
-        }
+        },
+        409: {"description": "A service used by this agent was retired"},
     }
 )
 async def chat_completions(

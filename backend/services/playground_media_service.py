@@ -23,6 +23,7 @@ from models.agent import Agent
 from services.repository_service import RepositoryService
 from services.media_service import MediaService
 from services.silo_service import SiloService
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +449,8 @@ class PlaygroundMediaService:
                 db,
             )
             return True
+        except ServiceRetiredError:
+            raise
         except Exception as exc:
             logger.warning(
                 "File-based extraction failed for %s, falling back to content: %s",

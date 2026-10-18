@@ -1064,6 +1064,25 @@ class FileManagementService:
                 "Error loading persistent files for session %s", sanitize_for_log(session_key)
             )
 
+    async def discard_uploaded_file(
+        self,
+        file_id: str,
+        agent_id: int,
+        user_context: Dict = None,
+        conversation_id: Optional[str] = None,
+    ) -> None:
+        """Best-effort removal of an attachment whose upload request is being failed.
+
+        Never raises, and logs only the file id (no error text) so a caller that is about to
+        re-raise a ``ServiceRetiredError`` does not log its admin notice a second time.
+        """
+        try:
+            removed = await self.remove_file(file_id, agent_id, user_context, conversation_id)
+        except Exception:
+            removed = False
+        if not removed:
+            logger.warning("Could not remove attachment %s after a failed upload", sanitize_for_log(file_id))
+
     async def remove_files(
         self,
         file_ids: List[str],

@@ -22,6 +22,7 @@ from routers.controls import enforce_file_size_limit
 from routers.controls.role_authorization import require_min_role, AppRole
 from repositories.media_repository import MediaRepository
 from utils.error_handlers import ValidationError
+from utils.service_lifecycle import ServiceRetiredError
 
 # Import database dependency
 from db.database import get_db
@@ -632,7 +633,8 @@ async def delete_media(
 
 @repositories_router.post("/{repository_id}/search",
                          summary="Search documents in repository",
-                         tags=["Repositories", "Search"])
+                         tags=["Repositories", "Search"],
+                         responses={409: {"description": "A service used by this resource was retired"}})
 async def search_repository_documents(
     app_id: int,
     repository_id: int,
@@ -663,7 +665,7 @@ async def search_repository_documents(
         logger.info(f"Repository search completed - found {len(result.get('results', []))} results")
         return result
         
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error searching repository {repository_id}: {str(e)}", exc_info=True)
