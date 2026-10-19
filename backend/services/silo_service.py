@@ -7,6 +7,7 @@ from models.media import Media
 from models.silo import Silo
 from models.resource import Resource, RESOURCE_STATUS_ERROR, RESOURCE_STATUS_INDEXED
 from models.embedding_service import EmbeddingService
+from models.output_parser import OutputParser
 from db.database import SessionLocal
 from db.database import db as db_obj
 from sqlalchemy import select
@@ -537,15 +538,19 @@ class SiloService:
                 silo.embedding_service_id = silo_data['embedding_service_id']
             
             # Handle metadata definition (output parser) - explicitly handle None to clear it
-            if 'output_parser_id' in silo_data:
-                # If output_parser_id is explicitly provided (even if None), use it
-                logger.info(f"Setting metadata_definition_id to: {silo_data['output_parser_id']}")
-                silo.metadata_definition_id = silo_data['output_parser_id']
-            elif 'metadata_definition_id' in silo_data:
-                # Fallback to metadata_definition_id for backward compatibility
-                logger.info(f"Setting metadata_definition_id from fallback to: {silo_data['metadata_definition_id']}")
-                silo.metadata_definition_id = silo_data['metadata_definition_id']
-            
+            parser_key = (
+                'output_parser_id' if 'output_parser_id' in silo_data
+                else 'metadata_definition_id' if 'metadata_definition_id' in silo_data
+                else None
+            )
+            if parser_key is not None:
+                new_parser_id = silo_data[parser_key]
+                if new_parser_id and new_parser_id != silo.metadata_definition_id:
+                    parser = SiloRepository.get_output_parser_by_id(int(new_parser_id), session)
+                    SiloService.ensure_output_parser_owned(parser, int(silo_data['app_id']))
+                logger.info(f"Setting metadata_definition_id to: {new_parser_id}")
+                silo.metadata_definition_id = new_parser_id
+
             # Media (video/audio) services: only touched when the caller sends them, so
             # callers that don't manage media never wipe an existing configuration.
             if 'transcription_service_id' in silo_data or 'video_ai_service_id' in silo_data:
@@ -578,6 +583,15 @@ class SiloService:
         """
         if service is None or (service.app_id is not None and service.app_id != app_id):
             raise ValidationError("embedding_service_id does not exist or does not belong to this app")
+
+    @staticmethod
+    def ensure_output_parser_owned(parser: Optional[OutputParser], app_id: int) -> None:
+        """Reject an output parser that is missing or owned by another app.
+
+        The message is the same for both cases so it cannot be used to probe other tenants' ids.
+        """
+        if parser is None or parser.app_id != app_id:
+            raise ValidationError("output_parser_id does not exist or does not belong to this app")
 
     @staticmethod
     def service_warnings(silo: Optional[Silo]) -> List[str]:
@@ -686,6 +700,7 @@ class SiloService:
         if silo:
             # Store metadata_definition_id before deleting (avoid DetachedInstanceError)
             metadata_definition_id = silo.metadata_definition_id
+            silo_app_id = silo.app_id
             
             SiloService.delete_collection(silo.silo_id, db)
             
@@ -698,9 +713,16 @@ class SiloService:
             SiloService.remove_silo_media_files(silo_id)
 
             # Finally delete the output parser if it exists
+            # (only if it belongs to the silo's app: never delete another tenant's parser)
             if metadata_definition_id:
                 output_parser_service = OutputParserService()
-                output_parser_service.delete_parser(db, metadata_definition_id)
+                parser = output_parser_service.get_parser_by_id(db, metadata_definition_id)
+                if parser is not None and parser.app_id == silo_app_id:
+                    output_parser_service.delete_parser(db, metadata_definition_id)
+                elif parser is not None:
+                    logger.warning(
+                        f"Not deleting output parser {metadata_definition_id}: not owned by app {silo_app_id}"
+                    )
 
 
 
@@ -1810,7 +1832,7 @@ class SiloService:
             if silo.metadata_definition_id:
                 logger.info(f"Getting metadata parser {silo.metadata_definition_id}")
                 metadata_parser = SiloRepository.get_output_parser_by_id(silo.metadata_definition_id, db)
-                if metadata_parser and metadata_parser.fields:
+                if metadata_parser and metadata_parser.app_id == silo.app_id and metadata_parser.fields:
                     metadata_fields = [
                         {
                             "name": field.get("name", ""),

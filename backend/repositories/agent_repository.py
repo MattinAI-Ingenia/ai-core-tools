@@ -310,7 +310,7 @@ class AgentRepository:
         # Get metadata definition if it exists
         if silo.metadata_definition_id:
             metadata_parser = AgentRepository.get_output_parser_by_id(db, silo.metadata_definition_id)
-            if metadata_parser and metadata_parser.fields:
+            if metadata_parser and metadata_parser.app_id == silo.app_id and metadata_parser.fields:
                 silo_info["metadata_definition"] = {
                     "fields": metadata_parser.fields
                 }

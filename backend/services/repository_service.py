@@ -179,6 +179,7 @@ class RepositoryService:
         # Get silo and parser info before deletion
         silo = repository.silo
         parser_id = silo.metadata_definition_id if silo else None
+        repository_app_id = repository.app_id
         
         # Delete all resources first
         resources = RepositoryRepository.get_resources_by_repository_id(db, repository.repository_id)
@@ -212,8 +213,12 @@ class RepositoryService:
             db.commit()
         
         # Delete output parser LAST (after silo is deleted)
+        # (only when it belongs to the repository's app: never delete another tenant's parser)
         if parser_id:
-            RepositoryRepository.delete_output_parser_by_id(db, parser_id)
+            from models.output_parser import OutputParser
+            parser = db.get(OutputParser, parser_id)
+            if parser is not None and parser.app_id == repository_app_id:
+                RepositoryRepository.delete_output_parser_by_id(db, parser_id)
 
     # ==================== ROUTER SERVICE METHODS ====================
 
@@ -401,7 +406,8 @@ class RepositoryService:
                 embedding_service_id = repo.silo.embedding_service.service_id
             
             # Get metadata fields from silo's metadata definition (OutputParser)
-            if repo.silo.metadata_definition and repo.silo.metadata_definition.fields:
+            if (repo.silo.metadata_definition and repo.silo.metadata_definition.app_id == repo.app_id
+                    and repo.silo.metadata_definition.fields):
                 try:
                     parser_fields = repo.silo.metadata_definition.fields
                     if isinstance(parser_fields, dict) and 'fields' in parser_fields:
