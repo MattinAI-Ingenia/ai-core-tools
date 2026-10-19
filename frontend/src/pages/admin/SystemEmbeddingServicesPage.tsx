@@ -1,24 +1,32 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Users, Pencil, Trash2 } from 'lucide-react';
 import { apiService } from '../../services/api';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
-import type { ServiceFormData } from '../../types/services';
+import type { ServiceLifecycleFields, ServiceFormData } from '../../types/services';
 import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { getServiceApiClient } from '../../components/services/serviceApi';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useSettingsCache } from '../../contexts/SettingsCacheContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
-interface SystemEmbeddingService {
+interface SystemEmbeddingService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;
   readonly model_name: string;
   readonly api_key: string;
   readonly base_url: string;
+  readonly api_version?: string;
+  readonly aws_access_key_id?: string;
+  readonly aws_region?: string;
   readonly is_system: boolean;
   readonly last_error?: string | null;
   readonly last_error_at?: string | null;
@@ -41,13 +49,16 @@ interface DeletionImpact {
 
 const SystemEmbeddingServicesPage: React.FC = () => {
   const confirm = useConfirm();
+  const settingsCache = useSettingsCache();
   const mutate = useApiMutation();
 
   const [services, setServices] = useState<SystemEmbeddingService[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [editingService, setEditingService] = useState<SystemEmbeddingService | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('embedding');
 
   const fetchServices = useCallback(async () => {
     try {
@@ -105,8 +116,24 @@ const SystemEmbeddingServicesPage: React.FC = () => {
     );
     if (result === undefined) return;
 
+    settingsCache.invalidateSystemServiceCaches();
     handleCancel();
     await fetchServices();
+  };
+
+  const testConnection = (serviceId: number) => {
+    const service = services.find((item) => item.service_id === serviceId);
+    if (!service) throw new Error('Embedding service not found');
+    return getServiceApiClient('embedding', 'system', undefined).testConnection({
+      name: service.name,
+      provider: service.provider,
+      model_name: service.model_name,
+      api_key: service.api_key,
+      base_url: service.base_url,
+      api_version: service.api_version,
+      aws_access_key_id: service.aws_access_key_id,
+      aws_region: service.aws_region,
+    }, serviceId);
   };
 
   const handleDelete = async (svc: SystemEmbeddingService) => {
@@ -180,6 +207,7 @@ const SystemEmbeddingServicesPage: React.FC = () => {
       },
     );
     if (result === undefined) return;
+    settingsCache.invalidateSystemServiceCaches();
     await fetchServices();
   };
 
@@ -243,13 +271,20 @@ const SystemEmbeddingServicesPage: React.FC = () => {
                     {svc.model_name}
                   </td>
                   <td className="px-6 py-4 text-sm">
-                    <ServiceStatusBadge lastError={svc.last_error} lastErrorAt={svc.last_error_at} />
+                    <ServiceStatusBadge lastError={svc.last_error} lastErrorAt={svc.last_error_at} lifecycleStatus={svc.lifecycle_status} endOfServiceAt={svc.end_of_service_at} deprecationNotice={svc.deprecation_notice} />
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right">
                     <div className="inline-flex justify-end">
                       <ActionDropdown
                         size="sm"
+                        triggerAriaLabel={`Actions for ${svc.name}`}
                         actions={[
+                          {
+                            label: SERVICE_USAGE_STRINGS.action,
+                            icon: <Users className="w-4 h-4" />,
+                            onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
+                          },
+                          testAction(svc.service_id, svc.name, () => testConnection(svc.service_id)),
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -296,6 +331,17 @@ const SystemEmbeddingServicesPage: React.FC = () => {
           onSave={handleSave}
         />
       )}
+
+      {usageService && (
+        <ServiceUsageModal
+          kind="embedding"
+          scope="system"
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          onClose={() => setUsageService(null)}
+        />
+      )}
+      {connectionTestModal}
     </div>
   );
 };

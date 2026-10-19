@@ -42,6 +42,7 @@ from db.database import get_db
 
 # Import logger
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from utils.error_handlers import ValidationError
 from utils.vector_db_immutability import assert_vector_db_type_immutable, assert_embedding_service_immutable
 from tools.vector_store_factory import VectorStoreFactory
@@ -466,7 +467,8 @@ async def recrawl_url(
 
 @domains_router.get("/{domain_id}/urls/{url_id}/content",
                     summary="Get URL content preview",
-                    tags=["Domains", "URLs"])
+                    tags=["Domains", "URLs"],
+                    responses={409: {"description": "A service used by this resource was retired"}})
 async def get_url_content(
     app_id: int,
     domain_id: int,
@@ -510,7 +512,7 @@ async def get_url_content(
             "content": content,
             "message": "Content retrieved successfully" if content else "No content found for this URL",
         }
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error retrieving URL content: {str(e)}")

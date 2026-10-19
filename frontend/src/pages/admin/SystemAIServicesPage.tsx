@@ -1,18 +1,23 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Users, Pencil, Trash2 } from 'lucide-react';
 import { apiService } from '../../services/api';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
-import type { ServiceFormData } from '../../types/services';
+import type { ServiceLifecycleFields, ServiceFormData } from '../../types/services';
 import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
+import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { getServiceApiClient } from '../../components/services/serviceApi';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
+import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useSettingsCache } from '../../contexts/SettingsCacheContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
-interface SystemAIService {
+interface SystemAIService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;
@@ -29,13 +34,16 @@ interface SystemAIService {
 
 const SystemAIServicesPage: React.FC = () => {
   const confirm = useConfirm();
+  const settingsCache = useSettingsCache();
   const mutate = useApiMutation();
 
   const [services, setServices] = useState<SystemAIService[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [editingService, setEditingService] = useState<SystemAIService | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('AI');
 
   const fetchServices = useCallback(async () => {
     try {
@@ -98,8 +106,24 @@ const SystemAIServicesPage: React.FC = () => {
     );
     if (result === undefined) return;
 
+    settingsCache.invalidateSystemServiceCaches();
     handleCancel();
     await fetchServices();
+  };
+
+  const testConnection = async (serviceId: number) => {
+    const detail = await apiService.getSystemAIService(serviceId);
+    return getServiceApiClient('ai', 'system', undefined).testConnection({
+      name: detail.name,
+      provider: detail.provider,
+      model_name: detail.model_name,
+      api_key: detail.api_key,
+      base_url: detail.base_url,
+      api_version: detail.api_version,
+      supports_video: detail.supports_video,
+      aws_access_key_id: detail.aws_access_key_id,
+      aws_region: detail.aws_region,
+    }, serviceId);
   };
 
   const handleDelete = async (service: SystemAIService) => {
@@ -120,6 +144,7 @@ const SystemAIServicesPage: React.FC = () => {
       },
     );
     if (result === undefined) return;
+    settingsCache.invalidateSystemServiceCaches();
     await fetchServices();
   };
 
@@ -183,13 +208,20 @@ const SystemAIServicesPage: React.FC = () => {
                     {svc.model_name}
                   </td>
                   <td className="px-6 py-4 text-sm">
-                    <ServiceStatusBadge lastError={svc.last_error} lastErrorAt={svc.last_error_at} />
+                    <ServiceStatusBadge lastError={svc.last_error} lastErrorAt={svc.last_error_at} lifecycleStatus={svc.lifecycle_status} endOfServiceAt={svc.end_of_service_at} deprecationNotice={svc.deprecation_notice} />
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right">
                     <div className="inline-flex justify-end">
                       <ActionDropdown
                         size="sm"
+                        triggerAriaLabel={`Actions for ${svc.name}`}
                         actions={[
+                          {
+                            label: SERVICE_USAGE_STRINGS.action,
+                            icon: <Users className="w-4 h-4" />,
+                            onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
+                          },
+                          testAction(svc.service_id, svc.name, () => testConnection(svc.service_id)),
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -238,6 +270,17 @@ const SystemAIServicesPage: React.FC = () => {
           onSave={handleSave}
         />
       )}
+
+      {usageService && (
+        <ServiceUsageModal
+          kind="ai"
+          scope="system"
+          serviceId={usageService.id}
+          serviceName={usageService.name}
+          onClose={() => setUsageService(null)}
+        />
+      )}
+      {connectionTestModal}
     </div>
   );
 };

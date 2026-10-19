@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
+import { ServiceOptionStatus, ServiceSelectOptions, serviceStatusId } from '../components/ui/ServiceOptionStatus';
+import type { ServiceOptionLike } from '../utils/serviceLifecycle';
 import { MediaServicesFields } from '../components/forms/MediaServicesFields';
 
 interface RepositoryFormData {
@@ -13,9 +15,7 @@ interface RepositoryFormData {
   video_ai_service_id?: number;
 }
 
-interface EmbeddingService {
-  service_id: number;
-  name: string;
+interface EmbeddingService extends ServiceOptionLike {
   provider?: string;
   model_name?: string;
   is_system?: boolean;
@@ -26,9 +26,7 @@ interface VectorDbOption {
   label: string;
 }
 
-interface AIService {
-  service_id: number;
-  name: string;
+interface AIService extends ServiceOptionLike {
   supports_video?: boolean;
 }
 
@@ -41,6 +39,8 @@ const RepositoryFormPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [embeddingServices, setEmbeddingServices] = useState<EmbeddingService[]>([]);
   const [aiServices, setAiServices] = useState<AIService[]>([]);
+  // Values saved on the loaded repository (D-4): the only retired services that stay selectable.
+  const [savedMedia, setSavedMedia] = useState<{ transcription?: number | null; video?: number | null }>({});
   const [vectorDbOptions, setVectorDbOptions] = useState<VectorDbOption[]>([]);
   const [formData, setFormData] = useState<RepositoryFormData>({
     name: '',
@@ -85,6 +85,7 @@ const RepositoryFormPage: React.FC = () => {
         setEmbeddingServices(servicesToUse);
         setVectorDbOptions(availableVectorDbOptions);
         setAiServices(repository.ai_services ?? []);
+        setSavedMedia({ transcription: repository.transcription_service_id, video: repository.video_ai_service_id });
 
         const normalizedVectorDbType = (repository.vector_db_type || 'PGVECTOR').toUpperCase();
         const resolvedVectorDbType = availableVectorDbOptions.some((option) => option.code === normalizedVectorDbType)
@@ -92,7 +93,9 @@ const RepositoryFormPage: React.FC = () => {
           : (availableVectorDbOptions[0]?.code || 'PGVECTOR');
 
         const nextEmbeddingServiceId = repository.embedding_service_id
-          ?? (isNewRepository && servicesToUse.length === 1 ? servicesToUse[0].service_id : undefined);
+          ?? (isNewRepository && servicesToUse.length === 1 && servicesToUse[0].lifecycle_status !== 'retired'
+            ? servicesToUse[0].service_id
+            : undefined);
 
         setFormData({
           name: repository.name ?? '',
@@ -292,16 +295,19 @@ const RepositoryFormPage: React.FC = () => {
                 })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 required
+                aria-describedby={serviceStatusId(embeddingServices, formData.embedding_service_id, 'embedding_service_id')}
               >
                 <option value="">Select an embedding service</option>
-                {embeddingServices.map((service) => (
-                  <option key={service.service_id} value={service.service_id}>
-                    {service.is_system ? '[System] ' : ''}{service.provider && service.model_name
+                <ServiceSelectOptions
+                  options={embeddingServices}
+                  savedValue={undefined}
+                  getLabel={(service) =>
+                    `${service.is_system ? '[System] ' : ''}${service.provider && service.model_name
                       ? `${service.name} (${service.provider} - ${service.model_name})`
-                      : service.name}
-                  </option>
-                ))}
+                      : service.name}`}
+                />
               </select>
+              <ServiceOptionStatus selectId="embedding_service_id" options={embeddingServices} selectedId={formData.embedding_service_id} />
               <p className="text-sm text-gray-500 mt-1">
                 This embedding service will be used for the silo that's automatically created with this repository
               </p>
@@ -313,6 +319,8 @@ const RepositoryFormPage: React.FC = () => {
             aiServices={aiServices}
             transcriptionServiceId={formData.transcription_service_id}
             videoServiceId={formData.video_ai_service_id}
+            savedTranscriptionServiceId={savedMedia.transcription}
+            savedVideoServiceId={savedMedia.video}
             onChange={(field, value) => setFormData({ ...formData, [field]: value ?? undefined })}
           />
 

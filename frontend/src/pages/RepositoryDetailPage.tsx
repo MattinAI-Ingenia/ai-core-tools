@@ -9,6 +9,8 @@ import Alert from '../components/ui/Alert';
 import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
+import type { ServiceLifecycleWarning } from '../types/services';
+import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
 
 interface Resource {
   resource_id: number;
@@ -46,6 +48,7 @@ interface RepositoryDetail {
   transcription_service_id?: number | null;
   video_ai_service_id?: number | null;
   service_warnings?: string[];
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
   interface Media {
@@ -710,6 +713,7 @@ const RepositoryDetailPage: React.FC = () => {
       {/* Error Message */}
       {error && <Alert type="error" message={error} onDismiss={() => setError(null)} className="mb-6" />}
       {reindexNotice && <Alert type={reindexNotice.type} message={reindexNotice.text} onDismiss={() => setReindexNotice(null)} className="mb-6" />}
+      <ServiceLifecycleAlert warnings={repository?.lifecycle_warnings} variant="full" className="mb-6" />
       {repository?.service_warnings?.map((warning) => (
         <Alert
           key={warning}

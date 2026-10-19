@@ -6,6 +6,7 @@ from models.silo import Silo
 from langchain.tools import BaseTool, tool
 from tools.outputParserTools import get_parser_model_by_id
 from tools.aiServiceTools import get_llm, get_output_parser
+from utils.service_lifecycle import ServiceRetiredError
 from tools.ai.fileTools import fetch_file_in_base64
 from tools.ai.workspaceTools import create_download_url_tool
 from typing import Any, Optional, Dict, List, Tuple, Type
@@ -44,7 +45,7 @@ from tools.sandbox import (
     create_sandbox_repl_tools,
     resolve_provider,
 )
-from tools.sandbox.factory import SandboxProviderUnavailableError
+from tools.sandbox.factory import SandboxProviderUnavailableError, SandboxServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -346,9 +347,12 @@ async def create_agent(
             ci_provider_for_prompt = sandbox_provider or resolve_provider(agent)
             ci_languages = ci_provider_for_prompt.get_supported_languages()
         except SandboxProviderUnavailableError as exc:
-            logger.warning(
-                "Code interpreter unavailable for agent %s: %s", agent.agent_id, exc
-            )
+            if isinstance(exc, SandboxServiceRetiredError):
+                logger.debug("Code interpreter unavailable for agent %s: sandbox service retired", agent.agent_id)
+            else:
+                logger.warning(
+                    "Code interpreter unavailable for agent %s: %s", agent.agent_id, exc
+                )
             ci_provider_for_prompt = None
             ci_languages = []
 
@@ -577,11 +581,15 @@ async def create_agent(
             try:
                 sandbox_provider = ci_provider_for_prompt or resolve_provider(agent)
             except SandboxProviderUnavailableError as exc:
-                logger.warning(
-                    "Skipping code interpreter tools for agent %s: %s",
-                    agent.agent_id,
-                    exc,
-                )
+                if isinstance(exc, SandboxServiceRetiredError):
+                    logger.debug("Skipping code interpreter tools for agent %s: sandbox service retired",
+                                 agent.agent_id)
+                else:
+                    logger.warning(
+                        "Skipping code interpreter tools for agent %s: %s",
+                        agent.agent_id,
+                        exc,
+                    )
                 sandbox_provider = None
         if sandbox_provider is not None and sandbox_handle is None:
             logger.warning(
@@ -843,9 +851,10 @@ def parse_agent_response(response_text, agent):
         if isinstance(response_text, dict):
             return response_text
         
-        # If response is a Pydantic model instance, convert to dict
+        # If response is a Pydantic model instance, convert to dict. mode="json" turns
+        # date/datetime/Decimal fields into JSON types, so the response can be streamed and stored.
         if hasattr(response_text, 'model_dump'):
-            return response_text.model_dump()
+            return response_text.model_dump(mode="json")
         
         # If response is a string, try to parse it as JSON
         content = response_text.strip()
@@ -989,6 +998,10 @@ class IACTTool(BaseTool):
     react_agent: Any = None
     mcp_client: Any = None
     llm: Any = None
+    # Set when building the tool agent hit a retired service. The guard already logged the
+    # one WARNING (at build time, not invocation time); invoking the tool re-raises this
+    # error without touching the DB or logging again.
+    deferred_error: Any = None
     working_dir: Optional[str] = None
     sandbox_handle: Any = None
     sandbox_provider: Any = None
@@ -1028,15 +1041,64 @@ class IACTTool(BaseTool):
         self.attached_files = attached_files or []
         self.name = sanitize_identifier(agent.name)
         self.description = agent.description or "Agent tool"
-        self.llm = get_llm(agent)
-        if self.llm is None:
+        # The LLM is built lazily (_ensure_llm): a retired AI service must only fail the
+        # parent when this tool is invoked, not on every turn it is merely attached.
+        if getattr(agent, "ai_service", None) is None:
             raise ValueError("No LLM found for agent")
+        self.llm = None
         self.react_agent = None
         self.mcp_client = None
+
+    def _ensure_llm(self) -> Any:
+        """Build the sub-agent's LLM on first use. Raises ``ServiceRetiredError`` if retired."""
+        if self.llm is None:
+            self.llm = get_llm(self.agent)
+            if self.llm is None:
+                raise ValueError("No LLM found for agent")
+        return self.llm
 
     @classmethod
     async def create(
         cls,
+        agent: Agent,
+        user_context: Optional[Dict] = None,
+        working_dir: Optional[str] = None,
+        sandbox_handle: Optional[Any] = None,
+        sandbox_provider: Optional[Any] = None,
+        sandbox_session_key: Optional[str] = None,
+        sandbox_session_service: Optional[Any] = None,
+        attached_files: Optional[List[Dict]] = None,
+        user_message: Optional[str] = None,
+    ) -> "IACTTool":
+        """Build the tool; a retired service used by the sub-agent defers the failure.
+
+        Any ``ServiceRetiredError`` raised while building (LLM, middleware models) is kept
+        on the instance and re-raised only when the tool is invoked, so merely attaching a
+        tool agent never fails the parent turn.
+        """
+        instance = cls(
+            agent,
+            user_context=user_context,
+            working_dir=working_dir,
+            sandbox_handle=sandbox_handle,
+            sandbox_provider=sandbox_provider,
+            sandbox_session_key=sandbox_session_key,
+            sandbox_session_service=sandbox_session_service,
+            attached_files=attached_files,
+        )
+        try:
+            return await cls._build(
+                instance, agent, user_context, working_dir, sandbox_handle, sandbox_provider,
+                sandbox_session_key, sandbox_session_service, attached_files, user_message,
+            )
+        except ServiceRetiredError as exc:
+            instance.deferred_error = exc
+            return instance
+
+    @classmethod
+    async def _build(
+        cls,
+        instance: "IACTTool",
         agent: Agent,
         user_context: Optional[Dict] = None,
         working_dir: Optional[str] = None,
@@ -1058,16 +1120,7 @@ class IACTTool(BaseTool):
         pass (``agent.skill_router_enabled``, see ``_resolve_skills_for_prompt``) has
         the same routing signal the top-level agent has — it is otherwise unused here.
         """
-        instance = cls(
-            agent,
-            user_context=user_context,
-            working_dir=working_dir,
-            sandbox_handle=sandbox_handle,
-            sandbox_provider=sandbox_provider,
-            sandbox_session_key=sandbox_session_key,
-            sandbox_session_service=sandbox_session_service,
-            attached_files=attached_files,
-        )
+        instance._ensure_llm()
 
         tools = []
         # Add nested tool agents recursively
@@ -1100,11 +1153,15 @@ class IACTTool(BaseTool):
                 sandbox_provider = resolve_provider(agent)
                 instance.sandbox_provider = sandbox_provider
             except SandboxProviderUnavailableError as exc:
-                logger.warning(
-                    "Skipping code interpreter tools for sub-agent %s: %s",
-                    agent.agent_id,
-                    exc,
-                )
+                if isinstance(exc, SandboxServiceRetiredError):
+                    logger.debug("Skipping code interpreter tools for sub-agent %s: sandbox service retired",
+                                 agent.agent_id)
+                else:
+                    logger.warning(
+                        "Skipping code interpreter tools for sub-agent %s: %s",
+                        agent.agent_id,
+                        exc,
+                    )
 
         if agent.enable_code_interpreter and working_dir and sandbox_handle is not None and sandbox_provider is not None:
             repl_tools = create_sandbox_repl_tools(
@@ -1221,7 +1278,7 @@ class IACTTool(BaseTool):
 
     def _run(self, query: str, *args, **kwargs) -> str:
         """Synchronous execution of the agent tool"""
-        if self.react_agent is None:
+        if self.react_agent is None and self.deferred_error is None:
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
@@ -1229,10 +1286,15 @@ class IACTTool(BaseTool):
         result = None
         error = None
         try:
+            if self.deferred_error is not None:
+                raise self.deferred_error
             formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
             result = self.react_agent.invoke({"messages": messages})
             return self._extract_last_message_content(result)
+        except ServiceRetiredError as e:
+            error = e
+            raise
         except Exception as e:
             error = e
             logger.error(f"Error executing agent tool {self.name}: {str(e)}")
@@ -1342,7 +1404,7 @@ class IACTTool(BaseTool):
 
     async def _arun(self, query: str, *args, **kwargs) -> str:
         """Asynchronous execution of the agent tool"""
-        if self.react_agent is None:
+        if self.react_agent is None and self.deferred_error is None:
             raise RuntimeError(
                 "IACTTool must be built via 'await IACTTool.create(...)' before use."
             )
@@ -1350,6 +1412,8 @@ class IACTTool(BaseTool):
         result = None
         error = None
         try:
+            if self.deferred_error is not None:
+                raise self.deferred_error
             formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
             stream_writer = self._get_stream_writer_or_none()
@@ -1388,6 +1452,9 @@ class IACTTool(BaseTool):
 
             return ""
 
+        except ServiceRetiredError as e:
+            error = e
+            raise
         except Exception as e:
             error = e
             logger.error(f"Error executing agent tool {self.name} (async): {str(e)}")
@@ -1457,6 +1524,7 @@ class IACTOCRTool(BaseTool):
     react_agent: Any = None
     mcp_client: Any = None
     llm: Any = None
+    deferred_error: Any = None  # see IACTTool.deferred_error
     has_memory: bool = False
     memory_max_messages: int = 20
     memory_max_tokens: int = 4000
@@ -1477,11 +1545,9 @@ class IACTOCRTool(BaseTool):
         self.attached_files = attached_files or []
         self.name = sanitize_identifier(agent.name)
         self.description = agent.description or "OCR agent tool"
-        try:
-            self.llm = get_llm(agent, is_vision=False)
-        except Exception:
-            self.llm = None
-        if self.llm is None:
+        # LLM built lazily (_ensure_llm), see IACTTool.
+        self.llm = None
+        if getattr(agent, "ai_service", None) is None:
             logger.warning(
                 "OCR agent %s has no configured LLM; OCR will not work until service_id is set",
                 agent.name,
@@ -1497,6 +1563,14 @@ class IACTOCRTool(BaseTool):
         )
         self.output_parser_id = getattr(agent, "output_parser_id", None)
         self.temperature = getattr(agent, "temperature", DEFAULT_AGENT_TEMPERATURE) or DEFAULT_AGENT_TEMPERATURE
+
+    def _ensure_llm(self) -> Any:
+        """Build the LLM on first use. Raises ``ServiceRetiredError`` if the service is retired."""
+        if self.llm is None:
+            self.llm = get_llm(self.agent, is_vision=False)
+            if self.llm is None:
+                raise ValueError("No LLM found for agent")
+        return self.llm
 
     @classmethod
     async def create(
@@ -1516,6 +1590,29 @@ class IACTOCRTool(BaseTool):
         sub-agent's own opt-in skill-router pass — see ``IACTTool.create``.
         """
         instance = cls(agent, user_context=user_context, attached_files=attached_files)
+        try:
+            return await cls._build(instance, agent, user_context, attached_files, user_message)
+        except ServiceRetiredError as exc:
+            # Deferred to invocation (see IACTTool.create); already logged once by the guard.
+            instance.deferred_error = exc
+            return instance
+
+    @classmethod
+    async def _build(
+        cls,
+        instance: "IACTOCRTool",
+        agent: Agent,
+        user_context: Optional[Dict],
+        attached_files: Optional[List[Dict]],
+        user_message: Optional[str],
+    ) -> "IACTOCRTool":
+        try:
+            instance._ensure_llm()
+        except ServiceRetiredError:
+            raise
+        except Exception:
+            # Lenient as before: __init__ already warned that OCR needs service_id.
+            instance.llm = None
 
         tools: list = [fetch_file_in_base64]
 
@@ -1584,6 +1681,9 @@ class IACTOCRTool(BaseTool):
     ) -> str:
         """Asynchronous execution of the OCR agent tool."""
 
+        if self.deferred_error is not None:
+            raise self.deferred_error
+
         if self.react_agent is None:
             raise RuntimeError(
                 "IACTOCRTool must be built via 'await IACTOCRTool.create(...)' before use."
@@ -1641,6 +1741,8 @@ class IACTOCRTool(BaseTool):
                         "content": ocr_result,
                     })
 
+                except ServiceRetiredError:
+                    raise
                 except Exception as exc:
 
                     logger.exception(
@@ -1711,6 +1813,8 @@ class IACTOCRTool(BaseTool):
 
             return str(result)
 
+        except ServiceRetiredError:
+            raise
         except Exception as e:
 
             logger.error(
@@ -2042,6 +2146,8 @@ def get_retriever_tool(
 
         try:
             docs: List[Document] = await _run_retrieval(silo_id, call_search_params, query)
+        except ServiceRetiredError:
+            raise
         except Exception as exc:
             logger.error(
                 "get_retriever_tool[%s]: vector store error",
@@ -2060,6 +2166,8 @@ def get_retriever_tool(
 
             try:
                 docs = await _run_retrieval(silo_id, effective_search_params, query)
+            except ServiceRetiredError:
+                raise
             except Exception as exc:
                 logger.error(
                     "get_retriever_tool[%s]: fallback vector store error",

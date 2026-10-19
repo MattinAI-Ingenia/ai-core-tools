@@ -23,6 +23,8 @@ from models.agent import Agent
 from services.repository_service import RepositoryService
 from services.media_service import MediaService
 from services.silo_service import SiloService
+from utils.error_handlers import ValidationError
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,39 @@ class PlaygroundMediaService:
         )
 
     @staticmethod
+    def _ensure_media_services_active(
+        db: Session,
+        app_id: int,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        embedding_service_id: Optional[int],
+    ) -> None:
+        """Raise ``ServiceRetiredError`` if a media service about to be used is retired.
+
+        The ids can come from the request form, so ownership (the app's own or a system
+        service) is validated first with the generic ownership error; only services the app
+        may use are then checked for retirement, so a foreign id never reveals its lifecycle.
+        A retired own service is a runtime block (409), not a "cannot be newly selected" error.
+        """
+        from repositories.ai_service_repository import AIServiceRepository
+        from repositories.embedding_service_repository import EmbeddingServiceRepository
+        from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, ensure_service_active
+
+        for label, service_id in (
+            ("Transcription service", transcription_service_id),
+            ("Video AI service", video_ai_service_id),
+        ):
+            if service_id:
+                service = AIServiceRepository.get_by_id(db, service_id)
+                if service is None or (service.app_id is not None and service.app_id != app_id):
+                    raise ValidationError(f"{label} {service_id} not found")
+                ensure_service_active(service, SERVICE_KIND_AI)
+        if embedding_service_id:
+            embedding = EmbeddingServiceRepository.get_by_id(db, embedding_service_id)
+            SiloService.ensure_embedding_service_owned(embedding, app_id)
+            ensure_service_active(embedding, SERVICE_KIND_EMBEDDING)
+
+    @staticmethod
     def get_or_create_temp_repository(
         app_id: int,
         agent_id: int,
@@ -143,20 +178,24 @@ class PlaygroundMediaService:
             # must not wipe an in-flight transcription's service configuration.
             updated = False
             silo = existing.silo
-            if (
-                silo is not None
-                and transcription_service_id is not None
-                and silo.transcription_service_id != transcription_service_id
-            ):
-                silo.transcription_service_id = transcription_service_id
-                updated = True
-            if (
-                silo is not None
-                and video_ai_service_id is not None
-                and silo.video_ai_service_id != video_ai_service_id
-            ):
-                silo.video_ai_service_id = video_ai_service_id
-                updated = True
+            if silo is not None:
+                PlaygroundMediaService._ensure_media_services_active(
+                    db,
+                    app_id,
+                    transcription_service_id
+                    if transcription_service_id not in (None, silo.transcription_service_id) else None,
+                    video_ai_service_id
+                    if video_ai_service_id not in (None, silo.video_ai_service_id) else None,
+                    None,
+                )
+            if silo is not None and (transcription_service_id is not None or video_ai_service_id is not None):
+                new_t = transcription_service_id or silo.transcription_service_id
+                new_v = video_ai_service_id or silo.video_ai_service_id
+                if (new_t, new_v) != (silo.transcription_service_id, silo.video_ai_service_id):
+                    # Ownership (app or system) and supports_video are validated here; the ids
+                    # come from the request form, so they must not be assigned unchecked.
+                    SiloService.apply_media_services(silo, new_t, new_v, app_id, db)
+                    updated = True
             if updated:
                 db.commit()
                 logger.info(
@@ -180,6 +219,10 @@ class PlaygroundMediaService:
                 "No media embedding service configured for this agent. Set it in "
                 "the agent's Media Processing configuration before uploading media."
             )
+
+        PlaygroundMediaService._ensure_media_services_active(
+            db, app_id, transcription_service_id, video_ai_service_id, embedding_service_id
+        )
 
         repo = Repository(
             name=_temp_repo_name(agent_id, session_id),
@@ -448,6 +491,8 @@ class PlaygroundMediaService:
                 db,
             )
             return True
+        except ServiceRetiredError:
+            raise
         except Exception as exc:
             logger.warning(
                 "File-based extraction failed for %s, falling back to content: %s",

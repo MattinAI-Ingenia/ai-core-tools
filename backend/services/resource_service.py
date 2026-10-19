@@ -46,6 +46,18 @@ class ResourceService:
         return ResourceRepository.get_by_id(db, resource_id)
     
     @staticmethod
+    def get_repository_resource(repository_id: int, resource_id: int, db: Session) -> Resource:
+        """Return a resource that belongs to ``repository_id``.
+
+        Raises:
+            HTTPException: 404 if the resource does not exist or belongs to another repository.
+        """
+        resource = ResourceService.get_resource(resource_id, db)
+        if not resource or resource.repository_id != repository_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
+        return resource
+
+    @staticmethod
     def move_resource_to_folder(resource_id: int, repository_id: int, new_folder_id: Optional[int], db: Session) -> dict:
         """
         Move a resource to a different folder within the same repository.
@@ -60,16 +72,10 @@ class ResourceService:
         Returns:
             dict: Result with success status and updated resource info
         """
+        # Child must belong to the repository (404, no existence oracle)
+        resource = ResourceService.get_repository_resource(repository_id, resource_id, db)
+
         try:
-            # Get the resource
-            resource = ResourceService.get_resource(resource_id, db)
-            if not resource:
-                raise ValueError(f"Resource {resource_id} not found")
-            
-            # Validate repository ownership
-            if resource.repository_id != repository_id:
-                raise ValueError(f"Resource {resource_id} does not belong to repository {repository_id}")
-            
             # Validate new folder if provided
             if new_folder_id is not None:
                 if not FolderService.validate_folder_access(new_folder_id, repository_id, db):
@@ -474,6 +480,8 @@ class ResourceService:
         """
         logger.info(f"Delete resource service called - app_id: {app_id}, repository_id: {repository_id}, resource_id: {resource_id}")
         
+        ResourceService.get_repository_resource(repository_id, resource_id, db)
+
         # Use delete_resource method with database session
         success = ResourceService.delete_resource(resource_id, db)
         if not success:
@@ -513,13 +521,7 @@ class ResourceService:
         logger.info(f"Download request - app_id: {app_id}, repository_id: {repository_id}, resource_id: {resource_id}, user_id: {user_id}")
         
         # Get resource using method with database session
-        resource = ResourceService.get_resource(resource_id, db)
-        if not resource:
-            logger.error(f"Resource {resource_id} not found")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Resource not found"
-            )
+        resource = ResourceService.get_repository_resource(repository_id, resource_id, db)
         
         logger.info(f"Resource found: {resource.name}, uri: {resource.uri}, repository_id: {resource.repository_id}")
         

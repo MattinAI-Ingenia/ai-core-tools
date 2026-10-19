@@ -2,6 +2,7 @@ import enum
 from sqlalchemy import Column, String, Integer, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from models.base_service import BaseService
+from models.service_lifecycle import ServiceLifecycleMixin
 from models.service_health import ServiceHealthMixin, track_service_health
 
 class ProviderEnum(enum.Enum):
@@ -15,7 +16,7 @@ class ProviderEnum(enum.Enum):
     OpenRouter = "OpenRouter"
     Bedrock = "Bedrock"
 
-class AIService(ServiceHealthMixin, BaseService):
+class AIService(ServiceLifecycleMixin, ServiceHealthMixin, BaseService):
     __tablename__ = 'AIService'
     
     provider = Column(String(45), nullable=False)

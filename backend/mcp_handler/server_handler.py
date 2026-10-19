@@ -18,6 +18,7 @@ from models.hitl_approval import ApprovalChannel
 from models.mcp_server import MCPServer
 from services.agent_execution_service import AgentExecutionService
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -55,7 +56,7 @@ class MCPServerHandler:
         self.api_key_id = api_key_id
         self.agent_execution_service = AgentExecutionService()
 
-    def x_get_mcp_server(self, session: Session) -> Optional[MCPServer]:
+    def _get_mcp_server(self, session: Session) -> Optional[MCPServer]:
         """Load the MCP server with a fresh session"""
         from repositories.mcp_server_repository import MCPServerRepository
         return MCPServerRepository.get_by_id_and_app_id(session, self.server_id, self.app_id)
@@ -281,6 +282,13 @@ class MCPServerHandler:
 
         except MCPError:
             raise
+        except ServiceRetiredError as e:
+            # Tool execution failure (MCP isError result), not a protocol error. Already
+            # logged once by the lifecycle guard, so nothing is logged here.
+            return {
+                "content": [{"type": "text", "text": e.message}],
+                "isError": True,
+            }
         except HTTPException as e:
             detail = e.detail.get("message", str(e.detail)) if isinstance(e.detail, dict) else e.detail
             raise MCPError(JSONRPCError.INTERNAL_ERROR, detail)

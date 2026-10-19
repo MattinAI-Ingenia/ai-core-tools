@@ -10,6 +10,8 @@ import AgentMiddlewaresCard, { type AgentMiddlewareOption } from '../components/
 import { Badge } from '../components/ui/Badge';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
+import { ServiceOptionStatus, ServiceSelectOptions, serviceStatusId } from '../components/ui/ServiceOptionStatus';
+import type { ServiceOptionLike } from '../utils/serviceLifecycle';
 import type { TabItem } from '../components/ui/Tabs';
 import RagConfigSection, { SCORE_THRESHOLD_REQUIRED_MSG } from '../components/forms/RagConfigSection';
 import type { RagConfigValue, RagFixedFilter, RagSearchType } from '../components/forms/RagConfigSection';
@@ -23,6 +25,8 @@ import type { A2ACardVisibility, AgentA2AFieldErrors, AgentA2AValue } from '../c
 import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import { randomId } from '../utils/randomId';
+import type { ServiceLifecycleWarning } from '../types/services';
+import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
 
 // Define the Agent types
 interface Agent {
@@ -35,6 +39,7 @@ interface Agent {
   is_tool: boolean;
   has_memory: boolean;
   enable_code_interpreter: boolean;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   skill_router_enabled?: boolean;
   service_id?: number;
   sandbox_service_id?: number;
@@ -74,8 +79,8 @@ interface Agent {
   media_chunk_min_duration?: number | null;
   media_chunk_max_duration?: number | null;
   media_chunk_overlap?: number | null;
-  ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
-  sandbox_services: Array<{ service_id: number; name: string }>;
+  ai_services: Array<ServiceOptionLike & { supports_video?: boolean }>;
+  sandbox_services: ServiceOptionLike[];
   silos: Array<{ silo_id: number; name: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
   tools: Array<{ agent_id: number; name: string }>;
@@ -310,7 +315,7 @@ function AgentFormPage() {
   const [showOutputParser, setShowOutputParser] = useState(false);
   const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
   const [loadingSiloMetadata, setLoadingSiloMetadata] = useState(false);
-  const [embeddingServices, setEmbeddingServices] = useState<Array<{ service_id: number; name: string }>>([]);
+  const [embeddingServices, setEmbeddingServices] = useState<ServiceOptionLike[]>([]);
 
   // Marketplace state
   const [showMarketplace, setShowMarketplace] = useState(false);
@@ -345,9 +350,12 @@ function AgentFormPage() {
         if (cancelled) return;
         const list = Array.isArray(services) ? services : [];
         setEmbeddingServices(
-          list.map((s: { service_id: number; name: string }) => ({
+          list.map((s: ServiceOptionLike) => ({
             service_id: s.service_id,
             name: s.name,
+            lifecycle_status: s.lifecycle_status,
+            end_of_service_at: s.end_of_service_at,
+            deprecation_notice: s.deprecation_notice,
           }))
         );
       })
@@ -766,6 +774,8 @@ function AgentFormPage() {
     ...(!isNewAgent ? [{ id: 'metrics', label: 'Metrics' }] : []),
   ];
 
+  const videoServiceOptions = agent?.ai_services?.filter((service) => service.supports_video);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
       <div className="max-w-6xl mx-auto">
@@ -788,6 +798,10 @@ function AgentFormPage() {
             Back to Agents
           </button>
         </div>
+
+        {agent && (
+          <ServiceLifecycleAlert warnings={agent.lifecycle_warnings} variant="full" className="mb-6" />
+        )}
 
         {/* Error Message */}
         {error && (
@@ -935,18 +949,16 @@ function AgentFormPage() {
                         </label>
                         <select
                           id="ai_service"
+                          aria-describedby={serviceStatusId(agent?.ai_services, formData.service_id, "ai_service")}
                           value={formData.service_id || ''}
                           onChange={(e) => handleInputChange('service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                           required
                         >
                           <option value="">Select AI Service</option>
-                          {agent?.ai_services.map((service) => (
-                            <option key={service.service_id} value={service.service_id}>
-                              {service.name}
-                            </option>
-                          ))}
+                          <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.service_id} />
                         </select>
+                        <ServiceOptionStatus selectId="ai_service" options={agent?.ai_services} selectedId={formData.service_id} />
                       </div>
 
                       <div>
@@ -1150,17 +1162,15 @@ function AgentFormPage() {
                           </label>
                           <select
                             id="sandbox_service"
+                            aria-describedby={serviceStatusId(agent?.sandbox_services, formData.sandbox_service_id, 'sandbox_service')}
                             value={formData.sandbox_service_id || ''}
                             onChange={(e) => handleInputChange('sandbox_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                             className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                           >
                             <option value="">Use app/system default</option>
-                            {agent?.sandbox_services.map((service) => (
-                              <option key={service.service_id} value={service.service_id}>
-                                {service.name}
-                              </option>
-                            ))}
+                            <ServiceSelectOptions options={agent?.sandbox_services} savedValue={agent?.sandbox_service_id} />
                           </select>
+                          <ServiceOptionStatus selectId="sandbox_service" options={agent?.sandbox_services} selectedId={formData.sandbox_service_id} />
                           <p className="text-xs text-gray-500 mt-1">
                             Overrides the sandbox environment used to run this agent's Python code. Leave unset to use the app's default Sandbox Service.
                           </p>
@@ -1273,18 +1283,16 @@ function AgentFormPage() {
                       </label>
                       <select
                         id="media_embedding_service"
+                        aria-describedby={serviceStatusId(embeddingServices, formData.media_embedding_service_id, "media_embedding_service")}
                         required={formData.has_memory}
                         value={formData.media_embedding_service_id || ''}
                         onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                         className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                       >
                         <option value="">None (no temporary knowledge base)</option>
-                        {embeddingServices.map((service) => (
-                          <option key={service.service_id} value={service.service_id}>
-                            {service.name}
-                          </option>
-                        ))}
+                        <ServiceSelectOptions options={embeddingServices} savedValue={agent?.media_embedding_service_id} />
                       </select>
+                      <ServiceOptionStatus selectId="media_embedding_service" options={embeddingServices} selectedId={formData.media_embedding_service_id} />
                       <p className="text-xs text-gray-500 mt-1">
                         Model used to vectorize uploaded media/documents into the conversation's temporary
                         knowledge base for retrieval. Required for conversational agents; optional otherwise
@@ -1299,17 +1307,15 @@ function AgentFormPage() {
                         </label>
                         <select
                           id="transcription_service"
+                          aria-describedby={serviceStatusId(agent?.ai_services, formData.transcription_service_id, "transcription_service")}
                           value={formData.transcription_service_id || ''}
                           onChange={(e) => handleInputChange('transcription_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                         >
                           <option value="">Select Transcription Service</option>
-                          {agent?.ai_services.map((service) => (
-                            <option key={service.service_id} value={service.service_id}>
-                              {service.name}
-                            </option>
-                          ))}
+                          <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.transcription_service_id} />
                         </select>
+                        <ServiceOptionStatus selectId="transcription_service" options={agent?.ai_services} selectedId={formData.transcription_service_id} />
                         <p className="text-xs text-gray-500 mt-1">Speech-to-text model used to transcribe media.</p>
                       </div>
 
@@ -1319,17 +1325,15 @@ function AgentFormPage() {
                         </label>
                         <select
                           id="video_ai_service"
+                          aria-describedby={serviceStatusId(videoServiceOptions, formData.video_ai_service_id, "video_ai_service")}
                           value={formData.video_ai_service_id || ''}
                           onChange={(e) => handleInputChange('video_ai_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                         >
                           <option value="">None (audio only)</option>
-                          {agent?.ai_services.filter((service) => service.supports_video).map((service) => (
-                            <option key={service.service_id} value={service.service_id}>
-                              {service.name}
-                            </option>
-                          ))}
+                          <ServiceSelectOptions options={videoServiceOptions} savedValue={agent?.video_ai_service_id} />
                         </select>
+                        <ServiceOptionStatus selectId="video_ai_service" options={videoServiceOptions} selectedId={formData.video_ai_service_id} />
                         <p className="text-xs text-gray-500 mt-1">Enables multimodal analysis (visual descriptions from video frames).</p>
                       </div>
 
@@ -1455,17 +1459,15 @@ function AgentFormPage() {
                       </label>
                       <select
                         id="vision_service"
+                        aria-describedby={serviceStatusId(agent?.ai_services, formData.vision_service_id, "vision_service")}
                         value={formData.vision_service_id || ''}
                         onChange={(e) => handleInputChange('vision_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                         className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                       >
                         <option value="">-- Seleccionar modelo de visión --</option>
-                        {agent?.ai_services.map((service) => (
-                          <option key={service.service_id} value={service.service_id}>
-                            {service.name}
-                          </option>
-                        ))}
+                        <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.vision_service_id} />
                       </select>
+                      <ServiceOptionStatus selectId="vision_service" options={agent?.ai_services} selectedId={formData.vision_service_id} />
                     </div>
 
                     <div>
@@ -1488,17 +1490,15 @@ function AgentFormPage() {
                       </label>
                       <select
                         id="text_service"
+                        aria-describedby={serviceStatusId(agent?.ai_services, formData.service_id, "text_service")}
                         value={formData.service_id || ''}
                         onChange={(e) => handleInputChange('service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                         className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                       >
                         <option value="">-- Seleccionar modelo de texto --</option>
-                        {agent?.ai_services.map((service) => (
-                          <option key={service.service_id} value={service.service_id}>
-                            {service.name}
-                          </option>
-                        ))}
+                        <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.service_id} />
                       </select>
+                      <ServiceOptionStatus selectId="text_service" options={agent?.ai_services} selectedId={formData.service_id} />
                     </div>
 
                     <div>

@@ -2,6 +2,7 @@ import os
 import asyncio
 from dataclasses import dataclass
 import ast
+import contextvars
 import functools
 import json
 import posixpath
@@ -37,6 +38,7 @@ from services.file_management_service import FileManagementService
 from services.session_management_service import SessionManagementService
 from repositories.agent_execution_repository import AgentExecutionRepository
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError, agent_turn_context_kwargs, service_call_context
 from utils.config import get_app_config
 from utils.async_files import write_bytes, write_temp_file
 from tools.stream_guard import AGENT_RUN_TIMEOUT_SECONDS
@@ -854,6 +856,27 @@ class AgentExecutionService:
         Returns:
             Dict containing agent response and metadata.
         """
+        # Set + reset (no yield here): a nested run (agent-as-tool) must not overwrite the outer context.
+        with service_call_context(**agent_turn_context_kwargs(channel, user_context, agent_id)):
+            return await self._execute_agent_chat_with_file_refs_impl(
+                agent_id, message, file_references, search_params, user_context, conversation_id,
+                db, channel, resume_approval, resume_decisions,
+            )
+
+    async def _execute_agent_chat_with_file_refs_impl(
+        self,
+        agent_id: int,
+        message: str,
+        file_references: List = None,
+        search_params: Dict = None,
+        user_context: Dict = None,
+        conversation_id: int = None,
+        db: Session = None,
+        channel: ApprovalChannel = ApprovalChannel.INTERNAL_SYNC,
+        resume_approval: Optional[HITLApproval] = None,
+        resume_decisions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Body of :meth:`execute_agent_chat_with_file_refs` (runs inside the call context)."""
         ctx = None
         sandbox_turn_active = False
         try:
@@ -905,6 +928,9 @@ class AgentExecutionService:
         except approvals.ApprovalError as exc:
             raise approval_http_exception(exc) from exc
         except HTTPException:
+            raise
+        except ServiceRetiredError:
+            # Already logged once by ensure_service_active; mapped to 409 at the edge.
             raise
         except Exception as e:
             logger.error(f"Error executing agent chat: {str(e)}", exc_info=True)
@@ -1263,6 +1289,7 @@ class AgentExecutionService:
             from tools.sandbox.factory import (
                 resolve_provider_and_service_id,
                 SandboxProviderUnavailableError,
+                SandboxServiceRetiredError,
             )
             from services.sandbox_session_service import SandboxSessionService
 
@@ -1276,7 +1303,11 @@ class AgentExecutionService:
                 # fields unset. Callers (e.g. tools/agentTools.py) already treat
                 # a None sandbox_handle/sandbox_provider as "code interpreter
                 # unusable this turn" and continue with the rest of the chain.
-                logger.warning("Sandbox provider unavailable for agent %s: %s", agent_id, exc)
+                if isinstance(exc, SandboxServiceRetiredError):
+                    # The resolution guard already logged the structured WARNING.
+                    logger.debug("Sandbox provider unavailable for agent %s: sandbox service retired", agent_id)
+                else:
+                    logger.warning("Sandbox provider unavailable for agent %s: %s", agent_id, exc)
                 resolved_sandbox_provider = None
                 resolved_sandbox_service_id = None
 
@@ -1689,6 +1720,8 @@ class AgentExecutionService:
                 if os.path.exists(temp_pdf_path):
                     os.remove(temp_pdf_path)
                     
+        except (HTTPException, ServiceRetiredError):
+            raise
         except Exception as e:
             logger.error(f"Error executing OCR agent: {str(e)}")
             raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
@@ -2000,10 +2033,11 @@ class AgentExecutionService:
         """Process PDF using OCR workflow respecting output parser/data structure"""
         # Run all OCR processing in thread pool (blocking operations: PDF parsing, LLM calls, etc.)
         loop = asyncio.get_event_loop()
+        # copy_context so the service call context reaches the worker thread (lifecycle log fields)
+        ctx = contextvars.copy_context()
         result = await loop.run_in_executor(
             self._executor,
-            self._process_pdf_with_ocr_sync,
-            agent, pdf_path, db
+            functools.partial(ctx.run, self._process_pdf_with_ocr_sync, agent, pdf_path, db),
         )
         return result
     
@@ -2070,6 +2104,8 @@ class AgentExecutionService:
                                 "extracted_text": text_content,
                                 "confidence": 0.9
                             }
+                    except ServiceRetiredError:
+                        raise
                     except Exception as e:
                         logger.error(f"Error processing with LLM and output parser: {str(e)}", exc_info=True)
                 
@@ -2119,6 +2155,8 @@ class AgentExecutionService:
                         except OSError:
                             pass
                             
+                    except ServiceRetiredError:
+                        raise
                     except Exception as e:
                         logger.warning(f"Error processing image {i+1}: {str(e)}")
                         continue
@@ -2154,6 +2192,8 @@ class AgentExecutionService:
                                 "extracted_text": vision_results,
                                 "confidence": 0.8
                             }
+                    except ServiceRetiredError:
+                        raise
                     except Exception as e:
                         logger.warning(f"Error processing with text model: {str(e)}")
                 
@@ -2165,6 +2205,8 @@ class AgentExecutionService:
                     "confidence": 0.7
                 }
                 
+        except ServiceRetiredError:
+            raise
         except Exception as e:
             logger.error(f"Error processing PDF with OCR: {str(e)}")
             raise
@@ -2402,6 +2444,8 @@ class AgentExecutionService:
         # executions to this one. Copy so the caller's dict is not mutated.
         event_id = str(uuid.uuid4())
         user_context = {**(user_context or {}), 'current_event_id': event_id}
+        # NOTE: a retired parent LLM raises from create_agent below, before the metrics block
+        # that records SERVICE_RETIRED, so that case is not recorded here (the streaming path is).
         try:
             # Create the agent chain with all tools and capabilities
             agent_chain, mcp_client = await create_agent(
@@ -2475,6 +2519,9 @@ class AgentExecutionService:
                 raise
             except asyncio.CancelledError:
                 status, error_code, error_message = "ERROR", "CancelledError", "Execution cancelled"
+                raise
+            except ServiceRetiredError as exc:
+                status, error_code, error_message = "ERROR", "SERVICE_RETIRED", exc.message
                 raise
             except Exception as exc:
                 status, error_code, error_message = "ERROR", type(exc).__name__, str(exc)[:2000]
@@ -2551,6 +2598,9 @@ class AgentExecutionService:
                 )
         except PIIDetectionError as pii_exc:
             raise HTTPException(status_code=422, detail=pii_blocked_message(pii_exc)) from pii_exc
+        except ServiceRetiredError:
+            # A retired service is not a corrupt checkpoint: never recover, never re-log.
+            raise
         except Exception as invoke_exc:
             from services.agent_cache_service import (
                 CheckpointerCacheService,
