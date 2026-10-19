@@ -37,6 +37,10 @@ class Conversation(Base):
     sandbox_session_id = Column(String(255), nullable=True)
     # Serialized JSON snapshot of the sandbox state (provider, session_key, sandbox_id, updated_at).
     sandbox_state = Column(Text, nullable=True)
+    # Cross-session memory: JSON list of the user's original messages from the
+    # turns since the last fact extraction (spec user-memory-mem0, D-15). Emptied
+    # on every write-due turn and on memory erasure.
+    memory_pending_user_messages = Column(Text, nullable=True)
 
     agent = relationship("Agent", backref="conversations")
     user = relationship("User", backref="conversations", foreign_keys=[user_id])

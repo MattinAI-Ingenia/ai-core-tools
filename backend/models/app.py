@@ -88,6 +88,12 @@ class App(Base):
                             name='App_memory_embedding_service_id_fkey',
                         ),
                         nullable=True)
+    # Fact extraction runs on turn 1 and every Nth turn after; NULL = deployment
+    # default (AICT_GLOBAL_MEMORY_WRITE_EVERY_N_TURNS). CHECK >= 1 in gmem003.
+    memory_write_every_n_turns = Column(Integer, nullable=True)
+    # Language memory facts are written in (code from MEMORY_LANGUAGES in
+    # tools/memory/settings.py); NULL = English. CHECK in gmem004.
+    memory_language = Column(String(8), nullable=True)
     memory_extraction_service = relationship('AIService', foreign_keys=[memory_extraction_service_id])
     memory_embedding_service = relationship('EmbeddingService', foreign_keys=[memory_embedding_service_id])
 
