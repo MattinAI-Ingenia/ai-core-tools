@@ -58,6 +58,7 @@ static/img/heroes/*
 /app/demo/
 /backend/app/
 /backend/data/
+/data/
 
 # Local runtime files, logs, and temporary output
 *.wav
