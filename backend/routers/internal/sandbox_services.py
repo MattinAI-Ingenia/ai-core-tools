@@ -20,7 +20,9 @@ from schemas.sandbox_service_schemas import (
 from .auth_utils import get_current_user_oauth
 from routers.controls.role_authorization import require_min_role, AppRole
 from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from schemas.service_lifecycle_schemas import MoveSandboxUsageRequestSchema, MoveSandboxUsageResponseSchema
 from services.service_lifecycle_service import ServiceLifecycleService
+from utils.error_handlers import AppError
 from tools.sandbox.factory import SandboxProviderUnavailableError
 from utils.service_lifecycle import SERVICE_KIND_SANDBOX
 
@@ -215,6 +217,35 @@ async def get_sandbox_service_used_by(
     if usage is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SANDBOX_SERVICE_NOT_FOUND_ERROR)
     return usage
+
+
+@sandbox_services_router.post(
+    "/{service_id}/move-usage",
+    summary="Move app usage from one sandbox service to another",
+    tags=["Sandbox Services"],
+    response_model=MoveSandboxUsageResponseSchema,
+)
+async def move_sandbox_service_usage(
+    app_id: int,
+    service_id: int,
+    body: MoveSandboxUsageRequestSchema,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("administrator"))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Move direct agent references and the app's default sandbox service atomically."""
+    try:
+        return ServiceLifecycleService.move_sandbox_usage(
+            db,
+            app_id,
+            service_id,
+            body.target_service_id,
+            body.expected_agent_count,
+            body.expected_app_count,
+            int(auth_context.identity.id),
+        )
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
 
 @sandbox_services_router.post("/{service_id}",

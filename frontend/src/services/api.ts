@@ -6,6 +6,7 @@ import type {
   ExistingSandboxService,
   ExistingService,
   MoveAgentsResult,
+  MoveSandboxServiceUsageResult,
   ServiceLifecycleFields,
   ServiceLifecycleWarning,
   ServiceUsage,
@@ -1161,6 +1162,23 @@ class ApiService {
 
   async getSandboxServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
     return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/used-by`);
+  }
+
+  async moveSandboxServiceUsage(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedAgentCount: number,
+    expectedAppCount: number,
+  ): Promise<MoveSandboxServiceUsageResult> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/move-usage`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_service_id: targetServiceId,
+        expected_agent_count: expectedAgentCount,
+        expected_app_count: expectedAppCount,
+      }),
+    });
   }
 
   async getSystemSandboxServiceUsedBy(serviceId: number): Promise<ServiceUsage> {

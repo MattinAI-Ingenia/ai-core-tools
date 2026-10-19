@@ -27,6 +27,7 @@ from schemas.service_lifecycle_schemas import (
     ServiceUsageSchema,
     ServiceUsageScheduledTaskSchema,
     ServiceUsageSiloSchema,
+    MoveSandboxUsageResponseSchema,
 )
 from services.middleware_service import MiddlewareService
 from services.system_settings_service import SystemSettingsService
@@ -419,6 +420,13 @@ class ServiceLifecycleService:
         return snapshot
 
     @staticmethod
+    def _visible_sandbox_service(db: Session, app_id: int, service_id: int) -> Optional[ServiceSnapshot]:
+        snapshot = ServiceUsageQueries.service_snapshot(db, SandboxService, service_id)
+        if snapshot is None or (snapshot.app_id is not None and snapshot.app_id != app_id):
+            return None
+        return snapshot
+
+    @staticmethod
     def move_agents(
         db: Session,
         app_id: int,
@@ -463,3 +471,61 @@ class ServiceLifecycleService:
             app_id, actor_id, source_service_id, target_service_id, len(moved),
         )
         return MoveAgentsResponseSchema(moved_agent_ids=moved, count=len(moved))
+
+    @staticmethod
+    def move_sandbox_usage(
+        db: Session,
+        app_id: int,
+        source_service_id: int,
+        target_service_id: int,
+        expected_agent_count: int,
+        expected_app_count: int,
+        actor_id: Optional[int],
+    ) -> MoveSandboxUsageResponseSchema:
+        """Move direct agent references and the app default from one sandbox service to another."""
+        if ServiceLifecycleService._visible_sandbox_service(db, app_id, source_service_id) is None:
+            raise NotFoundError("Sandbox service not found", "sandbox_service")
+        if target_service_id == source_service_id:
+            raise AppValidationError("The target service must be different from the source service", "target_service_id")
+
+        target = ServiceLifecycleService._visible_sandbox_service(db, app_id, target_service_id)
+        if target is None:
+            raise AppValidationError("Target sandbox service not found", "target_service_id")
+        if is_retired(target):
+            raise AppValidationError("The target sandbox service is retired and cannot be selected", "target_service_id")
+
+        try:
+            moved_agent_ids, updated_app_ids = ServiceUsageQueries.move_sandbox_usage(
+                db, app_id, source_service_id, target_service_id
+            )
+            if (
+                len(moved_agent_ids) != expected_agent_count
+                or len(updated_app_ids) != expected_app_count
+            ):
+                db.rollback()
+                raise ConflictError(
+                    "sandbox usage changed "
+                    f"(agents now {len(moved_agent_ids)}, apps using it as default now {len(updated_app_ids)}); "
+                    "review and confirm again",
+                    "MOVE_COUNT_MISMATCH",
+                )
+            db.commit()
+        except ConflictError:
+            raise
+        except Exception:
+            db.rollback()
+            raise
+
+        logger.info(
+            "service_lifecycle.sandbox_usage_moved app_id=%s actor_id=%s source=%s target=%s agents=%s apps=%s",
+            app_id,
+            actor_id,
+            source_service_id,
+            target_service_id,
+            len(moved_agent_ids),
+            len(updated_app_ids),
+        )
+        return MoveSandboxUsageResponseSchema(
+            moved_agent_ids=moved_agent_ids,
+            updated_app_ids=updated_app_ids,
+        )

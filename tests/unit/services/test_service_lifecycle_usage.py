@@ -1,4 +1,4 @@
-"""Unit tests for ServiceLifecycleService.get_usage / move_agents (queries mocked)."""
+"""Unit tests for ServiceLifecycleService usage lookups and moves (queries mocked)."""
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -36,6 +36,12 @@ def _services(q, source, target):
 
 def move(db, expected=None, target=20):
     return ServiceLifecycleService.move_agents(db, 1, 10, target, expected, 99)
+
+
+def move_sandbox(db, expected_agents=2, expected_apps=1, target=20):
+    return ServiceLifecycleService.move_sandbox_usage(
+        db, 1, 10, target, expected_agents, expected_apps, 99
+    )
 
 
 def test_move_success(queries):
@@ -106,6 +112,52 @@ def test_move_rolls_back_on_error(queries):
     with pytest.raises(RuntimeError):
         move(db)
     db.rollback.assert_called_once()
+    db.commit.assert_not_called()
+
+
+def test_move_sandbox_usage_updates_direct_agents_and_app_default(queries):
+    _services(queries, snap(10), snap(20, app_id=None))
+    queries.move_sandbox_usage.return_value = ([4, 5], [1])
+    db = MagicMock()
+
+    result = move_sandbox(db, expected_agents=2, expected_apps=1)
+
+    assert result.moved_agent_ids == [4, 5]
+    assert result.updated_app_ids == [1]
+    queries.move_sandbox_usage.assert_called_once_with(db, 1, 10, 20)
+    db.commit.assert_called_once()
+
+
+def test_move_sandbox_usage_allows_default_only_move(queries):
+    _services(queries, snap(10), snap(20))
+    queries.move_sandbox_usage.return_value = ([], [1])
+
+    result = move_sandbox(MagicMock(), expected_agents=0, expected_apps=1)
+
+    assert result.moved_agent_ids == []
+    assert result.updated_app_ids == [1]
+
+
+def test_move_sandbox_usage_conflict_rolls_back_both_updates(queries):
+    _services(queries, snap(10), snap(20))
+    queries.move_sandbox_usage.return_value = ([4], [1])
+    db = MagicMock()
+
+    with pytest.raises(ConflictError, match="sandbox usage changed"):
+        move_sandbox(db, expected_agents=2, expected_apps=1)
+
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()
+
+
+def test_move_sandbox_usage_rejects_target_from_another_app(queries):
+    _services(queries, snap(10), snap(20, app_id=2))
+    db = MagicMock()
+
+    with pytest.raises(AppValidationError):
+        move_sandbox(db)
+
+    queries.move_sandbox_usage.assert_not_called()
     db.commit.assert_not_called()
 
 

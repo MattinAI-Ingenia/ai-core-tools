@@ -170,6 +170,30 @@ export const SERVICE_USAGE_STRINGS = {
   moveNote:
     'Transcription, video, OCR vision and middleware references are not moved. They are listed above and must be changed manually.',
   moveError: 'Could not move the agents.',
+  moveSandboxTitle: 'Move usage to another sandbox service',
+  moveSandboxSummary: (agents: number, apps: number) =>
+    agents === 0 && apps === 0
+      ? 'No agents or app defaults use this service.'
+      : [
+          agents > 0 && `${agents} ${agents === 1 ? 'agent is' : 'agents are'} directly assigned to it`,
+          apps > 0 && `${apps} ${apps === 1 ? 'app uses' : 'apps use'} it as the default sandbox`,
+        ].filter(Boolean).join('; ') + '.',
+  moveSandboxTargetLabel: 'Target sandbox service',
+  moveSandboxNoTargets: 'There is no other available sandbox service to move this usage to.',
+  moveSandboxButton: 'Move sandbox usage...',
+  moveSandboxConfirm: (agents: number, apps: number, from: string, to: string) => {
+    const changes = [
+      agents > 0 && `${agents} directly assigned ${agents === 1 ? 'agent' : 'agents'}`,
+      apps > 0 && `the default sandbox in ${apps} ${apps === 1 ? 'app' : 'apps'}`,
+    ].filter(Boolean);
+    return `Move ${changes.join(' and ')} from ${from} to ${to}?`;
+  },
+  moveSandboxSuccess: (agents: number, apps: number) => [
+    agents > 0 && `Moved ${agents} ${agents === 1 ? 'agent' : 'agents'}`,
+    apps > 0 && `changed the default sandbox in ${apps} ${apps === 1 ? 'app' : 'apps'}`,
+  ].filter(Boolean).join(' and ') + '.',
+  moveSandboxNote:
+    'Agents inheriting the app default will follow the new default automatically.',
 } as const;
 
 export const MAX_DEPRECATION_NOTICE_LENGTH = 1000;

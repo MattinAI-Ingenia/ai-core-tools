@@ -61,6 +61,7 @@ function SandboxServicesPage() {
     handleEdit,
     handleCopy,
     handleSave,
+    forceReload,
     setIsModalOpen,
     setEditingService,
   } = useServicesManager<SandboxService>(appId, api as any, cache as any, { entity: 'sandbox service' });
@@ -217,6 +218,8 @@ function SandboxServicesPage() {
           appId={Number.parseInt(appId, 10)}
           serviceId={usageService.id}
           serviceName={usageService.name}
+          canMove={canEdit}
+          onMoved={() => void forceReload()}
           onClose={() => setUsageService(null)}
         />
       )}

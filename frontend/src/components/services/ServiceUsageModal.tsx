@@ -2,12 +2,13 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Link } from 'react-router-dom';
 import Modal from '../ui/Modal';
 import ServiceStatusBadge from '../ui/ServiceStatusBadge';
-import { apiService, ApiError, type AIService } from '../../services/api';
+import { apiService, ApiError } from '../../services/api';
 import type { ServiceUsage } from '../../types/services';
 import {
   SERVICE_LIFECYCLE_STRINGS,
   SERVICE_USAGE_STRINGS as S,
   formatEndOfServiceDate,
+  type ServiceOptionLike,
 } from '../../utils/serviceLifecycle';
 
 export interface ServiceUsageModalProps {
@@ -19,7 +20,7 @@ export interface ServiceUsageModalProps {
   readonly appId?: number;
   readonly serviceId: number;
   readonly serviceName: string;
-  /** App scope + AI service only: user is ADMINISTRATOR or higher. */
+  /** App scope + AI or sandbox service only: user is ADMINISTRATOR or higher. */
   readonly canMove?: boolean;
   /** Called after agents were moved so the parent can refresh its list. */
   readonly onMoved?: () => void;
@@ -102,7 +103,7 @@ function ServiceUsageModal({
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const [targets, setTargets] = useState<readonly AIService[]>([]);
+  const [targets, setTargets] = useState<readonly ServiceOptionLike[]>([]);
   const [targetId, setTargetId] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -113,7 +114,7 @@ function ServiceUsageModal({
   const cancelBtnRef = useRef<HTMLButtonElement>(null);
   const messageRef = useRef<HTMLDivElement>(null);
 
-  const showMove = canMove && kind === 'ai' && scope === 'app' && appId !== undefined;
+  const showMove = canMove && (kind === 'ai' || kind === 'sandbox') && scope === 'app' && appId !== undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -149,10 +150,12 @@ function ServiceUsageModal({
   useEffect(() => {
     if (!showMove || appId === undefined) return;
     let cancelled = false;
-    apiService
-      .getAIServices(appId)
+    const request = kind === 'ai'
+      ? apiService.getAIServices(appId)
+      : apiService.getSandboxServices(appId);
+    request
       .then((list) => {
-        if (!cancelled) setTargets(list);
+        if (!cancelled) setTargets(list as readonly ServiceOptionLike[]);
       })
       .catch(() => {
         if (!cancelled) setTargets([]);
@@ -160,7 +163,7 @@ function ServiceUsageModal({
     return () => {
       cancelled = true;
     };
-  }, [showMove, appId, reloadKey]);
+  }, [showMove, kind, appId, reloadKey]);
 
   useEffect(() => {
     if (confirming) cancelBtnRef.current?.focus();
@@ -180,13 +183,17 @@ function ServiceUsageModal({
     () => targets.filter((t) => t.service_id !== serviceId && t.lifecycle_status !== 'retired'),
     [targets, serviceId],
   );
-  const llmAgentCount = useMemo(
-    () => (usage ? usage.agents.filter((a) => a.roles.includes('llm')).length : 0),
-    [usage],
+  const moveAgentCount = useMemo(
+    () => (usage
+      ? usage.agents.filter((a) => a.roles.includes(kind === 'ai' ? 'llm' : 'sandbox')).length
+      : 0),
+    [usage, kind],
   );
+  const moveAppCount = kind === 'sandbox' ? usage?.apps_using_as_default?.length ?? 0 : 0;
+  const moveUsageCount = moveAgentCount + moveAppCount;
   const selectedTarget = targetOptions.find((t) => String(t.service_id) === targetId) ?? null;
 
-  function optionLabel(t: AIService): string {
+  function optionLabel(t: ServiceOptionLike): string {
     return t.lifecycle_status === 'deprecated' && t.end_of_service_at
       ? S.moveTargetEnds(t.name, formatEndOfServiceDate(t.end_of_service_at))
       : t.name;
@@ -197,13 +204,29 @@ function ServiceUsageModal({
     setMoving(true);
     setMoveMessage(null);
     try {
-      const result = await apiService.moveAgentsToAIService(
-        appId,
-        serviceId,
-        selectedTarget.service_id,
-        llmAgentCount,
-      );
-      setMoveMessage({ text: S.moveSuccess(result.count), type: 'success' });
+      if (kind === 'ai') {
+        const result = await apiService.moveAgentsToAIService(
+          appId,
+          serviceId,
+          selectedTarget.service_id,
+          moveAgentCount,
+        );
+        setMoveMessage({ text: S.moveSuccess(result.count), type: 'success' });
+      } else if (kind === 'sandbox') {
+        const result = await apiService.moveSandboxServiceUsage(
+          appId,
+          serviceId,
+          selectedTarget.service_id,
+          moveAgentCount,
+          moveAppCount,
+        );
+        setMoveMessage({
+          text: S.moveSandboxSuccess(result.moved_agent_ids.length, result.updated_app_ids.length),
+          type: 'success',
+        });
+      } else {
+        return;
+      }
       setConfirming(false);
       setTargetId('');
       setReloadKey((k) => k + 1);
@@ -226,25 +249,30 @@ function ServiceUsageModal({
 
   function renderMove(u: ServiceUsage) {
     if (!showMove) return null;
+    const isAI = kind === 'ai';
     return (
       <section
         aria-labelledby={`${selectId}-move`}
         className="mt-6 border-t border-gray-200 dark:border-slate-600 pt-4"
       >
         <h4 id={`${selectId}-move`} className="text-sm font-semibold text-gray-900 dark:text-slate-100 mb-1">
-          {S.moveTitle}
+          {isAI ? S.moveTitle : S.moveSandboxTitle}
         </h4>
         <p className="text-sm text-gray-700 dark:text-slate-300 mb-3">
-          {llmAgentCount > 0 ? S.moveCount(llmAgentCount) : S.moveNone}
+          {isAI
+            ? (moveAgentCount > 0 ? S.moveCount(moveAgentCount) : S.moveNone)
+            : S.moveSandboxSummary(moveAgentCount, moveAppCount)}
         </p>
-        {llmAgentCount > 0 && targetOptions.length === 0 && (
-          <p className="text-sm text-gray-500 dark:text-slate-400 mb-3">{S.moveNoTargets}</p>
+        {moveUsageCount > 0 && targetOptions.length === 0 && (
+          <p className="text-sm text-gray-500 dark:text-slate-400 mb-3">
+            {isAI ? S.moveNoTargets : S.moveSandboxNoTargets}
+          </p>
         )}
-        {llmAgentCount > 0 && targetOptions.length > 0 && (
+        {moveUsageCount > 0 && targetOptions.length > 0 && (
           <div className="space-y-3">
             <div>
               <label htmlFor={selectId} className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">
-                {S.moveTargetLabel}
+                {isAI ? S.moveTargetLabel : S.moveSandboxTargetLabel}
               </label>
               <select
                 id={selectId}
@@ -273,7 +301,7 @@ function ServiceUsageModal({
                 onClick={() => setConfirming(true)}
                 className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
               >
-                {S.moveButton}
+                  {isAI ? S.moveButton : S.moveSandboxButton}
               </button>
             }
             {confirming && selectedTarget && (
@@ -283,7 +311,9 @@ function ServiceUsageModal({
                 className="rounded-lg border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/30 p-3"
               >
                 <p id={confirmTextId} className="text-sm font-medium text-amber-900 dark:text-amber-100 mb-3">
-                  {S.moveConfirm(llmAgentCount, u.service_name, selectedTarget.name)}
+                  {isAI
+                    ? S.moveConfirm(moveAgentCount, u.service_name, selectedTarget.name)
+                    : S.moveSandboxConfirm(moveAgentCount, moveAppCount, u.service_name, selectedTarget.name)}
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -308,7 +338,9 @@ function ServiceUsageModal({
             )}
           </div>
         )}
-        <p className="mt-3 text-xs text-gray-500 dark:text-slate-400">{S.moveNote}</p>
+        <p className="mt-3 text-xs text-gray-500 dark:text-slate-400">
+          {isAI ? S.moveNote : S.moveSandboxNote}
+        </p>
       </section>
     );
   }

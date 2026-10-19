@@ -46,7 +46,7 @@ class ServiceLifecycleWarningSchema(BaseModel):
     deprecation_notice: Optional[str] = None
 
 
-# ==================== "Used by" and bulk move of agents ====================
+# ==================== "Used by" and bulk service usage moves ====================
 
 ServiceUsageKind = Literal["ai", "embedding", "sandbox"]
 AgentUsageRole = Literal[
@@ -134,3 +134,14 @@ class MoveAgentsRequestSchema(BaseModel):
 class MoveAgentsResponseSchema(BaseModel):
     moved_agent_ids: List[int]
     count: int
+
+
+class MoveSandboxUsageRequestSchema(BaseModel):
+    target_service_id: int
+    expected_agent_count: int = Field(..., ge=0)
+    expected_app_count: int = Field(..., ge=0)
+
+
+class MoveSandboxUsageResponseSchema(BaseModel):
+    moved_agent_ids: List[int]
+    updated_app_ids: List[int]
