@@ -4,7 +4,6 @@ import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb,
 import { apiService, ApiError, type ScheduledTask } from '../services/api';
 import { toast } from 'sonner';
 import { useApiMutation } from '../hooks/useApiMutation';
-import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../constants/messages';
 import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_PROMPT_TEMPLATE } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
