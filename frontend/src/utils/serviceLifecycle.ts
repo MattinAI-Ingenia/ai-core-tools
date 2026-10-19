@@ -170,6 +170,45 @@ export const SERVICE_USAGE_STRINGS = {
   moveNote:
     'Transcription, video, OCR vision and middleware references are not moved. They are listed above and must be changed manually.',
   moveError: 'Could not move the agents.',
+  moveSandboxTitle: 'Move usage to another sandbox service',
+  targetsLoading: 'Loading available services...',
+  targetsLoadError: 'Could not load available services.',
+  moveSandboxSummary: (agents: number, apps: number) =>
+    agents === 0 && apps === 0
+      ? 'No agents or app defaults use this service.'
+      : [
+          agents > 0 && `${agents} ${agents === 1 ? 'agent is' : 'agents are'} directly assigned to it`,
+          apps > 0 && `${apps} ${apps === 1 ? 'app uses' : 'apps use'} it as the default sandbox`,
+        ].filter(Boolean).join('; ') + '.',
+  moveSandboxTargetLabel: 'Target sandbox service',
+  moveSandboxNoTargets: 'There is no other available sandbox service to move this usage to.',
+  moveSandboxButton: 'Move sandbox usage...',
+  moveSandboxConfirm: (
+    agents: number,
+    apps: number,
+    inherited: number,
+    from: string,
+    to: string,
+  ) => {
+    const changes = [
+      `${agents} directly assigned ${agents === 1 ? 'agent' : 'agents'}`,
+      apps > 0 ? 'the app default sandbox' : 'no app default',
+    ];
+    const inheritNote = apps > 0
+      ? ` ${inherited} ${inherited === 1 ? 'agent that inherits' : 'agents that inherit'} the app default will also switch to ${to}.`
+      : '';
+    return `Move ${changes.join(' and ')} from ${from} to ${to}?${inheritNote}`;
+  },
+  moveSandboxSuccess: (agents: number, apps: number) => [
+    agents > 0 && `Moved ${agents} ${agents === 1 ? 'agent' : 'agents'}`,
+    apps > 0 && `changed the default sandbox in ${apps} ${apps === 1 ? 'app' : 'apps'}`,
+  ].filter(Boolean).join(' and ') + '.',
+  moveSandboxNote:
+    'Agents inheriting the app default will follow the new default automatically.',
+  deleteReview:
+    'Review what uses this service below. You can move eligible agents to another service before deleting it.',
+  deleteButton: 'Delete service...',
+  deleting: 'Deleting...',
 } as const;
 
 export const MAX_DEPRECATION_NOTICE_LENGTH = 1000;

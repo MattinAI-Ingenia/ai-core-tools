@@ -2,12 +2,13 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Link } from 'react-router-dom';
 import Modal from '../ui/Modal';
 import ServiceStatusBadge from '../ui/ServiceStatusBadge';
-import { apiService, ApiError, type AIService } from '../../services/api';
+import { apiService, ApiError } from '../../services/api';
 import type { ServiceUsage } from '../../types/services';
 import {
   SERVICE_LIFECYCLE_STRINGS,
   SERVICE_USAGE_STRINGS as S,
   formatEndOfServiceDate,
+  type ServiceOptionLike,
 } from '../../utils/serviceLifecycle';
 
 export interface ServiceUsageModalProps {
@@ -19,10 +20,12 @@ export interface ServiceUsageModalProps {
   readonly appId?: number;
   readonly serviceId: number;
   readonly serviceName: string;
-  /** App scope + AI service only: user is ADMINISTRATOR or higher. */
+  /** App scope + AI or sandbox service only: user is ADMINISTRATOR or higher. */
   readonly canMove?: boolean;
   /** Called after agents were moved so the parent can refresh its list. */
   readonly onMoved?: () => void;
+  /** Enables a delete action after the service usage has been reviewed. */
+  readonly onDelete?: () => Promise<boolean>;
   /** Entries link to editor-only pages; false renders them as plain text (VIEWER). */
   readonly canNavigate?: boolean;
 }
@@ -95,25 +98,32 @@ function ServiceUsageModal({
   serviceName,
   canMove = false,
   onMoved,
+  onDelete,
   canNavigate = true,
 }: ServiceUsageModalProps) {
+  const showMove = canMove && (kind === 'ai' || kind === 'sandbox') && scope === 'app' && appId !== undefined;
+
   const [usage, setUsage] = useState<ServiceUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const [targets, setTargets] = useState<readonly AIService[]>([]);
+  const [targets, setTargets] = useState<readonly ServiceOptionLike[]>([]);
+  const [targetsLoading, setTargetsLoading] = useState(showMove);
+  const [targetsError, setTargetsError] = useState<string | null>(null);
+  const [targetsReloadKey, setTargetsReloadKey] = useState(0);
   const [targetId, setTargetId] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [moveMessage, setMoveMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const selectId = useId();
   const confirmTextId = useId();
   const moveBtnRef = useRef<HTMLButtonElement>(null);
   const cancelBtnRef = useRef<HTMLButtonElement>(null);
   const messageRef = useRef<HTMLDivElement>(null);
-
-  const showMove = canMove && kind === 'ai' && scope === 'app' && appId !== undefined;
+  const loadStatusRef = useRef<HTMLParagraphElement>(null);
+  const moveHeadingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,18 +159,26 @@ function ServiceUsageModal({
   useEffect(() => {
     if (!showMove || appId === undefined) return;
     let cancelled = false;
-    apiService
-      .getAIServices(appId)
+    setTargetsLoading(true);
+    setTargetsError(null);
+    setTargets([]);
+    const request = kind === 'ai'
+      ? apiService.getAIServices(appId)
+      : apiService.getSandboxServices(appId);
+    request
       .then((list) => {
-        if (!cancelled) setTargets(list);
-      })
-      .catch(() => {
-        if (!cancelled) setTargets([]);
+        if (!cancelled) setTargets(list as readonly ServiceOptionLike[]);
+      }).catch((err: unknown) => {
+        if (!cancelled) {
+          setTargetsError(err instanceof Error && err.message ? err.message : S.targetsLoadError);
+        }
+      }).finally(() => {
+        if (!cancelled) setTargetsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [showMove, appId, reloadKey]);
+  }, [showMove, kind, appId, reloadKey, targetsReloadKey]);
 
   useEffect(() => {
     if (confirming) cancelBtnRef.current?.focus();
@@ -180,13 +198,23 @@ function ServiceUsageModal({
     () => targets.filter((t) => t.service_id !== serviceId && t.lifecycle_status !== 'retired'),
     [targets, serviceId],
   );
-  const llmAgentCount = useMemo(
-    () => (usage ? usage.agents.filter((a) => a.roles.includes('llm')).length : 0),
-    [usage],
+  const moveAgentCount = useMemo(
+    () => (usage
+      ? usage.agents.filter((a) => a.roles.includes(kind === 'ai' ? 'llm' : 'sandbox')).length
+      : 0),
+    [usage, kind],
   );
+  const moveAppCount = kind === 'sandbox' ? usage?.apps_using_as_default?.length ?? 0 : 0;
+  const moveInheritedCount = useMemo(
+    () => (usage && kind === 'sandbox'
+      ? usage.agents.filter((a) => a.roles.includes('sandbox_app_default')).length
+      : 0),
+    [usage, kind],
+  );
+  const moveUsageCount = moveAgentCount + moveAppCount;
   const selectedTarget = targetOptions.find((t) => String(t.service_id) === targetId) ?? null;
 
-  function optionLabel(t: AIService): string {
+  function optionLabel(t: ServiceOptionLike): string {
     return t.lifecycle_status === 'deprecated' && t.end_of_service_at
       ? S.moveTargetEnds(t.name, formatEndOfServiceDate(t.end_of_service_at))
       : t.name;
@@ -197,13 +225,27 @@ function ServiceUsageModal({
     setMoving(true);
     setMoveMessage(null);
     try {
-      const result = await apiService.moveAgentsToAIService(
-        appId,
-        serviceId,
-        selectedTarget.service_id,
-        llmAgentCount,
-      );
-      setMoveMessage({ text: S.moveSuccess(result.count), type: 'success' });
+      if (kind === 'ai') {
+        const result = await apiService.moveAgentsToAIService(
+          appId,
+          serviceId,
+          selectedTarget.service_id,
+          moveAgentCount,
+        );
+        setMoveMessage({ text: S.moveSuccess(result.count), type: 'success' });
+      } else {
+        const result = await apiService.moveSandboxServiceUsage(
+          appId,
+          serviceId,
+          selectedTarget.service_id,
+          moveAgentCount,
+          moveAppCount,
+        );
+        setMoveMessage({
+          text: S.moveSandboxSuccess(result.moved_agent_ids.length, result.updated_app_ids.length),
+          type: 'success',
+        });
+      }
       setConfirming(false);
       setTargetId('');
       setReloadKey((k) => k + 1);
@@ -221,37 +263,72 @@ function ServiceUsageModal({
     }
   }
 
+  async function handleDelete() {
+    if (!onDelete) return;
+    setDeleting(true);
+    try {
+      const deleted = await onDelete();
+      if (deleted) onClose();
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   const base = (id: number) => `/apps/${id}`;
   const scopedApp = (name?: string | null) => (scope === 'system' ? name : null);
 
   function renderMove(u: ServiceUsage) {
     if (!showMove) return null;
+    const isAI = kind === 'ai';
     return (
       <section
         aria-labelledby={`${selectId}-move`}
         className="mt-6 border-t border-gray-200 dark:border-slate-600 pt-4"
       >
-        <h4 id={`${selectId}-move`} className="text-sm font-semibold text-gray-900 dark:text-slate-100 mb-1">
-          {S.moveTitle}
+        <h4 ref={moveHeadingRef} tabIndex={-1} id={`${selectId}-move`} className="text-sm font-semibold text-gray-900 dark:text-slate-100 mb-1">
+          {isAI ? S.moveTitle : S.moveSandboxTitle}
         </h4>
         <p className="text-sm text-gray-700 dark:text-slate-300 mb-3">
-          {llmAgentCount > 0 ? S.moveCount(llmAgentCount) : S.moveNone}
+          {isAI
+            ? (moveAgentCount > 0 ? S.moveCount(moveAgentCount) : S.moveNone)
+            : S.moveSandboxSummary(moveAgentCount, moveAppCount)}
         </p>
-        {llmAgentCount > 0 && targetOptions.length === 0 && (
-          <p className="text-sm text-gray-500 dark:text-slate-400 mb-3">{S.moveNoTargets}</p>
+        {moveUsageCount > 0 && targetsLoading && (
+          <p role="status" className="text-sm text-gray-500 dark:text-slate-400 mb-3">
+            {S.targetsLoading}
+          </p>
         )}
-        {llmAgentCount > 0 && targetOptions.length > 0 && (
+        {moveUsageCount > 0 && targetsError && (
+          <div role="alert" className="text-sm text-red-700 dark:text-red-200 mb-3">
+            <p>{targetsError}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setTargetsReloadKey((key) => key + 1);
+                moveHeadingRef.current?.focus();
+              }}
+              className="mt-2 underline focus:outline-none focus:ring-2 focus:ring-red-500 rounded"
+            >
+              {S.retry}
+            </button>
+          </div>
+        )}
+        {moveUsageCount > 0 && !targetsLoading && !targetsError && targetOptions.length === 0 && (
+          <p className="text-sm text-gray-500 dark:text-slate-400 mb-3">
+            {isAI ? S.moveNoTargets : S.moveSandboxNoTargets}
+          </p>
+        )}
+        {moveUsageCount > 0 && !targetsLoading && !targetsError && targetOptions.length > 0 && (
           <div className="space-y-3">
             <div>
               <label htmlFor={selectId} className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">
-                {S.moveTargetLabel}
+                {isAI ? S.moveTargetLabel : S.moveSandboxTargetLabel}
               </label>
               <select
                 id={selectId}
                 value={targetId}
-                aria-disabled={moving}
+                disabled={moving}
                 onChange={(e) => {
-                  if (moving) return;
                   setTargetId(e.target.value);
                   setConfirming(false);
                 }}
@@ -265,25 +342,25 @@ function ServiceUsageModal({
                 ))}
               </select>
             </div>
-            {
-              <button
-                ref={moveBtnRef}
-                type="button"
-                disabled={!selectedTarget || confirming}
-                onClick={() => setConfirming(true)}
-                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-              >
-                {S.moveButton}
-              </button>
-            }
+            <button
+              ref={moveBtnRef}
+              type="button"
+              disabled={!selectedTarget || confirming}
+              onClick={() => setConfirming(true)}
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+            >
+              {isAI ? S.moveButton : S.moveSandboxButton}
+            </button>
             {confirming && selectedTarget && (
               <div
-                role="alertdialog"
+                role="group"
                 aria-labelledby={confirmTextId}
                 className="rounded-lg border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/30 p-3"
               >
                 <p id={confirmTextId} className="text-sm font-medium text-amber-900 dark:text-amber-100 mb-3">
-                  {S.moveConfirm(llmAgentCount, u.service_name, selectedTarget.name)}
+                  {isAI
+                    ? S.moveConfirm(moveAgentCount, u.service_name, selectedTarget.name)
+                    : S.moveSandboxConfirm(moveAgentCount, moveAppCount, moveInheritedCount, u.service_name, selectedTarget.name)}
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -308,7 +385,9 @@ function ServiceUsageModal({
             )}
           </div>
         )}
-        <p className="mt-3 text-xs text-gray-500 dark:text-slate-400">{S.moveNote}</p>
+        <p className="mt-3 text-xs text-gray-500 dark:text-slate-400">
+          {isAI ? S.moveNote : S.moveSandboxNote}
+        </p>
       </section>
     );
   }
@@ -423,7 +502,7 @@ function ServiceUsageModal({
   return (
     <Modal isOpen onClose={onClose} title={S.title(serviceName)} size="large">
       {loading && !usage && (
-        <p role="status" className="text-sm text-gray-600 dark:text-slate-300">
+        <p ref={loadStatusRef} tabIndex={-1} role="status" className="text-sm text-gray-600 dark:text-slate-300">
           {S.loading}
         </p>
       )}
@@ -432,7 +511,10 @@ function ServiceUsageModal({
           <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
           <button
             type="button"
-            onClick={() => setReloadKey((k) => k + 1)}
+            onClick={() => {
+              setReloadKey((k) => k + 1);
+              requestAnimationFrame(() => loadStatusRef.current?.focus());
+            }}
             className="mt-2 text-sm font-medium text-red-800 dark:text-red-200 underline focus:outline-none focus:ring-2 focus:ring-red-500 rounded"
           >
             {S.retry}
@@ -443,7 +525,6 @@ function ServiceUsageModal({
           <div
             ref={messageRef}
             tabIndex={-1}
-            role={moveMessage.type === 'error' ? 'alert' : 'status'}
             className={`mb-4 rounded-lg border p-3 text-sm ${
               moveMessage.type === 'success'
                 ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-900/30 dark:text-green-200'
@@ -454,9 +535,25 @@ function ServiceUsageModal({
           </div>
       )}
       {usage && !error && renderBody(usage)}
-      <div className="mt-4 flex justify-end">
+      {onDelete && usage && !error && (
+        <p className="mt-4 text-sm text-gray-600 dark:text-slate-300">
+          {S.deleteReview}
+        </p>
+      )}
+      <div className="mt-4 flex justify-between">
+        {onDelete && usage && !error ? (
+          <button
+            type="button"
+            disabled={deleting || moving}
+            onClick={() => void handleDelete()}
+            className="bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+          >
+            {deleting ? S.deleting : S.deleteButton}
+          </button>
+        ) : <span />}
         <button
           type="button"
+          disabled={deleting || moving}
           onClick={onClose}
           className="border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         >

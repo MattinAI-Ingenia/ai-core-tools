@@ -20,6 +20,8 @@ import SystemServiceBadge from '../../components/services/SystemServiceBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import type { ConflictMode, ImportResponse } from '../../components/ui/ImportModal';
+import { getServiceApiClient } from '../../components/services/serviceApi';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 
 interface EmbeddingService extends Partial<ServiceLifecycleFields> {
   service_id: number;
@@ -73,6 +75,24 @@ function EmbeddingServicesPage() {
   const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [exportingServiceId, setExportingServiceId] = useState<number | null>(null);
   const [notification, setNotification] = useState<{message: string; type: 'success' | 'error'} | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('embedding');
+
+  async function testConnection(serviceId: number) {
+    if (!appId) throw new Error('App ID not found');
+    const numericAppId = Number.parseInt(appId, 10);
+    const apiService = (await import('../../services/api')).apiService;
+    const detail = await apiService.getEmbeddingService(numericAppId, serviceId);
+    return getServiceApiClient('embedding', 'app', numericAppId).testConnection({
+      name: detail.name,
+      provider: detail.provider,
+      model_name: detail.model_name,
+      api_key: detail.api_key,
+      base_url: detail.base_url,
+      api_version: detail.api_version,
+      aws_access_key_id: detail.aws_access_key_id,
+      aws_region: detail.aws_region,
+    }, serviceId);
+  }
 
   async function handleExport(serviceId: number) {
     if (!appId) return;
@@ -245,6 +265,7 @@ function EmbeddingServicesPage() {
             ) : canEdit ? (
               <ActionDropdown triggerAriaLabel={`Actions for ${service.name}`} actions={[
                 { label: SERVICE_USAGE_STRINGS.action, onClick: () => setUsageService({ id: service.service_id, name: service.name }), icon: <Users className="w-4 h-4" /> },
+                testAction(service.service_id, service.name, () => testConnection(service.service_id)),
                 {
                   label: exportingServiceId === service.service_id ? 'Exporting...' : 'Export',
                   onClick: () => void handleExport(service.service_id),
@@ -310,6 +331,8 @@ function EmbeddingServicesPage() {
           onClose={() => setUsageService(null)}
         />
       )}
+
+      {connectionTestModal}
 
       {/* Import Modal */}
       <ImportModal

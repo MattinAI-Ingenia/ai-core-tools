@@ -435,3 +435,26 @@ class ServiceUsageQueries:
             .execution_options(synchronize_session=False)
         )
         return sorted(db.execute(stmt).scalars().all())
+
+    @staticmethod
+    def move_sandbox_usage(
+        db: Session, app_id: int, source_id: int, target_id: int
+    ) -> tuple[List[int], List[int]]:
+        """Repoint direct agent sandbox references and the app default in one transaction."""
+        move_agents = (
+            update(Agent)
+            .where(Agent.app_id == app_id, Agent.sandbox_service_id == source_id)
+            .values(sandbox_service_id=target_id)
+            .returning(Agent.agent_id)
+            .execution_options(synchronize_session=False)
+        )
+        move_apps = (
+            update(App)
+            .where(App.app_id == app_id, App.default_sandbox_service_id == source_id)
+            .values(default_sandbox_service_id=target_id)
+            .returning(App.app_id)
+            .execution_options(synchronize_session=False)
+        )
+        moved_agent_ids = sorted(db.execute(move_agents).scalars().all())
+        updated_app_ids = sorted(db.execute(move_apps).scalars().all())
+        return moved_agent_ids, updated_app_ids

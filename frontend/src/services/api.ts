@@ -2,7 +2,15 @@ import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { HitlCancelResult, HitlDecision, HitlPendingApproval, StreamEvent } from '../types/streaming';
-import type { MoveAgentsResult, ServiceLifecycleFields, ServiceLifecycleWarning, ServiceUsage } from '../types/services';
+import type {
+  ExistingSandboxService,
+  ExistingService,
+  MoveAgentsResult,
+  MoveSandboxServiceUsageResult,
+  ServiceLifecycleFields,
+  ServiceLifecycleWarning,
+  ServiceUsage,
+} from '../types/services';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
@@ -627,6 +635,9 @@ export interface SystemAIService extends Partial<ServiceLifecycleFields> {
   model_name: string;
   api_key: string;
   base_url: string;
+  api_version?: string;
+  aws_access_key_id?: string;
+  aws_region?: string;
   is_system: boolean;
   supports_video: boolean;
   created_at: string;
@@ -640,6 +651,9 @@ export interface SystemEmbeddingService extends Partial<ServiceLifecycleFields> 
   model_name: string;
   api_key: string;
   base_url: string;
+  api_version?: string;
+  aws_access_key_id?: string;
+  aws_region?: string;
   is_system: boolean;
   created_at?: string;
 }
@@ -1150,6 +1164,23 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/used-by`);
   }
 
+  async moveSandboxServiceUsage(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedAgentCount: number,
+    expectedAppCount: number,
+  ): Promise<MoveSandboxServiceUsageResult> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/move-usage`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_service_id: targetServiceId,
+        expected_agent_count: expectedAgentCount,
+        expected_app_count: expectedAppCount,
+      }),
+    });
+  }
+
   async getSystemSandboxServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
     return this.request(`/internal/admin/system-sandbox-services/${serviceId}/used-by`);
   }
@@ -1277,7 +1308,7 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/embedding-services/`);
   }
 
-  async getEmbeddingService(appId: number, serviceId: number): Promise<EmbeddingService> {
+  async getEmbeddingService(appId: number, serviceId: number): Promise<ExistingService> {
     return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}`);
   }
 
@@ -3457,7 +3488,7 @@ class ApiService {
     return this.request('/internal/admin/system-sandbox-services');
   }
 
-  async getSystemSandboxService(serviceId: number) {
+  async getSystemSandboxService(serviceId: number): Promise<ExistingSandboxService> {
     return this.request(`/internal/admin/system-sandbox-services/${serviceId}`);
   }
 

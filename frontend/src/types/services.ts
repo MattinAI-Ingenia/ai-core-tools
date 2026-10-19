@@ -236,3 +236,8 @@ export interface MoveAgentsResult {
   readonly moved_agent_ids: readonly number[];
   readonly count: number;
 }
+
+export interface MoveSandboxServiceUsageResult {
+  readonly moved_agent_ids: readonly number[];
+  readonly updated_app_ids: readonly number[];
+}

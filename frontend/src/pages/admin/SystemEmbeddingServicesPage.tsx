@@ -9,8 +9,11 @@ import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { getServiceApiClient } from '../../components/services/serviceApi';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useSettingsCache } from '../../contexts/SettingsCacheContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
@@ -21,6 +24,9 @@ interface SystemEmbeddingService extends Partial<ServiceLifecycleFields> {
   readonly model_name: string;
   readonly api_key: string;
   readonly base_url: string;
+  readonly api_version?: string;
+  readonly aws_access_key_id?: string;
+  readonly aws_region?: string;
   readonly is_system: boolean;
   readonly last_error?: string | null;
   readonly last_error_at?: string | null;
@@ -43,6 +49,7 @@ interface DeletionImpact {
 
 const SystemEmbeddingServicesPage: React.FC = () => {
   const confirm = useConfirm();
+  const settingsCache = useSettingsCache();
   const mutate = useApiMutation();
 
   const [services, setServices] = useState<SystemEmbeddingService[]>([]);
@@ -51,6 +58,7 @@ const SystemEmbeddingServicesPage: React.FC = () => {
   const [showForm, setShowForm] = useState(false);
   const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [editingService, setEditingService] = useState<SystemEmbeddingService | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('embedding');
 
   const fetchServices = useCallback(async () => {
     try {
@@ -108,8 +116,24 @@ const SystemEmbeddingServicesPage: React.FC = () => {
     );
     if (result === undefined) return;
 
+    settingsCache.invalidateSystemServiceCaches();
     handleCancel();
     await fetchServices();
+  };
+
+  const testConnection = (serviceId: number) => {
+    const service = services.find((item) => item.service_id === serviceId);
+    if (!service) throw new Error('Embedding service not found');
+    return getServiceApiClient('embedding', 'system', undefined).testConnection({
+      name: service.name,
+      provider: service.provider,
+      model_name: service.model_name,
+      api_key: service.api_key,
+      base_url: service.base_url,
+      api_version: service.api_version,
+      aws_access_key_id: service.aws_access_key_id,
+      aws_region: service.aws_region,
+    }, serviceId);
   };
 
   const handleDelete = async (svc: SystemEmbeddingService) => {
@@ -183,6 +207,7 @@ const SystemEmbeddingServicesPage: React.FC = () => {
       },
     );
     if (result === undefined) return;
+    settingsCache.invalidateSystemServiceCaches();
     await fetchServices();
   };
 
@@ -259,6 +284,7 @@ const SystemEmbeddingServicesPage: React.FC = () => {
                             icon: <Users className="w-4 h-4" />,
                             onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
                           },
+                          testAction(svc.service_id, svc.name, () => testConnection(svc.service_id)),
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -315,6 +341,7 @@ const SystemEmbeddingServicesPage: React.FC = () => {
           onClose={() => setUsageService(null)}
         />
       )}
+      {connectionTestModal}
     </div>
   );
 };
