@@ -171,6 +171,8 @@ export const SERVICE_USAGE_STRINGS = {
     'Transcription, video, OCR vision and middleware references are not moved. They are listed above and must be changed manually.',
   moveError: 'Could not move the agents.',
   moveSandboxTitle: 'Move usage to another sandbox service',
+  targetsLoading: 'Loading available services...',
+  targetsLoadError: 'Could not load available services.',
   moveSandboxSummary: (agents: number, apps: number) =>
     agents === 0 && apps === 0
       ? 'No agents or app defaults use this service.'

@@ -107,6 +107,9 @@ function ServiceUsageModal({
   const [reloadKey, setReloadKey] = useState(0);
 
   const [targets, setTargets] = useState<readonly ServiceOptionLike[]>([]);
+  const [targetsLoading, setTargetsLoading] = useState(true);
+  const [targetsError, setTargetsError] = useState<string | null>(null);
+  const [targetsReloadKey, setTargetsReloadKey] = useState(0);
   const [targetId, setTargetId] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -154,20 +157,26 @@ function ServiceUsageModal({
   useEffect(() => {
     if (!showMove || appId === undefined) return;
     let cancelled = false;
+    setTargetsLoading(true);
+    setTargetsError(null);
+    setTargets([]);
     const request = kind === 'ai'
       ? apiService.getAIServices(appId)
       : apiService.getSandboxServices(appId);
     request
       .then((list) => {
         if (!cancelled) setTargets(list as readonly ServiceOptionLike[]);
-      })
-      .catch(() => {
-        if (!cancelled) setTargets([]);
+      }).catch((err: unknown) => {
+        if (!cancelled) {
+          setTargetsError(err instanceof Error && err.message ? err.message : S.targetsLoadError);
+        }
+      }).finally(() => {
+        if (!cancelled) setTargetsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [showMove, kind, appId, reloadKey]);
+  }, [showMove, kind, appId, reloadKey, targetsReloadKey]);
 
   useEffect(() => {
     if (confirming) cancelBtnRef.current?.focus();
@@ -278,12 +287,29 @@ function ServiceUsageModal({
             ? (moveAgentCount > 0 ? S.moveCount(moveAgentCount) : S.moveNone)
             : S.moveSandboxSummary(moveAgentCount, moveAppCount)}
         </p>
-        {moveUsageCount > 0 && targetOptions.length === 0 && (
+        {moveUsageCount > 0 && targetsLoading && (
+          <p role="status" className="text-sm text-gray-500 dark:text-slate-400 mb-3">
+            {S.targetsLoading}
+          </p>
+        )}
+        {moveUsageCount > 0 && targetsError && (
+          <div role="alert" className="text-sm text-red-700 dark:text-red-200 mb-3">
+            <p>{targetsError}</p>
+            <button
+              type="button"
+              onClick={() => setTargetsReloadKey((key) => key + 1)}
+              className="mt-2 underline focus:outline-none focus:ring-2 focus:ring-red-500 rounded"
+            >
+              {S.retry}
+            </button>
+          </div>
+        )}
+        {moveUsageCount > 0 && !targetsLoading && !targetsError && targetOptions.length === 0 && (
           <p className="text-sm text-gray-500 dark:text-slate-400 mb-3">
             {isAI ? S.moveNoTargets : S.moveSandboxNoTargets}
           </p>
         )}
-        {moveUsageCount > 0 && targetOptions.length > 0 && (
+        {moveUsageCount > 0 && !targetsLoading && !targetsError && targetOptions.length > 0 && (
           <div className="space-y-3">
             <div>
               <label htmlFor={selectId} className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">
