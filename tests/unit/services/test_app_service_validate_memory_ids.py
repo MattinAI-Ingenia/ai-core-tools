@@ -1,4 +1,4 @@
-"""Unit tests for `AppService._validate_memory_service_ids` (AC-38, AC-46).
+"""Unit tests for `AppService._validate_memory_service_ids` (AC-38).
 
 Regression coverage for the security-audit MEDIUM finding on step_009 (App-level
 memory service configuration): no test previously exercised this validator directly.
@@ -9,10 +9,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import config
 from repositories.ai_service_repository import AIServiceRepository
 from repositories.embedding_service_repository import EmbeddingServiceRepository
 from services.app_service import AppService, MemoryServiceConfigError
+import tools.embeddingTools as embedding_tools_module
 import tools.memory.resolution as resolution_module
 
 
@@ -90,86 +90,26 @@ class TestEmbeddingServiceIdOwnership:
         monkeypatch.setattr(
             EmbeddingServiceRepository, "get_by_id", staticmethod(lambda db, sid: _service(sid, None))
         )
-        monkeypatch.setattr(
-            resolution_module, "probe_embedding_dims_for_config", lambda svc: config.GLOBAL_MEMORY_EMBEDDING_DIMS
-        )
 
         service._validate_memory_service_ids(
             app_id=THIS_APP_ID, extraction_service_id=None, embedding_service_id=42
         )  # must not raise
 
 
-class TestEmbeddingServiceDimensionality:
-    def test_mismatched_width_is_rejected(self, service, monkeypatch):
+class TestEmbeddingServiceWidth:
+    def test_any_width_is_accepted_without_contacting_the_provider(self, service, monkeypatch):
+        """The memory store is dimension-agnostic, so validation is a local DB
+        lookup only — it must never build (let alone call) an embeddings client."""
         monkeypatch.setattr(
             EmbeddingServiceRepository, "get_by_id", staticmethod(lambda db, sid: _service(sid, THIS_APP_ID))
         )
-        monkeypatch.setattr(
-            resolution_module,
-            "probe_embedding_dims_for_config",
-            lambda svc: config.GLOBAL_MEMORY_EMBEDDING_DIMS + 1,
-        )
-
-        with pytest.raises(MemoryServiceConfigError):
-            service._validate_memory_service_ids(
-                app_id=THIS_APP_ID, extraction_service_id=None, embedding_service_id=42
-            )
-
-    def test_matching_width_is_accepted(self, service, monkeypatch):
-        monkeypatch.setattr(
-            EmbeddingServiceRepository, "get_by_id", staticmethod(lambda db, sid: _service(sid, THIS_APP_ID))
-        )
-        monkeypatch.setattr(
-            resolution_module, "probe_embedding_dims_for_config", lambda svc: config.GLOBAL_MEMORY_EMBEDDING_DIMS
-        )
+        build = MagicMock(side_effect=AssertionError("validation must not build an embeddings client"))
+        monkeypatch.setattr(embedding_tools_module, "get_embeddings_model", build)
+        monkeypatch.setattr(resolution_module, "get_embeddings_model", build)
 
         service._validate_memory_service_ids(
             app_id=THIS_APP_ID, extraction_service_id=None, embedding_service_id=42
         )  # must not raise
 
-    def test_undeterminable_width_is_accepted(self, service, monkeypatch):
-        """A probe that cannot determine the width (`None`) must not block
-        configuration — the runtime guard (`build_memory_clients`) is the backstop
-        (AD-12)."""
-        monkeypatch.setattr(
-            EmbeddingServiceRepository, "get_by_id", staticmethod(lambda db, sid: _service(sid, THIS_APP_ID))
-        )
-        monkeypatch.setattr(resolution_module, "probe_embedding_dims_for_config", lambda svc: None)
+        build.assert_not_called()
 
-        service._validate_memory_service_ids(
-            app_id=THIS_APP_ID, extraction_service_id=None, embedding_service_id=42
-        )  # must not raise
-
-
-class TestSkipsProbeWhenEmbeddingIdUnchanged:
-    def test_probe_is_not_called_when_id_matches_current_value(self, service, monkeypatch):
-        monkeypatch.setattr(
-            EmbeddingServiceRepository, "get_by_id", staticmethod(lambda db, sid: _service(sid, THIS_APP_ID))
-        )
-        probe = MagicMock()
-        monkeypatch.setattr(resolution_module, "probe_embedding_dims_for_config", probe)
-
-        service._validate_memory_service_ids(
-            app_id=THIS_APP_ID,
-            extraction_service_id=None,
-            embedding_service_id=42,
-            current_embedding_service_id=42,
-        )
-
-        probe.assert_not_called()
-
-    def test_probe_still_runs_when_id_actually_changes(self, service, monkeypatch):
-        monkeypatch.setattr(
-            EmbeddingServiceRepository, "get_by_id", staticmethod(lambda db, sid: _service(sid, THIS_APP_ID))
-        )
-        probe = MagicMock(return_value=config.GLOBAL_MEMORY_EMBEDDING_DIMS)
-        monkeypatch.setattr(resolution_module, "probe_embedding_dims_for_config", probe)
-
-        service._validate_memory_service_ids(
-            app_id=THIS_APP_ID,
-            extraction_service_id=None,
-            embedding_service_id=42,
-            current_embedding_service_id=99,
-        )
-
-        probe.assert_called_once()

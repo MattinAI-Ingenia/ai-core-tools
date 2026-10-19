@@ -7,6 +7,7 @@ import json
 import os
 from pydantic import ValidationError
 
+import config
 from db.database import get_db
 
 from services.app_service import AppService, MemoryServiceConfigError
@@ -672,6 +673,9 @@ async def get_app(
         default_sandbox_service_id=app.default_sandbox_service_id,
         memory_extraction_service_id=app.memory_extraction_service_id,
         memory_embedding_service_id=app.memory_embedding_service_id,
+        memory_write_every_n_turns=app.memory_write_every_n_turns,
+        memory_language=app.memory_language,
+        memory_write_every_n_turns_default=config.GLOBAL_MEMORY_WRITE_EVERY_N_TURNS,
         **memory_service_options,
         **counts
     )
@@ -745,6 +749,9 @@ async def create_app(
         default_sandbox_service_id=app.default_sandbox_service_id,
         memory_extraction_service_id=app.memory_extraction_service_id,
         memory_embedding_service_id=app.memory_embedding_service_id,
+        memory_write_every_n_turns=app.memory_write_every_n_turns,
+        memory_language=app.memory_language,
+        memory_write_every_n_turns_default=config.GLOBAL_MEMORY_WRITE_EVERY_N_TURNS,
         **memory_service_options,
     )
 
@@ -820,16 +827,18 @@ async def update_app(
         update_dict['memory_extraction_service_id'] = app_data.memory_extraction_service_id
     if 'memory_embedding_service_id' in app_data.model_fields_set:
         update_dict['memory_embedding_service_id'] = app_data.memory_embedding_service_id
+    if 'memory_write_every_n_turns' in app_data.model_fields_set:
+        update_dict['memory_write_every_n_turns'] = app_data.memory_write_every_n_turns
+    if 'memory_language' in app_data.model_fields_set:
+        update_dict['memory_language'] = app_data.memory_language
 
-    # `memory_extraction_service_id`/`memory_embedding_service_id` validation (AC-38,
-    # AC-46) lives in the service and raises `MemoryServiceConfigError` (a `ValueError`
+    # `memory_extraction_service_id`/`memory_embedding_service_id` validation (AC-38)
+    # lives in the service and raises `MemoryServiceConfigError` (a `ValueError`
     # subclass), translated to 400 here. Any other `ValueError` from
     # `create_or_update_app` is NOT this — it falls through to the generic 500 handler
     # so an unrelated bug is never misreported as a memory-configuration problem
     # (security-audit LOW, step_009 follow-up). Run off the event loop
-    # (`run_in_threadpool`): validation may probe the embedding provider over the
-    # network, which must never block the whole worker for every tenant
-    # (security-audit HIGH, step_009 follow-up).
+    # (`run_in_threadpool`) because the service is synchronous.
     try:
         updated_app = await run_in_threadpool(app_service.create_or_update_app, update_dict)
     except MemoryServiceConfigError as e:
@@ -863,6 +872,9 @@ async def update_app(
         default_sandbox_service_id=updated_app.default_sandbox_service_id,
         memory_extraction_service_id=updated_app.memory_extraction_service_id,
         memory_embedding_service_id=updated_app.memory_embedding_service_id,
+        memory_write_every_n_turns=updated_app.memory_write_every_n_turns,
+        memory_language=updated_app.memory_language,
+        memory_write_every_n_turns_default=config.GLOBAL_MEMORY_WRITE_EVERY_N_TURNS,
         **memory_service_options,
     )
 

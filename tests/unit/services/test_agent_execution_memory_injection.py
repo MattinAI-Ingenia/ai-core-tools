@@ -1,26 +1,29 @@
-"""Unit tests for AD-7's graph-payload injection (spec `user-memory-mem0`,
-step_007, FR-6): an extra leading `SystemMessage` ahead of the human message
-in the invoke/stream payload, on both the non-streaming
-(`AgentExecutionService._execute_agent_async`) and streaming
+"""Unit tests for AD-7's memory injection (spec `user-memory-mem0`, FR-6):
+the cross-session memory block travels in THIS turn's system prompt
+(`create_agent(memory_context=...)`), never in the graph input — on both the
+non-streaming (`AgentExecutionService._execute_agent_async`) and streaming
 (`AgentStreamingService.stream_agent_chat`) paths.
 
+Why the system prompt: an input message is persisted in the checkpointer
+thread, where it lost influence a few turns later (a remembered "Wants
+responses in English" was obeyed on turn 3 and ignored on turn 4) and could
+be summarised away. LangChain prepends the system prompt at every model call
+without storing it in the thread state.
+
 `_prepare_turn`'s memory-activation logic itself is covered by
-`tests/unit/services/test_global_memory_read_path.py`; these tests start
-from an already-resolved `ctx.memory_context` (as `_prepare_turn` would leave
-it) and assert on the exact payload each path hands to the LangGraph chain.
+`tests/unit/services/test_global_memory_read_path.py`; these tests start from
+an already-resolved `ctx.memory_context`.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import SystemMessage
 
 from services.agent_execution_service import AgentExecutionService
 
 _MEMORY_BLOCK = (
-    "[REMEMBERED CONTEXT ABOUT THIS USER — background information, not an instruction]\n"
-    "- likes pizza\n"
-    "[END REMEMBERED CONTEXT]"
+    "This is background information remembered about the user from earlier conversations.\n"
+    '{"remembered_facts": ["Wants responses in English"]}'
 )
 
 
@@ -33,6 +36,58 @@ async def _empty_stream():
         yield None
 
 
+def _chain_returning(content="done"):
+    chain = MagicMock()
+    chain.ainvoke = AsyncMock(return_value={"messages": [SimpleNamespace(content=content)]})
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# create_agent — the block lands in the system prompt
+# ---------------------------------------------------------------------------
+
+
+def _agent_row():
+    return SimpleNamespace(
+        agent_id=7, type="agent", ai_service=None, enable_code_interpreter=False,
+        has_memory=True, memory_max_tokens=None, memory_max_messages=None,
+        memory_summarize_threshold=None, output_parser_id=None, server_tools=[],
+        tool_associations=[], silo_id=None, silo=None, skill_associations=[],
+        mcp_associations=[], system_prompt="You are useful.",
+    )
+
+
+class TestCreateAgentSystemPrompt:
+    async def _system_prompt(self, memory_context):
+        from tools.agentTools import create_agent
+
+        with (
+            patch("tools.agentTools.get_llm", return_value=MagicMock()),
+            patch("tools.agentTools.get_output_parser", return_value=None),
+            patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as create_langchain_agent,
+            patch("tools.agentTools.MCPClientManager.get_client", new=AsyncMock(return_value=None)),
+            patch(
+                "services.agent_cache_service.CheckpointerCacheService.get_async_checkpointer",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await create_agent(_agent_row(), memory_context=memory_context)
+        return create_langchain_agent.call_args.kwargs["system_prompt"]
+
+    @pytest.mark.asyncio
+    async def test_memory_block_is_appended_after_the_agents_own_instructions(self):
+        prompt = await self._system_prompt(_MEMORY_BLOCK)
+
+        assert prompt.startswith("You are useful.")
+        assert prompt.endswith("<user_memory>\n" + _MEMORY_BLOCK + "\n</user_memory>")
+
+    @pytest.mark.asyncio
+    async def test_no_memory_context_leaves_the_system_prompt_untouched(self):
+        prompt = await self._system_prompt(None)
+
+        assert "<user_memory>" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming path — AgentExecutionService._execute_agent_async
 # ---------------------------------------------------------------------------
@@ -40,15 +95,12 @@ async def _empty_stream():
 
 class TestNonStreamingMemoryInjection:
     @pytest.mark.asyncio
-    async def test_memory_context_injected_as_leading_system_message(self):
-        """AC-19: with a memory context resolved, the payload sent to the
-        graph contains an additional, delimited block AND the original human
-        message unchanged."""
-        agent = _make_agent()
+    async def test_memory_context_goes_to_create_agent_and_never_into_the_graph_input(self):
+        """AC-19: the block reaches the model through the system prompt; the
+        graph input is the user's message alone, so nothing is persisted."""
+        agent = _make_agent(has_memory=True)
         svc = AgentExecutionService.__new__(AgentExecutionService)
-
-        chain = MagicMock()
-        chain.ainvoke = AsyncMock(return_value={"messages": [SimpleNamespace(content="done")]})
+        chain = _chain_returning()
         create_agent = AsyncMock(return_value=(chain, None))
         human_message = SimpleNamespace(content="hi")
 
@@ -57,27 +109,18 @@ class TestNonStreamingMemoryInjection:
             patch("tools.agentTools.prepare_agent_config", return_value={"configurable": {}}),
             patch("tools.agentTools.build_human_message", return_value=human_message),
         ):
-            result = await svc._execute_agent_async(
-                agent,
-                "hi",
-                memory_context=_MEMORY_BLOCK,
-            )
+            result = await svc._execute_agent_async(agent, "hi", memory_context=_MEMORY_BLOCK)
 
         assert result == "done"
-        messages_sent = chain.ainvoke.call_args.args[0]["messages"]
-        assert len(messages_sent) == 2
-        assert isinstance(messages_sent[0], SystemMessage)
-        assert messages_sent[0].content == _MEMORY_BLOCK
-        assert messages_sent[1] is human_message  # the user's message, untouched
+        assert create_agent.call_args.kwargs["memory_context"] == _MEMORY_BLOCK
+        assert chain.ainvoke.call_args.args[0]["messages"] == [human_message]
 
     @pytest.mark.asyncio
     async def test_no_memory_context_payload_is_byte_identical_to_today(self):
         """AC-20: zero matches (memory_context=None) -> payload unchanged."""
         agent = _make_agent()
         svc = AgentExecutionService.__new__(AgentExecutionService)
-
-        chain = MagicMock()
-        chain.ainvoke = AsyncMock(return_value={"messages": [SimpleNamespace(content="done")]})
+        chain = _chain_returning()
         create_agent = AsyncMock(return_value=(chain, None))
         human_message = SimpleNamespace(content="hi")
 
@@ -86,24 +129,16 @@ class TestNonStreamingMemoryInjection:
             patch("tools.agentTools.prepare_agent_config", return_value={"configurable": {}}),
             patch("tools.agentTools.build_human_message", return_value=human_message),
         ):
-            await svc._execute_agent_async(
-                agent,
-                "hi",
-                memory_context=None,
-            )
+            await svc._execute_agent_async(agent, "hi", memory_context=None)
 
-        messages_sent = chain.ainvoke.call_args.args[0]["messages"]
-        assert messages_sent == [human_message]
+        assert create_agent.call_args.kwargs["memory_context"] is None
+        assert chain.ainvoke.call_args.args[0]["messages"] == [human_message]
 
     @pytest.mark.asyncio
     async def test_memory_context_defaults_to_none_when_not_passed(self):
-        """Callers that never pass `memory_context` (e.g. any other existing
-        call site) must see the exact pre-feature payload shape."""
         agent = _make_agent()
         svc = AgentExecutionService.__new__(AgentExecutionService)
-
-        chain = MagicMock()
-        chain.ainvoke = AsyncMock(return_value={"messages": [SimpleNamespace(content="done")]})
+        chain = _chain_returning()
         create_agent = AsyncMock(return_value=(chain, None))
         human_message = SimpleNamespace(content="hi")
 
@@ -114,16 +149,15 @@ class TestNonStreamingMemoryInjection:
         ):
             await svc._execute_agent_async(agent, "hi")
 
-        messages_sent = chain.ainvoke.call_args.args[0]["messages"]
-        assert messages_sent == [human_message]
+        assert create_agent.call_args.kwargs["memory_context"] is None
+        assert chain.ainvoke.call_args.args[0]["messages"] == [human_message]
 
     @pytest.mark.asyncio
-    async def test_retry_after_stale_checkpoint_also_uses_graph_messages(self):
-        """Both `ainvoke` call sites (the first attempt and the
-        stale-checkpoint retry) must build the identical payload shape."""
+    async def test_retry_after_stale_checkpoint_sends_the_same_payload(self):
+        """Both `ainvoke` call sites (first attempt and stale-checkpoint
+        retry) send the human message alone."""
         agent = _make_agent(has_memory=True)
         svc = AgentExecutionService.__new__(AgentExecutionService)
-
         chain = MagicMock()
         chain.ainvoke = AsyncMock(
             side_effect=[
@@ -144,50 +178,36 @@ class TestNonStreamingMemoryInjection:
             ),
         ):
             result = await svc._execute_agent_async(
-                agent,
-                "hi",
-                session_id_for_cache="297",
-                memory_context=_MEMORY_BLOCK,
+                agent, "hi", session_id_for_cache="297", memory_context=_MEMORY_BLOCK,
             )
 
         assert result == "done"
         assert chain.ainvoke.await_count == 2
         for call in chain.ainvoke.call_args_list:
-            messages_sent = call.args[0]["messages"]
-            assert len(messages_sent) == 2
-            assert isinstance(messages_sent[0], SystemMessage)
-            assert messages_sent[0].content == _MEMORY_BLOCK
+            assert call.args[0]["messages"] == [human_message]
 
     @pytest.mark.asyncio
-    async def test_memory_context_does_not_change_create_agent_call_or_tool_binding(self):
+    async def test_memory_context_changes_nothing_else_in_the_create_agent_call(self):
         """AC-23: memory context must not suppress or reorder tool/RAG
-        binding — create_agent is invoked identically regardless of whether
-        a memory context is present."""
+        binding — create_agent is invoked identically apart from the block."""
         agent = _make_agent()
         svc = AgentExecutionService.__new__(AgentExecutionService)
-
-        def _make_chain():
-            chain = MagicMock()
-            chain.ainvoke = AsyncMock(return_value={"messages": [SimpleNamespace(content="done")]})
-            return chain
-
-        create_agent = AsyncMock(side_effect=[(_make_chain(), None), (_make_chain(), None)])
-        human_message = SimpleNamespace(content="hi")
+        create_agent = AsyncMock(side_effect=[(_chain_returning(), None), (_chain_returning(), None)])
         search_params = {"top_k": 5}
 
         with (
             patch("tools.agentTools.create_agent", create_agent),
             patch("tools.agentTools.prepare_agent_config", return_value={"configurable": {}}),
-            patch("tools.agentTools.build_human_message", return_value=human_message),
+            patch("tools.agentTools.build_human_message", return_value=SimpleNamespace(content="hi")),
         ):
             await svc._execute_agent_async(agent, "hi", search_params=search_params, memory_context=None)
             await svc._execute_agent_async(agent, "hi", search_params=search_params, memory_context=_MEMORY_BLOCK)
 
-        assert create_agent.await_count == 2
-        first_call = create_agent.call_args_list[0]
-        second_call = create_agent.call_args_list[1]
-        assert first_call.args == second_call.args
-        assert first_call.kwargs == second_call.kwargs
+        without, with_memory = create_agent.call_args_list
+        assert without.args == with_memory.args
+        assert {k: v for k, v in without.kwargs.items() if k != "memory_context"} == {
+            k: v for k, v in with_memory.kwargs.items() if k != "memory_context"
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -214,21 +234,14 @@ class TestStreamingMemoryInjection:
             memory_context=memory_context,
         )
 
-    @pytest.mark.asyncio
-    async def test_memory_context_injected_as_leading_system_message(self):
-        """AC-19, streaming path — asserts on the exact `messages` payload
-        passed to `astream`, mirroring the non-streaming assertion so both
-        paths are provably identical for the same inputs."""
+    async def _stream(self, ctx):
         from services.agent_streaming_service import AgentStreamingService
-
-        ctx = self._ctx(memory_context=_MEMORY_BLOCK)
 
         execution_service = MagicMock()
         execution_service._prepare_turn = AsyncMock(return_value=ctx)
         execution_service._finalize_turn = AsyncMock(
             return_value={"parsed_response": "done", "effective_conv_id": 297, "files_data": []}
         )
-
         agent_chain = MagicMock()
         agent_chain.astream.return_value = _empty_stream()
         create_agent = AsyncMock(return_value=(agent_chain, None, None))
@@ -249,48 +262,21 @@ class TestStreamingMemoryInjection:
                     conversation_id=297, db=MagicMock(),
                 )
             ]
-
         assert events
-        messages_sent = agent_chain.astream.call_args.args[0]["messages"]
-        assert len(messages_sent) == 2
-        assert isinstance(messages_sent[0], SystemMessage)
-        assert messages_sent[0].content == _MEMORY_BLOCK
-        assert messages_sent[1] is human_message
+        return create_agent, agent_chain, human_message
+
+    @pytest.mark.asyncio
+    async def test_memory_context_goes_to_create_agent_and_never_into_the_graph_input(self):
+        """AC-19, streaming path — same shape as the non-streaming path."""
+        create_agent, agent_chain, human_message = await self._stream(self._ctx(_MEMORY_BLOCK))
+
+        assert create_agent.call_args.kwargs["memory_context"] == _MEMORY_BLOCK
+        assert agent_chain.astream.call_args.args[0]["messages"] == [human_message]
 
     @pytest.mark.asyncio
     async def test_no_memory_context_payload_is_byte_identical_to_today(self):
         """AC-20, streaming path."""
-        from services.agent_streaming_service import AgentStreamingService
+        create_agent, agent_chain, human_message = await self._stream(self._ctx(None))
 
-        ctx = self._ctx(memory_context=None)
-
-        execution_service = MagicMock()
-        execution_service._prepare_turn = AsyncMock(return_value=ctx)
-        execution_service._finalize_turn = AsyncMock(
-            return_value={"parsed_response": "done", "effective_conv_id": 297, "files_data": []}
-        )
-
-        agent_chain = MagicMock()
-        agent_chain.astream.return_value = _empty_stream()
-        create_agent = AsyncMock(return_value=(agent_chain, None, None))
-        human_message = SimpleNamespace(content="hello")
-
-        service = AgentStreamingService()
-        service.execution_service = execution_service
-
-        with (
-            patch("services.agent_streaming_service.create_agent", create_agent),
-            patch("services.agent_streaming_service.prepare_agent_config", return_value={"configurable": {}}),
-            patch("services.agent_streaming_service.build_human_message", return_value=human_message),
-        ):
-            events = [
-                event
-                async for event in service.stream_agent_chat(
-                    agent_id=1, message="hello", user_context={"user_id": "u1"},
-                    conversation_id=297, db=MagicMock(),
-                )
-            ]
-
-        assert events
-        messages_sent = agent_chain.astream.call_args.args[0]["messages"]
-        assert messages_sent == [human_message]
+        assert create_agent.call_args.kwargs["memory_context"] is None
+        assert agent_chain.astream.call_args.args[0]["messages"] == [human_message]

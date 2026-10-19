@@ -22,7 +22,6 @@ from langgraph.store.postgres import PostgresStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-import config
 from services.global_memory_service import (
     delete_app_global_memory,
     delete_global_memory,
@@ -66,10 +65,8 @@ def _raw_connection() -> psycopg.Connection:
 
 
 @pytest.fixture
-def memory_schema(monkeypatch):
+def memory_schema():
     """Create the store's four tables, then drop all four afterward."""
-    monkeypatch.setattr(config, "GLOBAL_MEMORY_EMBEDDING_DIMS", _TEST_DIMS)
-
     with _raw_connection() as conn:
         setup_store = PostgresStore(conn, index={"dims": _TEST_DIMS, "embed": _FakeEmbeddings(), "fields": ["text"]})
         setup_store.setup()

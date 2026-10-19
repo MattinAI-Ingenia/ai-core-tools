@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Literal, Optional, Dict, Any
 from datetime import datetime
 
@@ -62,6 +62,12 @@ class AppDetailSchema(BaseModel):
     # Cross-session user memory (D-16, FR-2b): both NULL = memory inactive for this App
     memory_extraction_service_id: Optional[int] = None
     memory_embedding_service_id: Optional[int] = None
+    # Fact-extraction cadence: turn 1 and every Nth turn after. None = the
+    # deployment default, reported alongside so the UI can show it.
+    memory_write_every_n_turns: Optional[int] = None
+    memory_write_every_n_turns_default: int = 5
+    # Language memory facts are written in (code); None = English.
+    memory_language: Optional[str] = None
     # Option lists for the App-settings memory service selectors (FR-3(b)); App-visible
     # plus system-level services, labelled like the agent form's `ai_services` list.
     ai_services: List[Dict[str, Any]] = []
@@ -105,6 +111,12 @@ class UpdateAppSchema(BaseModel):
     # follow-up) — an explicit `null` still clears the configuration.
     memory_extraction_service_id: Optional[int] = None
     memory_embedding_service_id: Optional[int] = None
+    # Fact-extraction cadence (turn 1 and every Nth turn after); null = deployment
+    # default. Same `model_fields_set` handling as the two fields above.
+    memory_write_every_n_turns: Optional[int] = Field(default=None, ge=1, le=100)
+    # Language memory facts are written in; null = English. A closed set of
+    # codes (tools/memory/settings.py::MEMORY_LANGUAGES), never free text.
+    memory_language: Optional[Literal["en", "es", "eu", "ca", "gl", "fr", "de", "it", "pt"]] = None
 
     @field_validator("langsmith_api_key", mode="before")
     @classmethod

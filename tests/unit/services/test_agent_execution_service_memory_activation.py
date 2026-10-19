@@ -10,6 +10,8 @@ fail-soft behaviour when the memory module raises (NFR-4).
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from datetime import datetime
+
 import pytest
 
 from services.agent_execution_service import AgentExecutionService
@@ -199,37 +201,20 @@ def _make_conversation(message_count: int, agent_id: int = 1, conversation_id: i
     return conversation
 
 
-class TestReadWriteCadenceIndependence:
-    """Regression test for the step_007 deviation found before commit: the
-    write trigger (D-15, `should_write`) has a cadence independent from the
-    read trigger (D-17, `should_read`). With the default read window (2) and
-    write threshold (5), turn 5 is write-due but not read-due. Gating
-    resolution (identity/services/clients) on `should_read` alone — as the
-    first pass did — starves every such turn of what it needs to write
-    with, silently no-op'ing D-15's batched write for the single most common
-    agent configuration (`has_memory=True`). Resolution must instead be
-    gated on activation being due for either cadence, while the retrieval
-    call itself (`get_memory_context`) stays behind `should_read` alone.
+class TestEveryTurnReadsForConversationalAgents:
+    """The memory block rides in each turn's system prompt and is never
+    stored in the thread (AD-7), so a `has_memory=True` agent resolves and
+    reads on EVERY turn — including turns that are neither the first ones nor
+    write-due. Regression: reads used to stop after turn 2 on the assumption
+    that the block was carried forward in-thread; the model then ignored a
+    remembered "Wants responses in English" from turn 4 on.
 
-    This exercises the real `prepare_turn_memory` (only its I/O-bound
-    collaborators — `resolve_identity`, `resolve_memory_services`,
-    `build_memory_clients` — are mocked, exactly as in
-    `test_global_memory_read_path.py`), through the full `_prepare_turn`
-    wiring, so both layers of the fix are covered together.
+    Exercises the real `prepare_turn_memory` through the full `_prepare_turn`
+    wiring; only its I/O-bound collaborators are mocked.
     """
 
-    @pytest.mark.asyncio
-    async def test_turn_5_write_due_not_read_due_resolves_clients_but_injects_nothing(self, tmp_path):
-        agent = _make_agent(has_global_memory=True, has_memory=True)
-        svc = _make_service(agent)
-
-        conversation = _make_conversation(message_count=8)  # turn_index 5
-
-        identity = MagicMock()
-        resolved = MagicMock()
-        llm = MagicMock()
-        embeddings = MagicMock()
-
+    async def _prepare(self, svc, conversation, tmp_path, memory_block):
+        identity, resolved, llm, embeddings = MagicMock(), MagicMock(), MagicMock(), MagicMock()
         with (
             patch(
                 "services.agent_execution_service.get_app_config",
@@ -243,11 +228,11 @@ class TestReadWriteCadenceIndependence:
             patch("services.global_memory_service.resolve_memory_services", return_value=resolved),
             patch(
                 "services.global_memory_service.build_memory_clients",
-                return_value=(llm, embeddings, 1536),
+                return_value=(llm, embeddings),
             ),
             patch(
                 "services.global_memory_service.get_memory_context",
-                new=AsyncMock(),
+                new=AsyncMock(return_value=memory_block),
             ) as mock_get_context,
         ):
             ctx = await svc._prepare_turn(
@@ -257,55 +242,39 @@ class TestReadWriteCadenceIndependence:
                 conversation_id=99,
                 db=MagicMock(),
             )
-
-        # The fix: clients are usable on the context even though no read ran.
-        assert ctx.memory_turn_index == 5
-        assert ctx.global_memory_identity is identity
-        assert ctx.global_memory_services is resolved
-        assert ctx.global_memory_llm is llm
-        assert ctx.global_memory_embeddings is embeddings
-        # But no retrieval happened and no block was injected (D-17 alone
-        # still gates the search itself).
-        mock_get_context.assert_not_called()
-        assert ctx.memory_context is None
+        return ctx, identity, mock_get_context
 
     @pytest.mark.asyncio
-    async def test_turn_3_neither_read_nor_write_due_resolves_nothing(self, tmp_path):
+    async def test_a_mid_conversation_turn_reads_and_injects(self, tmp_path):
         agent = _make_agent(has_global_memory=True, has_memory=True)
         svc = _make_service(agent)
 
-        conversation = _make_conversation(message_count=4)  # turn_index 3
+        conversation = _make_conversation(message_count=6)  # turn_index 4
+        last_activity = datetime(2026, 10, 7, 8, 6)
+        conversation.updated_at = last_activity
 
-        with (
-            patch(
-                "services.agent_execution_service.get_app_config",
-                return_value={"TMP_BASE_FOLDER": str(tmp_path)},
-            ),
-            patch(
-                "services.conversation_service.ConversationService.get_conversation",
-                return_value=conversation,
-            ),
-            patch("services.global_memory_service.resolve_identity") as mock_resolve_identity,
-            patch("services.global_memory_service.resolve_memory_services") as mock_resolve_services,
-            patch(
-                "services.global_memory_service.get_memory_context",
-                new=AsyncMock(),
-            ) as mock_get_context,
-        ):
-            ctx = await svc._prepare_turn(
-                agent_id=1,
-                message="hello",
-                user_context={"user_id": 5, "app_id": 1, "oauth": True},
-                conversation_id=99,
-                db=MagicMock(),
-            )
+        ctx, identity, mock_get_context = await self._prepare(svc, conversation, tmp_path, "remembered block")
 
-        assert ctx.memory_turn_index == 3
-        assert ctx.global_memory_identity is None
-        assert ctx.global_memory_services is None
-        assert ctx.global_memory_llm is None
-        assert ctx.global_memory_embeddings is None
-        assert ctx.memory_context is None
-        mock_resolve_identity.assert_not_called()
-        mock_resolve_services.assert_not_called()
-        mock_get_context.assert_not_called()
+        assert ctx.memory_turn_index == 4
+        assert ctx.global_memory_identity is identity
+        mock_get_context.assert_awaited_once()
+        assert ctx.memory_context == "remembered block"
+        # Recency: the read knows when this conversation was last active and
+        # which conversation it is (`new_since_last_message`).
+        assert mock_get_context.await_args.kwargs["last_activity_at"] == last_activity
+        assert mock_get_context.await_args.kwargs["conversation_id"] == 99
+
+    @pytest.mark.asyncio
+    async def test_a_write_due_turn_reads_and_keeps_its_clients_for_the_write(self, tmp_path):
+        agent = _make_agent(has_global_memory=True, has_memory=True)
+        svc = _make_service(agent)
+
+        ctx, identity, mock_get_context = await self._prepare(
+            svc, _make_conversation(message_count=8), tmp_path, "remembered block"  # turn_index 5
+        )
+
+        assert ctx.memory_turn_index == 5
+        assert ctx.global_memory_identity is identity
+        assert ctx.global_memory_llm is not None
+        assert ctx.global_memory_embeddings is not None
+        mock_get_context.assert_awaited_once()

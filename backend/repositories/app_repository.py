@@ -91,6 +91,10 @@ class AppRepository:
             app.memory_extraction_service_id = data['memory_extraction_service_id']
         if 'memory_embedding_service_id' in data:
             app.memory_embedding_service_id = data['memory_embedding_service_id']
+        if 'memory_write_every_n_turns' in data:
+            app.memory_write_every_n_turns = data['memory_write_every_n_turns']
+        if 'memory_language' in data:
+            app.memory_language = data['memory_language']
         if 'onboarding_dismissed' in data:
             app.onboarding_dismissed = data['onboarding_dismissed']
     

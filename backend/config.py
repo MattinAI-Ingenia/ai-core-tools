@@ -142,11 +142,16 @@ GLOBAL_MEMORY_ENABLED = os.getenv('AICT_GLOBAL_MEMORY_ENABLED', 'true').strip().
 GLOBAL_MEMORY_TOP_K = int(os.getenv('AICT_GLOBAL_MEMORY_TOP_K', '5'))
 
 # Timeout budgets (seconds) so a memory operation can never block a turn.
-GLOBAL_MEMORY_READ_TIMEOUT_S = float(os.getenv('AICT_GLOBAL_MEMORY_READ_TIMEOUT_S', '1.5'))
+# The read budget covers one embedding call to the provider for the query
+# (OpenAI routinely takes 1-2s on a cold connection), so 1.5s timed out
+# in practice and the turn silently got no memory.
+GLOBAL_MEMORY_READ_TIMEOUT_S = float(os.getenv('AICT_GLOBAL_MEMORY_READ_TIMEOUT_S', '3'))
 GLOBAL_MEMORY_WRITE_TIMEOUT_S = float(os.getenv('AICT_GLOBAL_MEMORY_WRITE_TIMEOUT_S', '30'))
 
 # Hard character cap on the rendered "remembered context" block (AD-7).
-GLOBAL_MEMORY_CONTEXT_MAX_CHARS = int(os.getenv('AICT_GLOBAL_MEMORY_CONTEXT_MAX_CHARS', '1500'))
+# Sized for the intro line (~820 chars) plus top_k facts carrying their date
+# and recency flag (~110 chars each for a short fact, up to ~380 at the cap).
+GLOBAL_MEMORY_CONTEXT_MAX_CHARS = int(os.getenv('AICT_GLOBAL_MEMORY_CONTEXT_MAX_CHARS', '2500'))
 
 # Hard character cap on the extraction input window (FR-5, R-6).
 GLOBAL_MEMORY_EXTRACTION_INPUT_MAX_CHARS = int(
@@ -165,20 +170,23 @@ GLOBAL_MEMORY_NAMESPACE_ROOT = 'user_memory'
 # extraction call may produce and the length of each fact.
 GLOBAL_MEMORY_MAX_FACTS_PER_EXTRACTION = int(os.getenv('AICT_GLOBAL_MEMORY_MAX_FACTS_PER_EXTRACTION', '5'))
 
-# Deployment-wide memory vector width (D-13). Every memory embedding service
-# used on this deployment must match this dimensionality.
-GLOBAL_MEMORY_EMBEDDING_DIMS = int(os.getenv('AICT_GLOBAL_MEMORY_EMBEDDING_DIMS', '1536'))
-
 # Similarity ceiling above which a candidate fact is considered already known
 # and dropped instead of written (D-14 dedup).
 GLOBAL_MEMORY_DEDUP_THRESHOLD = float(os.getenv('AICT_GLOBAL_MEMORY_DEDUP_THRESHOLD', '0.95'))
 
 # Batching trigger (D-15): extraction runs on turn 1 and every Nth turn after.
-GLOBAL_MEMORY_WRITE_EVERY_N_TURNS = int(os.getenv('AICT_GLOBAL_MEMORY_WRITE_EVERY_N_TURNS', '5'))
+# Deployment default; each App may override it (App.memory_write_every_n_turns).
+# Anything below 1 (or not a number) falls back to 5: the trigger computes turn % N.
+def _parse_write_every_n_turns(raw: str) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value >= 1 else 5
 
-# Read condition (D-17): for has_memory=True agents, retrieval only runs while
-# turn_index <= this value (later turns already carry the block in-thread).
-GLOBAL_MEMORY_READ_FIRST_N_TURNS = int(os.getenv('AICT_GLOBAL_MEMORY_READ_FIRST_N_TURNS', '2'))
+
+GLOBAL_MEMORY_WRITE_EVERY_N_TURNS = _parse_write_every_n_turns(os.getenv('AICT_GLOBAL_MEMORY_WRITE_EVERY_N_TURNS', '5'))
+
 
 # FR-11 `remember` tool (D-19). Off by default (R-18, a High security finding
 # gated on deliberate per-deployment enablement) -- unlike the feature's own

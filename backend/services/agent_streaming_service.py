@@ -10,7 +10,6 @@ and tool events to the client.
 from typing import AsyncGenerator, Dict, List, Any
 
 import psycopg.errors
-from langchain_core.messages import SystemMessage
 from sqlalchemy.orm import Session
 
 from tools.agentTools import create_agent, prepare_agent_config, build_human_message
@@ -149,6 +148,10 @@ class AgentStreamingService:
                     sandbox_provider=ctx.sandbox_provider,
                     sandbox_session_key=ctx.sandbox_session_key,
                     attached_files=ctx.processed_files,
+                    # Cross-session memory (AD-7): in the system prompt, never
+                    # in the graph input — see `_execute_agent_async`.
+                    # `getattr` tolerates a `ctx` stand-in predating the field.
+                    memory_context=getattr(ctx, "memory_context", None),
                 )
                 agent_chain, mcp_client = create_agent_result[:2]
 
@@ -178,18 +181,9 @@ class AgentStreamingService:
                     ctx.fresh_agent, ctx.enhanced_message, ctx.image_files, ctx.user_context
                 )
 
-                # Cross-session global user memory (FR-6, AD-7): identical
-                # payload shape to the non-streaming path for the same
-                # inputs (AC-19) — an extra SystemMessage ahead of the human
-                # message when a memory context was resolved by
-                # `_prepare_turn`, byte-identical to today's payload
-                # otherwise (AC-20). `getattr` (not `ctx.memory_context`)
-                # deliberately tolerates a `ctx` stand-in that predates this
-                # field (e.g. an older test double) rather than raising.
-                memory_context = getattr(ctx, "memory_context", None)
-                graph_messages = (
-                    [SystemMessage(content=memory_context)] if memory_context else []
-                ) + [message_payload]
+                # Same payload as the non-streaming path (AC-19): the human
+                # message alone — memory rides in the system prompt above.
+                graph_messages = [message_payload]
 
                 # ------------------------------------------------------------
                 # 5. Attach LangSmith tracer + metadata when configured

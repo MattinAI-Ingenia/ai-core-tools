@@ -12,7 +12,24 @@ the store's own data tables (`store`, `store_vectors`) — the two bookkeeping
 tables (`store_migrations`, `vector_migrations`) are read directly, once,
 only to verify `setup()` actually completed (see
 `GlobalMemoryPoolService._assert_migrations_complete`), which is a startup
-health check, not a substitute for the store's own API.
+health check, not a substitute for the store's own API. The one exception is
+a single idempotent DDL statement after `setup()`
+(`GlobalMemoryPoolService._relax_vector_column`) that makes
+`store_vectors.embedding` dimension-agnostic — schema, never row data.
+
+**Vector width is per embedding service, not per deployment.** The store's
+`setup()` always creates `embedding vector(<dims>)` plus an HNSW index, which
+would force every App onto one embedding width. The store never uses that
+index for its own searches (its namespace/filter `WHERE` forces a sequential
+scan — see `get_distance_operator` in `langgraph/store/postgres/base.py`) and
+casts query vectors without a width (`%s::vector`), so after `setup()` the
+index is dropped and the column relaxed to a plain `vector`, exactly like
+LangChain's `langchain_pg_embedding`. pgvector still refuses to *compare* two
+vectors of different widths, which a namespace can only contain if its App
+switched embedding service: every fact therefore records the
+`embedding_service_id` it was embedded with, and every vector search filters
+on it, so facts from a previous model are simply not candidates (they remain
+fully enumerable and erasable, which never touch vectors).
 
 Two empirically-verified constraints from the FR-1 spike (`decisions.md`)
 shape everything below:
@@ -58,6 +75,7 @@ store this system might ever add.
 import asyncio
 import hashlib
 import os
+import re
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -113,6 +131,19 @@ _DRAIN_POLL_INTERVAL_S = 0.05
 # method's docstring for why a single point-in-time re-check is wrong.
 _SETUP_CONVERGENCE_TIMEOUT_S = 30.0
 _SETUP_POLL_INTERVAL_S = 0.5
+
+# `AsyncPostgresStore` requires `index["dims"]`, but only its `setup()` reads
+# it — to size the `vector(<dims>)` column and HNSW index that
+# `_relax_vector_column` immediately undoes. It must stay within pgvector's
+# 2000-dim HNSW limit or a cold-DB `setup()` fails before it can be relaxed.
+# It constrains nothing at runtime: real embeddings of any width are written
+# and searched.
+_STORE_PLACEHOLDER_DIMS = 1536
+
+# Bounds how long the post-setup DDL waits for its ACCESS EXCLUSIVE lock on
+# `store_vectors` on an upgraded, already-serving database; a timeout raises
+# into `_run_setup`'s bounded poll and is retried there.
+_RELAX_LOCK_TIMEOUT = "10s"
 
 # Modest over-fetch applied to `search`/`similarity` before the exact-namespace
 # filter is applied: since the store's own `limit`/`offset` are computed over
@@ -205,6 +236,11 @@ def _assert_positive_int(value: Any, label: str) -> None:
     """
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise AssertionError(f"{label} must be a positive int, got {value!r}")
+
+
+def fact_key(fact: str) -> str:
+    """Public name of `_fact_key`: the store key a fact's text maps to."""
+    return _fact_key(fact)
 
 
 def _fact_key(fact: str) -> str:
@@ -356,12 +392,11 @@ class GlobalMemoryPoolService:
 
         The main pool caps statement duration so an abandoned turn cannot hold a
         connection indefinitely — but the store's own migrations include
-        `CREATE INDEX CONCURRENTLY`, which on an upgraded client database with a
-        populated `store` legitimately runs far longer than any per-turn budget.
-        Inheriting the cap would abort the migration mid-flight and, because
-        `CREATE INDEX CONCURRENTLY IF NOT EXISTS` then skips the leftover invalid
-        index forever, silently degrade every later memory search to a sequential
-        scan. So setup gets its own connection, closed as soon as it converges.
+        `CREATE INDEX CONCURRENTLY`, and `_relax_vector_column`'s `ALTER TABLE`
+        rewrites `store_vectors`; on an upgraded client database with a populated
+        store either can legitimately run far longer than any per-turn budget,
+        and a migration aborted mid-flight leaves the schema half-applied. So
+        setup gets its own connection, closed as soon as it converges.
         """
         setup_pool = AsyncConnectionPool(
             conninfo=db_uri,
@@ -412,7 +447,7 @@ class GlobalMemoryPoolService:
         setup_store = AsyncPostgresStore(
             conn=pool,
             index={
-                "dims": settings.embedding_dims(),
+                "dims": _STORE_PLACEHOLDER_DIMS,
                 "embed": _SetupOnlyEmbeddings(),
                 "fields": ["text"],
             },
@@ -435,8 +470,9 @@ class GlobalMemoryPoolService:
 
             try:
                 await cls._assert_migrations_complete(setup_store)
+                await cls._relax_vector_column(pool)
                 return
-            except RuntimeError as exc:
+            except (RuntimeError, psycopg.Error) as exc:
                 last_error = exc
 
             if loop.time() >= deadline:
@@ -482,6 +518,40 @@ class GlobalMemoryPoolService:
             )
 
     @classmethod
+    async def _relax_vector_column(cls, pool: AsyncConnectionPool) -> None:
+        """Make `store_vectors.embedding` accept vectors of any width (see the
+        module docstring for why this is safe for the store's own queries).
+
+        Idempotent and race-safe across workers: it is a no-op once the column
+        is already a plain `vector` and the index is gone, and both statements
+        run in one transaction under the same ACCESS EXCLUSIVE table lock, so
+        two workers serialise rather than deadlock. Runs on the setup pool (no
+        `statement_timeout`), bounded instead by `_RELAX_LOCK_TIMEOUT`.
+
+        `store.setup()` never re-runs a recorded vector migration, so the
+        dropped index and widened column are never recreated by later startups.
+        """
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT format_type(a.atttypid, a.atttypmod) AS column_type, "
+                    "to_regclass('store_vectors_embedding_idx') IS NOT NULL AS has_index "
+                    "FROM pg_attribute a "
+                    "WHERE a.attrelid = 'store_vectors'::regclass AND a.attname = 'embedding'"
+                )
+                row = await cur.fetchone()
+            if row is None:
+                raise RuntimeError("store_vectors.embedding not found after setup()")
+            if row["column_type"] == "vector" and not row["has_index"]:
+                return
+
+            async with conn.transaction():
+                await conn.execute(f"SET LOCAL lock_timeout = '{_RELAX_LOCK_TIMEOUT}'")
+                await conn.execute("DROP INDEX IF EXISTS store_vectors_embedding_idx")
+                await conn.execute("ALTER TABLE store_vectors ALTER COLUMN embedding TYPE vector")
+        logger.info("Global memory store_vectors.embedding relaxed to accept any embedding width")
+
+    @classmethod
     async def close_pool(cls) -> None:
         """Drain cached clients, then close the shared pool (AD-9 shutdown ordering)."""
         await _drain_all_clients()
@@ -503,6 +573,49 @@ class GlobalMemoryPoolService:
                 "or the kill switch is off for this process, or a previous setup() failed."
             )
         return cls._pool
+
+
+@dataclass(frozen=True)
+class RetrievedFact:
+    """One fact returned by a read-path search, with the provenance the
+    rendered memory block needs (when it was learned, and in which
+    conversation) to let the model resolve conflicts by recency."""
+
+    text: str
+    created_at: Optional[str]
+    conversation_id: Optional[int]
+    key: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ClosestFact:
+    """The caller's stored fact most similar to a candidate (dedup stage).
+    `same_fact` is True when it is the very row the candidate would write
+    (same normalised text, hence same `_fact_key`)."""
+
+    score: float
+    key: str
+    same_fact: bool
+
+
+def _to_retrieved(item: Any) -> Optional[RetrievedFact]:
+    """A store item as a `RetrievedFact`, or `None` if it carries no text."""
+    value = item.value or {}
+    text = value.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    created_at = value.get("created_at")
+    conversation_id = value.get("conversation_id")
+    return RetrievedFact(
+        key=item.key,
+        text=text,
+        created_at=created_at if isinstance(created_at, str) else None,
+        conversation_id=(
+            conversation_id
+            if isinstance(conversation_id, int) and not isinstance(conversation_id, bool)
+            else None
+        ),
+    )
 
 
 class GlobalMemoryClient:
@@ -533,7 +646,7 @@ class GlobalMemoryClient:
         self._store = AsyncPostgresStore(
             conn=pool,
             index={
-                "dims": settings.embedding_dims(),
+                "dims": _STORE_PLACEHOLDER_DIMS,
                 "embed": embeddings,
                 "fields": ["text"],
             },
@@ -558,8 +671,63 @@ class GlobalMemoryClient:
         """
         return self._inflight == 0
 
+    @property
+    def _vector_filter(self) -> dict:
+        """`asearch` filter restricting candidates to facts embedded by this
+        client's embedding service — pgvector raises on comparing vectors of
+        different widths, and vectors from different models are meaningless
+        to compare even at equal width (D-16). See the module docstring."""
+        return {"embedding_service_id": self._embedding_service_id}
+
     async def search(self, identity: MemoryIdentity, query: str, top_k: int) -> List[str]:
-        """Return up to `top_k` fact strings from `identity`'s namespace, best match first.
+        """Text-only view of `search_facts` (same contract, same fault containment)."""
+        return [fact.text for fact in await self.search_facts(identity, query, top_k)]
+
+    async def session_facts(
+        self, identity: MemoryIdentity, conversation_id: int, limit: int
+    ) -> List[RetrievedFact]:
+        """Facts learned in one conversation (`value.conversation_id`), most
+        recently updated first, at most `limit`.
+
+        A filter-only `asearch` (no query): a plain SQL filter on the stored
+        value ordered by `updated_at`, so no embedding call. Same exact-
+        namespace re-check as `search_facts`. Not restricted to this client's
+        embedding service: these facts are shown to the extractor as text and
+        only ever deleted by key. Fault-contained: returns `[]` on any failure.
+        """
+        if isinstance(conversation_id, bool) or not isinstance(conversation_id, int) or limit <= 0:
+            return []
+        self._inflight += 1
+        try:
+            _assert_identity(identity)
+            items = await asyncio.wait_for(
+                self._store.asearch(
+                    identity.namespace, filter={"conversation_id": conversation_id},
+                    limit=min(limit * _SEARCH_OVERFETCH_MULTIPLIER, _SEARCH_OVERFETCH_MAX),
+                ),
+                timeout=settings.read_timeout_s(),
+            )
+            own_items = [item for item in items if tuple(item.namespace) == tuple(identity.namespace)]
+            return [fact for fact in (_to_retrieved(item) for item in own_items) if fact is not None][:limit]
+        except asyncio.TimeoutError:
+            log_memory_event(
+                "session_facts", app_id=identity.app_id, agent_id=identity.agent_id,
+                active=False, reason=FAIL_TIMEOUT, level="warning",
+            )
+            return []
+        except Exception:
+            log_memory_event(
+                "session_facts", app_id=getattr(identity, "app_id", None), agent_id=getattr(identity, "agent_id", None),
+                active=False, reason=FAIL_ERROR, level="warning",
+            )
+            return []
+        finally:
+            self._inflight -= 1
+
+    async def search_facts(self, identity: MemoryIdentity, query: str, top_k: int) -> List[RetrievedFact]:
+        """Return up to `top_k` facts from `identity`'s namespace, best match first,
+        each with its `created_at` and originating `conversation_id` (either
+        `None` for facts written before that provenance existed).
 
         Fault-contained: any error, timeout, or namespace-invariant violation
         returns `[]` rather than raising.
@@ -577,15 +745,13 @@ class GlobalMemoryClient:
             _assert_identity(identity)
             fetch_limit = min(max(top_k * _SEARCH_OVERFETCH_MULTIPLIER, top_k), _SEARCH_OVERFETCH_MAX)
             items = await asyncio.wait_for(
-                self._store.asearch(identity.namespace, query=query, limit=fetch_limit),
+                self._store.asearch(
+                    identity.namespace, query=query, filter=self._vector_filter, limit=fetch_limit
+                ),
                 timeout=settings.read_timeout_s(),
             )
             own_items = [item for item in items if tuple(item.namespace) == tuple(identity.namespace)]
-            return [
-                item.value["text"]
-                for item in own_items[:top_k]
-                if item.value and item.value.get("text")
-            ]
+            return [fact for fact in (_to_retrieved(item) for item in own_items[:top_k]) if fact is not None]
         except asyncio.TimeoutError:
             log_memory_event(
                 "search", app_id=identity.app_id, agent_id=identity.agent_id,
@@ -601,7 +767,7 @@ class GlobalMemoryClient:
         finally:
             self._inflight -= 1
 
-    async def add(self, identity: MemoryIdentity, facts: List[str]) -> int:
+    async def add(self, identity: MemoryIdentity, facts: List[str], conversation_id: Optional[int] = None) -> int:
         """Persist each fact string under `identity`'s namespace; return how many
         were written.
 
@@ -636,6 +802,8 @@ class GlobalMemoryClient:
                     value = {
                         "text": fact,
                         "agent_id": identity.agent_id,
+                        "embedding_service_id": self._embedding_service_id,
+                        "conversation_id": conversation_id,
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     }
                     await self._store.aput(identity.namespace, key, value)
@@ -659,7 +827,12 @@ class GlobalMemoryClient:
             self._inflight -= 1
 
     async def similarity(self, identity: MemoryIdentity, fact: str) -> Optional[float]:
-        """Return the top similarity score for `fact` within `identity`'s
+        """Score-only view of `closest` (same contract, same fault containment)."""
+        found = await self.closest(identity, fact)
+        return found.score if found is not None else None
+
+    async def closest(self, identity: MemoryIdentity, fact: str) -> Optional[ClosestFact]:
+        """Return the stored fact most similar to `fact` (its score and key) within `identity`'s
         namespace, or `None` if there is no candidate at all (empty
         namespace) or the operation failed.
 
@@ -678,13 +851,16 @@ class GlobalMemoryClient:
         try:
             _assert_identity(identity)
             items = await asyncio.wait_for(
-                self._store.asearch(identity.namespace, query=fact, limit=_SIMILARITY_OVERFETCH_LIMIT),
+                self._store.asearch(
+                    identity.namespace, query=fact, filter=self._vector_filter, limit=_SIMILARITY_OVERFETCH_LIMIT
+                ),
                 timeout=settings.read_timeout_s(),
             )
             own_items = [item for item in items if tuple(item.namespace) == tuple(identity.namespace)]
-            if not own_items:
+            if not own_items or own_items[0].score is None:
                 return None
-            return own_items[0].score
+            top = own_items[0]
+            return ClosestFact(score=top.score, key=top.key, same_fact=top.key == _fact_key(fact))
         except asyncio.TimeoutError:
             log_memory_event(
                 "similarity", app_id=identity.app_id, agent_id=identity.agent_id,
@@ -697,6 +873,41 @@ class GlobalMemoryClient:
                 active=False, reason=FAIL_ERROR, level="warning",
             )
             return None
+        finally:
+            self._inflight -= 1
+
+    async def delete_keys(self, identity: MemoryIdentity, keys: List[str]) -> int:
+        """Delete the given fact keys from `identity`'s exact namespace; return
+        how many deletes were issued (0 on any failure — never raises).
+
+        Used by the write path to drop a near-duplicate older fact once its
+        newer replacement is stored. The store's delete (`PutOp(..., None)`)
+        matches the namespace with SQL equality, so a key can never reach a
+        neighbouring scope; `store_vectors` rows go by `ON DELETE CASCADE`.
+        """
+        keys = [k for k in dict.fromkeys(keys) if isinstance(k, str) and _FACT_KEY_RE.match(k)]
+        if not keys:
+            return 0
+        self._inflight += 1
+        try:
+            _assert_identity(identity)
+            await asyncio.wait_for(
+                self._store.abatch([PutOp(identity.namespace, key, None) for key in keys]),
+                timeout=settings.write_timeout_s(),
+            )
+            return len(keys)
+        except asyncio.TimeoutError:
+            log_memory_event(
+                "delete", app_id=identity.app_id, agent_id=identity.agent_id,
+                active=False, reason=FAIL_TIMEOUT, level="warning",
+            )
+            return 0
+        except Exception:
+            log_memory_event(
+                "delete", app_id=getattr(identity, "app_id", None), agent_id=getattr(identity, "agent_id", None),
+                active=False, reason=FAIL_ERROR, level="warning",
+            )
+            return 0
         finally:
             self._inflight -= 1
 
@@ -846,6 +1057,87 @@ def _purge_sync(identity: MemoryIdentity) -> int:
     except Exception as exc:
         raise _PurgeIncomplete(total, exc) from exc
     return total
+
+
+# Upper bound on how many facts `list_facts` returns for one scope. A scope
+# only grows by at most `max_facts_per_extraction()` per write-due turn and
+# dedup keeps it from accumulating repeats, so a real user is far below this;
+# it bounds the response for a pathological scope instead of streaming an
+# unbounded list to the browser.
+_LIST_FACTS_MAX = 500
+
+# `_fact_key` output: the first 32 hex chars of a SHA-256.
+_FACT_KEY_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+@dataclass(frozen=True)
+class StoredFact:
+    """One remembered fact as shown to the user it is about."""
+
+    key: str
+    text: str
+    agent_id: Optional[int]
+    created_at: Optional[str]
+
+
+def list_facts(identity: MemoryIdentity) -> List[StoredFact]:
+    """Return the facts stored in `identity`'s exact namespace, newest first.
+
+    Sync and module-level for the same reason as `purge`: a user must be able
+    to see what is held about them even when the feature is disabled or its
+    pool failed to start. Same `LIKE`-prefix caveat as everywhere else — only
+    rows whose namespace is an exact match are returned. Raises on failure
+    (unlike the turn-path methods) so the caller can answer 503 rather than
+    show an empty list that looks like "nothing remembered".
+    """
+    _assert_identity(identity)
+    facts: List[StoredFact] = []
+    with _sync_connection() as conn:
+        store = PostgresStore(conn=conn)
+        offset = 0
+        while len(facts) < _LIST_FACTS_MAX:
+            items = store.search(identity.namespace, limit=_LIST_SCOPES_PAGE_SIZE, offset=offset)
+            for item in items:
+                if tuple(item.namespace) != tuple(identity.namespace):
+                    continue
+                value = item.value or {}
+                text = value.get("text")
+                if not isinstance(text, str) or not text:
+                    continue
+                agent_id = value.get("agent_id")
+                facts.append(
+                    StoredFact(
+                        key=item.key,
+                        text=text,
+                        agent_id=agent_id if isinstance(agent_id, int) and not isinstance(agent_id, bool) else None,
+                        created_at=value.get("created_at") if isinstance(value.get("created_at"), str) else None,
+                    )
+                )
+            offset += len(items)
+            if len(items) < _LIST_SCOPES_PAGE_SIZE:
+                break
+    facts.sort(key=lambda f: f.created_at or "", reverse=True)
+    return facts[:_LIST_FACTS_MAX]
+
+
+def delete_fact(identity: MemoryIdentity, key: str) -> bool:
+    """Delete one fact from `identity`'s exact namespace; return whether it existed.
+
+    The store's `get` and its delete (`PutOp(..., None)`) both match the
+    namespace with SQL **equality** (`prefix = %s`), not the `LIKE` used by
+    search/list, so a key can never reach a neighbouring scope's row — and
+    `key` is additionally required to be a `_fact_key`-shaped value. Raises
+    on store failure so the caller can answer 503.
+    """
+    _assert_identity(identity)
+    if not isinstance(key, str) or not _FACT_KEY_RE.match(key):
+        raise ValueError("Invalid fact key")
+    with _sync_connection() as conn:
+        store = PostgresStore(conn=conn)
+        if store.get(identity.namespace, key) is None:
+            return False
+        store.batch([PutOp(identity.namespace, key, None)])
+    return True
 
 
 @dataclass(frozen=True)
@@ -1069,9 +1361,10 @@ def _list_user_scopes_sync(user_id: int) -> List[MemoryIdentity]:
 
 
 # Module-level bounded cache, keyed by `embedding_service_id` alone — the
-# vector width is deployment-wide (`GLOBAL_MEMORY_EMBEDDING_DIMS`) and the
-# extraction LLM is not part of the store at all, so that is the only axis a
-# `GlobalMemoryClient` varies on. FIFO eviction, but only of *idle* instances
+# embeddings client is the store's only per-instance input (the vector width
+# follows from it, see the module docstring) and the extraction LLM is not
+# part of the store at all, so that is the only axis a `GlobalMemoryClient`
+# varies on. FIFO eviction, but only of *idle* instances
 # (AD-9): evicting one with queued operations would strand the coroutine
 # awaiting them, since the store's background task is simply cancelled with
 # no way to resume it.

@@ -372,12 +372,35 @@ class TestRunSetupBoundedPoll:
         monkeypatch.setattr(
             GlobalMemoryPoolService, "_assert_migrations_complete", classmethod(fake_assert_migrations_complete)
         )
+        relax = AsyncMock()
+        monkeypatch.setattr(GlobalMemoryPoolService, "_relax_vector_column", relax)
         GlobalMemoryPoolService._pool = MagicMock()
 
         await GlobalMemoryPoolService._run_setup(MagicMock())
 
         assert setup_store.setup.await_count == 2
         assert call_count["n"] == 2
+        relax.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_column_relax_is_retried_inside_the_poll(self, monkeypatch):
+        """The post-setup DDL can lose a lock race (`lock_timeout`) on a busy,
+        already-serving DB; that must be retried, not turn memory off."""
+        monkeypatch.setattr(client_module, "_SETUP_POLL_INTERVAL_S", 0.001)
+        monkeypatch.setattr(client_module, "_SETUP_CONVERGENCE_TIMEOUT_S", 5.0)
+
+        setup_store = AsyncMock()
+        monkeypatch.setattr(client_module, "AsyncPostgresStore", MagicMock(return_value=setup_store))
+        monkeypatch.setattr(
+            GlobalMemoryPoolService, "_assert_migrations_complete", classmethod(AsyncMock())
+        )
+        relax = AsyncMock(side_effect=[psycopg.errors.LockNotAvailable("lock timeout"), None])
+        monkeypatch.setattr(GlobalMemoryPoolService, "_relax_vector_column", relax)
+        GlobalMemoryPoolService._pool = MagicMock()
+
+        await GlobalMemoryPoolService._run_setup(MagicMock())
+
+        assert relax.await_count == 2
 
     @pytest.mark.asyncio
     async def test_gives_up_after_the_deadline_with_the_last_error_attached(self, monkeypatch):

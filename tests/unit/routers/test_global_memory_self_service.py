@@ -244,7 +244,7 @@ class TestCrossAppSelfServiceCannotTargetAnotherUser:
             )
 
         assert response.status_code == 200
-        mock_delete.assert_called_once_with(db, user_x.user_id)
+        mock_delete.assert_called_once_with(db, user_x.user_id, commit=True)
 
     def test_user_id_as_extra_path_segment_is_rejected(self, memory_app, memory_client, db):
         configure_factories(db)

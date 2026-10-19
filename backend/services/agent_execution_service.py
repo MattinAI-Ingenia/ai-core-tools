@@ -702,13 +702,11 @@ class AgentExecutionService:
         #
         # `has_global_memory` (D-3) is an independent opt-in from `has_memory`
         # (which only governs the in-thread checkpointer + summarization).
-        # `has_memory` is consulted here ONLY to pick the read *frequency*
-        # (D-17, via `should_read`) — never to decide whether memory works at
-        # all: an agent with `has_global_memory=True, has_memory=False` is
-        # still fully active, and in fact reads on EVERY turn, since there is
-        # no thread state to carry a previously injected block forward
-        # (AC-50). Any implementation where `has_memory=False` reduces or
-        # disables memory is wrong.
+        # Memory reads on EVERY turn for both values (D-17/AC-50): the block
+        # is placed in this turn's system prompt and never stored in the
+        # thread, so no turn can rely on an earlier one having injected it.
+        # Any implementation where `has_memory=False` reduces or disables
+        # memory is wrong.
         #
         # The turn index is computed exactly once, here, and carried on the
         # context as `ctx.memory_turn_index` rather than recomputed later.
@@ -722,16 +720,9 @@ class AgentExecutionService:
         #
         # Resolution (identity + services + clients) is gated on activation
         # being due for EITHER cadence — `should_read` (D-17) OR
-        # `should_write` (D-15) — never on `should_read` alone.
-        # `prepare_turn_memory` implements that union internally. The two
-        # triggers have independent cadences (e.g. with the defaults, a
-        # write is due on turn 5 while a read is not due past turn 2), so
-        # gating resolution on `should_read` alone would leave every
-        # write-only turn with no identity/clients to write with, silently
-        # no-op'ing the batched write (D-15) for the most common agent
-        # configuration. Only the retrieval CALL below stays behind
-        # `should_read` alone (D-17/AC-50) — a write-only turn resolves
-        # clients but injects nothing.
+        # `should_write` (D-15). Reads are due on every turn today, so this is
+        # every turn; the union is kept so a write-due turn can never be
+        # starved of clients should the read cadence ever be narrowed again.
         #
         # Every failure here degrades to "no memory context" and never fails
         # the turn (NFR-4) — the whole step is wrapped in one broad
@@ -769,6 +760,13 @@ class AgentExecutionService:
             )
 
             if global_memory_identity is not None and global_memory_embeddings is not None:
+                # The conversation's last activity before this turn, read
+                # before the commit below expires the ORM attributes. Facts
+                # stored after it in another conversation are flagged as the
+                # user's latest wish (`_format_memory_block`).
+                last_activity_at = getattr(conversation, "updated_at", None)
+                memory_conversation_id = getattr(conversation, "conversation_id", None)
+
                 # Release the pooled connection before the network-bound
                 # embedding/search call below (AD-6 step 6). Both callers
                 # already commit again immediately after `_prepare_turn`
@@ -791,10 +789,9 @@ class AgentExecutionService:
                         global_memory_embeddings,
                         embedding_service_id,
                         enhanced_message,
+                        last_activity_at=last_activity_at,
+                        conversation_id=memory_conversation_id,
                     )
-                # else: this turn is write-due but not read-due (D-15 without
-                # D-17) — clients stay on the context for step_008's write
-                # hook, but no retrieval runs and no block is injected.
         except Exception:
             # `exc_info=True` was dropped here (post-audit hardening): both
             # `prepare_turn_memory` and `get_memory_context` are total today
@@ -1139,12 +1136,44 @@ class AgentExecutionService:
         # The whole step is wrapped in one broad try/except: a bug in the
         # memory module must degrade to "no write scheduled this turn", never
         # fail an already-otherwise-complete turn (NFR-4).
+        #
+        # Turns between two write-due turns are not lost: their user message is
+        # buffered on the conversation, and the next write-due turn extracts
+        # from all of them plus itself (D-15). Buffering does not depend on
+        # `ctx.global_memory_identity`, which is only resolved on read- or
+        # write-due turns; eligibility is re-checked when the write runs. A
+        # write-due turn always empties the buffer, even if no write follows.
         try:
+            from tools.memory import settings as memory_settings
+
+            earlier_user_messages: list = []
+            buffering_on = (
+                memory_settings.is_global_memory_enabled()
+                and getattr(ctx.fresh_agent, "has_global_memory", False) is True
+                and ctx.conversation is not None
+                and getattr(ctx.conversation, "user_id", None) is not None
+            )
+            # The App's own extraction cadence (App.memory_write_every_n_turns),
+            # or the deployment default when it has none.
+            every_n_turns = memory_settings.write_every_n_turns(getattr(ctx.fresh_agent, "app", None))
+            write_due = memory_settings.should_write(ctx.memory_turn_index, every_n_turns)
+            if buffering_on or ctx.global_memory_identity is not None:
+                from services.global_memory_service import (
+                    buffer_pending_user_message,
+                    take_pending_user_messages,
+                )
+
+                if write_due:
+                    earlier_user_messages = take_pending_user_messages(db, ctx.conversation)
+                elif buffering_on:
+                    buffer_pending_user_message(
+                        db, ctx.conversation, ctx.original_user_message or "", every_n_turns
+                    )
+
             if ctx.global_memory_identity is not None:
-                from tools.memory import settings as memory_settings
                 from tools.memory.settings import SKIP_WRITE_NOT_DUE, log_memory_event
 
-                if memory_settings.should_write(ctx.memory_turn_index):
+                if write_due:
                     response_text = _flatten_response_text_for_memory(parsed_response)
                     if response_text:
                         from services.global_memory_service import schedule_write_path
@@ -1164,6 +1193,10 @@ class AgentExecutionService:
                             response_text=response_text,
                             turn_used_tool_call=bool(ctx.turn_used_tool_call),
                             turn_had_attachments=bool(ctx.processed_files),
+                            earlier_user_messages=earlier_user_messages,
+                            conversation_id=(
+                                ctx.conversation.conversation_id if ctx.conversation is not None else None
+                            ),
                         )
                 else:
                     log_memory_event(
@@ -1859,6 +1892,7 @@ class AgentExecutionService:
                 sandbox_provider=sandbox_provider,
                 sandbox_session_key=sandbox_session_key,
                 attached_files=processed_files,
+                memory_context=memory_context,
             )
 
             # Prepare configuration
@@ -1877,17 +1911,13 @@ class AgentExecutionService:
             # Build the HumanMessage (handles text-only and multimodal images)
             message_payload = build_human_message(fresh_agent, message, image_files or [], user_context)
 
-            # Cross-session global user memory (FR-6, AD-7): an extra
-            # SystemMessage ahead of the human message, never modifying the
-            # agent's own system prompt, never replacing the user message.
-            # With no memory context the payload is byte-identical to today
-            # (AC-20); with one present it is one extra leading message
-            # (AC-19).
-            from langchain_core.messages import SystemMessage
-
-            graph_messages = (
-                [SystemMessage(content=memory_context)] if memory_context else []
-            ) + [message_payload]
+            # Cross-session global user memory (FR-6, AD-7) travels in this
+            # turn's system prompt (`create_agent(memory_context=...)` above),
+            # never in the graph input: an input message would be persisted in
+            # the thread, lose influence as the conversation grows, and could
+            # be summarised away. The payload is therefore the human message
+            # alone, with or without memory (AC-19/AC-20).
+            graph_messages = [message_payload]
 
             # Attach LangSmith tracer + metadata when configured
             ls_settings = resolve_langsmith_settings(fresh_agent.app)

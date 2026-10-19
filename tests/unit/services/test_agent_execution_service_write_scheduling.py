@@ -414,3 +414,102 @@ class TestExecuteAgentAsyncSetsToolCallFlagOnContext:
             result = await svc._execute_agent_async(agent, "hi")
 
         assert result == "Just a plain answer."
+
+
+# ---------------------------------------------------------------------------
+# D-15: turns between write-due turns are buffered and extracted later
+# ---------------------------------------------------------------------------
+
+
+class TestPendingUserMessagesWiring:
+    def _ctx(self, turn, identity, has_global_memory=True, user_id=7):
+        conversation = MagicMock(conversation_id=1, user_id=user_id, memory_pending_user_messages=None)
+        fresh_agent = MagicMock(ai_service=None, has_global_memory=has_global_memory)
+        return _make_context(
+            global_memory_identity=identity, memory_turn_index=turn,
+            conversation=conversation, fresh_agent=fresh_agent,
+            original_user_message=f"message of turn {turn}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_is_not_write_due_buffers_its_user_message(self):
+        svc = _make_service()
+        ctx = self._ctx(turn=3, identity=None)
+
+        with (
+            patch.object(memory_settings, "is_global_memory_enabled", return_value=True),
+            patch("services.conversation_service.ConversationService.increment_message_count"),
+            patch("services.global_memory_service.buffer_pending_user_message") as mock_buffer,
+            patch("services.global_memory_service.schedule_write_path") as mock_schedule,
+        ):
+            await _finalize(svc, ctx)
+
+        assert mock_buffer.call_args.args[1:3] == (ctx.conversation, "message of turn 3")
+        mock_schedule.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_write_due_turn_hands_the_buffered_messages_to_the_write(self):
+        svc = _make_service()
+        ctx = self._ctx(turn=5, identity=_identity())
+
+        with (
+            patch.object(memory_settings, "is_global_memory_enabled", return_value=True),
+            patch("services.conversation_service.ConversationService.increment_message_count"),
+            patch(
+                "services.global_memory_service.take_pending_user_messages",
+                return_value=["turn 2", "turn 3", "turn 4"],
+            ),
+            patch("services.global_memory_service.buffer_pending_user_message") as mock_buffer,
+            patch("services.global_memory_service.schedule_write_path") as mock_schedule,
+        ):
+            await _finalize(svc, ctx)
+
+        assert mock_schedule.call_args.kwargs["earlier_user_messages"] == ["turn 2", "turn 3", "turn 4"]
+        assert mock_schedule.call_args.kwargs["conversation_id"] == 1
+        assert mock_schedule.call_args.kwargs["original_user_message"] == "message of turn 5"
+        mock_buffer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_write_due_turn_empties_the_buffer_even_without_a_write(self):
+        """Identity unresolved this turn (e.g. services timed out) — the buffer
+        must still not outlive the extraction it was meant for."""
+        svc = _make_service()
+        ctx = self._ctx(turn=5, identity=None)
+
+        with (
+            patch.object(memory_settings, "is_global_memory_enabled", return_value=True),
+            patch("services.conversation_service.ConversationService.increment_message_count"),
+            patch("services.global_memory_service.take_pending_user_messages", return_value=[]) as mock_take,
+            patch("services.global_memory_service.schedule_write_path") as mock_schedule,
+        ):
+            await _finalize(svc, ctx)
+
+        mock_take.assert_called_once()
+        mock_schedule.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_buffered_for_an_agent_without_global_memory_or_without_a_user(self):
+        svc = _make_service()
+        for ctx in (self._ctx(turn=3, identity=None, has_global_memory=False), self._ctx(turn=3, identity=None, user_id=None)):
+            with (
+                patch.object(memory_settings, "is_global_memory_enabled", return_value=True),
+                patch("services.conversation_service.ConversationService.increment_message_count"),
+                patch("services.global_memory_service.buffer_pending_user_message") as mock_buffer,
+            ):
+                await _finalize(svc, ctx)
+
+            mock_buffer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_buffered_when_the_kill_switch_is_off(self):
+        svc = _make_service()
+        ctx = self._ctx(turn=3, identity=None)
+
+        with (
+            patch.object(memory_settings, "is_global_memory_enabled", return_value=False),
+            patch("services.conversation_service.ConversationService.increment_message_count"),
+            patch("services.global_memory_service.buffer_pending_user_message") as mock_buffer,
+        ):
+            await _finalize(svc, ctx)
+
+        mock_buffer.assert_not_called()

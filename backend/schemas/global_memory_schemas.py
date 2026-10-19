@@ -1,6 +1,8 @@
 """Response schemas for cross-session global memory erasure (spec
 `user-memory-mem0`, FR-8, step_006).
 """
+from typing import List, Optional
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -20,3 +22,20 @@ class GlobalMemoryPurgeResponseSchema(BaseModel):
     purged: int
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class GlobalMemoryFactSchema(BaseModel):
+    """One remembered fact, as shown to the user it is about (self-service only)."""
+
+    key: str
+    text: str
+    agent_id: Optional[int] = None
+    created_at: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class GlobalMemoryFactListSchema(BaseModel):
+    """The caller's own remembered facts in one App, newest first."""
+
+    facts: List[GlobalMemoryFactSchema]

@@ -1,5 +1,7 @@
 """FastAPI auth dependencies for the internal API (OIDC and LOCAL auth modes)."""
 
+import re
+
 import jwt
 from fastapi import Cookie, HTTPException, status, Depends, Request, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -281,6 +283,9 @@ from typing import Annotated
 from utils.config import is_omniadmin as _is_omniadmin
 
 
+_OWN_MEMORY_FACT_PATH = re.compile(r"/global-memory/me/facts/[^/]+$")
+
+
 async def require_editor_for_writes(
     request: Request,
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
@@ -291,6 +296,7 @@ async def require_editor_for_writes(
     Exemptions — viewer-legitimate writes:
       - POST .../invitations/{id}/respond  (accept or decline a collaboration invite)
       - DELETE .../global-memory/me  (erase the caller's own memory, this App)
+      - DELETE .../global-memory/me/facts/{key}  (erase one of the caller's own facts)
     """
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return auth_context
@@ -304,6 +310,10 @@ async def require_editor_for_writes(
     # target, so it carries none of the risk this gate blocks. Do not
     # re-tighten this exemption without re-reading that handler's docstring.
     if request.url.path.endswith("/global-memory/me"):
+        return auth_context
+    # Same right, one fact at a time (`erase_my_global_memory_fact`): also
+    # scoped exclusively to the caller's session identity.
+    if request.method == "DELETE" and _OWN_MEMORY_FACT_PATH.search(request.url.path):
         return auth_context
     email = auth_context.identity.email
     if _is_omniadmin(email):

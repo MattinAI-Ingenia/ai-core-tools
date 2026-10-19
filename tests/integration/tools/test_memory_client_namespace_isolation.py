@@ -29,9 +29,8 @@ from langgraph.store.postgres import PostgresStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-import config
 from tools.memory import settings as memory_settings
-from tools.memory.client import GlobalMemoryClient, list_user_scopes, purge
+from tools.memory.client import GlobalMemoryClient, delete_fact, list_facts, list_user_scopes, purge
 from tools.memory.identity import MemoryIdentity
 
 pytestmark = pytest.mark.integration
@@ -72,12 +71,10 @@ def _raw_connection() -> psycopg.Connection:
 
 
 @pytest.fixture
-def memory_schema(monkeypatch):
+def memory_schema():
     """Create the store's four tables (small vector width for test speed),
     then drop all four afterward — this suite must never leave them behind.
     """
-    monkeypatch.setattr(config, "GLOBAL_MEMORY_EMBEDDING_DIMS", _TEST_DIMS)
-
     with _raw_connection() as conn:
         setup_store = PostgresStore(
             conn, index={"dims": _TEST_DIMS, "embed": _FakeEmbeddings(), "fields": ["text"]}
@@ -294,3 +291,100 @@ class TestListUserScopesNamespaceIsolation:
         resolved = {(scope.app_id, scope.user_id) for scope in result.scopes}
 
         assert resolved == {(5, 7)}
+
+
+class TestPreferencesViewNamespaceIsolation:
+    """The self-service "Preferences" view (`list_facts`/`delete_fact`) must
+    stay inside the caller's exact namespace, like every other seam call."""
+
+    @pytest.mark.asyncio
+    async def test_list_facts_excludes_prefix_colliding_neighbour(self, memory_client):
+        identity_7 = _make_identity(app_id=5, user_id=7, agent_id=3)
+        identity_70 = _make_identity(app_id=5, user_id=70)
+        await memory_client.add(identity_7, ["Wants responses in English"])
+        await memory_client.add(identity_70, ["SECRETO DEL USUARIO 70"])
+
+        facts = await asyncio.to_thread(list_facts, identity_7)
+
+        assert [f.text for f in facts] == ["Wants responses in English"]
+        assert facts[0].agent_id == 3
+        assert len(facts[0].key) == 32
+
+    @pytest.mark.asyncio
+    async def test_delete_fact_never_touches_the_neighbours_identical_fact(self, memory_client):
+        """Same text ⇒ same key in both namespaces: deleting user 7's must leave
+        user 70's row in place."""
+        identity_7 = _make_identity(app_id=5, user_id=7)
+        identity_70 = _make_identity(app_id=5, user_id=70)
+        await memory_client.add(identity_7, ["Prefers short answers"])
+        await memory_client.add(identity_70, ["Prefers short answers"])
+        key = (await asyncio.to_thread(list_facts, identity_7))[0].key
+
+        assert await asyncio.to_thread(delete_fact, identity_7, key) is True
+
+        assert await asyncio.to_thread(list_facts, identity_7) == []
+        assert [f.text for f in await asyncio.to_thread(list_facts, identity_70)] == ["Prefers short answers"]
+
+    @pytest.mark.asyncio
+    async def test_delete_fact_reports_a_missing_key_and_rejects_a_malformed_one(self, memory_client):
+        identity_7 = _make_identity(app_id=5, user_id=7)
+
+        assert await asyncio.to_thread(delete_fact, identity_7, "0" * 32) is False
+        with pytest.raises(ValueError):
+            await asyncio.to_thread(delete_fact, identity_7, "%")
+
+
+class TestProvenanceAndReplacement:
+    """Recency support: search returns each fact's date and conversation,
+    `closest` names the row to replace, and `delete_keys` stays inside the
+    caller's exact namespace."""
+
+    @pytest.mark.asyncio
+    async def test_search_facts_returns_date_and_originating_conversation(self, memory_client):
+        identity = _make_identity(app_id=5, user_id=7)
+        await memory_client.add(identity, ["Wants all code examples in Java"], conversation_id=77)
+
+        facts = await memory_client.search_facts(identity, "Java", top_k=5)
+
+        assert [f.text for f in facts] == ["Wants all code examples in Java"]
+        assert facts[0].conversation_id == 77
+        assert facts[0].created_at is not None
+
+    @pytest.mark.asyncio
+    async def test_closest_reports_the_key_and_whether_it_is_the_same_fact(self, memory_client):
+        identity = _make_identity(app_id=5, user_id=7)
+        await memory_client.add(identity, ["Prefers short answers"])
+
+        same = await memory_client.closest(identity, "prefers short answers")
+        other = await memory_client.closest(identity, "Prefers long answers")
+
+        assert same is not None and same.same_fact is True
+        assert other is not None and other.same_fact is False and other.key == same.key
+
+    @pytest.mark.asyncio
+    async def test_delete_keys_never_touches_the_neighbours_row(self, memory_client):
+        identity_7 = _make_identity(app_id=5, user_id=7)
+        identity_70 = _make_identity(app_id=5, user_id=70)
+        await memory_client.add(identity_7, ["Old wording"])
+        await memory_client.add(identity_70, ["Old wording"])
+        key = (await memory_client.closest(identity_7, "Old wording")).key
+
+        assert await memory_client.delete_keys(identity_7, [key]) == 1
+
+        assert await memory_client.search(identity_7, "Old wording", top_k=5) == []
+        assert await memory_client.search(identity_70, "Old wording", top_k=5) == ["Old wording"]
+
+
+class TestSessionFacts:
+    @pytest.mark.asyncio
+    async def test_returns_only_this_conversations_facts_in_the_exact_namespace(self, memory_client):
+        identity_7 = _make_identity(app_id=5, user_id=7)
+        identity_70 = _make_identity(app_id=5, user_id=70)
+        await memory_client.add(identity_7, ["Works at Ikerlan"], conversation_id=98)
+        await memory_client.add(identity_7, ["Uses Python"], conversation_id=70)
+        await memory_client.add(identity_70, ["Neighbour fact"], conversation_id=98)
+
+        facts = await memory_client.session_facts(identity_7, 98, limit=20)
+
+        assert [f.text for f in facts] == ["Works at Ikerlan"]
+        assert facts[0].key is not None and facts[0].conversation_id == 98

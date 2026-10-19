@@ -11,7 +11,9 @@ module covers the write path's OWN policy layered on top of that seam:
 scheduling, extraction bounds, the dedup stage, and fault containment.
 """
 import asyncio
+from types import SimpleNamespace
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,11 +23,14 @@ import services.global_memory_service as global_memory_service
 from services.global_memory_service import (
     EXTRACTION_PROMPT,
     _build_extraction_window,
+    buffer_pending_user_message,
+    take_pending_user_messages,
     extract_facts,
     run_write_path,
     schedule_write_path,
 )
 from tools.memory import settings as memory_settings
+from tools.memory.client import ClosestFact
 from tools.memory.identity import MemoryIdentity
 from tools.memory.resolution import ResolvedMemoryServices
 
@@ -88,6 +93,43 @@ class TestExtractionPromptIsAConstant:
 # ---------------------------------------------------------------------------
 # _build_extraction_window (D-23, AC-60)
 # ---------------------------------------------------------------------------
+
+
+class TestExtractionPromptContent:
+    """Regression for a fact inferred from the language the user wrote in
+    ("Communicates in Spanish") overriding their stated preference."""
+
+    def test_records_standing_response_instructions_as_preferences(self):
+        assert "always answer me in English" in EXTRACTION_PROMPT
+        assert "Wants responses in English" in EXTRACTION_PROMPT
+
+    def test_forbids_inferring_facts_from_the_language_the_user_writes_in(self):
+        """Checked by meaning, not one exact sentence, so the prompt's wording
+        can evolve: inferring from the language/style must stay excluded."""
+        prompt = EXTRACTION_PROMPT.lower()
+        assert "infer" in prompt
+        assert "language" in prompt and ("writing style" in prompt or "tone" in prompt)
+
+    def test_user_messages_are_the_authoritative_source(self):
+        assert "The user's own message is the primary and authoritative source" in EXTRACTION_PROMPT
+
+    def test_never_extracts_shared_document_content(self):
+        assert "Never extract the content of documents" in EXTRACTION_PROMPT
+
+    def test_carries_few_shot_examples_including_empty_outputs(self):
+        assert EXTRACTION_PROMPT.count('"memory": []') >= 3
+        assert '"text": "Wants responses in English"' in EXTRACTION_PROMPT
+
+    def test_extends_and_updates_must_write_the_complete_combined_fact(self):
+        """Regression: "Trabaja en IKERLAN" extended by "trabajo en proyectos de
+        IA" came back as "Trabaja en proyectos de IA"; since extends replaces
+        the linked memory, "Ikerlan" was lost."""
+        assert "COMPLETE REPLACEMENT TEXT" in EXTRACTION_PROMPT
+        assert '"Works on AI projects at Ikerlan"' in EXTRACTION_PROMPT
+        assert "is REMOVED and replaced by your new memory" in EXTRACTION_PROMPT
+
+    def test_never_carries_mem0s_deceptive_data_source_instruction(self):
+        assert "publicly available sources" not in EXTRACTION_PROMPT
 
 
 class TestBuildExtractionWindow:
@@ -165,6 +207,105 @@ class TestBuildExtractionWindow:
 # ---------------------------------------------------------------------------
 
 
+class TestExtractionWindowWithEarlierTurns:
+    """D-15: a write-due turn extracts from every turn since the previous
+    extraction — earlier turns contribute their user messages only."""
+
+    def test_earlier_user_messages_precede_the_current_turn_oldest_first(self):
+        window = _build_extraction_window(
+            "Actually, give me detailed answers", "Sure.", False,
+            earlier_user_messages=["turn two", "turn three", "turn four"],
+        )
+
+        assert window == (
+            "User (earlier turn): turn two\n"
+            "User (earlier turn): turn three\n"
+            "User (earlier turn): turn four\n"
+            "User: Actually, give me detailed answers\n"
+            "Assistant: Sure."
+        )
+
+    def test_over_budget_drops_the_oldest_earlier_messages_never_the_current_turn(self, monkeypatch):
+        monkeypatch.setattr(memory_settings, "extraction_input_max_chars", lambda: 80)
+        window = _build_extraction_window(
+            "current message", "", False,
+            earlier_user_messages=["a" * 40, "newest earlier"],
+        )
+
+        assert window == "User (earlier turn): newest earlier\nUser: current message"
+
+    def test_a_long_assistant_reply_never_pushes_out_the_users_messages(self, monkeypatch):
+        """Regression: a 4.5k-char code answer used to consume the whole budget
+        and drop every pending user message, so "prefiero que sean en python"
+        never reached the extractor."""
+        monkeypatch.setattr(memory_settings, "extraction_input_max_chars", lambda: 4000)
+        window = _build_extraction_window(
+            "hazme un ejemplo de api rest", "x" * 4500, False,
+            earlier_user_messages=["trabajo en proyectos de IA", "prefiero que sean en python"],
+        )
+
+        assert "User (earlier turn): trabajo en proyectos de IA" in window
+        assert "User (earlier turn): prefiero que sean en python" in window
+        assert "User: hazme un ejemplo de api rest" in window
+        assert len(window) <= 4000
+        assistant_line = window.splitlines()[-1]
+        assert assistant_line.startswith("Assistant: ") and assistant_line.endswith("…")
+
+    def test_no_room_left_drops_the_assistant_reply_entirely(self, monkeypatch):
+        monkeypatch.setattr(memory_settings, "extraction_input_max_chars", lambda: 60)
+        window = _build_extraction_window("current message", "a long reply " * 20, False)
+
+        assert window == "User: current message"
+
+    def test_blank_earlier_messages_are_skipped(self):
+        window = _build_extraction_window("now", "", False, earlier_user_messages=["", "  "])
+        assert window == "User: now"
+
+    def test_the_prompt_explains_earlier_turns_and_that_the_later_line_wins(self):
+        assert "User (earlier turn):" in EXTRACTION_PROMPT
+        assert "the later one wins" in EXTRACTION_PROMPT
+
+
+class TestPendingUserMessageBuffer:
+    def _conversation(self, pending=None):
+        return SimpleNamespace(memory_pending_user_messages=pending)
+
+    def test_buffers_messages_and_keeps_only_the_turns_between_two_extractions(self, monkeypatch):
+        monkeypatch.setattr(memory_settings, "write_every_n_turns", lambda: 5)
+        conversation, db = self._conversation(), MagicMock()
+
+        for turn in range(2, 8):
+            buffer_pending_user_message(db, conversation, f"turn {turn}")
+
+        assert json.loads(conversation.memory_pending_user_messages) == ["turn 4", "turn 5", "turn 6", "turn 7"]
+        assert db.commit.call_count == 6
+
+    def test_take_returns_the_messages_and_clears_the_buffer(self):
+        conversation, db = self._conversation(json.dumps(["turn 2", "turn 3"])), MagicMock()
+
+        assert take_pending_user_messages(db, conversation) == ["turn 2", "turn 3"]
+        assert conversation.memory_pending_user_messages is None
+        db.commit.assert_called_once()
+
+    def test_take_on_an_empty_buffer_does_not_touch_the_session(self):
+        conversation, db = self._conversation(None), MagicMock()
+
+        assert take_pending_user_messages(db, conversation) == []
+        db.commit.assert_not_called()
+
+    def test_a_corrupt_buffer_reads_as_empty(self):
+        conversation = self._conversation("not json")
+        assert take_pending_user_messages(MagicMock(), conversation) == []
+
+    def test_buffering_failure_rolls_back_and_never_raises(self):
+        conversation, db = self._conversation(), MagicMock()
+        db.commit.side_effect = RuntimeError("db down")
+
+        buffer_pending_user_message(db, conversation, "hello")
+
+        db.rollback.assert_called_once()
+
+
 class TestExtractFacts:
     @pytest.mark.asyncio
     async def test_no_llm_returns_empty_list_without_any_call(self):
@@ -233,7 +374,37 @@ class TestExtractFacts:
 
         sent_messages = llm.ainvoke.call_args.args[0]
         human_message = sent_messages[-1]
-        assert human_message.content == "0123456789"
+        assert human_message.content.endswith("\n\n0123456789")
+        assert "ABCDEF" not in human_message.content
+
+    @pytest.mark.asyncio
+    async def test_input_carries_the_observation_date_for_relative_time_references(self):
+        llm = _llm_returning('{"memory": []}')
+        await extract_facts(llm, "User: next month I start a new job")
+
+        human_message = llm.ainvoke.call_args.args[0][-1]
+        assert re.match(r"^Observation Date: \d{4}-\d{2}-\d{2}\n\n", human_message.content)
+        assert human_message.content.endswith("User: next month I start a new job")
+
+    @pytest.mark.asyncio
+    async def test_parses_the_mem0_style_memory_object(self):
+        llm = _llm_returning(json.dumps({"memory": [{"text": "Wants responses in English"}, {"text": "Uses Python 3.11"}]}))
+        assert await extract_facts(llm, "User: hi") == ["Wants responses in English", "Uses Python 3.11"]
+
+    @pytest.mark.asyncio
+    async def test_parses_a_memory_object_holding_plain_strings(self):
+        llm = _llm_returning('```json\n{"memory": ["Prefers dark mode"]}\n```')
+        assert await extract_facts(llm, "User: hi") == ["Prefers dark mode"]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_memory_object_is_a_normal_no_facts_outcome(self):
+        llm = _llm_returning('{"memory": []}')
+        assert await extract_facts(llm, "User: hi") == []
+
+    @pytest.mark.asyncio
+    async def test_memory_items_without_usable_text_are_dropped(self):
+        llm = _llm_returning(json.dumps({"memory": [{"text": "a real fact"}, {"text": ""}, {"id": "1"}, 7]}))
+        assert await extract_facts(llm, "User: hi") == ["a real fact"]
 
     @pytest.mark.asyncio
     async def test_system_message_is_the_module_constant_prompt(self):
@@ -258,7 +429,7 @@ class TestRunWritePathFactExtractionOutcomes:
         resolved = _resolved()
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=[])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=[])),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock()) as mock_get_client,
         ):
             await run_write_path(
@@ -267,7 +438,11 @@ class TestRunWritePathFactExtractionOutcomes:
                 turn_used_tool_call=False,
             )
 
-        mock_get_client.assert_not_called()
+        # The client is fetched before extraction (to look up similar
+        # memories), but nothing is written or deleted.
+        client = mock_get_client.return_value
+        client.add.assert_not_called()
+        client.delete_keys.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_only_fact_strings_cross_to_the_persistence_call(self):
@@ -275,12 +450,12 @@ class TestRunWritePathFactExtractionOutcomes:
         identity = _identity()
         resolved = _resolved()
         client = MagicMock()
-        client.similarity = AsyncMock(return_value=None)
+        client.closest = AsyncMock(return_value=None)
         client.add = AsyncMock(return_value=2)
 
         with (
             patch.object(
-                global_memory_service, "extract_facts",
+                global_memory_service, "extract_memories",
                 new=AsyncMock(return_value=["Likes pizza", "Works remotely"]),
             ),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
@@ -293,7 +468,69 @@ class TestRunWritePathFactExtractionOutcomes:
                 turn_used_tool_call=False,
             )
 
-        client.add.assert_awaited_once_with(identity, ["Likes pizza", "Works remotely"])
+        client.add.assert_awaited_once_with(identity, ["Likes pizza", "Works remotely"], conversation_id=None)
+
+
+class TestRunWritePathBuildsItsOwnClients:
+    """When the turn's read-budgeted client construction timed out,
+    `prepare_turn_memory` hands over no clients and the write builds them."""
+
+    @pytest.mark.asyncio
+    async def test_missing_clients_are_built_in_a_fresh_session_then_used(self):
+        identity = _identity()
+        resolved = _resolved()
+        llm, embeddings = MagicMock(), MagicMock()
+        client = MagicMock()
+        client.closest = AsyncMock(return_value=None)
+        client.add = AsyncMock(return_value=1)
+
+        with (
+            patch.object(
+                global_memory_service, "_build_memory_clients_sync", return_value=(llm, embeddings)
+            ) as mock_build,
+            patch.object(
+                global_memory_service, "extract_memories", new=AsyncMock(return_value=["Wants responses in English"])
+            ) as mock_extract,
+            patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)) as mock_get,
+        ):
+            await run_write_path(
+                identity=identity, resolved=resolved, llm=None, embeddings=None,
+                embedding_service_id=1, original_user_message="answer me always in English",
+                response_text="Sure!", turn_used_tool_call=False,
+            )
+
+        mock_build.assert_called_once_with(resolved)
+        assert mock_extract.await_args.args[0] is llm
+        assert mock_get.await_args.args[0] is embeddings
+        client.add.assert_awaited_once_with(identity, ["Wants responses in English"], conversation_id=None)
+
+    @pytest.mark.asyncio
+    async def test_clients_that_still_cannot_be_built_skip_the_write_without_raising(self):
+        with (
+            patch.object(global_memory_service, "_build_memory_clients_sync", return_value=(None, None)),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock()) as mock_extract,
+        ):
+            await run_write_path(
+                identity=_identity(), resolved=_resolved(), llm=None, embeddings=None,
+                embedding_service_id=1, original_user_message="hi", response_text="hello",
+                turn_used_tool_call=False,
+            )
+
+        mock_extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clients_handed_over_by_the_turn_are_never_rebuilt(self):
+        with (
+            patch.object(global_memory_service, "_build_memory_clients_sync") as mock_build,
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=[])),
+        ):
+            await run_write_path(
+                identity=_identity(), resolved=_resolved(), llm=MagicMock(), embeddings=MagicMock(),
+                embedding_service_id=1, original_user_message="hi", response_text="hello",
+                turn_used_tool_call=False,
+            )
+
+        mock_build.assert_not_called()
 
 
 class TestRunWritePathForwardsAttachmentSignal:
@@ -310,7 +547,7 @@ class TestRunWritePathForwardsAttachmentSignal:
                 global_memory_service, "_build_extraction_window",
                 wraps=global_memory_service._build_extraction_window,
             ) as mock_build_window,
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=[])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=[])),
         ):
             await run_write_path(
                 identity=identity, resolved=resolved, llm=MagicMock(), embeddings=MagicMock(),
@@ -326,6 +563,7 @@ class TestRunWritePathForwardsAttachmentSignal:
             "Trabaja como ingeniero, DNI 12345678X",
             False,
             True,
+            earlier_user_messages=(),
         )
 
 
@@ -337,7 +575,7 @@ class TestRunWritePathFailureContainment:
         resolved = _resolved()
 
         with patch.object(
-            global_memory_service, "extract_facts", new=AsyncMock(side_effect=RuntimeError("boom"))
+            global_memory_service, "extract_memories", new=AsyncMock(side_effect=RuntimeError("boom"))
         ):
             await run_write_path(
                 identity=identity, resolved=resolved, llm=MagicMock(), embeddings=MagicMock(),
@@ -352,11 +590,11 @@ class TestRunWritePathFailureContainment:
         identity = _identity()
         resolved = _resolved()
         client = MagicMock()
-        client.similarity = AsyncMock(return_value=None)
+        client.closest = AsyncMock(return_value=None)
         client.add = AsyncMock(side_effect=RuntimeError("store unreachable"))
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=["a fact"])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=["a fact"])),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
         ):
             await run_write_path(
@@ -367,77 +605,78 @@ class TestRunWritePathFailureContainment:
 
 
 class TestRunWritePathDedup:
-    """AC-47."""
+    """AC-47 (revised): the most recent wording wins. A candidate scoring above
+    the threshold against an existing fact is still written, and the older
+    fact is deleted once that write lands."""
 
-    @pytest.mark.asyncio
-    async def test_near_duplicate_above_threshold_is_dropped(self, monkeypatch):
-        monkeypatch.setattr(memory_settings, "dedup_threshold", lambda: 0.9)
-        identity = _identity()
-        resolved = _resolved()
-        client = MagicMock()
-        # "new fact" is novel; "known fact" scores above threshold.
-        client.similarity = AsyncMock(side_effect=[None, 0.95])
-        client.add = AsyncMock(return_value=1)
-
+    async def _run(self, client, facts, conversation_id=None):
         with (
-            patch.object(
-                global_memory_service, "extract_facts",
-                new=AsyncMock(return_value=["new fact", "known fact"]),
-            ),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=facts)),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
         ):
             await run_write_path(
-                identity=identity, resolved=resolved, llm=MagicMock(), embeddings=MagicMock(),
+                identity=_identity(), resolved=_resolved(), llm=MagicMock(), embeddings=MagicMock(),
                 embedding_service_id=1, original_user_message="hi", response_text="hi",
-                turn_used_tool_call=False,
+                turn_used_tool_call=False, conversation_id=conversation_id,
             )
 
-        client.add.assert_awaited_once_with(identity, ["new fact"])
-
-    @pytest.mark.asyncio
-    async def test_all_candidates_deduped_away_writes_nothing(self, monkeypatch):
-        monkeypatch.setattr(memory_settings, "dedup_threshold", lambda: 0.5)
-        identity = _identity()
-        resolved = _resolved()
+    def _client(self, closest, written=1):
         client = MagicMock()
-        client.similarity = AsyncMock(return_value=0.99)
-        client.add = AsyncMock(return_value=0)
-
-        with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=["known fact"])),
-            patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
-        ):
-            await run_write_path(
-                identity=identity, resolved=resolved, llm=MagicMock(), embeddings=MagicMock(),
-                embedding_service_id=1, original_user_message="hi", response_text="hi",
-                turn_used_tool_call=False,
-            )
-
-        client.add.assert_not_awaited()
+        client.closest = AsyncMock(side_effect=closest) if isinstance(closest, (list, Exception)) else AsyncMock(return_value=closest)
+        client.add = AsyncMock(return_value=written)
+        client.delete_keys = AsyncMock(return_value=1)
+        return client
 
     @pytest.mark.asyncio
-    async def test_dedup_stage_failure_degrades_to_writing_every_candidate(self):
+    async def test_a_near_duplicate_replaces_the_older_fact(self, monkeypatch):
+        monkeypatch.setattr(memory_settings, "dedup_threshold", lambda: 0.95)
+        old = ClosestFact(score=0.955, key="a" * 32, same_fact=False)
+        client = self._client([None, old], written=2)
+
+        await self._run(client, ["new fact", "Wants responses in English."], conversation_id=76)
+
+        client.add.assert_awaited_once_with(_identity(), ["new fact", "Wants responses in English."], conversation_id=76)
+        client.delete_keys.assert_awaited_once_with(_identity(), ["a" * 32])
+
+    @pytest.mark.asyncio
+    async def test_identical_text_overwrites_in_place_without_a_delete(self, monkeypatch):
+        monkeypatch.setattr(memory_settings, "dedup_threshold", lambda: 0.95)
+        client = self._client(ClosestFact(score=1.0, key="b" * 32, same_fact=True))
+
+        await self._run(client, ["Wants responses in English"])
+
+        client.add.assert_awaited_once()
+        client.delete_keys.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_below_the_threshold_nothing_is_replaced(self, monkeypatch):
+        monkeypatch.setattr(memory_settings, "dedup_threshold", lambda: 0.95)
+        client = self._client(ClosestFact(score=0.835, key="c" * 32, same_fact=False))
+
+        await self._run(client, ["Wants responses in Spanish"])
+
+        client.add.assert_awaited_once()
+        client.delete_keys.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_older_fact_survives_when_the_write_fails(self, monkeypatch):
+        """Never lose a fact: the delete only runs after a successful write."""
+        monkeypatch.setattr(memory_settings, "dedup_threshold", lambda: 0.95)
+        client = self._client(ClosestFact(score=0.99, key="d" * 32, same_fact=False), written=0)
+
+        await self._run(client, ["new wording"])
+
+        client.delete_keys.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dedup_stage_failure_writes_every_candidate_and_replaces_none(self):
         """'Losing a fact is worse than storing a near-duplicate' (AD-8)."""
-        identity = _identity()
-        resolved = _resolved()
-        client = MagicMock()
-        client.similarity = AsyncMock(side_effect=RuntimeError("embedding provider down"))
-        client.add = AsyncMock(return_value=2)
+        client = self._client(RuntimeError("embedding provider down"), written=2)
 
-        with (
-            patch.object(
-                global_memory_service, "extract_facts",
-                new=AsyncMock(return_value=["fact one", "fact two"]),
-            ),
-            patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
-        ):
-            await run_write_path(
-                identity=identity, resolved=resolved, llm=MagicMock(), embeddings=MagicMock(),
-                embedding_service_id=1, original_user_message="hi", response_text="hi",
-                turn_used_tool_call=False,
-            )
+        await self._run(client, ["fact one", "fact two"])
 
-        client.add.assert_awaited_once_with(identity, ["fact one", "fact two"])
+        client.add.assert_awaited_once_with(_identity(), ["fact one", "fact two"], conversation_id=None)
+        client.delete_keys.assert_not_awaited()
 
 
 class TestRunWritePathUsageAndQuota:
@@ -453,11 +692,11 @@ class TestRunWritePathUsageAndQuota:
         identity = _identity()
         resolved = _resolved(extraction_is_system=True)
         client = MagicMock()
-        client.similarity = AsyncMock(return_value=None)
+        client.closest = AsyncMock(return_value=None)
         client.add = AsyncMock(return_value=1)
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=["a fact"])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=["a fact"])),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
             patch(
                 "services.tier_enforcement_service.TierEnforcementService.check_system_llm_quota"
@@ -495,7 +734,7 @@ class TestRunWritePathUsageAndQuota:
                 "services.tier_enforcement_service.TierEnforcementService.check_system_llm_quota",
                 side_effect=HTTPException(status_code=429, detail="quota exhausted"),
             ),
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock()) as mock_extract,
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock()) as mock_extract,
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock()) as mock_get_client,
         ):
             await run_write_path(
@@ -519,11 +758,11 @@ class TestRunWritePathUsageAndQuota:
         identity = _identity()
         resolved = _resolved(extraction_is_system=False)
         client = MagicMock()
-        client.similarity = AsyncMock(return_value=None)
+        client.closest = AsyncMock(return_value=None)
         client.add = AsyncMock(return_value=1)
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=["a fact"])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=["a fact"])),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
             patch(
                 "services.tier_enforcement_service.TierEnforcementService.check_system_llm_quota"
@@ -557,7 +796,7 @@ class TestRunWritePathUsageAndQuota:
         resolved = _resolved(extraction_is_system=True)
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=[])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=[])),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock()) as mock_get_client,
             patch(
                 "services.tier_enforcement_service.TierEnforcementService.check_system_llm_quota"
@@ -576,8 +815,8 @@ class TestRunWritePathUsageAndQuota:
         mock_record.assert_called_once_with(usage_session, identity.user_id)
         usage_session.commit.assert_called_once()
         usage_session.close.assert_called_once()
-        # No facts survived extraction, so the store is never even reached.
-        mock_get_client.assert_not_called()
+        # No facts survived extraction, so nothing is written to the store.
+        mock_get_client.return_value.add.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_usage_session_is_committed_before_being_closed(self, monkeypatch):
@@ -597,11 +836,11 @@ class TestRunWritePathUsageAndQuota:
         identity = _identity()
         resolved = _resolved(extraction_is_system=True)
         client = MagicMock()
-        client.similarity = AsyncMock(return_value=None)
+        client.closest = AsyncMock(return_value=None)
         client.add = AsyncMock(return_value=1)
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=["a fact"])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=["a fact"])),
             patch.object(global_memory_service, "get_memory_client", new=AsyncMock(return_value=client)),
             patch("services.tier_enforcement_service.TierEnforcementService.check_system_llm_quota"),
             patch("services.usage_tracking_service.UsageTrackingService.record_system_llm_call"),
@@ -629,7 +868,7 @@ class TestRunWritePathUsageAndQuota:
         resolved = _resolved(extraction_is_system=True)
 
         with (
-            patch.object(global_memory_service, "extract_facts", new=AsyncMock(return_value=[])),
+            patch.object(global_memory_service, "extract_memories", new=AsyncMock(return_value=[])),
             patch("services.tier_enforcement_service.TierEnforcementService.check_system_llm_quota"),
             patch(
                 "services.usage_tracking_service.UsageTrackingService.record_system_llm_call",

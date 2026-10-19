@@ -220,6 +220,7 @@ async def create_agent(
     sandbox_session_key: Optional[str] = None,
     sandbox_session_service: Optional[Any] = None,
     attached_files: Optional[List[Dict]] = None,
+    memory_context: Optional[str] = None,
 ):
     """Create a new agent instance with cached checkpointer if memory is enabled.
 
@@ -234,6 +235,12 @@ async def create_agent(
         sandbox_session_key: Optional key for sandbox active-use leasing
         sandbox_session_service: Optional service used for sandbox active-use leasing
         attached_files: Optional list of attached files to pass to the agent chain
+        memory_context: Optional cross-session memory block for THIS turn's user
+            (`global_memory_service.get_memory_context`), appended to the system
+            prompt. The agent is built per turn, and LangChain prepends the
+            system prompt at every model call without storing it in the thread
+            state, so the block is present on every call of the turn but never
+            persisted, repeated in the history, or summarised away.
     """
     llm = get_llm(agent)
     if llm is None:
@@ -332,6 +339,14 @@ async def create_agent(
             + "\n<output_format_instructions>"
             + format_instructions
             + "</output_format_instructions>"
+        )
+
+    if memory_context:
+        # Spec user-memory-mem0, AD-7: the block's own intro line keeps its JSON
+        # payload below the instructions above (R-23); the payload is not escaped
+        # because the system prompt is never run through a template.
+        system_prompt_content = (
+            system_prompt_content + "\n\n<user_memory>\n" + memory_context + "\n</user_memory>"
         )
 
     middleware = []

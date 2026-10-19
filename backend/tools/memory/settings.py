@@ -31,7 +31,6 @@ SKIP_FLAG_OFF = "SKIP_FLAG_OFF"
 SKIP_INELIGIBLE_IDENTITY = "SKIP_INELIGIBLE_IDENTITY"
 SKIP_NO_AI_SERVICE = "SKIP_NO_AI_SERVICE"
 SKIP_NO_EMBEDDING_SERVICE = "SKIP_NO_EMBEDDING_SERVICE"
-SKIP_DIMS_MISMATCH = "SKIP_DIMS_MISMATCH"
 SKIP_QUOTA = "SKIP_QUOTA"
 SKIP_NO_FACTS = "SKIP_NO_FACTS"
 SKIP_DUPLICATE = "SKIP_DUPLICATE"
@@ -59,7 +58,6 @@ _ALLOWED_REASONS = frozenset({
     SKIP_INELIGIBLE_IDENTITY,
     SKIP_NO_AI_SERVICE,
     SKIP_NO_EMBEDDING_SERVICE,
-    SKIP_DIMS_MISMATCH,
     SKIP_QUOTA,
     SKIP_NO_FACTS,
     SKIP_DUPLICATE,
@@ -143,24 +141,45 @@ def max_facts_per_extraction() -> int:
     return config.GLOBAL_MEMORY_MAX_FACTS_PER_EXTRACTION
 
 
-def embedding_dims() -> int:
-    """Deployment-wide memory vector width (D-13)."""
-    return config.GLOBAL_MEMORY_EMBEDDING_DIMS
-
-
 def dedup_threshold() -> float:
     """Similarity ceiling above which a candidate fact is dropped (D-14)."""
     return config.GLOBAL_MEMORY_DEDUP_THRESHOLD
 
 
-def write_every_n_turns() -> int:
-    """The Nth-turn batching threshold for the write trigger (D-15)."""
+# Languages memory facts can be written in (App.memory_language). A closed set
+# of codes, never free text: the chosen name is turned into an instruction for
+# the extraction model, so an App setting must not be able to inject one.
+# Keep in sync with the CHECK in alembic gmem004 and the App settings UI.
+MEMORY_LANGUAGES = {
+    "en": "English",
+    "es": "Spanish",
+    "eu": "Basque",
+    "ca": "Catalan",
+    "gl": "Galician",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+}
+DEFAULT_MEMORY_LANGUAGE = "en"
+
+
+def memory_language(app: Any = None) -> str:
+    """The App's memory language code, or English when unset or unknown."""
+    code = getattr(app, "memory_language", None)
+    return code if isinstance(code, str) and code in MEMORY_LANGUAGES else DEFAULT_MEMORY_LANGUAGE
+
+
+def write_every_n_turns(app: Any = None) -> int:
+    """The Nth-turn batching threshold for the write trigger (D-15).
+
+    The App's own `memory_write_every_n_turns` when set to 1 or more,
+    otherwise the deployment default (`AICT_GLOBAL_MEMORY_WRITE_EVERY_N_TURNS`).
+    """
+    value = getattr(app, "memory_write_every_n_turns", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
     return config.GLOBAL_MEMORY_WRITE_EVERY_N_TURNS
-
-
-def read_first_n_turns() -> int:
-    """The turn-index ceiling for reads on `has_memory=True` agents (D-17)."""
-    return config.GLOBAL_MEMORY_READ_FIRST_N_TURNS
 
 
 def fact_max_chars() -> int:
@@ -221,7 +240,7 @@ def turn_index(conversation: Any) -> int:
     return (getattr(conversation, "message_count", 0) or 0) // 2 + 1
 
 
-def should_write(turn_index_value: int) -> bool:
+def should_write(turn_index_value: int, every_n_turns: Optional[int] = None) -> bool:
     """Return whether the batched extraction trigger fires for this turn (D-15).
 
     Fires on turn 1 and every `GLOBAL_MEMORY_WRITE_EVERY_N_TURNS`th turn
@@ -233,27 +252,27 @@ def should_write(turn_index_value: int) -> bool:
 
     Args:
         turn_index_value: The value returned by `turn_index()`.
+        every_n_turns: The App's cadence (`write_every_n_turns(app)`); the
+            deployment default when omitted.
 
     Returns:
         True if extraction should run for this turn.
     """
-    return turn_index_value == 1 or turn_index_value % write_every_n_turns() == 0
+    n = every_n_turns if every_n_turns is not None and every_n_turns >= 1 else write_every_n_turns()
+    return turn_index_value == 1 or turn_index_value % n == 0
 
 
 def should_read(turn_index_value: int, has_memory: bool) -> bool:
     """Return whether pre-turn retrieval should run for this turn (D-17).
 
-    The two branches exist because they answer different questions:
-
-    - `has_memory` falsy: there is no in-thread checkpointer state, so
-      nothing carries a previously injected memory block forward. Retrieval
-      must run on *every* turn or a later turn would lose the earlier
-      context entirely.
-    - `has_memory` truthy: the injected block becomes part of the thread
-      state (AD-7), so once it has been injected, re-reading on a later turn
-      would only re-fetch what the conversation already contains. Retrieval
-      is therefore limited to the first `GLOBAL_MEMORY_READ_FIRST_N_TURNS`
-      turns.
+    Always: the memory block travels in each turn's system prompt and is
+    never stored in the thread (AD-7), so no turn can rely on an earlier one
+    having injected it. It used to be limited to the first turns for
+    `has_memory=True` agents on the assumption that an injected block was
+    carried forward in-thread — in practice the model stopped honouring it a
+    few turns later (and summarisation could drop it), so a "Wants responses
+    in English" preference was obeyed on turn 3 and ignored on turn 4.
+    The signature is kept so call sites stay explicit about the cadence.
 
     Args:
         turn_index_value: The value returned by `turn_index()`.
@@ -263,9 +282,7 @@ def should_read(turn_index_value: int, has_memory: bool) -> bool:
     Returns:
         True if retrieval should run for this turn.
     """
-    if not has_memory:
-        return True
-    return turn_index_value <= read_first_n_turns()
+    return True
 
 
 def log_memory_event(

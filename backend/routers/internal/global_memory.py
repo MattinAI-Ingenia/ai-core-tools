@@ -2,7 +2,13 @@
 Right-to-erasure endpoints for cross-session user memory (spec
 `user-memory-mem0`, FR-8, D-8, D-11, step_006).
 
-Three surfaces, all delegating to the **same** service functions
+Plus the self-service *view* that goes with surface 2 (the chat's
+"Preferences" panel): `GET /internal/apps/{app_id}/global-memory/me` lists the
+caller's own facts in that App and
+`DELETE /internal/apps/{app_id}/global-memory/me/facts/{fact_key}` erases one.
+Both take the identity exclusively from the session, exactly like surface 2.
+
+Three erasure surfaces, all delegating to the **same** service functions
 (`services.global_memory_service.delete_global_memory` /
 `delete_user_global_memory`) — no endpoint reimplements the purge:
 
@@ -48,13 +54,23 @@ lives in `services.global_memory_service`.
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.concurrency import run_in_threadpool
 from lks_idprovider.models.auth import AuthContext
 from sqlalchemy.orm import Session
 
 from db.database import get_db
 from routers.controls.role_authorization import AppRole, require_min_role
-from schemas.global_memory_schemas import GlobalMemoryPurgeResponseSchema
-from services.global_memory_service import delete_global_memory, delete_user_global_memory
+from schemas.global_memory_schemas import (
+    GlobalMemoryFactListSchema,
+    GlobalMemoryFactSchema,
+    GlobalMemoryPurgeResponseSchema,
+)
+from services.global_memory_service import (
+    delete_global_memory,
+    delete_my_global_memory_fact,
+    delete_user_global_memory,
+    list_my_global_memory,
+)
 from utils.logger import get_logger
 
 from .auth_utils import get_current_user_oauth
@@ -202,6 +218,88 @@ async def erase_my_global_memory(
     return GlobalMemoryPurgeResponseSchema(purged=result.deleted)
 
 
+@global_memory_router.get(
+    "/me",
+    response_model=GlobalMemoryFactListSchema,
+    summary="List the caller's own remembered facts in this App",
+    description=(
+        "Returns every durable global-memory fact stored about the caller in this "
+        "App, newest first. Available to any authenticated member of this App "
+        "(VIEWER or higher) and only ever about the caller's own data — there is "
+        "no user_id parameter. Memory is shared across every memory-enabled agent "
+        "in this App, so this is the same list whichever agent the caller is in."
+    ),
+    tags=["Global Memory"],
+)
+async def list_my_global_memory_facts(
+    app_id: int,
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GlobalMemoryFactListSchema:
+    """Self-service view, current App. Identity from the session only (D-11,
+    same rule as `erase_my_global_memory`)."""
+    session_user_id = int(auth_context.identity.id)
+    try:
+        facts = await run_in_threadpool(list_my_global_memory, db, app_id, session_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        logger.error(
+            "list_my_global_memory_facts: unexpected error app_id=%s user_id=%s",
+            app_id, session_user_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Remembered preferences could not be loaded. Please retry.",
+        )
+    return GlobalMemoryFactListSchema(facts=[GlobalMemoryFactSchema.model_validate(f) for f in facts])
+
+
+@global_memory_router.delete(
+    "/me/facts/{fact_key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Erase one of the caller's own remembered facts in this App",
+    description=(
+        "Deletes a single durable global-memory fact of the caller in this App, "
+        "for every memory-enabled agent of the App. VIEWER or higher; only ever "
+        "the caller's own data. 404 if the caller holds no fact with that key. "
+        "Does NOT delete conversation history."
+    ),
+    tags=["Global Memory"],
+)
+async def erase_my_global_memory_fact(
+    app_id: int,
+    fact_key: str,
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Self-service single-fact erasure, current App. Identity from the
+    session only; the key alone can never reach another user's row because
+    the delete matches the caller's exact namespace (see
+    `tools.memory.client.delete_fact`)."""
+    session_user_id = int(auth_context.identity.id)
+    try:
+        deleted = await run_in_threadpool(delete_my_global_memory_fact, db, app_id, session_user_id, fact_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        logger.error(
+            "erase_my_global_memory_fact: unexpected error app_id=%s user_id=%s",
+            app_id, session_user_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The preference could not be deleted. Please retry.",
+        )
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preference not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @me_global_memory_router.delete(
     "/me/global-memory",
     response_model=GlobalMemoryPurgeResponseSchema,
@@ -230,7 +328,7 @@ async def erase_my_global_memory_everywhere(
     """
     session_user_id = int(auth_context.identity.id)
     try:
-        result = delete_user_global_memory(db, session_user_id)
+        result = delete_user_global_memory(db, session_user_id, commit=True)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except Exception:
