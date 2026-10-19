@@ -194,6 +194,10 @@ export const SERVICE_USAGE_STRINGS = {
   ].filter(Boolean).join(' and ') + '.',
   moveSandboxNote:
     'Agents inheriting the app default will follow the new default automatically.',
+  deleteReview:
+    'Review what uses this service below. You can move eligible agents to another service before deleting it.',
+  deleteButton: 'Delete service...',
+  deleting: 'Deleting...',
 } as const;
 
 export const MAX_DEPRECATION_NOTICE_LENGTH = 1000;

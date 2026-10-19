@@ -24,6 +24,8 @@ export interface ServiceUsageModalProps {
   readonly canMove?: boolean;
   /** Called after agents were moved so the parent can refresh its list. */
   readonly onMoved?: () => void;
+  /** Enables a delete action after the service usage has been reviewed. */
+  readonly onDelete?: () => Promise<boolean>;
   /** Entries link to editor-only pages; false renders them as plain text (VIEWER). */
   readonly canNavigate?: boolean;
 }
@@ -96,6 +98,7 @@ function ServiceUsageModal({
   serviceName,
   canMove = false,
   onMoved,
+  onDelete,
   canNavigate = true,
 }: ServiceUsageModalProps) {
   const [usage, setUsage] = useState<ServiceUsage | null>(null);
@@ -107,6 +110,7 @@ function ServiceUsageModal({
   const [targetId, setTargetId] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [moveMessage, setMoveMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const selectId = useId();
   const confirmTextId = useId();
@@ -241,6 +245,17 @@ function ServiceUsageModal({
       if (err instanceof ApiError && err.status === 409) setReloadKey((k) => k + 1);
     } finally {
       setMoving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!onDelete) return;
+    setDeleting(true);
+    try {
+      const deleted = await onDelete();
+      if (deleted) onClose();
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -486,9 +501,25 @@ function ServiceUsageModal({
           </div>
       )}
       {usage && !error && renderBody(usage)}
-      <div className="mt-4 flex justify-end">
+      {onDelete && usage && !error && (
+        <p className="mt-4 text-sm text-gray-600 dark:text-slate-300">
+          {S.deleteReview}
+        </p>
+      )}
+      <div className="mt-4 flex justify-between">
+        {onDelete && usage && !error ? (
+          <button
+            type="button"
+            disabled={deleting || moving}
+            onClick={() => void handleDelete()}
+            className="bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+          >
+            {deleting ? S.deleting : S.deleteButton}
+          </button>
+        ) : <span />}
         <button
           type="button"
+          disabled={deleting || moving}
           onClick={onClose}
           className="border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         >

@@ -66,7 +66,11 @@ function SandboxServicesPage() {
     setEditingService,
   } = useServicesManager<SandboxService>(appId, api as any, cache as any, { entity: 'sandbox service' });
 
-  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
+  const [usageService, setUsageService] = useState<{
+    id: number;
+    name: string;
+    deleteRequested?: boolean;
+  } | null>(null);
   const { testAction, modal: connectionTestModal } = useServiceConnectionTest('sandbox');
 
   async function testConnection(serviceId: number) {
@@ -154,7 +158,7 @@ function SandboxServicesPage() {
                 testAction(service.service_id, service.name, () => testConnection(service.service_id)),
                 { label: 'Edit', onClick: () => void handleEdit(service.service_id), icon: <Pencil className="w-4 h-4" />, variant: 'primary' as const },
                 { label: 'Copy', onClick: () => void handleCopy(service.service_id), icon: <ClipboardCopy className="w-4 h-4" />, variant: 'primary' as const },
-                { label: 'Delete', onClick: () => void handleDelete(service.service_id), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
+                { label: 'Delete', onClick: () => setUsageService({ id: service.service_id, name: service.name, deleteRequested: true }), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
               ]} size="sm" />
             ) : (
               <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
@@ -220,6 +224,7 @@ function SandboxServicesPage() {
           serviceName={usageService.name}
           canMove={canEdit}
           onMoved={() => void forceReload()}
+          onDelete={usageService.deleteRequested ? () => handleDelete(usageService.id) : undefined}
           onClose={() => setUsageService(null)}
         />
       )}

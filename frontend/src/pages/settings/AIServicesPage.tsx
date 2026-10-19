@@ -73,7 +73,11 @@ function AIServicesPage() {
   const { testAction, modal: connectionTestModal } = useServiceConnectionTest('AI');
   const [showImportModal, setShowImportModal] = useState(false);
   const [exportingServiceId, setExportingServiceId] = useState<number | null>(null);
-  const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
+  const [usageService, setUsageService] = useState<{
+    id: number;
+    name: string;
+    deleteRequested?: boolean;
+  } | null>(null);
   const [notification, setNotification] = useState<{message: string; type: 'success' | 'error'} | null>(null);
 
   async function testConnection(serviceId: number) {
@@ -249,7 +253,7 @@ function AIServicesPage() {
                 },
                 { label: 'Edit', onClick: () => void handleEdit(service.service_id), icon: <Pencil className="w-4 h-4" />, variant: 'primary' as const },
                 { label: 'Copy', onClick: () => void handleCopy(service.service_id), icon: <ClipboardCopy className="w-4 h-4" />, variant: 'primary' as const },
-                { label: 'Delete', onClick: () => void handleDelete(service.service_id), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
+                { label: 'Delete', onClick: () => setUsageService({ id: service.service_id, name: service.name, deleteRequested: true }), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
               ]} size="sm" />
             ) : (
               <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
@@ -341,6 +345,7 @@ function AIServicesPage() {
           serviceName={usageService.name}
           canMove={canEdit}
           onMoved={() => void forceReload()}
+          onDelete={usageService.deleteRequested ? () => handleDelete(usageService.id) : undefined}
           onClose={() => setUsageService(null)}
         />
       )}
