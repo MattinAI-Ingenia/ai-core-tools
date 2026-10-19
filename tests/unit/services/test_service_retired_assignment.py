@@ -455,6 +455,7 @@ class TestRepositoryDeleteOwnership:
         import asyncio
         from fastapi import HTTPException
         from routers.internal import repositories as repo_router
+        from routers.controls import repository_scope
 
         foreign = MagicMock()
         foreign.app_id = 99
@@ -462,18 +463,20 @@ class TestRepositoryDeleteOwnership:
             repo_router.RepositoryService, "delete_repository_router"
         ) as delete:
             with pytest.raises(HTTPException) as exc:
-                asyncio.run(repo_router.delete_repository(10, 5, MagicMock(), MagicMock(), MagicMock()))
+                repository_scope.require_repository_in_app(10, 5, MagicMock(), MagicMock())
         assert exc.value.status_code == 404
         delete.assert_not_called()
 
     def test_own_app_delete_proceeds(self):
         import asyncio
         from routers.internal import repositories as repo_router
+        from routers.controls import repository_scope
 
         own = MagicMock()
         own.app_id = 10
         with patch.object(repo_router.RepositoryService, "get_repository", return_value=own), patch.object(
             repo_router.RepositoryService, "delete_repository_router"
         ) as delete:
+            repository_scope.require_repository_in_app(10, 5, MagicMock(), MagicMock())
             asyncio.run(repo_router.delete_repository(10, 5, MagicMock(), MagicMock(), MagicMock()))
         delete.assert_called_once()

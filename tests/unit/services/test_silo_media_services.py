@@ -1,3 +1,4 @@
+from fastapi import HTTPException
 """Media (video/audio) indexing driven by the silo's own media services."""
 
 from types import SimpleNamespace
@@ -283,7 +284,16 @@ class TestDeleteMediaItem:
 
     def test_delete_media_by_id_not_found(self):
         with patch("services.media_service.MediaRepository.get_by_id", return_value=None):
-            assert MediaService.delete_media(5, 1, 3, MagicMock()) is False
+            with pytest.raises(HTTPException) as exc:
+                MediaService.delete_media(5, 1, 3, MagicMock())
+        assert exc.value.status_code == 404
+
+    def test_delete_media_of_another_repository_is_404(self):
+        media = MagicMock(repository_id=99)
+        with patch("services.media_service.MediaRepository.get_by_id", return_value=media):
+            with pytest.raises(HTTPException) as exc:
+                MediaService.delete_media(5, 1, 3, MagicMock())
+        assert exc.value.status_code == 404
 
 
 class TestSiloServiceMediaWiring:
