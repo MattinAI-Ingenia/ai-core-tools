@@ -6,11 +6,14 @@ import CompactServiceEditor from '../../components/services/CompactServiceEditor
 import type { SandboxServiceFormData, ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { getServiceApiClient } from '../../components/services/serviceApi';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { LoadingState } from '../../components/ui/LoadingState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useSettingsCache } from '../../contexts/SettingsCacheContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
@@ -27,6 +30,7 @@ interface SystemSandboxService extends Partial<ServiceLifecycleFields> {
 
 const SystemSandboxServicesPage: React.FC = () => {
   const confirm = useConfirm();
+  const settingsCache = useSettingsCache();
   const mutate = useApiMutation();
 
   const [services, setServices] = useState<SystemSandboxService[]>([]);
@@ -35,6 +39,7 @@ const SystemSandboxServicesPage: React.FC = () => {
   const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingService, setEditingService] = useState<SystemSandboxService | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('sandbox');
 
   const fetchServices = useCallback(async () => {
     try {
@@ -97,8 +102,26 @@ const SystemSandboxServicesPage: React.FC = () => {
     );
     if (result === undefined) return;
 
+    settingsCache.invalidateSystemServiceCaches();
     handleCancel();
     await fetchServices();
+  };
+
+  const testConnection = async (serviceId: number) => {
+    const detail = await apiService.getSystemSandboxService(serviceId);
+    return getServiceApiClient('sandbox', 'system', undefined).testConnection({
+      name: detail.name,
+      provider: detail.provider,
+      api_key: detail.api_key,
+      base_url: detail.base_url,
+      opensandbox_image: detail.opensandbox_image,
+      daytona_target: detail.daytona_target,
+      daytona_workspace: detail.daytona_workspace,
+      daytona_cpu: detail.daytona_cpu,
+      daytona_memory_gb: detail.daytona_memory_gb,
+      e2b_template: detail.e2b_template,
+      e2b_workspace: detail.e2b_workspace,
+    }, serviceId);
   };
 
   const handleDelete = async (service: SystemSandboxService) => {
@@ -119,6 +142,7 @@ const SystemSandboxServicesPage: React.FC = () => {
       },
     );
     if (result === undefined) return;
+    settingsCache.invalidateSystemServiceCaches();
     await fetchServices();
   };
 
@@ -189,6 +213,7 @@ const SystemSandboxServicesPage: React.FC = () => {
                             icon: <Users className="w-4 h-4" />,
                             onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
                           },
+                          testAction(svc.service_id, svc.name, () => testConnection(svc.service_id)),
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -247,6 +272,7 @@ const SystemSandboxServicesPage: React.FC = () => {
           onClose={() => setUsageService(null)}
         />
       )}
+      {connectionTestModal}
     </div>
   );
 };

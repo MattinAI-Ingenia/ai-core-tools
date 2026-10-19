@@ -1,7 +1,6 @@
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
-import { Box, Plug, Pencil, ClipboardCopy, Trash2, Loader2, Users } from 'lucide-react';
-import Modal from '../../components/ui/Modal';
+import { Box, Pencil, ClipboardCopy, Trash2, Users } from 'lucide-react';
 import ServiceWizard from '../../components/services/wizard/ServiceWizard';
 import CompactServiceEditor from '../../components/services/CompactServiceEditor';
 import ActionDropdown from '../../components/ui/ActionDropdown';
@@ -17,6 +16,7 @@ import type { ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import UsedByButton from '../../components/services/UsedByButton';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 
 interface SandboxService extends Partial<ServiceLifecycleFields> {
@@ -25,6 +25,7 @@ interface SandboxService extends Partial<ServiceLifecycleFields> {
   provider: string;
   created_at: string;
   needs_api_key?: boolean;
+  is_system?: boolean;
 }
 
 function SandboxServicesPage() {
@@ -65,25 +66,12 @@ function SandboxServicesPage() {
   } = useServicesManager<SandboxService>(appId, api as any, cache as any, { entity: 'sandbox service' });
 
   const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
-  const [testResult, setTestResult] = useState<any>(null);
-  const [isTestModalOpen, setIsTestModalOpen] = useState(false);
-  const [testingServiceId, setTestingServiceId] = useState<number | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('sandbox');
 
-  async function handleTestConnection(serviceId: number) {
-    if (!appId) return;
-    setTestingServiceId(serviceId);
-    setTestResult(null);
-    setIsTestModalOpen(true);
-
-    try {
-      const apiService = (await import('../../services/api')).apiService;
-      const result = await apiService.testSandboxServiceConnection(Number.parseInt(appId), serviceId);
-      setTestResult(result);
-    } catch (err) {
-      setTestResult({ status: 'error', message: err instanceof Error ? err.message : 'Failed to test connection' });
-    } finally {
-      setTestingServiceId(null);
-    }
+  async function testConnection(serviceId: number) {
+    if (!appId) throw new Error('App ID not found');
+    const apiService = (await import('../../services/api')).apiService;
+    return apiService.testSandboxServiceConnection(Number.parseInt(appId, 10), serviceId) as Promise<any>;
   }
 
   if (loading) return (
@@ -128,13 +116,20 @@ function SandboxServicesPage() {
           {
             header: 'Name',
             render: (service: SandboxService) => (
-              canEdit ? (
-                <button type="button" className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors text-left" onClick={() => handleEdit(service.service_id)}>
-                  {service.name}
-                </button>
-              ) : (
-                <span className="text-sm font-medium text-gray-900">{service.name}</span>
-              )
+              <span className="flex items-center gap-1.5">
+                {canEdit && !service.is_system ? (
+                  <button type="button" className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors text-left" onClick={() => handleEdit(service.service_id)}>
+                    {service.name}
+                  </button>
+                ) : (
+                  <span className="text-sm font-medium text-gray-900">{service.name}</span>
+                )}
+                {service.is_system && (
+                  <span className="ml-1 text-xs font-medium text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">
+                    System
+                  </span>
+                )}
+              </span>
             )
           },
           { header: 'Provider', render: (service: SandboxService) => (
@@ -147,15 +142,15 @@ function SandboxServicesPage() {
           )},
           { header: 'Created', render: (service: any) => (service.created_at ? new Date(service.created_at).toLocaleDateString() : 'N/A') },
           { header: 'Actions', className: 'relative', render: (service: SandboxService) => (
-            canEdit ? (
+            service.is_system ? (
+              <span className="inline-flex items-center gap-3">
+                <span className="text-gray-400 text-sm">System</span>
+                <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
+              </span>
+            ) : canEdit ? (
               <ActionDropdown triggerAriaLabel={`Actions for ${service.name}`} actions={[
                 { label: SERVICE_USAGE_STRINGS.action, onClick: () => setUsageService({ id: service.service_id, name: service.name }), icon: <Users className="w-4 h-4" /> },
-                {
-                  label: testingServiceId === service.service_id ? 'Testing...' : 'Test Connection',
-                  onClick: () => void handleTestConnection(service.service_id),
-                  icon: testingServiceId === service.service_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plug className="w-4 h-4" />,
-                  disabled: testingServiceId === service.service_id
-                },
+                testAction(service.service_id, service.name, () => testConnection(service.service_id)),
                 { label: 'Edit', onClick: () => void handleEdit(service.service_id), icon: <Pencil className="w-4 h-4" />, variant: 'primary' as const },
                 { label: 'Copy', onClick: () => void handleCopy(service.service_id), icon: <ClipboardCopy className="w-4 h-4" />, variant: 'primary' as const },
                 { label: 'Delete', onClick: () => void handleDelete(service.service_id), icon: <Trash2 className="w-4 h-4" />, variant: 'danger' as const }
@@ -226,48 +221,7 @@ function SandboxServicesPage() {
         />
       )}
 
-      {/* Test Result Modal */}
-      <Modal
-        isOpen={isTestModalOpen}
-        onClose={() => !testingServiceId && setIsTestModalOpen(false)}
-        title="Connection Test Result"
-      >
-        <div className="p-4">
-          {testingServiceId ? (
-            <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Testing connection to sandbox service...</p>
-            </div>
-          ) : testResult && (
-            <div>
-              <div className={`mb-4 p-3 rounded ${testResult.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                <strong>Status:</strong> {testResult.status === 'success' ? 'Success' : 'Error'}
-                <br />
-                <strong>Message:</strong> {testResult.message}
-              </div>
-
-              {testResult.response && (
-                <div>
-                  <h4 className="font-semibold mb-2">Response:</h4>
-                  <div className="bg-gray-50 p-3 rounded border text-sm font-mono whitespace-pre-wrap max-h-60 overflow-y-auto">
-                    {testResult.response}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {!testingServiceId && (
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => setIsTestModalOpen(false)}
-                className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
-              >
-                Close
-              </button>
-            </div>
-          )}
-        </div>
-      </Modal>
+      {connectionTestModal}
     </div>
   );
 }

@@ -9,8 +9,11 @@ import { ErrorState } from '../../components/ui/ErrorState';
 import ActionDropdown from '../../components/ui/ActionDropdown';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
+import { getServiceApiClient } from '../../components/services/serviceApi';
+import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useSettingsCache } from '../../contexts/SettingsCacheContext';
 import { useApiMutation } from '../../hooks/useApiMutation';
 import { errorMessage, MESSAGES } from '../../constants/messages';
 
@@ -31,6 +34,7 @@ interface SystemAIService extends Partial<ServiceLifecycleFields> {
 
 const SystemAIServicesPage: React.FC = () => {
   const confirm = useConfirm();
+  const settingsCache = useSettingsCache();
   const mutate = useApiMutation();
 
   const [services, setServices] = useState<SystemAIService[]>([]);
@@ -39,6 +43,7 @@ const SystemAIServicesPage: React.FC = () => {
   const [showForm, setShowForm] = useState(false);
   const [usageService, setUsageService] = useState<{ id: number; name: string } | null>(null);
   const [editingService, setEditingService] = useState<SystemAIService | null>(null);
+  const { testAction, modal: connectionTestModal } = useServiceConnectionTest('AI');
 
   const fetchServices = useCallback(async () => {
     try {
@@ -101,8 +106,24 @@ const SystemAIServicesPage: React.FC = () => {
     );
     if (result === undefined) return;
 
+    settingsCache.invalidateSystemServiceCaches();
     handleCancel();
     await fetchServices();
+  };
+
+  const testConnection = async (serviceId: number) => {
+    const detail = await apiService.getSystemAIService(serviceId);
+    return getServiceApiClient('ai', 'system', undefined).testConnection({
+      name: detail.name,
+      provider: detail.provider,
+      model_name: detail.model_name,
+      api_key: detail.api_key,
+      base_url: detail.base_url,
+      api_version: detail.api_version,
+      supports_video: detail.supports_video,
+      aws_access_key_id: detail.aws_access_key_id,
+      aws_region: detail.aws_region,
+    }, serviceId);
   };
 
   const handleDelete = async (service: SystemAIService) => {
@@ -123,6 +144,7 @@ const SystemAIServicesPage: React.FC = () => {
       },
     );
     if (result === undefined) return;
+    settingsCache.invalidateSystemServiceCaches();
     await fetchServices();
   };
 
@@ -199,6 +221,7 @@ const SystemAIServicesPage: React.FC = () => {
                             icon: <Users className="w-4 h-4" />,
                             onClick: () => setUsageService({ id: svc.service_id, name: svc.name }),
                           },
+                          testAction(svc.service_id, svc.name, () => testConnection(svc.service_id)),
                           {
                             label: 'Edit',
                             icon: <Pencil className="w-4 h-4" />,
@@ -257,6 +280,7 @@ const SystemAIServicesPage: React.FC = () => {
           onClose={() => setUsageService(null)}
         />
       )}
+      {connectionTestModal}
     </div>
   );
 };
