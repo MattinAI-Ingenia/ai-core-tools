@@ -7,6 +7,20 @@ import { useAppRole } from '../../hooks/useAppRole';
 import { AppRole } from '../../types/roles';
 import ReadOnlyBanner from '../../components/ui/ReadOnlyBanner';
 
+// Languages remembered facts can be written in (App.memory_language). Must match
+// MEMORY_LANGUAGES in backend/tools/memory/settings.py; the backend rejects others.
+const MEMORY_LANGUAGE_OPTIONS = [
+  { code: 'en', label: 'English' },
+  { code: 'es', label: 'Español' },
+  { code: 'eu', label: 'Euskara' },
+  { code: 'ca', label: 'Català' },
+  { code: 'gl', label: 'Galego' },
+  { code: 'fr', label: 'Français' },
+  { code: 'de', label: 'Deutsch' },
+  { code: 'it', label: 'Italiano' },
+  { code: 'pt', label: 'Português' },
+] as const;
+
 type LangsmithTestStatus = 'ok' | 'unauthorized' | 'network' | 'unknown';
 
 interface LangsmithTestResult {
@@ -44,7 +58,12 @@ function AppSettingsPage() {
     // App, not "use a default" — there is no system-level fallback (D-21).
     memory_extraction_service_id: null as number | null,
     memory_embedding_service_id: null as number | null,
+    // Fact-extraction cadence; null = deployment default.
+    memory_write_every_n_turns: null as number | null,
+    // Language memory facts are written in; null = English.
+    memory_language: null as string | null,
   });
+  const [memoryWriteEveryDefault, setMemoryWriteEveryDefault] = useState(5);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -101,7 +120,10 @@ function AppSettingsPage() {
         default_sandbox_service_id: app.default_sandbox_service_id ?? null,
         memory_extraction_service_id: app.memory_extraction_service_id ?? null,
         memory_embedding_service_id: app.memory_embedding_service_id ?? null,
+        memory_write_every_n_turns: app.memory_write_every_n_turns ?? null,
+        memory_language: app.memory_language ?? null,
       });
+      setMemoryWriteEveryDefault(app.memory_write_every_n_turns_default ?? 5);
       setMemoryExtractionServices(app.ai_services ?? []);
       setMemoryEmbeddingServices(app.embedding_services ?? []);
       setOriginalLangsmithKey(langsmithKey);
@@ -165,12 +187,14 @@ function AppSettingsPage() {
         default_sandbox_service_id: formData.default_sandbox_service_id,
         memory_extraction_service_id: formData.memory_extraction_service_id,
         memory_embedding_service_id: formData.memory_embedding_service_id,
+        memory_write_every_n_turns: formData.memory_write_every_n_turns,
+        memory_language: formData.memory_language,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
-      // AC-46: a bad memory-service config (wrong-dimensionality embeddings, or an
-      // extraction/embedding service id that doesn't belong to this app) is rejected
+      // AC-38: a bad memory-service config (an extraction/embedding service id that
+      // doesn't exist or doesn't belong to this app) is rejected
       // with a 400 whose detail names the offending field — surface it as a
       // field-level error next to that selector instead of a generic toast.
       // `MemoryServiceConfigError` (backend/services/app_service.py) always includes
@@ -615,6 +639,72 @@ function AppSettingsPage() {
                       {memoryEmbeddingError}
                     </p>
                   )}
+                </div>
+
+                {/* Cross-session memory: language facts are written in */}
+                <div>
+                  <label htmlFor="memory_language" className="block text-sm font-medium text-gray-700 mb-2">
+                    Memory language
+                  </label>
+                  <select
+                    id="memory_language"
+                    name="memory_language"
+                    value={formData.memory_language ?? 'en'}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setFormData(prev => ({ ...prev, memory_language: value === 'en' ? null : value }));
+                    }}
+                    disabled={!canEdit}
+                    aria-describedby="memory_language_help"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  >
+                    {MEMORY_LANGUAGE_OPTIONS.map((option) => (
+                      <option key={option.code} value={option.code}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p id="memory_language_help" className="mt-1 text-sm text-gray-500">
+                    Language remembered facts are written in, whatever language users write in. Users see them
+                    in this language under Preferences. Changing it does not translate facts already stored.
+                  </p>
+                </div>
+
+                {/* Cross-session memory: how often facts are extracted */}
+                <div>
+                  <label htmlFor="memory_write_every_n_turns" className="block text-sm font-medium text-gray-700 mb-2">
+                    Learn from the conversation every
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      id="memory_write_every_n_turns"
+                      name="memory_write_every_n_turns"
+                      min={1}
+                      max={100}
+                      step={1}
+                      inputMode="numeric"
+                      value={formData.memory_write_every_n_turns ?? ''}
+                      placeholder={String(memoryWriteEveryDefault)}
+                      onChange={(e) => {
+                        const parsed = Number.parseInt(e.target.value, 10);
+                        setFormData(prev => ({
+                          ...prev,
+                          memory_write_every_n_turns: Number.isNaN(parsed) ? null : Math.min(Math.max(parsed, 1), 100),
+                        }));
+                      }}
+                      disabled={!canEdit}
+                      aria-describedby="memory_write_every_n_turns_help"
+                      className="w-24 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    />
+                    <span className="text-sm text-gray-700">messages</span>
+                  </div>
+                  <p id="memory_write_every_n_turns_help" className="mt-1 text-sm text-gray-500">
+                    Durable facts are extracted on the first message of a conversation and then every this
+                    many messages, from all the user&apos;s messages since the last time. Lower values learn
+                    sooner but cost more extraction calls. Leave empty to use the default
+                    ({memoryWriteEveryDefault}).
+                  </p>
                 </div>
               </div>
 

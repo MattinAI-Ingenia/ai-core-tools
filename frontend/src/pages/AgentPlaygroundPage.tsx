@@ -16,7 +16,7 @@ interface Agent {
   type: string;
   has_memory?: boolean;
   /** Cross-session user memory (D-3/D-16) — gates the chat UI's self-service
-   * "forget my preferences" erasure action (D-11/FR-8(b)). */
+   * "Preferences" panel (view/erase remembered facts) (D-11/FR-8(b)). */
   has_global_memory?: boolean;
   system_prompt?: string;
   prompt_template?: string;

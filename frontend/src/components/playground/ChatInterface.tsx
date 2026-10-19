@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Timer, BrainCircuit } from 'lucide-react';
-import { apiService, ApiError } from '../../services/api';
+import { apiService } from '../../services/api';
 import { StreamingChatError, useStreamingChat } from '../../hooks/useStreamingChat';
 import { formatDuration } from '../../utils/duration';
 import MessageContent from './MessageContent';
@@ -10,7 +10,7 @@ import type { SearchFilterMetadataField } from './SearchFilters';
 import AttachedFilesPanel from './AttachedFilesPanel';
 import type { PanelFile } from './AttachedFilesPanel';
 import ToolHistoryPanel from './ToolHistoryPanel';
-import ConfirmationModal from '../ui/ConfirmationModal';
+import MemoryPreferencesModal from './MemoryPreferencesModal';
 
 interface Message {
   id: string;
@@ -48,7 +48,7 @@ interface ChatInterfaceProps {
   metadataFields?: SearchFilterMetadataField[];
   vectorDbType?: string;
   /** Whether this agent has cross-session user memory (D-3/D-16) enabled. Gates the
-   * self-service "forget my preferences" erasure action (D-11/FR-8(b)) — offering it
+   * self-service "Preferences" panel (view/erase remembered facts, D-11/FR-8(b)) — offering it
    * for an agent that never remembers anything across conversations is confusing. */
   hasGlobalMemory?: boolean;
 }
@@ -344,38 +344,14 @@ function ChatInterface({
     }
   };
 
-  // ─── Cross-session memory erasure (D-11, FR-8(b)) ────────────────────────────
-  // Self-service "forget my preferences": purges durable facts remembered about the
-  // *current user* across every memory-enabled agent in this app. Identity is derived
-  // server-side from the session — `apiService.eraseMyGlobalMemory` never accepts or
-  // sends a user id (AC-45's client-side half). This is a different, additive action
-  // from "Reset" above: Reset clears this conversation's transcript/checkpointer state;
-  // this clears durable cross-session facts only and leaves conversation history intact.
-  const [isForgetConfirmOpen, setIsForgetConfirmOpen] = useState(false);
-  const [isForgetting, setIsForgetting] = useState(false);
-  const [forgetResult, setForgetResult] = useState<
-    { readonly kind: 'success'; readonly purged: number } | { readonly kind: 'error'; readonly message: string } | null
-  >(null);
-
-  const handleForgetMemory = async () => {
-    setIsForgetting(true);
-    try {
-      const result = await apiService.eraseMyGlobalMemory(appId);
-      // A count of zero is a normal, successful outcome ("nothing to forget"),
-      // never treated as an error.
-      setForgetResult({ kind: 'success', purged: result.purged });
-    } catch (error) {
-      setForgetResult({
-        kind: 'error',
-        message: error instanceof ApiError || error instanceof Error
-          ? error.message
-          : 'Failed to erase memory due to an unexpected error.',
-      });
-    } finally {
-      setIsForgetting(false);
-      setIsForgetConfirmOpen(false);
-    }
-  };
+  // ─── Cross-session memory "Preferences" (D-11, FR-8(b)) ──────────────────────
+  // Self-service view of the durable facts remembered about the *current user* across
+  // every memory-enabled agent in this app, with per-fact and delete-all erasure (see
+  // `MemoryPreferencesModal`). Identity is derived server-side from the session — no
+  // call sends a user id (AC-45's client-side half). Different from "Reset" below:
+  // Reset clears this conversation's transcript/checkpointer state; this touches
+  // durable cross-session facts only and leaves conversation history intact.
+  const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
 
   // ─── File upload ─────────────────────────────────────────────────────────────
 
@@ -577,25 +553,23 @@ function ChatInterface({
       <div className="flex gap-4 items-start">
         {/* Chat card */}
         <div className="flex-1 pg-glass rounded-2xl flex flex-col h-[calc(100vh-20rem)] min-h-[480px]">
-          {/* Reset / forget-memory buttons — subtle, top-right corner */}
+          {/* Reset / preferences buttons — subtle, top-right corner */}
           <div className="flex justify-end items-center gap-2 px-4 pt-3 pb-1">
             {hasGlobalMemory && (
               <button
                 type="button"
-                onClick={() => {
-                  setForgetResult(null);
-                  setIsForgetConfirmOpen(true);
-                }}
+                onClick={() => setIsPreferencesOpen(true)}
+                aria-haspopup="dialog"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
                            text-gray-500 dark:text-gray-400
-                           hover:text-red-600 dark:hover:text-red-400
-                           hover:bg-red-50 dark:hover:bg-red-900/20
-                           border border-transparent hover:border-red-200 dark:hover:border-red-800/40
+                           hover:text-indigo-600 dark:hover:text-indigo-400
+                           hover:bg-indigo-50 dark:hover:bg-indigo-900/20
+                           border border-transparent hover:border-indigo-200 dark:hover:border-indigo-800/40
                            transition-all duration-150
                            focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
               >
                 <BrainCircuit className="w-3.5 h-3.5" aria-hidden="true" />
-                Forget my preferences
+                Memories
               </button>
             )}
             <button
@@ -626,27 +600,6 @@ function ChatInterface({
               Reset
             </button>
           </div>
-
-          {/* Forget-memory outcome banner — zero purged is a success, not an error */}
-          {forgetResult && (
-            <div className="px-4 pb-1">
-              <div
-                role={forgetResult.kind === 'error' ? 'alert' : 'status'}
-                aria-live={forgetResult.kind === 'error' ? undefined : 'polite'}
-                className={`text-xs rounded-lg px-3 py-2 border ${
-                  forgetResult.kind === 'success'
-                    ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800/40'
-                    : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800/40'
-                }`}
-              >
-                {forgetResult.kind === 'success'
-                  ? forgetResult.purged > 0
-                    ? `Forgot ${forgetResult.purged} remembered fact${forgetResult.purged === 1 ? '' : 's'} about you across this app's memory-enabled agents.`
-                    : 'Nothing to forget — no durable facts were stored about you.'
-                  : forgetResult.message}
-              </div>
-            </div>
-          )}
 
           {/* Messages container */}
           <div
@@ -1008,32 +961,13 @@ function ChatInterface({
         />
       </div>
 
-      {/* Forget-memory confirmation — accessible, focus-managed destructive-action dialog */}
-      <ConfirmationModal
-        isOpen={isForgetConfirmOpen}
-        title="Forget my preferences?"
-        message={
-          <div className="space-y-2">
-            <p>
-              This erases the durable facts remembered about you (preferences, recurring
-              context) that were learned from past conversations with agents in this app.
-            </p>
-            <p>
-              It does <strong>not</strong> delete your conversation history — existing chat
-              transcripts are unaffected.
-            </p>
-            <p>
-              Memory is shared across every agent in this app that has cross-session memory
-              enabled, so this clears it for all of them, not just {agentName}.
-            </p>
-          </div>
-        }
-        confirmLabel="Forget my preferences"
-        cancelLabel="Cancel"
-        variant="danger"
-        isLoading={isForgetting}
-        onConfirm={handleForgetMemory}
-        onCancel={() => setIsForgetConfirmOpen(false)}
+      {/* Cross-session memory preferences — view and erase remembered facts */}
+      <MemoryPreferencesModal
+        isOpen={isPreferencesOpen}
+        onClose={() => setIsPreferencesOpen(false)}
+        appId={appId}
+        agentId={agentId}
+        agentName={agentName}
       />
     </div>
   );

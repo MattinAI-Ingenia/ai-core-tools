@@ -1046,11 +1046,7 @@ function AgentFormPage() {
                           <label htmlFor="has_global_memory" className="text-sm font-medium text-gray-900">Cross-session user memory</label>
                           <p id="has_global_memory_help" className="text-xs text-gray-500">
                             Remembers durable facts about each user across different conversations, stored
-                            long-term. Independent from "Conversational" above, which only keeps context
-                            inside one conversation. Memory is shared across every agent in this app that
-                            has this toggle on. Which models do the extraction and embedding work is
-                            configured once for the whole app, under App settings — this toggle does
-                            nothing until those are set there.
+                            long-term.
                           </p>
                         </div>
                       </div>

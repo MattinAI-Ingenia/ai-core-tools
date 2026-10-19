@@ -86,6 +86,12 @@ export interface App {
   // not "use a default" — there is no system-level fallback (D-21).
   memory_extraction_service_id?: number | null;
   memory_embedding_service_id?: number | null;
+  // Fact-extraction cadence: turn 1 and every Nth turn after. null = deployment default,
+  // which `memory_write_every_n_turns_default` reports.
+  memory_write_every_n_turns?: number | null;
+  memory_write_every_n_turns_default?: number;
+  // Language memory facts are written in (code); null = English.
+  memory_language?: string | null;
   // Option lists for the App-settings memory service selectors (FR-3(b)); App-visible
   // plus system-level services, labelled like the agent form's `ai_services` list.
   ai_services?: Array<{ service_id: number; name: string }>;
@@ -102,6 +108,14 @@ export interface App {
 /** Response for the self-service global-memory erasure endpoints (D-11, FR-8(b)). */
 export interface GlobalMemoryPurgeResult {
   purged: number;
+}
+
+/** One durable fact remembered about the current user in an app (cross-session memory). */
+export interface GlobalMemoryFact {
+  key: string;
+  text: string;
+  agent_id: number | null;
+  created_at: string | null;
 }
 
 /** RAG retrieval-time filter applied on top of an agent's fixed silo. Mirrors RagConfigSection's RagFixedFilter shape. */
@@ -668,6 +682,8 @@ class ApiService {
     // `model_fields_set`); send an explicit `null` to clear the configuration (D-21).
     memory_extraction_service_id?: number | null;
     memory_embedding_service_id?: number | null;
+    memory_write_every_n_turns?: number | null;
+    memory_language?: string | null;
   }): Promise<App> {
     return this.request(`/internal/apps/${appId}`, {
       method: 'PUT',
@@ -685,6 +701,18 @@ class ApiService {
    */
   async eraseMyGlobalMemory(appId: number): Promise<GlobalMemoryPurgeResult> {
     return this.request(`/internal/apps/${appId}/global-memory/me`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Identity is always the session's — none of these send a user id (D-11/AC-45).
+  async listMyGlobalMemory(appId: number): Promise<GlobalMemoryFact[]> {
+    const result = await this.request<{ facts: GlobalMemoryFact[] }>(`/internal/apps/${appId}/global-memory/me`);
+    return result.facts;
+  }
+
+  async eraseMyGlobalMemoryFact(appId: number, factKey: string): Promise<void> {
+    await this.request(`/internal/apps/${appId}/global-memory/me/facts/${encodeURIComponent(factKey)}`, {
       method: 'DELETE',
     });
   }
