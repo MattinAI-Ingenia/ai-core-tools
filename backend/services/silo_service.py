@@ -12,7 +12,7 @@ from models.embedding_service import EmbeddingService
 from db.database import SessionLocal
 from db.database import db as db_obj
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from utils.logger import get_logger
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -283,6 +283,26 @@ def _resolve_vector_db_type(silo: Optional[Silo] = None, override: Optional[str]
     return 'PGVECTOR'
 
 
+def _end_read_transaction_before_lightrag(session: Optional[Session]) -> None:
+    """End a session's read-only transaction before any LightRAG storage work.
+
+    LightRAG's first-run storage init issues ``CREATE INDEX CONCURRENTLY``, which
+    waits for every transaction that was already open — a request or indexing
+    session holding its read snapshot across the build deadlocks the run (seen
+    live: two idle-in-transaction handler sessions vs the DDL). Commit it here,
+    once the silo's service relationships are loaded; ``expire_on_commit`` is
+    disabled so the build's attribute reads on those loaded objects don't
+    re-open a transaction mid-build. Sessions with pending writes are left
+    untouched (never commit someone else's work).
+    """
+    if session is None or not session.in_transaction():
+        return
+    if session.new or session.dirty or session.deleted:
+        return
+    session.expire_on_commit = False
+    session.commit()
+
+
 def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str] = None) -> VectorStoreInterface:
     """Return the vector store implementation bound to the silo's backend."""
 
@@ -291,7 +311,7 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
         # EXTRACT is the role that drives indexing; prefer the new column
         # and fall back to the legacy ``indexing_service`` for old silos.
         extract_service = getattr(silo, 'extract_service', None) or silo.indexing_service
-        return VectorStoreFactory.get_vector_store(
+        store = VectorStoreFactory.get_vector_store(
             db_obj, resolved_type,
             ai_service=extract_service,
             embedding_service=silo.embedding_service,
@@ -307,6 +327,11 @@ def _get_vector_store(silo: Optional[Silo] = None, vector_db_type: Optional[str]
             lightrag_max_source_ids_per_relation=getattr(silo, 'lightrag_max_source_ids_per_relation', None),
             lightrag_entity_types=getattr(silo, 'lightrag_entity_types', None),
         )
+        # Every service relationship above was loaded inside the factory call's
+        # arguments, so the owning session's read snapshot can end before the
+        # store's first LightRAG build (see helper docstring for why).
+        _end_read_transaction_before_lightrag(object_session(silo))
+        return store
     return VectorStoreFactory.get_vector_store(db_obj, resolved_type)
 
 

@@ -19,6 +19,7 @@ from models.silo import Silo
 from models.repository import Repository
 from models.resource import Resource
 from models.embedding_service import EmbeddingService
+from services.silo_service import _get_vector_store
 
 
 @pytest.fixture
@@ -94,6 +95,32 @@ def reindex_resource(db, reindex_repository):
     db.add(resource)
     db.flush()
     return resource
+
+
+@pytest.fixture
+def lightrag_silo(db, fake_app):
+    """LIGHTRAG-type Silo — the backend whose first build runs the blocking DDL."""
+    embedding_svc = EmbeddingService(
+        name="LightRAG Embedding Service",
+        provider="OpenAI",
+        api_key="sk-test-fake",  # pragma: allowlist secret
+        app_id=fake_app.app_id,
+    )
+    db.add(embedding_svc)
+    db.flush()
+
+    silo = Silo(
+        name="LightRAG Txn Test Silo",
+        description="Silo for the LightRAG session-transaction tests",
+        silo_type="REPO",
+        status="active",
+        app_id=fake_app.app_id,
+        vector_db_type="LIGHTRAG",
+        embedding_service_id=embedding_svc.service_id,
+    )
+    db.add(silo)
+    db.flush()
+    return silo
 
 
 def _reindex_url(app_id: int, silo_id: int, resource_id: int) -> str:
@@ -311,6 +338,62 @@ class TestReindexIdempotency:
             f"Filter resource_id mismatch: {filter_metadata}"
         )
         assert "index_batch" in exclude, f"Expected index_batch in exclude, got {exclude}"
+
+    def test_lightrag_store_construction_ends_the_silo_session_transaction(
+        self,
+        db,
+        fake_app,
+        lightrag_silo,
+    ):
+        """Building a LightRAG store ends the owning session's read snapshot.
+
+        LightRAG's first-run storage init issues CREATE INDEX CONCURRENTLY, which
+        waits for every transaction that was already open — indexing flows keep
+        their session open across the whole build, so it must be committed here.
+        """
+        db.flush()
+        with patch(
+            "services.silo_service.VectorStoreFactory.get_vector_store",
+            return_value=MagicMock(),
+        ):
+            _get_vector_store(lightrag_silo)
+        assert not db.in_transaction()
+        # expire_on_commit must stay off so the build's own attribute reads on
+        # already-loaded relationships don't re-open a transaction mid-build.
+        assert lightrag_silo.embedding_service.name == "LightRAG Embedding Service"
+        assert not db.in_transaction()
+
+    def test_reindex_ends_the_request_session_transaction_before_indexing(
+        self,
+        client,
+        db,
+        fake_app,
+        owner_headers,
+        reindex_silo,
+        reindex_resource,
+        reindex_session_patch,
+    ):
+        """The request's read snapshot must be gone before the blocking indexing
+        runs, or LightRAG's first-run CREATE INDEX CONCURRENTLY deadlocks against
+        this very session (seen live on a fresh database)."""
+        db.flush()
+        received = {}
+
+        def fake_reindex(resource, *args, **kwargs):
+            received["resource_id"] = resource.resource_id  # ORM read post-commit
+            received["in_txn"] = db.in_transaction()
+
+        with patch(
+            "services.silo_service.SiloService.reindex_resource",
+            side_effect=fake_reindex,
+        ):
+            resp = client.post(
+                _reindex_url(fake_app.app_id, reindex_silo.silo_id, reindex_resource.resource_id),
+                headers=owner_headers,
+            )
+        assert resp.status_code == 200, f"Reindex failed: {resp.text}"
+        assert received["resource_id"] == reindex_resource.resource_id
+        assert received["in_txn"] is False
 
 
 class TestReindexAuthorization:

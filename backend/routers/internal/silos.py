@@ -8,7 +8,7 @@ import json
 import time
 import asyncio
 
-from services.silo_service import SiloService, ResourceIndexingError
+from services.silo_service import SiloService, ResourceIndexingError, _end_read_transaction_before_lightrag
 from services.silo_export_service import SiloExportService
 from services.silo_import_service import SiloImportService
 from models.silo import Silo
@@ -560,6 +560,10 @@ async def reindex_silo_resource(
                    "Please wait for it to finish before reindexing a file.",
         )
     try:
+        # The blocking reindex below must not hold this request's read
+        # transaction open across LightRAG's first-run CREATE INDEX
+        # CONCURRENTLY — that mutual wait is the reindex deadlock.
+        _end_read_transaction_before_lightrag(db)
         # Reindex is blocking I/O (DB + embedding HTTP + vector store); run it off the
         # event loop so it does not stall other requests on this worker.
         await asyncio.to_thread(SiloService.reindex_resource, resource)
