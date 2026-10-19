@@ -58,7 +58,8 @@ class SiloDetailSchema(BaseModel):
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
     vector_db_options: List[Dict[str, Any]] = []
-    # AI services usable for media: [{service_id, name, supports_video}]
+    # AI services (app + system): [{service_id, name, provider, supports_video}] —
+    # LightRAG role selects use them all; MediaServicesFields filters supports_video.
     ai_services: List[Dict[str, Any]] = []
     # Metadata definition fields for playground
     metadata_fields: Optional[List[Dict[str, Any]]] = None

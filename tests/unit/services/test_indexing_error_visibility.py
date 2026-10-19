@@ -22,9 +22,12 @@ def _revoked_key_error():
 
 def _resource():
     embedding = SimpleNamespace(service_id=10, name="text-embedding-3-small", last_error=None)
-    silo = SimpleNamespace(silo_id=114, embedding_service=embedding)
+    silo = SimpleNamespace(silo_id=114, app_id=1, embedding_service=embedding)
     return SimpleNamespace(
         resource_id=54, repository_id=80, uri="cv.pdf", folder_id=None, status=None, error_message=None,
+        # extra_metadata is a fork-only LightRAG column index_resource merges into
+        # the chunk metadata; ORM objects always carry it.
+        extra_metadata=None,
         repository=SimpleNamespace(silo_id=114, silo=silo),
     )
 
@@ -220,7 +223,7 @@ class TestUploadResponse:
         db = MagicMock()
         with patch.object(resource_service.ResourceRepository, "get_repository_by_id", return_value=object()), \
                 patch.object(resource_service.ResourceService, "create_multiple_resources",
-                             return_value=(resources, [])):
+                             return_value=(resources, [], None)):
             return resource_service.ResourceService.upload_resources_to_repository(1, 80, ["f"], db)
 
     def test_indexing_failures_are_reported(self):

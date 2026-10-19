@@ -19,7 +19,10 @@ _SERVICE_TABLES = ("AIService", "embedding_service")
 
 
 def upgrade():
-    op.add_column("Resource", sa.Column("error_message", sa.Text(), nullable=True))
+    # The fork's da0c9d2daf57 already adds Resource.error_message (same column,
+    # same purpose) earlier in this merged chain; skip when it already exists.
+    if not any(c["name"] == "error_message" for c in sa.inspect(op.get_bind()).get_columns("Resource")):
+        op.add_column("Resource", sa.Column("error_message", sa.Text(), nullable=True))
     for table in _SERVICE_TABLES:
         op.add_column(table, sa.Column("last_error", sa.Text(), nullable=True))
         op.add_column(table, sa.Column("last_error_at", sa.DateTime(), nullable=True))
@@ -29,4 +32,5 @@ def downgrade():
     for table in _SERVICE_TABLES:
         op.drop_column(table, "last_error_at")
         op.drop_column(table, "last_error")
-    op.drop_column("Resource", "error_message")
+    if any(c["name"] == "error_message" for c in sa.inspect(op.get_bind()).get_columns("Resource")):
+        op.drop_column("Resource", "error_message")

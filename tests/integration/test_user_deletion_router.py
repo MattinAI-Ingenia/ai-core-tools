@@ -73,24 +73,21 @@ class TestDeleteUserEndpoint:
         target = UserFactory()
         db.flush()
 
-        response = client.delete(
-            f"/internal/admin/users/{target.user_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{target.user_id}",
             headers=auth_headers,  # regular user, NOT omniadmin
         )
         assert response.status_code == 403
 
     def test_unknown_user_returns_404(self, client, admin_headers):
         """Deleting a non-existent user returns 404."""
-        response = client.delete(
-            "/internal/admin/users/999999",
+        response = client.request("DELETE", "/internal/admin/users/999999",
             headers=admin_headers,
         )
         assert response.status_code == 404
 
     def test_self_deletion_returns_400(self, client, admin_headers, fake_user):
         """Actor attempting to delete themselves receives 400."""
-        response = client.delete(
-            f"/internal/admin/users/{fake_user.user_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{fake_user.user_id}",
             headers=admin_headers,
         )
         assert response.status_code == 400
@@ -103,14 +100,13 @@ class TestDeleteUserEndpoint:
         # Make another_admin also an omniadmin.
         from utils.config import is_omniadmin
 
-        existing = monkeypatch.getenv("AICT_OMNIADMINS") or ""
+        existing = os.getenv("AICT_OMNIADMINS") or ""
         monkeypatch.setenv(
             "AICT_OMNIADMINS",
             ",".join(filter(None, [existing, another_admin.email])),
         )
 
-        response = client.delete(
-            f"/internal/admin/users/{another_admin.user_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{another_admin.user_id}",
             headers=admin_headers,
         )
         assert response.status_code == 403
@@ -123,8 +119,7 @@ class TestDeleteUserEndpoint:
         app2 = AppFactory(owner=target)
         db.flush()
 
-        response = client.delete(
-            f"/internal/admin/users/{target.user_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{target.user_id}",
             headers=admin_headers,
             # No mode → defaults to block
         )
@@ -159,8 +154,7 @@ class TestDeleteUserEndpoint:
 
         mocker.patch("services.app_service.AppService.delete_app", side_effect=_fake_delete_app)
 
-        response = client.delete(
-            f"/internal/admin/users/{target_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{target_id}",
             json={"mode": "cascade_apps"},
             headers=admin_headers,
         )
@@ -183,8 +177,7 @@ class TestDeleteUserEndpoint:
         app_id = app.app_id
         recipient_id = recipient.user_id
 
-        response = client.delete(
-            f"/internal/admin/users/{target_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{target_id}",
             json={"mode": "transfer_apps", "transfer_to_user_id": recipient_id},
             headers=admin_headers,
         )
@@ -207,8 +200,7 @@ class TestDeleteUserEndpoint:
         db.flush()
         target_id = target.user_id
 
-        response = client.delete(
-            f"/internal/admin/users/{target_id}",
+        response = client.request("DELETE", f"/internal/admin/users/{target_id}",
             headers=admin_headers,
         )
         assert response.status_code == 200, response.text
@@ -227,8 +219,7 @@ class TestDeleteUserEndpoint:
         db.flush()
 
         # Using query param fallback instead of JSON body — must still return 409 for block mode.
-        response = client.delete(
-            f"/internal/admin/users/{target.user_id}?mode=block",
+        response = client.request("DELETE", f"/internal/admin/users/{target.user_id}?mode=block",
             headers=admin_headers,
         )
         assert response.status_code == 409

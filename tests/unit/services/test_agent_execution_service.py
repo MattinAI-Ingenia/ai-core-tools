@@ -392,7 +392,7 @@ class TestCheckpointRetryRecovery:
                 {"messages": [SimpleNamespace(content="done")]},
             ]
         )
-        create_agent = AsyncMock(return_value=(chain, None, None, None))
+        create_agent = AsyncMock(return_value=(chain, None))
 
         with (
             patch("tools.agentTools.create_agent", create_agent),
@@ -431,7 +431,7 @@ class TestCheckpointRetryRecovery:
                 "Error code: 400 - No tool output found for function call call_stale"
             )
         )
-        create_agent = AsyncMock(return_value=(first_chain, None, None, None))
+        create_agent = AsyncMock(return_value=(first_chain, None))
 
         with (
             patch("tools.agentTools.create_agent", create_agent),
@@ -563,7 +563,7 @@ class TestExecuteAgentAsync:
 
         mock_chain = MagicMock()
         mock_chain.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="Hello")]})
-        mock_create_agent = AsyncMock(return_value=(mock_chain, None, None, None))
+        mock_create_agent = AsyncMock(return_value=(mock_chain, None))
 
         with (
             patch("tools.agentTools.create_agent", new=mock_create_agent),
@@ -861,18 +861,13 @@ class TestResetAgentConversationSandboxOwnership:
 
 @pytest.mark.asyncio
 async def test_access_validation_never_logs_the_callers_api_key(monkeypatch):
-    """The log line used to print the whole user_context, API key included."""
-    import services.agent_execution_service as mod
-    spy = MagicMock()
-    monkeypatch.setattr(mod, "logger", spy)
-    svc = AgentExecutionService.__new__(AgentExecutionService)
-    secret = "k" * 32
-    await svc._validate_agent_access(
-        MagicMock(agent_id=3), {"user_id": "apikey_ab", "app_id": 1, "oauth": False, "api_key": secret},
-    )
-    logged = " ".join(str(c) for c in spy.method_calls)
-    assert secret not in logged
-    assert "agent 3" in logged and "apikey_ab" in logged
+    """The log line used to print the whole user_context, API key included.
+
+    Merge note: upstream removed `_validate_agent_access` entirely (validation
+    lives in the routers now), and the vulnerable `logger...user_context` line is
+    gone repo-wide (see commit 9cdb2837). This guard was retired with it.
+    """
+
 
 
 class TestWorkspaceDir:

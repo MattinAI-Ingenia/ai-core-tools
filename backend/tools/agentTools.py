@@ -824,9 +824,6 @@ async def create_agent(
 
     from tools.middleware.factory import build_agent_middlewares
     middleware = build_agent_middlewares(agent, llm)
-    # MONITORING middleware was removed upstream (#273); the handler stays None for
-    # the fork's 4-tuple create_agent signature consumed by the execution services.
-    monitoring_handler = None
 
     tools = []
 
@@ -1115,12 +1112,13 @@ async def create_agent(
     # multiple simultaneous calls to the same tool (e.g. retrieve_from_knowledge_base
     # called 6× in one turn). LangGraph's _should_bind_tools detects the pre-bound
     # model and skips its own bind, preserving this setting.
-    try:
-        llm = llm.bind_tools(tools, parallel_tool_calls=False)
-    except TypeError:
-        # Some providers (e.g. older Anthropic builds) don't accept parallel_tool_calls;
-        # fall back to plain bind so the agent still works.
-        llm = llm.bind_tools(tools)
+    if tools and hasattr(llm, "bind_tools"):
+        try:
+            llm = llm.bind_tools(tools, parallel_tool_calls=False)
+        except TypeError:
+            # Some providers (e.g. older Anthropic builds) don't accept parallel_tool_calls;
+            # fall back to plain bind so the agent still works.
+            llm = llm.bind_tools(tools)
 
     middleware.append(_TimingMiddleware(agent.agent_id))
 
@@ -1145,15 +1143,12 @@ async def create_agent(
             middleware=middleware or [],
         )
 
-    langsmith_config = None  # TODO: build from agent.app via resolve_langsmith_settings
-
     # Add logging for the created agent
     logger.info(f"Created agent with {len(tools)} tools")
     logger.info(f"Memory enabled: {agent.has_memory}")
     logger.info(f"Output parser: {agent.output_parser_id is not None}")
-    logger.info(f"LangSmith configured: {langsmith_config is not None}")
 
-    return agent_chain, langsmith_config, mcp_client, monitoring_handler
+    return agent_chain, mcp_client
 
 
 _DEFAULT_RECURSION_LIMIT = 50

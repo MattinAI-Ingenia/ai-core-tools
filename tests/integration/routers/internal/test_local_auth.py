@@ -290,6 +290,8 @@ class TestRefreshTokenRotation:
         """Presenting a garbage refresh token returns 401."""
         client.cookies.set("refresh_token", "invalid.token.value")
         client.cookies.set("access_token", "any-token")
+        # CSRF del fork: con access_token cookie exige cookie+header matching
+        client.cookies.set("csrf_token", "dummy")
         resp = client.post(
             "/internal/auth/refresh",
             headers={"X-CSRF-Token": "dummy"},

@@ -488,7 +488,6 @@ class RepositoryService:
 
         # Read the LightRAG config back so the UI can show what this repository
         # was actually indexed with, editable or not.
-        from services.silo_service import SiloService
         lightrag_fields = {
             field: getattr(repo.silo, field, None) if repo.silo else None
             for field in (
@@ -657,7 +656,6 @@ class RepositoryService:
         # the extraction fields freeze after the first index, the LLM roles do not.
         silo_fields = repo_data.model_dump(include=_SILO_OWNED_FIELDS, exclude_none=True)
         if updated.silo_id and silo_fields:
-            from services.silo_service import SiloService
             SiloService.create_or_update_silo(
                 {
                     'silo_id': updated.silo_id,

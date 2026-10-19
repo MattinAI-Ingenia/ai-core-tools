@@ -1273,7 +1273,8 @@ class SiloService:
         from repositories.ai_service_repository import AIServiceRepository
         services = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
         return [
-            {"service_id": s.service_id, "name": s.name, "supports_video": bool(s.supports_video)}
+            {"service_id": s.service_id, "name": s.name, "provider": getattr(s, "provider", None),
+             "supports_video": bool(s.supports_video)}
             for s in services
         ]
 
@@ -1830,7 +1831,9 @@ class SiloService:
                 ServiceHealthService.record_failure(EmbeddingService, embedding_service, error)
                 SiloService._set_index_status(resource_with_relations, session, error.message)
                 logger.error(f"Error indexing resource {resource_id}: {exc}")
-                raise
+                # Wrap so the outer handler stores the specific message instead of
+                # reclassifying with the generic "Indexing" label over it.
+                raise ResourceIndexingError(error.message) from exc
             else:
                 # Before the status commit expires the loaded instances.
                 ServiceHealthService.record_success(EmbeddingService, embedding_service)

@@ -208,30 +208,63 @@ class TestUseremail001MigrationEndToEnd:
 
             apps_by_user = {}
             agents_by_app = {}
+            # Inserts via reflection, no ORM: el modelo actual tiene columnas
+            # con defaults añadidas por migraciones posteriores a useremail001
+            # (sandbox001, kr001, ...) que no existen en esta BD pre-fix.
+            from sqlalchemy import MetaData, Table, insert
+            _md = MetaData()
+            _app_tbl = Table("App", _md, autoload_with=engine)
+            _agent_tbl = Table("Agent", _md, autoload_with=engine)
+
+            def _seed_values(tbl, values):
+                """Completa NOT NULL sin server_default que el INSERT no trae."""
+                from datetime import datetime as _dt
+                for c in tbl.columns:
+                    if c.name in values or (c.primary_key and c.autoincrement):
+                        continue
+                    if not c.nullable and c.server_default is None:
+                        py = c.type.python_type
+                        if py is bool:
+                            values[c.name] = False
+                        elif py is int:
+                            values[c.name] = 0
+                        elif py is str:
+                            values[c.name] = ""
+                        elif py is _dt:
+                            values[c.name] = _dt.now()
+                        else:
+                            raise AssertionError(
+                                f"sin valor semilla para {tbl.name}.{c.name}"
+                            )
+                return values
+
             for owner in (user1, user2):
                 owned_apps = []
                 for i in range(2):
-                    app_obj = App(
-                        name=f"E2E App {owner.user_id}-{i}",
-                        slug=f"e2e-useremail001-{owner.user_id}-{i}",
-                        owner_id=owner.user_id,
-                        agent_rate_limit=0,
-                        max_file_size_mb=10,
-                    )
-                    setup_session.add(app_obj)
-                    setup_session.flush()
-                    owned_apps.append(app_obj)
+                    app_id = setup_session.execute(
+                        insert(_app_tbl).values(
+                            _seed_values(_app_tbl, {
+                                "name": f"E2E App {owner.user_id}-{i}",
+                                "slug": f"e2e-useremail001-{owner.user_id}-{i}",
+                                "owner_id": owner.user_id,
+                                "agent_rate_limit": 0,
+                                "max_file_size_mb": 10,
+                            })
+                        ).returning(_app_tbl.c.app_id)
+                    ).scalar_one()
+                    owned_apps.append(app_id)
 
-                    agent_obj = Agent(
-                        name=f"E2E Agent {owner.user_id}-{i}",
-                        app_id=app_obj.app_id,
-                        type="agent",
-                    )
-                    setup_session.add(agent_obj)
-                    setup_session.flush()
-                    agents_by_app[app_obj.app_id] = agent_obj.agent_id
+                    agent_id = setup_session.execute(
+                        insert(_agent_tbl).values(
+                            _seed_values(_agent_tbl, {
+                                "name": f"E2E Agent {owner.user_id}-{i}",
+                                "app_id": app_id,
+                            })
+                        ).returning(_agent_tbl.c.agent_id)
+                    ).scalar_one()
+                    agents_by_app[app_id] = agent_id
 
-                apps_by_user[owner.user_id] = [a.app_id for a in owned_apps]
+                apps_by_user[owner.user_id] = owned_apps
 
             setup_session.commit()
 

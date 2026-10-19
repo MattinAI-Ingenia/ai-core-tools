@@ -103,7 +103,7 @@ def _reindex_url(app_id: int, silo_id: int, resource_id: int) -> str:
     )
 
 
-def _fake_extract(path, file_extension, base_metadata):
+def _fake_extract(path, file_extension, base_metadata, split=False):
     """Stand-in for extract_documents_from_file: stamps each chunk with base_metadata
     (which includes the index_batch set by index_resource), as the real splitter does."""
     return [
@@ -117,7 +117,7 @@ def _make_fake_vector_store(indexed_docs: list) -> MagicMock:
     delete_documents_excluding removes the resource's chunks not in the kept batch."""
     store = MagicMock()
 
-    def fake_index(collection_name, documents, embedding_service=None):
+    def fake_index(collection_name, documents, embedding_service=None, progress_callback=None):
         indexed_docs.extend(documents)
 
     def fake_delete_excluding(collection_name, filter_metadata, exclude, embedding_service=None):

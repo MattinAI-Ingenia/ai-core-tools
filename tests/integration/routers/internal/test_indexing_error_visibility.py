@@ -1,12 +1,19 @@
-"""Indexing failures reach the user: upload response, document status, service status.
+"""Indexing failures reach the user: document status, repository detail, service status.
 
 Scenario from a real incident: the embedding service's API key was revoked, uploads kept
 answering "success" and the silo silently stayed at 0 documents.
 
-Vector store and text extraction are mocked; index_resource and ServiceHealthService open
-their own SessionLocal(), redirected here to the test connection.
+Uploads answer success immediately and index in a background thread, so the failure is
+asserted on the resource row (and on the services) once that thread has finished. The
+response itself is always plain success in this fork.
+
+Vector store and text extraction are mocked; the indexing thread and ServiceHealthService
+open their own SessionLocal() — silo_service, service_health_service, and the late
+imports from db.database the thread makes — all redirected here to the test connection.
 """
 
+import threading
+import time
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -32,7 +39,8 @@ def shared_sessions(db):
         return inner
 
     with patch("services.silo_service.SessionLocal", side_effect=_session_factory), \
-            patch("services.service_health_service.SessionLocal", side_effect=_session_factory):
+            patch("services.service_health_service.SessionLocal", side_effect=_session_factory), \
+            patch("db.database.SessionLocal", side_effect=_session_factory):
         yield
 
 
@@ -72,18 +80,63 @@ def _revoked_key_error():
     )
 
 
-def _extract(path, file_extension, base_metadata):
+def _extract(path, file_extension, base_metadata, split=False):
+    # `split` is the LightRAG switch the caller passes (split=not is_lightrag);
+    # the fake accepts and ignores it — its callers already get one chunk.
     return [Document(page_content="chunk", metadata={**base_metadata})]
 
 
 def _upload(client, headers, app_id, repo_id, store):
+    deferred = []
+
+    class _DeferredIndexThread(threading.Thread):
+        # _index_resources_background starts a real daemon thread. Hold it back
+        # until the response is built (the upload must answer success while the
+        # rows are still 'pending', like production), then launch it while the
+        # mocks below are still live, and join before the mocks are undone.
+        def start(self):
+            deferred.append(self)
+
+        def launch(self):
+            super().start()
+
     with patch("services.silo_service._get_vector_store", return_value=store), \
-            patch("services.silo_service.SiloService.extract_documents_from_file", side_effect=_extract):
-        return client.post(
+            patch("services.silo_service.SiloService.extract_documents_from_file", side_effect=_extract), \
+            patch("threading.Thread", _DeferredIndexThread):
+        resp = client.post(
             f"/internal/apps/{app_id}/repositories/{repo_id}/resources",
             headers=headers,
             files=[("files", ("cv.txt", b"hello", "text/plain"))],
         )
+        for t in deferred:
+            t.launch()
+        for t in deferred:
+            t.join(timeout=30)
+    return resp
+
+
+_TERMINAL_STATUSES = ("indexed", "ready", "error")
+
+
+def _wait_for_terminal_status(db, repository_id, timeout=15.0):
+    """Poll the resource rows until the background indexing thread has settled.
+
+    The thread commits through its own sessions on the shared test connection;
+    expire first, or the db session's identity map would keep serving the
+    'pending' state the upload response was built with.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        db.expire_all()
+        rows = db.query(Resource).filter_by(repository_id=repository_id).all()
+        if rows and all(r.status in _TERMINAL_STATUSES for r in rows):
+            return rows
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"background indexing did not settle within {timeout}s; "
+                f"statuses={[r.status for r in rows]}"
+            )
+        time.sleep(0.2)
 
 
 @pytest.mark.usefixtures("shared_sessions", "repo_base")
@@ -95,27 +148,27 @@ class TestRevokedEmbeddingKey:
 
         resp = _upload(client, owner_headers, fake_app.app_id, repository.repository_id, store)
 
-        # The file is kept (it can be reindexed) but the response says it is not searchable.
+        # The response is plain success; the failure shows up once the
+        # background thread has run.
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert len(body["created_resources"]) == 1
-        assert "could not be indexed" in body["message"]
-        [failure] = body["indexing_failures"]
-        assert failure["filename"] == "cv.txt"
-        assert "Embedding service 'small' rejected its credentials" in failure["error"]
-        assert "LRsA" not in failure["error"]
+        assert len(resp.json()["created_resources"]) == 1
+
+        [resource] = _wait_for_terminal_status(db, repository.repository_id)
+        error = resource.error_message
+        assert "Embedding service 'small' rejected its credentials" in error
+        assert "LRsA" not in error
 
         detail = client.get(f"/internal/apps/{fake_app.app_id}/repositories/{repository.repository_id}",
                             headers=owner_headers).json()
-        [resource] = detail["resources"]
-        assert resource["status"] == "error"
-        assert resource["error_message"] == failure["error"]
-        assert detail["service_warnings"] == [failure["error"]]
+        [listed_resource] = detail["resources"]
+        assert listed_resource["status"] == "error"
+        assert listed_resource["error_message"] == error
+        assert detail["service_warnings"] == [error]
 
         services = client.get(f"/internal/apps/{fake_app.app_id}/embedding-services/",
                               headers=owner_headers).json()
         [listed] = [s for s in services if s["service_id"] == embedding_service.service_id]
-        assert listed["last_error"] == failure["error"]
+        assert listed["last_error"] == error
         assert listed["last_error_at"] is not None
 
     def test_successful_upload_marks_indexed_and_clears_the_service_error(self, client, db, fake_app, owner_headers,
@@ -127,10 +180,10 @@ class TestRevokedEmbeddingKey:
         resp = _upload(client, owner_headers, fake_app.app_id, repository.repository_id, MagicMock())
 
         assert resp.status_code == 200, resp.text
-        assert resp.json()["indexing_failures"] == []
-        resource = db.query(Resource).filter(Resource.repository_id == repository.repository_id).one()
-        db.refresh(resource)
-        assert resource.status == "indexed"
+        [resource] = _wait_for_terminal_status(db, repository.repository_id)
+        # The background thread finalizes success to 'ready' (it stamps
+        # 'indexed' first, then marks the batch done with 'ready').
+        assert resource.status == "ready"
         db.refresh(embedding_service)
         assert embedding_service.last_error is None
 
@@ -180,7 +233,7 @@ class TestReindexFailures:
         store = MagicMock()
 
         resp = _reindex(client, owner_headers, fake_app.app_id, repository.silo_id,
-                        indexed_resource.resource_id, store, extract=lambda *a: [])
+                        indexed_resource.resource_id, store, extract=lambda *a, **k: [])
 
         assert resp.status_code == 422
         assert "No text could be extracted" in resp.json()["detail"]

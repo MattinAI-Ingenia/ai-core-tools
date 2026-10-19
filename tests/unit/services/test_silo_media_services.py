@@ -314,15 +314,17 @@ class TestSiloServiceMediaWiring:
         assert SiloService.remove_silo_media_files(7) is None
 
     def test_media_ai_service_options(self):
-        app_service = SimpleNamespace(service_id=1, name="whisper", supports_video=None)
-        system_service = SimpleNamespace(service_id=2, name="gemini", supports_video=True)
+        # provider is part of the payload: the LightRAG role selectors in
+        # SiloForm render "(provider)" next to the name (fork feature).
+        app_service = SimpleNamespace(service_id=1, name="whisper", provider="openai", supports_video=None)
+        system_service = SimpleNamespace(service_id=2, name="gemini", provider="google", supports_video=True)
         with patch("repositories.ai_service_repository.AIServiceRepository.get_by_app_id", return_value=[app_service]), \
                 patch("repositories.ai_service_repository.AIServiceRepository.get_system_services",
                       return_value=[system_service]):
             options = SiloService.media_ai_service_options(3, MagicMock())
         assert options == [
-            {"service_id": 1, "name": "whisper", "supports_video": False},
-            {"service_id": 2, "name": "gemini", "supports_video": True},
+            {"service_id": 1, "name": "whisper", "provider": "openai", "supports_video": False},
+            {"service_id": 2, "name": "gemini", "provider": "google", "supports_video": True},
         ]
 
 

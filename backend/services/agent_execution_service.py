@@ -2417,7 +2417,7 @@ class AgentExecutionService:
         user_context = {**(user_context or {}), 'current_event_id': event_id}
         try:
             # Create the agent chain with all tools and capabilities
-            agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
+            agent_chain, mcp_client = await create_agent(
                 fresh_agent,
                 search_params,
                 session_id_for_cache,
@@ -2442,10 +2442,6 @@ class AgentExecutionService:
             # Add the question to config
             config["configurable"]["question"] = message
 
-            # Attach monitoring callback if enabled
-            if monitoring_handler is not None:
-                config.setdefault("callbacks", []).append(monitoring_handler)
-            
             # Build the HumanMessage (handles text-only and multimodal images)
             message_payload = build_human_message(fresh_agent, message, image_files or [], user_context)
 
@@ -2513,24 +2509,6 @@ class AgentExecutionService:
                     message=message,
                     collector=metrics_collector,
                 )
-
-            # Log usage metrics if monitoring is enabled
-            if monitoring_handler is not None:
-                try:
-                    usage_by_model = monitoring_handler.usage_metadata
-                    total_input = sum(u.get('input_tokens', 0) for u in usage_by_model.values())
-                    total_output = sum(u.get('output_tokens', 0) for u in usage_by_model.values())
-                    total_tokens = sum(u.get('total_tokens', 0) for u in usage_by_model.values())
-                    logger.info(
-                        f"[Monitoring] agent_id={fresh_agent.agent_id} | "
-                        f"models={list(usage_by_model.keys())} | "
-                        f"input_tokens={total_input} | "
-                        f"output_tokens={total_output} | "
-                        f"total_tokens={total_tokens} | "
-                        f"llm_calls={len(usage_by_model)}"
-                    )
-                except Exception as monitor_err:
-                    logger.warning(f"Error reading monitoring metrics: {monitor_err}")
 
             # LangChain v1: structured output is in 'structured_response' key
             # when create_agent is called with response_format=pydantic_model

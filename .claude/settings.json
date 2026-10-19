@@ -16,7 +16,8 @@
       "Bash(gh issue view:*)",
       "Bash(gh pr view:*)",
       "Bash(alembic history:*)",
-      "Bash(alembic current:*)"
+      "Bash(alembic current:*)",
+      "WebFetch(domain:huggingface.co)"
     ],
     "deny": []
   },
@@ -37,8 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(git add*)",
             "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-git-add.ps1\"",
+            "if": "Bash(git add*)",
             "timeout": 15
           }
         ]

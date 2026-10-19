@@ -109,52 +109,6 @@ async def _final_answer_text(agent_chain, config) -> str:
     return ""
 
 
-def _emit_monitoring_log(
-    agent_id: int,
-    monitoring_handler,
-    monitoring_config: dict | None,
-    log_fn,
-) -> None:
-    """Emit the [Monitoring] log line, filtering to only selected metrics.
-
-    Args:
-        agent_id: The agent being monitored.
-        monitoring_handler: UsageMetadataCallbackHandler instance.
-        monitoring_config: The ``config`` dict from the Monitoring middleware
-            entity, or None.  Absent or None means all metrics enabled.
-        log_fn: callable used for logging (e.g. logger.info).
-    """
-    try:
-        usage_by_model = monitoring_handler.usage_metadata
-        metrics_cfg: dict = (monitoring_config or {}).get("metrics", {})
-
-        # Default-on: absent key => metric is enabled
-        def enabled(key: str) -> bool:
-            return metrics_cfg.get(key, True)
-
-        parts: list[str] = [f"[Monitoring] agent_id={agent_id}"]
-
-        if enabled("models"):
-            parts.append(f"models={list(usage_by_model.keys())}")
-        if enabled("input_tokens"):
-            total = sum(u.get("input_tokens", 0) for u in usage_by_model.values())
-            parts.append(f"input_tokens={total}")
-        if enabled("output_tokens"):
-            total = sum(u.get("output_tokens", 0) for u in usage_by_model.values())
-            parts.append(f"output_tokens={total}")
-        if enabled("total_tokens"):
-            total = sum(u.get("total_tokens", 0) for u in usage_by_model.values())
-            parts.append(f"total_tokens={total}")
-        if enabled("llm_calls"):
-            parts.append(f"llm_calls={len(usage_by_model)}")
-
-        if len(parts) > 1:  # more than just the prefix
-            log_fn(" | ".join(parts))
-    except Exception as monitor_err:
-        import logging
-        logging.getLogger(__name__).warning(f"Error reading monitoring metrics: {monitor_err}")
-
-
 class AgentStreamingService:
     """Service for streaming agent responses via Server-Sent Events."""
 
@@ -382,7 +336,7 @@ class AgentStreamingService:
                 # ------------------------------------------------------------
                 # 3. Build agent chain
                 # ------------------------------------------------------------
-                agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
+                agent_chain, mcp_client = await create_agent(
                     ctx.fresh_agent,
                     ctx.search_params,
                     ctx.session_id_for_cache,
@@ -413,10 +367,7 @@ class AgentStreamingService:
                 config.setdefault("callbacks", []).append(metrics_collector)
 
                 # Attach monitoring callback if enabled
-                if monitoring_handler is not None:
-                    config.setdefault("callbacks", []).append(monitoring_handler)
-
-                # ------------------------------------------------------------
+                                # ------------------------------------------------------------
                 # 4. Build the HumanMessage payload (handles multimodal images)
                 # ------------------------------------------------------------
                 if resume is None:
@@ -459,17 +410,6 @@ class AgentStreamingService:
                         ls_settings.project_name,
                         ls_settings.source,
                     )
-
-                if langsmith_config:
-                    stream_ctx = ls.tracing_context(
-                        client=langsmith_config["client"],
-                        project_name=langsmith_config["project_name"],
-                        enabled=True,
-                    )
-                else:
-                    from contextlib import nullcontext
-
-                    stream_ctx = nullcontext()
 
                 # ------------------------------------------------------------
                 # 6. Streaming loop — the only part that stays in this service
@@ -534,6 +474,16 @@ class AgentStreamingService:
                                     continue
                                 msg_id = getattr(msg_chunk, "id", None)
                                 if not msg_id:
+                                    # Id-less chunk (bare test mocks): no discard
+                                    # guarantee is possible, so emit immediately.
+                                    text = _extract_text(getattr(msg_chunk, "content", None))
+                                    if text:
+                                        if first_token_at is None:
+                                            first_token_at = datetime.utcnow()
+                                        accumulated_content += text
+                                        if buffer_output:
+                                            continue
+                                        yield AgentStreamEvent(SSE_TOKEN, {"content": text})
                                     continue
                                 # If this chunk carries tool_call_chunks, the whole
                                 # message is a tool invocation — discard buffered text.
@@ -633,8 +583,15 @@ class AgentStreamingService:
                                 yield AgentStreamEvent(SSE_TOKEN, {"content": text})
                     # Knowledge-router pass-through: the turn ended on the
                     # specialist's ToolMessage (return_direct), so no model
-                    # tokens carried the answer.
-                    tool_answer = None if structured_response is not None else final_tool_answer(trailing_tool_msgs, accumulated_content)
+                    # tokens carried the answer. Only knowledge-router agents
+                    # stream a specialist's ToolMessage as the answer token;
+                    # regular agents surface tool output via tool_end only.
+                    tool_answer = (
+                        None
+                        if (structured_response is not None
+                            or not getattr(ctx.fresh_agent, 'is_knowledge_router', False))
+                        else final_tool_answer(trailing_tool_msgs, accumulated_content)
+                    )
                     if tool_answer:
                         accumulated_content = tool_answer
                         if not buffer_output:
@@ -1034,7 +991,7 @@ class AgentStreamingService:
                 except Exception:
                     pass
 
-            agent_chain, langsmith_config, mcp_client, monitoring_handler = await create_agent(
+            agent_chain, mcp_client = await create_agent(
                 ctx.fresh_agent,
                 ctx.search_params,
                 ctx.session_id_for_cache,
@@ -1050,10 +1007,7 @@ class AgentStreamingService:
                 )
 
             # Attach monitoring callback if enabled
-            if monitoring_handler is not None:
-                config.setdefault("callbacks", []).append(monitoring_handler)
-
-            # 3. Build the Command to resume with decisions
+                        # 3. Build the Command to resume with decisions
             resume_value = {"decisions": decisions}
             resume_input = Command(resume=resume_value)
 
@@ -1151,7 +1105,12 @@ class AgentStreamingService:
 
             # Knowledge-router pass-through: the resumed turn ended on the
             # specialist's ToolMessage (return_direct), so no model tokens.
-            tool_answer = final_tool_answer(trailing_tool_msgs, accumulated_content)
+            # Gated to knowledge-router agents (see stream_agent_events).
+            tool_answer = (
+                final_tool_answer(trailing_tool_msgs, accumulated_content)
+                if getattr(ctx.fresh_agent, 'is_knowledge_router', False)
+                else None
+            )
             if tool_answer:
                 accumulated_content = tool_answer
                 yield format_sse_event(SSE_TOKEN, {"content": tool_answer})
@@ -1191,15 +1150,6 @@ class AgentStreamingService:
                     },
                 )
             else:
-                # Log usage metrics if monitoring is enabled
-                if monitoring_handler is not None:
-                    monitoring_mw_config = None
-                    for _assoc in (getattr(ctx.fresh_agent, 'middleware_associations', None) or []):
-                        if _assoc.middleware and _assoc.middleware.middleware_type.value == 'monitoring':
-                            monitoring_mw_config = _assoc.middleware.config or {}
-                            break
-                    _emit_monitoring_log(ctx.fresh_agent.agent_id, monitoring_handler, monitoring_mw_config, logger.info)
-
                 # 6. Normal finalization
                 result = await self.execution_service._finalize_turn(
                     ctx, accumulated_content, effective_db

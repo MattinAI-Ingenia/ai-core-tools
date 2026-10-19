@@ -52,7 +52,7 @@ async def test_streaming_agent_passes_sandbox_session_key_to_tool_builder():
 
     agent_chain = MagicMock()
     agent_chain.astream.return_value = _empty_stream()
-    create_agent = AsyncMock(return_value=(agent_chain, None, None, None))
+    create_agent = AsyncMock(return_value=(agent_chain, None))
 
     service = AgentStreamingService()
     service.execution_service = execution_service
@@ -125,8 +125,8 @@ async def test_streaming_resets_stale_tool_call_checkpoint_and_retries():
     second_chain.astream.return_value = _empty_stream()
     create_agent = AsyncMock(
         side_effect=[
-            (first_chain, None, None, None),
-            (second_chain, None, None, None),
+            (first_chain, None),
+            (second_chain, None),
         ]
     )
 
@@ -191,7 +191,7 @@ async def test_streaming_keeps_checkpoint_when_hitl_interrupt_is_pending():
     chain = MagicMock()
     chain.astream.return_value = _missing_tool_output_stream()
     chain.aget_state = AsyncMock(return_value=_paused_state())
-    create_agent = AsyncMock(return_value=(chain, None, None, None))
+    create_agent = AsyncMock(return_value=(chain, None))
 
     service = AgentStreamingService()
     service.execution_service = execution_service
@@ -263,7 +263,7 @@ async def test_streaming_fails_cleanly_when_no_checkpoint_to_roll_back_to():
 
     first_chain = MagicMock()
     first_chain.astream.return_value = _missing_tool_output_stream()
-    create_agent = AsyncMock(return_value=(first_chain, None, None, None))
+    create_agent = AsyncMock(return_value=(first_chain, None))
 
     service = AgentStreamingService()
     service.execution_service = execution_service
@@ -320,7 +320,7 @@ async def test_resumed_turn_ending_on_a_specialist_keeps_answer_and_graph():
     ctx = SimpleNamespace(
         effective_conv_id=5, conversation=None,
         agent=SimpleNamespace(name="Router", has_memory=True),
-        fresh_agent=SimpleNamespace(agent_id=1, has_memory=True),
+        fresh_agent=SimpleNamespace(agent_id=1, has_memory=True, is_knowledge_router=True),
         search_params={}, session_id_for_cache="5", user_context={"user_id": "u1"}, working_dir=None,
     )
     execution_service = MagicMock()
@@ -336,7 +336,7 @@ async def test_resumed_turn_ending_on_a_specialist_keeps_answer_and_graph():
     service.execution_service = execution_service
 
     with (
-        patch("services.agent_streaming_service.create_agent", AsyncMock(return_value=(agent_chain, None, None, None))),
+        patch("services.agent_streaming_service.create_agent", AsyncMock(return_value=(agent_chain, None))),
         patch("services.agent_streaming_service.prepare_agent_config", return_value={"configurable": {}}),
     ):
         events = [e async for e in service.stream_resume_agent_chat(
@@ -417,7 +417,7 @@ async def _run_hitl(chain, *, approvals_overrides=None, **kwargs):
     kwargs.setdefault("message", "hi")
     with (
         patch("services.agent_streaming_service.human_in_the_loop_config", return_value=MagicMock()),
-        patch("services.agent_streaming_service.create_agent", AsyncMock(return_value=(chain, None, None, None))),
+        patch("services.agent_streaming_service.create_agent", AsyncMock(return_value=(chain, None))),
         patch("services.agent_streaming_service.prepare_agent_config", return_value={"configurable": {}}),
         patch("services.agent_streaming_service.build_human_message", return_value=SimpleNamespace(content="hi")),
         patch.multiple("services.agent_streaming_service.approvals", **fakes),

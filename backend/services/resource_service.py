@@ -232,7 +232,7 @@ class ResourceService:
             return os.path.join(REPO_BASE_FOLDER, str(resource.repository_id), resource.uri)
     
     @staticmethod
-    def create_multiple_resources(files: List, repository_id: int, db: Session, custom_names: dict = None, folder_id: Optional[int] = None, extra_metadata: dict = None, display_names: dict = None) -> Tuple[List[Resource], List[dict]]:
+    def create_multiple_resources(files: List, repository_id: int, db: Session, custom_names: dict = None, folder_id: Optional[int] = None, extra_metadata: dict = None, display_names: dict = None) -> Tuple[List[Resource], List[dict], Optional[str]]:
         """
         Create multiple resources from uploaded files
         

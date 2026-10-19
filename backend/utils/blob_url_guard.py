@@ -14,6 +14,7 @@ import ipaddress
 import socket
 from urllib.parse import urlsplit
 
+from utils import ssrf_guard
 from utils.config import Config
 
 _VALID_CODES = (
@@ -114,20 +115,14 @@ def _is_ip_literal(host: str) -> bool:
 
 
 def _assert_resolves_to_public_addresses(host: str) -> None:
+    # Delegated to utils.ssrf_guard (project invariant: SSRF logic lives there).
     try:
-        addr_infos = socket.getaddrinfo(host, None)
+        resolved = ssrf_guard.resolve_host(host)
     except socket.gaierror as exc:
         raise BlobUrlRejected("DNS_RESOLUTION_FAILED", f"Could not resolve host '{host}': {exc}") from None
 
-    resolved_addresses = {info[4][0] for info in addr_infos}
-    for address in resolved_addresses:
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError:
-            raise BlobUrlRejected(
-                "DNS_RESOLUTION_FAILED", f"Host '{host}' resolved to an unparsable address"
-            ) from None
-        if not ip.is_global:
+    for address in resolved:
+        if ssrf_guard.is_blocked_ip(address):
             raise BlobUrlRejected(
                 "PRIVATE_ADDRESS_NOT_ALLOWED", f"Host '{host}' resolves to a non-public address"
             )

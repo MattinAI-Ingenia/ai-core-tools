@@ -275,6 +275,14 @@ class TestCreateAgent:
     ):
         """Create agent with all optional fields."""
         db.flush()
+        # El fork exige media_embedding_service_id para agentes conversacionales
+        from models.embedding_service import EmbeddingService
+        embedding = EmbeddingService(
+            name="Test Embeddings", provider="OpenAI", api_key="sk-test-key",  # pragma: allowlist secret
+            app_id=fake_app.app_id,
+        )
+        db.add(embedding)
+        db.flush()
         payload = agent_payload(
             name="Full Agent",
             description="Full featured agent",
@@ -285,6 +293,7 @@ class TestCreateAgent:
             service_id=fake_ai_service.service_id,
             temperature=0.5,
         )
+        payload["media_embedding_service_id"] = embedding.service_id
         response = client.post(
             f"/internal/apps/{fake_app.app_id}/agents/0",
             json=payload,
