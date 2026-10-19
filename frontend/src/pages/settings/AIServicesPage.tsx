@@ -16,6 +16,7 @@ import { AppRole } from '../../types/roles';
 import type { ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import UsedByButton from '../../components/services/UsedByButton';
+import SystemServiceBadge from '../../components/services/SystemServiceBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
 import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
@@ -208,20 +209,16 @@ function AIServicesPage() {
           {
             header: 'Name',
             render: (service: AIService) => (
-              canEdit && !service.is_system ? (
-                <button type="button" className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors text-left" onClick={() => handleEdit(service.service_id)}>
-                  {service.name}
-                </button>
-              ) : (
-                <span className="flex items-center gap-1.5">
+              <span className="flex items-center gap-1.5">
+                {canEdit && !service.is_system ? (
+                  <button type="button" className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors text-left" onClick={() => handleEdit(service.service_id)}>
+                    {service.name}
+                  </button>
+                ) : (
                   <span className="text-sm font-medium text-gray-900">{service.name}</span>
-                  {service.is_system && (
-                    <span className="ml-1 rounded bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-700">
-                      System
-                    </span>
-                  )}
-                </span>
-              )
+                )}
+                {service.is_system && <SystemServiceBadge />}
+              </span>
             )
           },
           { header: 'Model', accessor: 'model_name' },
@@ -236,8 +233,9 @@ function AIServicesPage() {
           { header: 'Created', render: (service: any) => (service.created_at ? new Date(service.created_at).toLocaleDateString() : 'N/A') },
           { header: 'Actions', className: 'relative', render: (service: AIService) => (
             service.is_system ? (
+              // System services are managed by platform admins; the app can only see where they are used.
               <span className="inline-flex items-center gap-3">
-                <span className="text-sm text-gray-400">System</span>
+                <span className="text-gray-400 text-sm">System</span>
                 <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />
               </span>
             ) : canEdit ? (

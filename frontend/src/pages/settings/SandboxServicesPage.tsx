@@ -15,6 +15,7 @@ import { AppRole } from '../../types/roles';
 import type { ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import UsedByButton from '../../components/services/UsedByButton';
+import SystemServiceBadge from '../../components/services/SystemServiceBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
 import { useServiceConnectionTest } from '../../components/services/useServiceConnectionTest';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
@@ -129,11 +130,7 @@ function SandboxServicesPage() {
                 ) : (
                   <span className="text-sm font-medium text-gray-900">{service.name}</span>
                 )}
-                {service.is_system && (
-                  <span className="ml-1 text-xs font-medium text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">
-                    System
-                  </span>
-                )}
+                {service.is_system && <SystemServiceBadge />}
               </span>
             )
           },
@@ -148,6 +145,7 @@ function SandboxServicesPage() {
           { header: 'Created', render: (service: any) => (service.created_at ? new Date(service.created_at).toLocaleDateString() : 'N/A') },
           { header: 'Actions', className: 'relative', render: (service: SandboxService) => (
             service.is_system ? (
+              // System services are managed by platform admins; the app can only see where they are used.
               <span className="inline-flex items-center gap-3">
                 <span className="text-gray-400 text-sm">System</span>
                 <UsedByButton serviceName={service.name} onClick={() => setUsageService({ id: service.service_id, name: service.name })} />

@@ -16,6 +16,7 @@ import { AppRole } from '../../types/roles';
 import type { ServiceLifecycleFields } from '../../types/services';
 import ServiceStatusBadge from '../../components/ui/ServiceStatusBadge';
 import UsedByButton from '../../components/services/UsedByButton';
+import SystemServiceBadge from '../../components/services/SystemServiceBadge';
 import ServiceUsageModal from '../../components/services/ServiceUsageModal';
 import { SERVICE_USAGE_STRINGS } from '../../utils/serviceLifecycle';
 import type { ConflictMode, ImportResponse } from '../../components/ui/ImportModal';
@@ -243,7 +244,7 @@ function EmbeddingServicesPage() {
                 <span className="text-sm font-medium text-gray-900">{service.name}</span>
               )}
               {service.is_system && (
-                <span className="ml-1 text-xs font-medium text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">System</span>
+                <SystemServiceBadge />
               )}
             </span>
           ) },

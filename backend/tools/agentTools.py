@@ -851,9 +851,10 @@ def parse_agent_response(response_text, agent):
         if isinstance(response_text, dict):
             return response_text
         
-        # If response is a Pydantic model instance, convert to dict
+        # If response is a Pydantic model instance, convert to dict. mode="json" turns
+        # date/datetime/Decimal fields into JSON types, so the response can be streamed and stored.
         if hasattr(response_text, 'model_dump'):
-            return response_text.model_dump()
+            return response_text.model_dump(mode="json")
         
         # If response is a string, try to parse it as JSON
         content = response_text.strip()

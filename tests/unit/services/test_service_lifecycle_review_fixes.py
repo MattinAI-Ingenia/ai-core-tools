@@ -126,9 +126,9 @@ class TestAgentImportRetired:
         with patch("services.agent_import_service.validate_export_version"), patch.object(
             AgentImportService, "get_by_name_and_app", return_value=existing_agent
         ), patch(
-            "services.agent_import_service.AIServiceRepository.get_by_id_and_app_id", return_value=service
+            "services.agent_import_service.AIServiceRepository.get_by_id", return_value=service
         ):
-            imp.session.query.return_value.filter.return_value.first.return_value = service
+            imp.session.query.return_value.filter.return_value.order_by.return_value.first.return_value = service
             return imp.import_agent(
                 _agent_export(), 10, mode, selected_ai_service_id=selected
             )
@@ -183,6 +183,7 @@ class TestSiloImportRetired:
         validation = MagicMock()
         validation.requires_embedding_service_selection = False
         imp.session.query.return_value.filter.return_value.first.return_value = service
+        imp.session.query.return_value.filter.return_value.order_by.return_value.first.return_value = service
         with patch.object(SiloImportService, "validate_import", return_value=validation), patch.object(
             SiloImportService, "get_by_name_and_app", return_value=existing_silo
         ):
