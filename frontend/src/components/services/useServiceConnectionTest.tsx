@@ -11,7 +11,9 @@ interface TestService {
   readonly name: string;
 }
 
-export function useServiceConnectionTest(serviceKind: string) {
+export type ServiceKindLabel = 'AI' | 'embedding' | 'sandbox';
+
+export function useServiceConnectionTest(serviceKind: ServiceKindLabel) {
   const [testService, setTestService] = useState<TestService | null>(null);
   const [testingServiceId, setTestingServiceId] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
@@ -47,8 +49,8 @@ export function useServiceConnectionTest(serviceKind: string) {
       void runTest({ id: serviceId, name: serviceName }, testConnection);
     },
     icon: testingServiceId === serviceId
-      ? <Loader2 className="w-4 h-4 animate-spin" />
-      : <Plug className="w-4 h-4" />,
+      ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+      : <Plug className="w-4 h-4" aria-hidden="true" />,
     variant: 'success',
     disabled: testingServiceId !== null,
   });

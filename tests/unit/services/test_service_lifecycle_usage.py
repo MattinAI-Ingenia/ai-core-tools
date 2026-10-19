@@ -259,3 +259,58 @@ def test_names_using_ai_service_wrapper(monkeypatch):
         staticmethod(lambda db, app_id, sid: [SimpleNamespace(name="a"), SimpleNamespace(name="b")]),
     )
     assert MiddlewareService.names_using_ai_service(MagicMock(), 1, 2) == ["a", "b"]
+
+
+def test_move_sandbox_usage_missing_source_not_found(queries):
+    _services(queries, None, snap(20))
+    db = MagicMock()
+    with pytest.raises(NotFoundError):
+        move_sandbox(db)
+    queries.move_sandbox_usage.assert_not_called()
+    db.commit.assert_not_called()
+
+
+def test_move_sandbox_usage_source_of_other_app_not_found(queries):
+    _services(queries, snap(10, app_id=2), snap(20))
+    with pytest.raises(NotFoundError):
+        move_sandbox(MagicMock())
+    queries.move_sandbox_usage.assert_not_called()
+
+
+def test_move_sandbox_usage_same_target_rejected(queries):
+    _services(queries, snap(10), snap(20))
+    db = MagicMock()
+    with pytest.raises(AppValidationError):
+        move_sandbox(db, target=10)
+    queries.move_sandbox_usage.assert_not_called()
+    db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("target", [None, snap(20, eos=PAST)])
+def test_move_sandbox_usage_missing_or_retired_target_rejected(queries, target):
+    _services(queries, snap(10), target)
+    db = MagicMock()
+    with pytest.raises(AppValidationError):
+        move_sandbox(db)
+    queries.move_sandbox_usage.assert_not_called()
+    db.commit.assert_not_called()
+
+
+def test_move_sandbox_usage_app_count_only_mismatch_conflicts(queries):
+    _services(queries, snap(10), snap(20))
+    queries.move_sandbox_usage.return_value = ([4, 5], [])
+    db = MagicMock()
+    with pytest.raises(ConflictError):
+        move_sandbox(db, expected_agents=2, expected_apps=1)
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()
+
+
+def test_move_sandbox_usage_unexpected_error_rolls_back(queries):
+    _services(queries, snap(10), snap(20))
+    queries.move_sandbox_usage.side_effect = RuntimeError("boom")
+    db = MagicMock()
+    with pytest.raises(RuntimeError):
+        move_sandbox(db)
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()

@@ -183,12 +183,21 @@ export const SERVICE_USAGE_STRINGS = {
   moveSandboxTargetLabel: 'Target sandbox service',
   moveSandboxNoTargets: 'There is no other available sandbox service to move this usage to.',
   moveSandboxButton: 'Move sandbox usage...',
-  moveSandboxConfirm: (agents: number, apps: number, from: string, to: string) => {
+  moveSandboxConfirm: (
+    agents: number,
+    apps: number,
+    inherited: number,
+    from: string,
+    to: string,
+  ) => {
     const changes = [
-      agents > 0 && `${agents} directly assigned ${agents === 1 ? 'agent' : 'agents'}`,
-      apps > 0 && `the default sandbox in ${apps} ${apps === 1 ? 'app' : 'apps'}`,
-    ].filter(Boolean);
-    return `Move ${changes.join(' and ')} from ${from} to ${to}?`;
+      `${agents} directly assigned ${agents === 1 ? 'agent' : 'agents'}`,
+      apps > 0 ? 'the app default sandbox' : 'no app default',
+    ];
+    const inheritNote = apps > 0
+      ? ` ${inherited} ${inherited === 1 ? 'agent that inherits' : 'agents that inherit'} the app default will also switch to ${to}.`
+      : '';
+    return `Move ${changes.join(' and ')} from ${from} to ${to}?${inheritNote}`;
   },
   moveSandboxSuccess: (agents: number, apps: number) => [
     agents > 0 && `Moved ${agents} ${agents === 1 ? 'agent' : 'agents'}`,
