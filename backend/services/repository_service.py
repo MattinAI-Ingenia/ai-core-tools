@@ -94,6 +94,8 @@ class RepositoryService:
         lightrag_max_source_ids_per_relation: Optional[int] = None,
         lightrag_entity_types: Optional[str] = None,
         lightrag_entity_types_mode: Optional[str] = None,
+        transcription_service_id: Optional[int] = None,
+        video_ai_service_id: Optional[int] = None,
     ) -> Repository:
         """
         Create a new repository with its associated silo
@@ -145,6 +147,9 @@ class RepositoryService:
             'lightrag_max_source_ids_per_relation': lightrag_max_source_ids_per_relation,
             'lightrag_entity_types': lightrag_entity_types,
             'lightrag_entity_types_mode': lightrag_entity_types_mode,
+            # Media services are stored on the silo, which does the indexing.
+            'transcription_service_id': transcription_service_id,
+            'video_ai_service_id': video_ai_service_id,
         }
         silo = silo_service.create_or_update_silo(silo_data, SiloType.REPO, db)
 
@@ -526,6 +531,7 @@ class RepositoryService:
             vlm_service_id=vlm_service_id,
             total_indexing_duration_seconds=total_indexing_duration_seconds,
             azure_blob_source=getattr(repo, 'azure_blob_source', None),
+            service_warnings=SiloService.service_warnings(repo.silo),
         )
 
     @staticmethod
@@ -582,8 +588,6 @@ class RepositoryService:
         repo.type = repo_data.type
         repo.status = repo_data.status or 'active'
         repo.create_date = datetime.now()
-        repo.transcription_service_id = repo_data.transcription_service_id
-        repo.video_ai_service_id = repo_data.video_ai_service_id
 
         return RepositoryService.create_repository(
             repo,
@@ -604,6 +608,8 @@ class RepositoryService:
             lightrag_max_source_ids_per_relation=repo_data.lightrag_max_source_ids_per_relation,
             lightrag_entity_types=repo_data.lightrag_entity_types,
             lightrag_entity_types_mode=repo_data.lightrag_entity_types_mode,
+            transcription_service_id=repo_data.transcription_service_id,
+            video_ai_service_id=repo_data.video_ai_service_id,
         )
 
     @staticmethod
@@ -631,8 +637,10 @@ class RepositoryService:
             repo.type = repo_data.type
         if repo_data.status is not None:
             repo.status = repo_data.status
-        repo.transcription_service_id = repo_data.transcription_service_id
-        repo.video_ai_service_id = repo_data.video_ai_service_id
+        if repo.silo:
+            SiloService.apply_media_services(
+                repo.silo, repo_data.transcription_service_id, repo_data.video_ai_service_id, app_id, db,
+            )
 
         updated = RepositoryService.update_repository(
             repo,

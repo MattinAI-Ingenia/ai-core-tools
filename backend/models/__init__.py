@@ -9,13 +9,14 @@ from .output_parser import OutputParser
 from .mcp_config import MCPConfig
 from .silo import Silo
 from .skill import Skill, SkillFile
-from .middleware import Middleware, AgentMiddleware, MiddlewareMCP
+from .middleware import Middleware, AgentMiddleware
 from .agent import Agent
 from .agent_marketplace_profile import AgentMarketplaceProfile
 from .conversation_starter import ConversationStarter
 from .agent_marketplace_rating import AgentMarketplaceRating
 from .ocr_agent import OCRAgent
 from .conversation import Conversation
+from .hitl_approval import HITLApproval
 from .repository import Repository
 from .resource import Resource
 from .folder import Folder
@@ -43,11 +44,13 @@ from .entity_type_inference_job import EntityTypeInferenceJob
 from .entity_name_variant import EntityNameVariant
 from .refresh_token import RefreshToken
 from .scheduled_task import ScheduledTask, ScheduledTaskRun
+from .a2a_context_link import A2AContextLink
+from .output_delivery import OutputArtifact, OutputDestination, ScheduledTaskOutputBinding, OutputDelivery, OutputDeliveryAttempt
 
 __all__ = [
     'User', 'App', 'AppCollaborator', 'APIKey',
     'AIService', 'EmbeddingService', 'OutputParser', 'MCPConfig', 'Silo', 'Skill', 'SkillFile',
-    'Agent', 'AgentMarketplaceProfile', 'ConversationStarter', 'AgentMarketplaceRating', 'OCRAgent', 'Conversation',
+    'Agent', 'AgentMarketplaceProfile', 'ConversationStarter', 'AgentMarketplaceRating', 'OCRAgent', 'Conversation', 'HITLApproval',
     'Repository', 'Resource', 'Folder', 'Domain',
     'DomainUrl', 'CrawlPolicy', 'CrawlJob', 'ImportJob', 'ImportJobRow', 'SharePointSource', 'SharePointFile',
     'AIService', 'EmbeddingService', 'OutputParser', 'MCPConfig', 'Silo',
@@ -67,6 +70,8 @@ __all__ = [
     'RefreshToken',
     'SandboxService',
     'ScheduledTask', 'ScheduledTaskRun',
+    'OutputArtifact', 'OutputDestination', 'ScheduledTaskOutputBinding', 'OutputDelivery', 'OutputDeliveryAttempt',
     'AgentExecutionEvent',
     'AgentToolCall',
+    'A2AContextLink',
 ]

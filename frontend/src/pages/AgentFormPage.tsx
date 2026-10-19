@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Brain, Info, BarChart2, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Layers, Plus, Tv } from 'lucide-react';
-import { apiService, type ScheduledTask } from '../services/api';
+import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Info, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Plus, Tv } from 'lucide-react';
+import { apiService, ApiError, type ScheduledTask } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { toast } from 'sonner';
 import { MESSAGES, errorMessage } from '../constants/messages';
-import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD, DEFAULT_PROMPT_TEMPLATE } from '../constants/agentConstants';
+import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_PROMPT_TEMPLATE } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
+import AgentMiddlewaresCard, { type AgentMiddlewareOption } from '../components/forms/AgentMiddlewaresCard';
 import { Badge } from '../components/ui/Badge';
 import { TagInput } from '../components/ui/TagInput';
 import { Tabs } from '../components/ui/Tabs';
@@ -18,6 +19,10 @@ import type { AgentMCPUsage } from '../core/types';
 import type { MarketplaceVisibility, MarketplaceProfileUpdate } from '../types/marketplace';
 import { MARKETPLACE_CATEGORIES } from '../types/marketplace';
 import { AgentMetricsTab } from '../components/metrics/AgentMetricsTab';
+import { AgentA2ASettings } from '../components/forms/AgentA2ASettings';
+import type { A2ACardVisibility, AgentA2AFieldErrors, AgentA2AValue } from '../components/forms/AgentA2ASettings';
+import { useAppRole } from '../hooks/useAppRole';
+import { AppRole } from '../types/roles';
 import { randomId } from '../utils/randomId';
 
 // Define the Agent types
@@ -33,9 +38,6 @@ interface Agent {
   enable_code_interpreter: boolean;
   skill_router_enabled?: boolean;
   is_knowledge_router?: boolean;
-  memory_max_messages: number;
-  memory_max_tokens: number;
-  memory_summarize_threshold: number;
   service_id?: number;
   sandbox_service_id?: number;
   silo_id?: number;
@@ -49,6 +51,15 @@ interface Agent {
   created_at: string;
   request_count: number;
   marketplace_visibility?: MarketplaceVisibility;
+  // A2A (Agent2Agent protocol) exposure
+  a2a_enabled?: boolean;
+  a2a_card_visibility?: A2ACardVisibility;
+  a2a_name_override?: string | null;
+  a2a_description_override?: string | null;
+  a2a_skill_tags?: string[];
+  a2a_examples?: string[];
+  a2a_card_url?: string | null;
+  a2a_rpc_url?: string | null;
   // OCR-specific fields
   vision_service_id?: number;
   vision_system_prompt?: string;
@@ -78,7 +89,7 @@ interface Agent {
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string; is_enabled?: boolean; is_system?: boolean }>;
-  middlewares: Array<{ middleware_id: number; name: string; description?: string; middleware_type: string; mcp_config_ids?: number[]; tool_agent_ids?: number[] }>;
+  middlewares?: AgentMiddlewareOption[];
 }
 
 interface AgentFormData {
@@ -93,9 +104,6 @@ interface AgentFormData {
   skill_router_enabled: boolean;
   is_knowledge_router: boolean;
   server_tools: string[];
-  memory_max_messages: number;
-  memory_max_tokens: number;
-  memory_summarize_threshold: number;
   service_id?: number;
   sandbox_service_id?: number;
   silo_id?: number;
@@ -126,6 +134,13 @@ interface AgentFormData {
   media_chunk_min_duration: number;
   media_chunk_max_duration: number;
   media_chunk_overlap: number;
+  // A2A (Agent2Agent protocol) exposure
+  a2a_enabled: boolean;
+  a2a_card_visibility: A2ACardVisibility;
+  a2a_name_override: string | null;
+  a2a_description_override: string | null;
+  a2a_skill_tags: string[];
+  a2a_examples: string[];
 }
 
 // Output Parser Field Component
@@ -182,6 +197,30 @@ const OutputParserField = ({
   </div>
 );
 
+/**
+ * Pull per-field messages for a2a_* keys out of a FastAPI 422 `detail` array
+ * (each item's `loc` looks like `["body", "a2a_name_override"]`). Returns null
+ * when the error isn't a 422 with any a2a_* location, so callers can fall back
+ * to the generic top-level banner.
+ */
+function extractA2AFieldErrors(err: unknown): AgentA2AFieldErrors | null {
+  if (!(err instanceof ApiError) || err.status !== 422 || !Array.isArray(err.detail)) {
+    return null;
+  }
+  const errors: AgentA2AFieldErrors = {};
+  for (const item of err.detail) {
+    if (!item || typeof item !== 'object') continue;
+    const loc = (item as { loc?: unknown }).loc;
+    const msg = (item as { msg?: unknown }).msg;
+    if (!Array.isArray(loc) || typeof msg !== 'string') continue;
+    const field = loc.find((segment) => typeof segment === 'string' && segment.startsWith('a2a_'));
+    if (typeof field !== 'string') continue;
+    const key = field as keyof AgentA2AFieldErrors;
+    if (!errors[key]) errors[key] = msg;
+  }
+  return Object.keys(errors).length > 0 ? errors : null;
+}
+
 function getPageTitle(type: string, isNewAgent: boolean): string {
   if (type === 'ocr_agent') return 'Agente OCR';
   if (isNewAgent) return 'Create Agent';
@@ -204,7 +243,12 @@ function AgentFormPage() {
   const { appId, agentId } = useParams();
   const navigate = useNavigate();
   const mutate = useApiMutation();
+  const { hasMinRole } = useAppRole(appId);
+  const canEditA2A = hasMinRole(AppRole.EDITOR);
   const [agent, setAgent] = useState<Agent | null>(null);
+  const [a2aCardUrl, setA2aCardUrl] = useState<string | null>(null);
+  const [a2aRpcUrl, setA2aRpcUrl] = useState<string | null>(null);
+  const [a2aFieldErrors, setA2aFieldErrors] = useState<AgentA2AFieldErrors>({});
   const [loading, setLoading] = useState(true);
   const [mcpUsage, setMcpUsage] = useState<AgentMCPUsage | null>(null);
   const [showMcpWarning, setShowMcpWarning] = useState(false);
@@ -255,9 +299,6 @@ function AgentFormPage() {
     skill_router_enabled: false,
     is_knowledge_router: false,
     server_tools: [],
-    memory_max_messages: 20,
-    memory_max_tokens: 4000,
-    memory_summarize_threshold: DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
     temperature: DEFAULT_AGENT_TEMPERATURE,
     tool_ids: [],
     mcp_config_ids: [],
@@ -274,7 +315,13 @@ function AgentFormPage() {
     media_embedding_service_id: undefined,
     media_chunk_min_duration: 30,
     media_chunk_max_duration: 120,
-    media_chunk_overlap: 5
+    media_chunk_overlap: 5,
+    a2a_enabled: false,
+    a2a_card_visibility: 'public',
+    a2a_name_override: null,
+    a2a_description_override: null,
+    a2a_skill_tags: [],
+    a2a_examples: [],
   });
   const [showOutputParser, setShowOutputParser] = useState(false);
   const [siloMetadataFields, setSiloMetadataFields] = useState<SearchFilterMetadataField[]>([]);
@@ -380,9 +427,6 @@ function AgentFormPage() {
         skill_router_enabled: response.skill_router_enabled || false,
         is_knowledge_router: response.is_knowledge_router || false,
         server_tools: response.server_tools || [],
-        memory_max_messages: response.memory_max_messages || 20,
-        memory_max_tokens: response.memory_max_tokens || 4000,
-        memory_summarize_threshold: response.memory_summarize_threshold || DEFAULT_MEMORY_SUMMARIZE_THRESHOLD,
         service_id: response.service_id || undefined,
         sandbox_service_id: response.sandbox_service_id || undefined,
         silo_id: response.silo_id || undefined,
@@ -415,8 +459,17 @@ function AgentFormPage() {
         media_forced_language: response.media_forced_language || '',
         media_chunk_min_duration: response.media_chunk_min_duration ?? 30,
         media_chunk_max_duration: response.media_chunk_max_duration ?? 120,
-        media_chunk_overlap: response.media_chunk_overlap ?? 5
+        media_chunk_overlap: response.media_chunk_overlap ?? 5,
+        // A2A (Agent2Agent protocol) exposure
+        a2a_enabled: response.a2a_enabled ?? false,
+        a2a_card_visibility: response.a2a_card_visibility ?? 'public',
+        a2a_name_override: response.a2a_name_override ?? null,
+        a2a_description_override: response.a2a_description_override ?? null,
+        a2a_skill_tags: response.a2a_skill_tags ?? [],
+        a2a_examples: response.a2a_examples ?? [],
       });
+      setA2aCardUrl(response.a2a_card_url ?? null);
+      setA2aRpcUrl(response.a2a_rpc_url ?? null);
 
       // Set output parser toggle based on whether agent has an output parser
       setShowOutputParser(!!response.output_parser_id);
@@ -562,27 +615,9 @@ function AgentFormPage() {
     if (snapToSkillRouted) toast.info('Query mode switched to skill-routed — save to apply.');
   };
 
-  const getMiddlewareStatus = (mw: { mcp_config_ids?: number[]; tool_agent_ids?: number[] }): 'available' | 'disabled' | 'partial' => {
-    const mcpIds = mw.mcp_config_ids ?? [];
-    const toolAgentIds = mw.tool_agent_ids ?? [];
-    if (mcpIds.length === 0 && toolAgentIds.length === 0) return 'available';
-    const connectedMcps = mcpIds.filter(id => formData.mcp_config_ids.includes(id)).length;
-    const connectedToolAgents = toolAgentIds.filter(id => formData.tool_ids.includes(id)).length;
-    const totalDeps = mcpIds.length + toolAgentIds.length;
-    const connectedDeps = connectedMcps + connectedToolAgents;
-    if (connectedDeps === 0) return 'disabled';
-    if (connectedDeps < totalDeps) return 'partial';
-    return 'available';
-  };
-
-  const handleMiddlewareToggle = (middlewareId: number) => {
-    setFormData(prev => ({
-      ...prev,
-      middleware_ids: prev.middleware_ids.includes(middlewareId)
-        ? prev.middleware_ids.filter(id => id !== middlewareId)
-        : [...prev.middleware_ids, middlewareId]
-    }));
-  };
+  const handleA2AChange = useCallback((patch: Partial<AgentA2AValue>) => {
+    setFormData(prev => ({ ...prev, ...patch }));
+  }, []);
 
   // Marketplace handlers
   const handleVisibilityChange = useCallback(async (visibility: MarketplaceVisibility) => {
@@ -680,11 +715,11 @@ function AgentFormPage() {
       return;
     }
 
-    // Mirror the backend invariant: a media embedding service is required so
-    // uploaded media/documents are always vectorized with a valid model.
-    if (!formData.media_embedding_service_id) {
+    // Mirror the backend invariant: conversational agents keep uploaded documents in a
+    // per-conversation temp silo, which needs an embedding service.
+    if (formData.has_memory && !formData.media_embedding_service_id) {
       setActiveTab('configuration');
-      setError('Select a media embedding service in Media Processing before saving.');
+      setError('Conversational agents require a media embedding service in Media Processing.');
       return;
     }
 
@@ -693,6 +728,20 @@ function AgentFormPage() {
     const cleanedFilters: RagFixedFilter[] = formData.rag_fixed_filters
       .filter((f) => f.field && (Array.isArray(f.value) ? f.value.length > 0 : String(f.value ?? '').trim() !== ''))
       .map(({ _key, ...rest }) => rest);
+
+    // The A2A tab is disabled for new agents, so only existing agents send these
+    // fields; a2a_card_visibility must never be sent as null (422 on the backend).
+    const isExistingAgent = Number.parseInt(agentId) !== 0;
+    const a2aFields = isExistingAgent
+      ? {
+          a2a_enabled: formData.a2a_enabled,
+          a2a_card_visibility: formData.a2a_card_visibility,
+          a2a_name_override: formData.a2a_name_override,
+          a2a_description_override: formData.a2a_description_override,
+          a2a_skill_tags: formData.a2a_skill_tags,
+          a2a_examples: formData.a2a_examples.map((example) => example.trim()).filter((example) => example.length > 0),
+        }
+      : {};
 
     const submitData = {
       name: formData.name,
@@ -706,9 +755,6 @@ function AgentFormPage() {
       skill_router_enabled: formData.skill_router_enabled,
       is_knowledge_router: formData.is_knowledge_router,
       server_tools: formData.server_tools,
-      memory_max_messages: formData.memory_max_messages,
-      memory_max_tokens: formData.memory_max_tokens,
-      memory_summarize_threshold: formData.memory_summarize_threshold,
       service_id: formData.service_id,
       sandbox_service_id: formData.enable_code_interpreter ? formData.sandbox_service_id : undefined,
       silo_id: formData.silo_id,
@@ -742,6 +788,7 @@ function AgentFormPage() {
       media_chunk_max_duration: formData.media_chunk_max_duration,
       media_chunk_overlap: formData.media_chunk_overlap,
       app_id: Number.parseInt(appId),
+      ...a2aFields,
     };
 
     const isNew = Number.parseInt(agentId) === 0;
@@ -751,22 +798,36 @@ function AgentFormPage() {
     await handleSaveMarketplaceProfile();
 
     setError(null);
+    setA2aFieldErrors({});
     setSaving(true);
-    const result = await mutate(
-      () =>
-        isNewAgent
-          ? apiService.createAgent(Number.parseInt(appId), 0, submitData)
-          : apiService.updateAgent(Number.parseInt(appId), Number.parseInt(agentId), submitData),
-      {
-        loading: isNewAgent ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
-        success: isNewAgent ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
-        error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
-      },
-    );
+    // Created once so both the toast (via `mutate`) and our own error inspection
+    // below observe the same settled promise instead of issuing the request twice.
+    const submitPromise = isNew
+      ? apiService.createAgent(Number.parseInt(appId), 0, submitData)
+      : apiService.updateAgent(Number.parseInt(appId), Number.parseInt(agentId), submitData);
+
+    const result = await mutate(() => submitPromise, {
+      loading: isNew ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
+      success: isNew ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
+      error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
+    });
     setSaving(false);
 
     if (result !== undefined) {
       navigate(`/apps/${appId}/agents`);
+      return;
+    }
+
+    try {
+      await submitPromise;
+    } catch (err) {
+      const a2aErrors = extractA2AFieldErrors(err);
+      if (a2aErrors) {
+        setActiveTab('a2a');
+        setA2aFieldErrors(a2aErrors);
+      }
+      // Keep the existing top-level banner in addition to the per-field messages.
+      setError(errorMessage(err, MESSAGES.SAVE_FAILED('agent')));
     }
   };
 
@@ -792,6 +853,12 @@ function AgentFormPage() {
     { id: 'configuration', label: 'Configuration' },
     { id: 'advanced', label: 'Advanced' },
     { id: 'marketplace', label: 'Marketplace' },
+    {
+      id: 'a2a',
+      label: 'A2A',
+      disabled: isNewAgent,
+      disabledReason: isNewAgent ? 'Save the agent first to configure A2A settings' : undefined,
+    },
     ...(!isNewAgent ? [{ id: 'metrics', label: 'Metrics' }] : []),
   ];
 
@@ -936,109 +1003,6 @@ function AgentFormPage() {
                   />
                   <p className="text-xs text-gray-500 mt-2 flex items-center gap-1"><Lightbulb className="w-3 h-3" /> The template must include {'{question}'} to work properly</p>
                 </div>
-
-                {/* Memory Management - Conditional */}
-                {formData.has_memory && (
-                  <div className="border-t border-gray-200 pt-6">
-                    <div className="flex items-center mb-6">
-                      <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center mr-4">
-                        <Brain className="w-5 h-5 text-indigo-600" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-gray-900">Memory Management</h3>
-                        <p className="text-sm text-gray-600 mt-1">Configure the agent's memory management strategy</p>
-                      </div>
-                    </div>
-
-                    <div className="mb-6 p-4 bg-indigo-50 rounded-xl">
-                      <div className="flex items-start">
-                        <Info className="w-5 h-5 text-indigo-500 mr-3 shrink-0" />
-                        <div>
-                          <p className="text-sm text-indigo-800 font-medium">Automatic Hybrid Strategy</p>
-                          <p className="text-xs text-indigo-700 mt-1">
-                            The agent automatically applies a hybrid strategy that removes tool messages, trims the history,
-                            and manages token limits to optimize performance and costs.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="space-y-6">
-                      <div>
-                        <label htmlFor="memory_max_messages" className="block text-sm font-medium text-gray-700 mb-2">
-                          Maximum Messages
-                        </label>
-                        <input
-                          type="number"
-                          id="memory_max_messages"
-                          min="1"
-                          max="100"
-                          value={formData.memory_max_messages}
-                          onChange={(e) => handleInputChange('memory_max_messages', Number.parseInt(e.target.value))}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
-                        />
-                        <p className="text-xs text-gray-500 mt-2">
-                          Maximum number of messages to keep in the conversation history (recommended: 20)
-                        </p>
-                      </div>
-
-                      <div>
-                        <label htmlFor="memory_max_tokens" className="block text-sm font-medium text-gray-700 mb-2">
-                          Token Limit
-                        </label>
-                        <input
-                          type="number"
-                          id="memory_max_tokens"
-                          min="100"
-                          max="32000"
-                          step="100"
-                          value={formData.memory_max_tokens}
-                          onChange={(e) => handleInputChange('memory_max_tokens', Number.parseInt(e.target.value))}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
-                        />
-                        <p className="text-xs text-gray-500 mt-2">
-                          Maximum number of tokens for the conversation history (recommended: 4000)
-                        </p>
-                      </div>
-
-                      <div>
-                        <label htmlFor="memory_summarize_threshold" className="block text-sm font-medium text-gray-700 mb-2">
-                          Summarization Threshold
-                        </label>
-                        <input
-                          type="number"
-                          id="memory_summarize_threshold"
-                          min="1"
-                          max="50"
-                          value={formData.memory_summarize_threshold}
-                          onChange={(e) => handleInputChange('memory_summarize_threshold', Number.parseInt(e.target.value))}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
-                        />
-                        <p className="text-xs text-gray-500 mt-2">
-                          Number of old messages at which summarization is considered (future implementation, recommended: 10)
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-6 p-4 bg-gray-50 rounded-xl">
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1"><BarChart2 className="w-4 h-4" /> Current Configuration:</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                        <div>
-                          <span className="text-gray-600">Messages:</span>
-                          <span className="ml-2 font-medium text-gray-900">{formData.memory_max_messages}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-600">Tokens:</span>
-                          <span className="ml-2 font-medium text-gray-900">{formData.memory_max_tokens.toLocaleString()}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-600">Threshold:</span>
-                          <span className="ml-2 font-medium text-gray-900">{formData.memory_summarize_threshold}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
           )}
@@ -1428,16 +1392,16 @@ function AgentFormPage() {
 
                     <div className="mb-6">
                       <label htmlFor="media_embedding_service" className="block text-sm font-medium text-gray-700 mb-2">
-                        Embedding Service <span className="text-red-500">*</span>
+                        Embedding Service {formData.has_memory && <span className="text-red-500">*</span>}
                       </label>
                       <select
                         id="media_embedding_service"
-                        required
+                        required={formData.has_memory}
                         value={formData.media_embedding_service_id || ''}
                         onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                         className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                       >
-                        <option value="">Select Embedding Service</option>
+                        <option value="">None (no temporary knowledge base)</option>
                         {embeddingServices.map((service) => (
                           <option key={service.service_id} value={service.service_id}>
                             {service.name}
@@ -1445,8 +1409,9 @@ function AgentFormPage() {
                         ))}
                       </select>
                       <p className="text-xs text-gray-500 mt-1">
-                        Required. Model used to vectorize uploaded media/documents into the conversation's
-                        temporary knowledge base for retrieval.
+                        Model used to vectorize uploaded media/documents into the conversation's temporary
+                        knowledge base for retrieval. Required for conversational agents; optional otherwise
+                        (documents are then sent in full to the agent, and audio/video uploads are unavailable).
                       </p>
                     </div>
 
@@ -1828,6 +1793,18 @@ function AgentFormPage() {
                 </div>
               )}
 
+              {/* Middlewares Card - Only for regular agents */}
+              {agent?.middlewares && formData.type !== 'ocr_agent' && (
+                <AgentMiddlewaresCard
+                  middlewares={agent.middlewares}
+                  selectedIds={formData.middleware_ids}
+                  hasMemory={formData.has_memory}
+                  onChange={(ids) => setFormData((prev) => ({ ...prev, middleware_ids: ids }))}
+                  onRequireMemory={() => setFormData((prev) => ({ ...prev, has_memory: true }))}
+                  onManage={() => navigate(`/apps/${appId}/middlewares`)}
+                />
+              )}
+
               {/* Skills Card - Only for regular agents */}
               {agent?.skills && formData.type !== 'ocr_agent' && (
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
@@ -1931,131 +1908,6 @@ function AgentFormPage() {
                 </div>
               )}
 
-              {/* Middlewares Card - Only for regular agents */}
-              {agent?.middlewares && formData.type !== 'ocr_agent' && (
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                  <div className="flex items-center justify-between mb-6">
-                    <div>
-                      <h3 className="text-xl font-semibold text-gray-900 flex items-center">
-                        <Layers className="w-5 h-5 mr-3" />
-                        {' '}Middlewares
-                      </h3>
-                      <p className="text-gray-600 mt-1">Attach middlewares to monitor and extend agent execution</p>
-                    </div>
-                  </div>
-
-                  {agent.middlewares.length > 0 ? (
-                    <>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {agent.middlewares.map((mw) => {
-                          const status = getMiddlewareStatus(mw);
-                          const isSelected = formData.middleware_ids.includes(mw.middleware_id);
-                          const isDisabled = status === 'disabled';
-                          const isPartial = status === 'partial';
-                          const mcpIds = mw.mcp_config_ids ?? [];
-                          const toolAgentIds = mw.tool_agent_ids ?? [];
-
-                          // Resolve MCP names for display
-                          const allMcpNames = (agent.mcp_configs ?? [])
-                            .filter(c => mcpIds.includes(c.config_id))
-                            .map(c => c.name);
-                          const missingMcpNames = (agent.mcp_configs ?? [])
-                            .filter(c => mcpIds.includes(c.config_id) && !formData.mcp_config_ids.includes(c.config_id))
-                            .map(c => c.name);
-                          // Resolve tool agent names for display
-                          const allToolAgentNames = (agent.tools ?? [])
-                            .filter(t => toolAgentIds.includes(t.agent_id))
-                            .map(t => t.name);
-                          const missingToolAgentNames = (agent.tools ?? [])
-                            .filter(t => toolAgentIds.includes(t.agent_id) && !formData.tool_ids.includes(t.agent_id))
-                            .map(t => t.name);
-                          const missingAll = [...missingMcpNames, ...missingToolAgentNames];
-
-                          return (
-                            <button
-                              key={mw.middleware_id}
-                              type="button"
-                              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left w-full relative ${isDisabled
-                                ? 'border-gray-200 bg-gray-100 opacity-50 cursor-not-allowed'
-                                : isSelected
-                                  ? 'border-indigo-500 bg-indigo-50 cursor-pointer'
-                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300 cursor-pointer'
-                                }`}
-                              onClick={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
-                              disabled={isDisabled}
-                            >
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => !isDisabled && handleMiddlewareToggle(mw.middleware_id)}
-                                    disabled={isDisabled}
-                                    className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                                  />
-                                  <span className="ml-3 text-sm font-medium text-gray-900">{mw.name}</span>
-                                </div>
-                                <div className="flex items-center gap-1.5">
-                                  {isPartial && (
-                                    <div className="relative group">
-                                      <AlertTriangle className="w-4 h-4 text-amber-500 cursor-help" />
-                                      <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block z-10 w-56 p-2.5 text-xs bg-gray-900 text-white rounded-lg shadow-lg pointer-events-none">
-                                        <p className="font-medium mb-1">Partially connected</p>
-                                        <p className="text-gray-300">
-                                          Not active for: {missingAll.join(', ')}
-                                        </p>
-                                        <div className="absolute bottom-0 right-3 translate-y-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
-                                      </div>
-                                    </div>
-                                  )}
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                                    {mw.middleware_type}
-                                  </span>
-                                </div>
-                              </div>
-                              {mw.description && (
-                                <p className="mt-2 ml-7 text-xs text-gray-500 truncate">{mw.description.split('###')[0].trim()}</p>
-                              )}
-                              {isDisabled && (
-                                <p className="mt-2 ml-7 text-xs text-red-500 flex items-center gap-1">
-                                  <AlertTriangle className="w-3 h-3 shrink-0" />
-                                  Requires unselected {[...allMcpNames, ...allToolAgentNames].length > 1 ? 'resources' : 'resource'}: {[...allMcpNames, ...allToolAgentNames].join(', ')}
-                                </p>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {formData.middleware_ids.length > 0 && (
-                        <div className="mt-4 p-4 bg-indigo-50 rounded-xl">
-                          <p className="text-sm text-indigo-800">
-                            <span className="font-medium">{formData.middleware_ids.length}</span> middleware{formData.middleware_ids.length === 1 ? '' : 's'} selected.
-                          </p>
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="text-center py-8">
-                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <Layers className="w-8 h-8 text-gray-400" />
-                      </div>
-                      <h4 className="text-lg font-medium text-gray-900 mb-2">No Middlewares Available</h4>
-                      <p className="text-gray-500 mb-4">
-                        You haven't created any middlewares yet. Create middlewares in the settings to add monitoring and other capabilities.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => navigate(`/apps/${appId}/middlewares`)}
-                        className="inline-flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
-                      >
-                        <Layers className="w-4 h-4 mr-2" />
-                        {' '}Manage Middlewares
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )}
 
@@ -2254,6 +2106,25 @@ function AgentFormPage() {
               </>
               )}
             </div>
+          )}
+
+          {activeTab === 'a2a' && !isNewAgent && (
+            <AgentA2ASettings
+              appId={Number.parseInt(appId ?? '0')}
+              value={{
+                a2a_enabled: formData.a2a_enabled,
+                a2a_card_visibility: formData.a2a_card_visibility,
+                a2a_name_override: formData.a2a_name_override,
+                a2a_description_override: formData.a2a_description_override,
+                a2a_skill_tags: formData.a2a_skill_tags,
+                a2a_examples: formData.a2a_examples,
+              }}
+              onChange={handleA2AChange}
+              cardUrl={a2aCardUrl}
+              rpcUrl={a2aRpcUrl}
+              disabled={!canEditA2A}
+              fieldErrors={a2aFieldErrors}
+            />
           )}
 
           {activeTab === 'metrics' && !isNewAgent && (

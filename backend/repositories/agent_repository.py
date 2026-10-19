@@ -17,6 +17,9 @@ from repositories.output_parser_repository import OutputParserRepository
 from repositories.mcp_config_repository import MCPConfigRepository
 from repositories.skill_repository import SkillRepository
 from repositories.middleware_repository import MiddlewareRepository
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class AgentRepository:
@@ -33,6 +36,25 @@ class AgentRepository:
     def get_ocr_agent_by_id(db: Session, agent_id: int) -> Optional[OCRAgent]:
         """Get OCR agent by ID from OCRAgent table"""
         return db.query(OCRAgent).filter(OCRAgent.agent_id == agent_id).first()
+
+    @staticmethod
+    def existing_ids(db: Session, candidate_ids: list[int]) -> set[int]:
+        """Returns the subset of `candidate_ids` that still exist in `Agent`.
+
+        `OCRAgent` is single-table-inheritance-joined on `Agent.agent_id`
+        (every `OCRAgent` row has a matching `Agent` row), so a plain
+        `Agent.agent_id` lookup covers both. Used by the A2A maintenance
+        worker's orphan sweep (step_018) via `asyncio.to_thread`.
+        """
+        if not candidate_ids:
+            return set()
+        rows = db.query(Agent.agent_id).filter(Agent.agent_id.in_(candidate_ids)).all()
+        return {row[0] for row in rows}
+
+    @staticmethod
+    def any_exists(db: Session) -> bool:
+        """True if at least one agent row exists (A2A orphan-sweep sanity guard)."""
+        return db.query(Agent.agent_id).limit(1).first() is not None
     
     @staticmethod
     def get_agent_by_id_and_type(db: Session, agent_id: int, agent_type: str = 'basic') -> Agent | OCRAgent:
@@ -101,10 +123,9 @@ class AgentRepository:
             if agent:
                 return AgentRepository._delete_agent_with_associations(db, agent)
             return False
-        except Exception as exc:
+        except Exception:
             db.rollback()
-            import logging
-            logging.getLogger(__name__).error("Failed to delete agent %s: %s", agent_id, exc, exc_info=True)
+            logger.exception("Could not delete agent %s", agent_id)
             return False
 
     @staticmethod
@@ -194,11 +215,15 @@ class AgentRepository:
     
     @staticmethod
     def get_valid_tool_ids(db: Session, tool_ids: List[int], app_id: int) -> List[int]:
-        """Get valid tool IDs: agents marked as tools that belong to *app_id*."""
+        """Get valid tool IDs: agents marked as tools AND belonging to ``app_id``.
+
+        The ``app_id`` filter is mandatory — without it, a caller could attach another
+        tenant's tool-agent to their own agent (cross-tenant tool invocation / IDOR).
+        """
         tools_query = db.query(Agent.agent_id).filter(
             Agent.agent_id.in_(tool_ids),
             Agent.is_tool == True,
-            Agent.app_id == app_id,
+            Agent.app_id == app_id
         )
         return [id for (id,) in tools_query]
     
@@ -360,7 +385,11 @@ class AgentRepository:
 
         # Get middlewares
         middlewares = MiddlewareRepository.get_all_by_app_id(db, app_id)
-        middlewares_list = [{"middleware_id": m.middleware_id, "name": m.name, "description": m.description, "middleware_type": m.middleware_type.value if m.middleware_type else "monitoring", "mcp_config_ids": [a.config_id for a in m.mcp_associations], "tool_agent_ids": (m.config or {}).get('tool_agent_ids', []) if m.config else []} for m in middlewares]
+        middlewares_list = [
+            {"middleware_id": m.middleware_id, "name": m.name, "description": m.description,
+             "middleware_type": m.middleware_type.value}
+            for m in middlewares
+        ]
 
         return {
             'ai_services': ai_services_list,
@@ -392,7 +421,12 @@ class AgentRepository:
         agent_skill_ids = [assoc.skill_id for assoc in skill_assocs]
 
         # Get middleware associations
-        middleware_assocs = db.query(AgentMiddleware).filter(AgentMiddleware.agent_id == agent_id).all()
+        middleware_assocs = (
+            db.query(AgentMiddleware)
+            .filter(AgentMiddleware.agent_id == agent_id)
+            .order_by(AgentMiddleware.order)
+            .all()
+        )
         agent_middleware_ids = [assoc.middleware_id for assoc in middleware_assocs]
 
         return {'tool_ids': agent_tool_ids, 'mcp_ids': agent_mcp_ids, 'skill_ids': agent_skill_ids, 'middleware_ids': agent_middleware_ids}

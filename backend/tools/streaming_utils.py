@@ -1,10 +1,12 @@
 """
 SSE (Server-Sent Events) utilities for streaming LangGraph agent responses.
 
-Provides event type constants, formatting helpers, and a mapping function that
-translates raw LangGraph astream chunks into our normalized SSE event dicts.
+Provides event type constants, formatting helpers, a typed event dataclass
+(``AgentStreamEvent``), and a mapping function that translates raw LangGraph
+astream chunks into our normalized SSE event dicts.
 
-Usage example:
+Usage example (the canonical streaming seam, ``AgentStreamingService.
+stream_agent_events``):
     async for mode, chunk in agent_chain.astream(
         {"messages": messages},
         config=config,
@@ -13,17 +15,79 @@ Usage example:
         events = map_stream_event(mode, chunk)
         if events:
             for event in events:
-                yield format_sse_event(event["type"], event["data"])
+                yield AgentStreamEvent(event["type"], event["data"])
+
+A thin SSE bridge then renders each ``AgentStreamEvent`` as
+``format_sse_event(ev.type, ev.data)`` for HTTP/SSE clients.
 """
 
 import json
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Optional, TypedDict
 
 from langchain_core.messages import ToolMessage
 
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Typed stream event (AD-5 streaming seam)
+# ---------------------------------------------------------------------------
+
+
+class DoneExtra(TypedDict):
+    """``extra`` payload shape for a ``done`` :class:`AgentStreamEvent`."""
+
+    structured: bool
+    parsed_response: Any
+    files_data: list
+    conversation_id: Optional[int]
+
+
+class ErrorExtra(TypedDict, total=False):
+    """``extra`` payload shape for an ``error`` :class:`AgentStreamEvent`.
+
+    ``error_kind`` is a stable, small, closed vocabulary a non-SSE consumer
+    can switch on without string-matching ``error_code`` (which mirrors the
+    raw exception class name or a specific internal code and is not meant to
+    be exhaustive). ``status_code``/``detail`` are only present when
+    ``error_kind == "http"``.
+    """
+
+    error_code: Optional[str]
+    error_kind: str
+    status_code: int
+    detail: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentStreamEvent:
+    """A single typed event yielded by ``AgentStreamingService.stream_agent_events``.
+
+    This is the canonical, non-SSE representation of one streamed agent
+    update; a thin presentation-layer bridge renders each instance as a
+    ``format_sse_event(ev.type, ev.data)`` string for HTTP/SSE clients, and
+    other, non-SSE consumers can read this dataclass directly instead.
+
+    Attributes:
+        type: One of the ``SSE_*`` constants in this module (``metadata``,
+            ``token``, ``thinking``, ``tool_start``, ``tool_end``,
+            ``code_output``, ``done``, ``error``).
+        data: The exact payload that would be serialized under the SSE
+            event's ``"data"`` key. Payload fields a consumer would also see
+            over SSE always live here.
+        extra: Side-channel data a non-SSE bridge needs but that is never
+            serialized to SSE — see :class:`DoneExtra` and :class:`ErrorExtra`
+            for the two shapes it takes. ``None`` for every intermediate
+            event (``metadata``/``token``/``thinking``/``tool_start``/
+            ``tool_end``/``code_output``).
+    """
+
+    type: str
+    data: dict
+    extra: DoneExtra | ErrorExtra | None = None
+
 
 # ---------------------------------------------------------------------------
 # SSE Event Type constants
@@ -142,7 +206,7 @@ def get_thinking_message(tool_name: str, is_agent_tool: bool = False) -> str:
 # `SummarizationMiddleware`) from the agent's user-facing tokens. We must
 # suppress these chunks; otherwise the summary text leaks into the chat
 # stream every time the conversation crosses the summarization threshold.
-_INTERNAL_LC_SOURCES: frozenset[str] = frozenset({"summarization", "lightrag"})
+_INTERNAL_LC_SOURCES: frozenset[str] = frozenset({"summarization", "lightrag", "pii"})
 
 
 def _get_lc_source(metadata: Any) -> str | None:
@@ -317,13 +381,59 @@ def final_tool_answer(trailing_tool_msgs: list, streamed_text: str) -> Optional[
     return "\n\n".join(t for t in texts if t.strip()) or None
 
 
+# State key HumanInTheLoopMiddleware writes with the reviewer's edits ({tool_call_id: action}).
+_HITL_EDITED_TOOL_CALLS_KEY = "hitl_edited_tool_calls"
+
+
+def _map_edited_tool_calls(state_delta: dict) -> list[dict]:
+    """Re-announce tool calls a reviewer edited, with the arguments that will actually run."""
+    edited = state_delta.get(_HITL_EDITED_TOOL_CALLS_KEY)
+    if not isinstance(edited, dict):
+        return []
+    events: list[dict] = []
+    for tool_call_id, action in edited.items():
+        if not isinstance(action, dict) or not action.get("name"):
+            continue
+        args = action.get("args") or {}
+        events.append({
+            "type": SSE_TOOL_START,
+            "data": {
+                "tool_name": action["name"],
+                "tool_call_id": tool_call_id,
+                "args": args,
+                "tool_input": json.dumps(args, ensure_ascii=False) if args else None,
+                "edited": True,
+            },
+        })
+    return events
+
+
+def _tc_id(tool_call: Any) -> str:
+    return (tool_call.get("id") if isinstance(tool_call, dict) else getattr(tool_call, "id", "")) or ""
+
+
+def _hitl_unannounced_ids(node_name: str, state_delta: dict, messages: list) -> set[str] | None:
+    """For the human-approval node answering a pause: ids of calls that will not run as-is.
+
+    Rejected calls already have their ToolMessage in the update and edited ones are
+    announced with their new arguments. Returns None for any other node.
+    """
+    if not node_name.startswith("HumanInTheLoopMiddleware") or _HITL_EDITED_TOOL_CALLS_KEY not in state_delta:
+        return None
+    answered = {getattr(m, "tool_call_id", "") for m in messages if getattr(m, "type", "") == "tool"}
+    edited = set((state_delta.get(_HITL_EDITED_TOOL_CALLS_KEY) or {}).keys())
+    return answered | edited
+
+
 def _map_updates_chunk(chunk: Any) -> list[dict] | None:
     """Handle a single ``updates``-mode chunk from LangGraph astream.
 
     LangGraph emits ``updates`` as a dict of ``{node_name: state_delta}``.
     We inspect the state delta for:
-    - Messages with ``tool_calls`` → emit ``tool_start`` + ``thinking`` events.
-    - Messages of type ``ToolMessage`` in a "tools" node → emit ``tool_end``.
+    - Messages with ``tool_calls`` from a non-middleware node → emit ``tool_start`` + ``thinking``.
+    - Reviewer-edited tool calls → emit ``tool_start`` with ``edited: True`` and the new args.
+    - ``ToolMessage`` in a "tools" or middleware node → emit ``tool_end``; a middleware's
+      error ToolMessage (human-approval rejection) carries ``outcome: "rejected"``.
 
     Args:
         chunk: A dict mapping node names to their state delta dicts.
@@ -344,17 +454,31 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
         if not isinstance(state_delta, dict):
             continue
 
+        # Middleware hook nodes ("PIIMiddleware[email].after_model", ...) re-emit the
+        # model's AIMessage; its tool calls were already announced by the model node.
+        # The exception is the human-approval node answering a pause: a resumed run
+        # announces the calls that will now run (approved as-is; edited ones below).
+        is_middleware_node = "." in node_name
+        events.extend(_map_edited_tool_calls(state_delta))
+
         messages = state_delta.get("messages", [])
         if not isinstance(messages, list):
             # State delta may store a single message
             messages = [messages]
+
+        not_running = _hitl_unannounced_ids(node_name, state_delta, messages)
 
         for msg in messages:
             if msg is None:
                 continue
 
             # --- tool_start: AI message contains tool_calls ---
-            tool_calls = getattr(msg, "tool_calls", None) or []
+            if not is_middleware_node:
+                tool_calls = getattr(msg, "tool_calls", None) or []
+            elif not_running is not None:
+                tool_calls = [tc for tc in (getattr(msg, "tool_calls", None) or []) if _tc_id(tc) not in not_running]
+            else:
+                tool_calls = []
             for tc in tool_calls:
                 try:
                     tool_name: str = (
@@ -396,12 +520,13 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                         exc_info=True,
                     )
 
-            # --- tool_end: ToolMessage in the "tools" node ---
+            # --- tool_end: ToolMessage from the "tools" node, or one a middleware wrote in
+            # place of running the tool (e.g. a human-approval rejection) ---
             msg_type = type(msg).__name__
             is_tool_message = msg_type in ("ToolMessage",) or (
                 hasattr(msg, "type") and getattr(msg, "type", "") == "tool"
             )
-            if is_tool_message and "tool" in node_name.lower():
+            if is_tool_message and ("tool" in node_name.lower() or is_middleware_node):
                 try:
                     tool_call_id = getattr(msg, "tool_call_id", "") or ""
                     tool_name_end = getattr(msg, "name", "") or ""
@@ -412,14 +537,14 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                             raw_output if isinstance(raw_output, str)
                             else json.dumps(raw_output, ensure_ascii=False)
                         )
-                    events.append({
-                        "type": SSE_TOOL_END,
-                        "data": {
-                            "tool_name": tool_name_end,
-                            "tool_call_id": tool_call_id,
-                            "tool_output": tool_output,
-                        },
-                    })
+                    end_data: dict = {
+                        "tool_name": tool_name_end,
+                        "tool_call_id": tool_call_id,
+                        "tool_output": tool_output,
+                    }
+                    if is_middleware_node and getattr(msg, "status", None) == "error":
+                        end_data["outcome"] = "rejected"
+                    events.append({"type": SSE_TOOL_END, "data": end_data})
                 except Exception:
                     logger.warning(
                         "Could not extract ToolMessage info for tool_end event",
@@ -431,33 +556,8 @@ def _map_updates_chunk(chunk: Any) -> list[dict] | None:
                     events.append({"type": "_lightrag_graph", "data": raw_data})
 
     # --- __interrupt__: HumanInTheLoop middleware paused execution ---
-    # This check MUST be outside the for-loop above because when LangGraph
-    # emits an interrupt the chunk is {"__interrupt__": [Interrupt(...)]}.
-    # The list value is not a dict, so the `continue` inside the loop skips it.
-    interrupt_value = chunk.get("__interrupt__")
-    if interrupt_value:
-        try:
-            interrupts = interrupt_value if isinstance(interrupt_value, list) else [interrupt_value]
-            for intr in interrupts:
-                action_requests = []
-                if isinstance(intr, dict):
-                    payload = intr.get("value", intr)
-                elif hasattr(intr, "value"):
-                    payload = intr.value
-                else:
-                    payload = {}
-                if isinstance(payload, dict):
-                    action_requests = payload.get("action_requests", [])
-                events.append({
-                    "type": SSE_HITL_INTERRUPT,
-                    "data": {
-                        "action_requests": action_requests,
-                        "review_configs": payload.get("review_configs", []) if isinstance(payload, dict) else [],
-                    },
-                })
-                logger.info("HITL interrupt emitted for tools: %s", [r.get('name') for r in action_requests])
-        except Exception:
-            logger.warning("Could not parse __interrupt__ payload", exc_info=True)
+    # Not handled here; the actual interrupt with proper action_requests is
+    # detected and emitted in agent_streaming_service.py after checking graph state.
 
     return events if events else None
 

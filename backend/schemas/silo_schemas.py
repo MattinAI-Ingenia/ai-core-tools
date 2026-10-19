@@ -51,11 +51,15 @@ class SiloDetailSchema(BaseModel):
     # inference gate must stop showing (there is nothing left to infer for).
     lightrag_config_locked: bool = False
     source_label_fields: Optional[str] = None
+    # Media (video/audio) indexing services
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
-    ai_services: List[Dict[str, Any]] = []
     vector_db_options: List[Dict[str, Any]] = []
+    # AI services usable for media: [{service_id, name, supports_video}]
+    ai_services: List[Dict[str, Any]] = []
     # Metadata definition fields for playground
     metadata_fields: Optional[List[Dict[str, Any]]] = None
     is_frozen: bool = False
@@ -87,6 +91,9 @@ class CreateSiloSchema(BaseModel):
     lightrag_entity_types: Optional[str] = None
     lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
     source_label_fields: Optional[str] = None
+    # Optional: needed only to index video/audio into the silo
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
 
 
 class UpdateSiloSchema(BaseModel):
@@ -107,6 +114,9 @@ class UpdateSiloSchema(BaseModel):
     lightrag_entity_types_mode: Optional[Literal['infer', 'manual']] = None
     # Query-time only, editable at any time ("" clears it).
     source_label_fields: Optional[str] = None
+    # Optional media services; omitted fields keep their value, null clears them
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
 
 
 class _ContentLengthFilterSchema(BaseModel):

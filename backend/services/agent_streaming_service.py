@@ -1,28 +1,41 @@
 """
 Streaming agent execution service.
 
-A thin SSE adapter over AgentExecutionService.  The setup and post-processing
-phases are fully delegated to AgentExecutionService._prepare_turn() and
-_finalize_turn(); this service only owns the astream loop that yields tokens
-and tool events to the client.
+``stream_agent_events`` is the canonical streaming seam (AD-5): it owns the
+astream loop, the retry logic, metrics and cleanup for one agent chat turn,
+and yields typed ``AgentStreamEvent`` instances. The setup and
+post-processing phases are fully delegated to
+``AgentExecutionService._prepare_turn()`` and ``_finalize_turn()``.
+
+``stream_agent_chat`` is a thin SSE presentation of that seam: it renders
+each ``AgentStreamEvent`` as a ``format_sse_event`` string for HTTP/SSE
+clients (playground, public API, marketplace, scheduled tasks). Any other
+transport should consume ``stream_agent_events`` directly rather than parse
+SSE text.
 """
 
 import asyncio
+import contextlib
+import json
 import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Any
 
 import psycopg.errors
-from langchain_core.messages import ToolMessage
+from fastapi import HTTPException
+from langchain.agents.middleware import PIIDetectionError
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 from sqlalchemy.orm import Session
 
-from tools.agentTools import create_agent, prepare_agent_config, build_human_message
+from tools.agentTools import create_agent, prepare_agent_config, build_human_message, compute_thread_id
 from tools.langsmith_config import (
     apply_tracing_to_config,
     build_tracing_config,
     resolve_langsmith_settings,
 )
 from tools.streaming_utils import (
+    AgentStreamEvent,
     final_tool_answer,
     format_sse_event,
     map_stream_event,
@@ -31,7 +44,10 @@ from tools.streaming_utils import (
     SSE_HITL_INTERRUPT,
 )
 from tools.streaming_utils import _extract_text_content as _extract_text, _get_lc_source, _INTERNAL_LC_SOURCES
-from services.agent_execution_service import AgentExecutionService
+from services.agent_execution_service import AgentExecutionService, RunPausedForApproval, pii_blocked_message
+from services import hitl_approval_service as approvals
+from models.hitl_approval import ApprovalChannel
+from tools.middleware.factory import human_in_the_loop_config, redacts_output
 from services.agent_metrics_collector import AgentMetricsCollector
 from services.agent_metrics_recorder import record_agent_execution
 from services.agent_cache_service import (
@@ -41,6 +57,56 @@ from services.agent_cache_service import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_AGENT_EXECUTION_FAILED = "Agent execution failed"
+
+
+class _AgentStreamSerializationError(RuntimeError):
+    """Raised internally when an outgoing event payload is not JSON-safe.
+
+    Caught by ``stream_agent_events``'s own exception handling so the turn
+    still ends in exactly one terminal ``error`` event with an accurate
+    ``error_kind``/``error_code``, instead of being misreported as a
+    cancellation by the ``aclosing`` wrapper in ``stream_agent_chat`` (a bare
+    ``json.dumps`` failure inside the SSE bridge would otherwise surface
+    there as a generic exception during generator teardown).
+    """
+
+
+def _assert_json_serializable(data: dict, *, event_type: str) -> None:
+    """Raise :class:`_AgentStreamSerializationError` if ``data`` cannot be
+    rendered as the SSE payload :func:`tools.streaming_utils.format_sse_event`
+    will eventually build from it.
+
+    Only called for payloads built from values this service does not fully
+    control (e.g. ``OutputParser``/tool output passed through verbatim into
+    the ``done`` event), so the check runs once per turn, not per token.
+    """
+    try:
+        json.dumps(data, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise _AgentStreamSerializationError(
+            f"{event_type} payload is not JSON-serializable: {exc}"
+        ) from exc
+
+
+async def _read_pause(agent_chain, config) -> "approvals.GraphPause | None":
+    """The human-in-the-loop interrupt the graph is paused on, or None."""
+    try:
+        return await approvals.read_pause(agent_chain, config)
+    except Exception as exc:
+        # Unreadable state falls back to "no interrupt" so the normal recovery path stays reachable.
+        logger.warning("Could not read graph state for pending interrupts: %s", exc)
+        return None
+
+
+async def _final_answer_text(agent_chain, config) -> str:
+    """Text of the last AI message in the checkpoint (after after_model middlewares ran)."""
+    state = await agent_chain.aget_state(config)
+    for msg in reversed((state.values or {}).get("messages", [])):
+        if isinstance(msg, AIMessage):
+            return msg.text
+    return ""
 
 
 def _emit_monitoring_log(
@@ -100,7 +166,7 @@ class AgentStreamingService:
     # Public API
     # ------------------------------------------------------------------
 
-    async def stream_agent_chat(
+    async def stream_agent_events(
         self,
         agent_id: int,
         message: str,
@@ -109,11 +175,29 @@ class AgentStreamingService:
         user_context: dict | None = None,
         conversation_id: int | None = None,
         db: Session | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """Stream an agent chat turn as SSE events.
+        channel: ApprovalChannel = ApprovalChannel.PLAYGROUND,
+        resume: "approvals.ResumeRequest | None" = None,
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
+        """Run one agent chat turn and yield typed stream events.
 
-        Yields ``format_sse_event`` strings for each event in the following
-        sequence:
+        With ``resume`` the turn answers a human-in-the-loop approval (already claimed
+        by the caller) instead of sending a new message, and records its outcome.
+        When the run pauses, interactive channels get a ``hitl_interrupt`` event with the
+        recorded approval followed by ``done`` (``status: "requires_approval"``); other
+        channels have the pause rejected on the spot and get an ``error`` event, so the
+        conversation is never left paused.
+
+        This is the **canonical streaming seam** (AD-5): it runs exactly the
+        setup, astream loop, retry, metrics and cleanup logic a chat turn
+        needs, and yields :class:`~tools.streaming_utils.AgentStreamEvent`
+        instances rather than any wire format. ``stream_agent_chat`` is a
+        thin presentation-layer bridge over this generator that renders each
+        event as an SSE string; any other transport (e.g. the A2A execution
+        bridge) can consume this generator directly and never has to parse
+        SSE text.
+
+        Event sequence, mirroring ``stream_agent_chat``'s historical SSE
+        order:
 
         1. ``metadata`` — emitted immediately after setup with conversation/agent
            metadata so the client can bind the conversation ID before tokens
@@ -122,9 +206,45 @@ class AgentStreamingService:
            reasons and calls tools.
         3. ``token`` — one per partial LLM text chunk.
         4. ``done`` — emitted once after the stream finishes, carrying the full
-           parsed response, conversation ID, and any generated files.
+           parsed response, conversation ID, and any generated files in
+           ``data``, plus ``structured``, ``parsed_response``, ``files_data``
+           and ``conversation_id`` in ``extra`` for non-SSE consumers.
         5. ``error`` — emitted instead of ``done`` if an unhandled exception
-           occurs.
+           occurs; ``extra["error_code"]`` carries the metrics error code and
+           ``extra["error_kind"]`` a stable, small vocabulary (``"connection"``,
+           ``"incomplete_turn"``, ``"http"``, ``"serialization"``,
+           ``"agent_failure"``, ``"approval"``, ``"pii_blocked"``) a non-SSE
+           consumer can switch on.
+
+        Consumer contract:
+            - Always iterate this generator through
+              ``async with contextlib.aclosing(self.stream_agent_events(...)) as events:``
+              (``stream_agent_chat`` does exactly this). Cancel the *task*
+              consuming it rather than calling ``aclose()`` from a different
+              task while the owning task is still awaiting a value — that
+              races the generator's own cleanup with whatever the other task
+              is doing and is not a supported usage.
+            - This generator commits ``effective_db`` mid-turn before the
+              astream loop (to free the sync connection for the duration of
+              LLM I/O) but never closes it. The caller still owns opening and
+              closing the session it passed in.
+            - Exactly one terminal event (``done`` or ``error``) is yielded
+              per successful or failed turn; on a cancellation that arrives
+              *before* that terminal event (``CancelledError``/
+              ``GeneratorExit``), neither is yielded — the generator
+              re-raises instead, after recording the turn as ``"Cancelled"``.
+              A ``GeneratorExit`` that instead arrives *after* the terminal
+              event (e.g. ``contextlib.aclosing``/the consumer's own
+              ``aclose()`` tearing down this now-finished generator right
+              after reading its ``done``/``error``) is re-raised too, but
+              does **not** overwrite the outcome already recorded for that
+              event — it is generator teardown, not a mid-turn cancellation.
+            - The retry loop (missing-tool-output recovery) never yields a
+              ``token`` before deciding whether to retry or fail, so
+              ``data["response"]`` on the final ``done`` is always the
+              complete, authoritative answer for that turn — consumers do
+              not need to reassemble it from intermediate ``token`` events
+              themselves if they would rather wait for ``done``.
 
         Args:
             agent_id: Primary key of the agent to execute.
@@ -142,9 +262,12 @@ class AgentStreamingService:
                 created automatically.
             db: SQLAlchemy session.  If omitted the instance-level ``self.db``
                 is used.
+            channel: Where the turn comes from; decides whether a human-approval
+                pause can be answered (see ``hitl_approval_service.is_interactive``).
+            resume: Claimed approval to answer instead of sending ``message``.
 
         Yields:
-            SSE-formatted strings (``"data: {...}\\n\\n"``).
+            :class:`~tools.streaming_utils.AgentStreamEvent` instances.
         """
         effective_db = db or self.db
         mcp_client = None
@@ -157,6 +280,19 @@ class AgentStreamingService:
         metrics_status, metrics_error_code, metrics_error_message = "SUCCESS", None, None
         metrics_collector = AgentMetricsCollector()
         first_token_at = None
+        # Set to True immediately before every terminal (done/error) yield
+        # below. A consumer that stops iterating right after receiving that
+        # event (e.g. `contextlib.aclosing.__aexit__` -> `aclose()`, which is
+        # exactly what every documented consumer -- `stream_agent_chat`, the
+        # A2A executor bridge -- does once it has what it needs) throws
+        # `GeneratorExit` back into this generator at that very `yield`,
+        # which is otherwise indistinguishable from a real mid-turn
+        # cancellation to the `except (CancelledError, GeneratorExit)` below.
+        # Without this flag, every successful (or already-reported-error)
+        # turn would be mis-recorded as `"Cancelled"` purely because of how
+        # its own caller closes the generator afterwards.
+        terminal_event_yielded = False
+        resume_settled = resume is None
 
         try:
             # ----------------------------------------------------------------
@@ -171,6 +307,23 @@ class AgentStreamingService:
                 conversation_id=conversation_id,
                 db=effective_db,
             )
+            if (
+                resume is None
+                and effective_db is not None
+                and ctx.conversation is not None
+                and human_in_the_loop_config(ctx.fresh_agent) is not None
+            ):
+                try:
+                    expired = approvals.check_conversation_free(effective_db, ctx.conversation.conversation_id)
+                except approvals.ApprovalPendingError as exc:
+                    metrics_status, metrics_error_code, metrics_error_message = "ERROR", exc.code, str(exc)
+                    terminal_event_yielded = True
+                    yield AgentStreamEvent(
+                        "error", exc.to_dict(), extra={"error_code": exc.code, "error_kind": "approval"}
+                    )
+                    return
+                if expired is not None:
+                    await self.execution_service.expire_approval(effective_db, expired.id)
             sandbox_turn_active = self.execution_service._begin_sandbox_turn(
                 ctx,
                 db=effective_db,
@@ -181,7 +334,7 @@ class AgentStreamingService:
             # ----------------------------------------------------------------
             # 2. Emit early metadata event so the client has conversation_id
             # ----------------------------------------------------------------
-            yield format_sse_event(
+            yield AgentStreamEvent(
                 "metadata",
                 {
                     "conversation_id": ctx.effective_conv_id,
@@ -244,18 +397,14 @@ class AgentStreamingService:
                 )
 
                 config = prepare_agent_config(ctx.fresh_agent)
+                config["configurable"]["thread_id"] = compute_thread_id(
+                    ctx.fresh_agent, ctx.session_id_for_cache
+                )
 
                 if ctx.fresh_agent.has_memory and ctx.session_id_for_cache:
-                    config["configurable"]["thread_id"] = (
-                        f"thread_{ctx.fresh_agent.agent_id}_{ctx.session_id_for_cache}"
-                    )
                     logger.info(
                         "Using session-aware thread_id: %s",
                         config["configurable"]["thread_id"],
-                    )
-                else:
-                    config["configurable"]["thread_id"] = (
-                        f"thread_{ctx.fresh_agent.agent_id}"
                     )
 
                 config["configurable"]["question"] = ctx.enhanced_message
@@ -270,9 +419,27 @@ class AgentStreamingService:
                 # ------------------------------------------------------------
                 # 4. Build the HumanMessage payload (handles multimodal images)
                 # ------------------------------------------------------------
-                message_payload = build_human_message(
-                    ctx.fresh_agent, ctx.enhanced_message, ctx.image_files, ctx.user_context
-                )
+                if resume is None:
+                    stream_input = {"messages": [build_human_message(
+                        ctx.fresh_agent, ctx.enhanced_message, ctx.image_files, ctx.user_context
+                    )]}
+                else:
+                    pause = await _read_pause(agent_chain, config)
+                    if pause is None or pause.interrupt_id != resume.approval.interrupt_id:
+                        approvals.finish(
+                            effective_db, resume.approval.id, approvals.ApprovalStatus.CANCELLED, reason="stale"
+                        )
+                        resume_settled = True
+                        exc = approvals.ApprovalStaleError(
+                            "This approval request no longer matches the conversation; it was not applied."
+                        )
+                        metrics_status, metrics_error_code, metrics_error_message = "ERROR", exc.code, str(exc)
+                        terminal_event_yielded = True
+                        yield AgentStreamEvent(
+                            "error", exc.to_dict(), extra={"error_code": exc.code, "error_kind": "approval"}
+                        )
+                        return
+                    stream_input = Command(resume={"decisions": resume.decisions})
 
                 # ------------------------------------------------------------
                 # 5. Attach LangSmith tracer + metadata when configured
@@ -332,14 +499,29 @@ class AgentStreamingService:
                 # know whether the message has tool_calls (discard) or not (flush).
                 _token_buf: dict[str, list[str]] = {}
                 _discarded_ids: set[str] = set()
+                # PIIMiddleware(apply_to_output) redacts the AI message in after_model, i.e.
+                # after its tokens were streamed; hold tokens back so PII never reaches the UI.
+                buffer_output = redacts_output(ctx.fresh_agent)
+                hitl_enabled = human_in_the_loop_config(ctx.fresh_agent) is not None
 
                 try:
-                    with stream_ctx:
-                        async for mode, chunk in agent_chain.astream(
-                            {"messages": [message_payload]},
+                    # ``aclosing`` guarantees the LangGraph astream generator
+                    # itself is closed (releasing the LLM/tool/checkpointer
+                    # work it is suspended on) whenever we leave this block
+                    # for any reason — normal completion, the retry
+                    # ``continue``/``raise`` below, or the consumer cancelling
+                    # us mid-token. Without it, a cancelled turn left that
+                    # generator suspended until the asyncgen GC hook ran, so
+                    # in-flight LLM/tool/checkpointer work kept running after
+                    # the turn was already recorded as "Cancelled".
+                    async with contextlib.aclosing(
+                        agent_chain.astream(
+                            stream_input,
                             config=config,
                             stream_mode=["messages", "updates", "custom"],
-                        ):
+                        )
+                    ) as stream:
+                        async for mode, chunk in stream:
                             if mode == "messages":
                                 # Buffer tokens instead of emitting immediately so we can
                                 # discard them if this message turns out to have tool_calls.
@@ -366,6 +548,7 @@ class AgentStreamingService:
                                 if text:
                                     _token_buf.setdefault(msg_id, []).append(text)
                                 continue
+
 
                             if mode == "updates":
                                 if (
@@ -403,7 +586,11 @@ class AgentStreamingService:
                                                     if first_token_at is None:
                                                         first_token_at = datetime.utcnow()
                                                     accumulated_content += text
-                                                    yield format_sse_event(SSE_TOKEN, {"content": text})
+                                                    if buffer_output:
+                                                        # Raw tokens are not PII-redacted yet; the
+                                                        # redacted final message replaces them below.
+                                                        continue
+                                                    yield AgentStreamEvent(SSE_TOKEN, {"content": text})
                                 # Emit non-token events from updates (tool_start, tool_end, etc.)
                                 events = map_stream_event(mode, chunk)
                                 if events:
@@ -411,10 +598,11 @@ class AgentStreamingService:
                                         if event["type"] == "_lightrag_graph":
                                             lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
                                         elif event["type"] != SSE_TOKEN:
-                                            yield format_sse_event(event["type"], event["data"])
+                                            yield AgentStreamEvent(event["type"], event["data"])
                                 continue
 
                             # custom mode and anything else
+
                             events = map_stream_event(mode, chunk)
                             if events:
                                 for event in events:
@@ -422,11 +610,15 @@ class AgentStreamingService:
                                         if first_token_at is None:
                                             first_token_at = datetime.utcnow()
                                         accumulated_content += event["data"].get("content", "")
+                                        if buffer_output:
+                                            # Raw tokens are not PII-redacted yet; send the
+                                            # redacted final message instead (see below).
+                                            continue
                                     elif event["type"] == "_lightrag_graph":
                                         lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
                                         continue
                                     else:
-                                        yield format_sse_event(event["type"], event["data"])
+                                        yield AgentStreamEvent(event["type"], event["data"])
 
                     # Flush any remaining buffered tokens (e.g. final message with no
                     # tool_calls that never triggered an updates confirmation).
@@ -436,14 +628,17 @@ class AgentStreamingService:
                                 if first_token_at is None:
                                     first_token_at = datetime.utcnow()
                                 accumulated_content += text
-                                yield format_sse_event(SSE_TOKEN, {"content": text})
+                                if buffer_output:
+                                    continue
+                                yield AgentStreamEvent(SSE_TOKEN, {"content": text})
                     # Knowledge-router pass-through: the turn ended on the
                     # specialist's ToolMessage (return_direct), so no model
                     # tokens carried the answer.
                     tool_answer = None if structured_response is not None else final_tool_answer(trailing_tool_msgs, accumulated_content)
                     if tool_answer:
                         accumulated_content = tool_answer
-                        yield format_sse_event(SSE_TOKEN, {"content": tool_answer})
+                        if not buffer_output:
+                            yield AgentStreamEvent(SSE_TOKEN, {"content": tool_answer})
                     break
                 except Exception as stream_exc:
                     if (
@@ -451,6 +646,11 @@ class AgentStreamingService:
                         and ctx.fresh_agent.has_memory
                         and ctx.session_id_for_cache
                         and is_missing_tool_output_error(stream_exc)
+                        # A HITL pause leaves the same unanswered tool_call a corrupt
+                        # checkpoint does. Deleting it would silently discard the
+                        # pending approval and the whole thread's memory.
+                        and resume is None
+                        and not (hitl_enabled and await _read_pause(agent_chain, config))
                     ):
                         # Recover by forking from the last known-good checkpoint
                         # instead of deleting the whole thread — see the mirrored
@@ -472,9 +672,14 @@ class AgentStreamingService:
                             metrics_status = "ERROR"
                             metrics_error_code = type(stream_exc).__name__
                             metrics_error_message = str(stream_exc)[:2000]
-                            yield format_sse_event(
+                            terminal_event_yielded = True
+                            yield AgentStreamEvent(
                                 "error",
                                 {"message": "Your last message could not be completed. Please resend it."},
+                                extra={
+                                    "error_code": metrics_error_code,
+                                    "error_kind": "incomplete_turn",
+                                },
                             )
                             return
                         logger.warning(
@@ -488,80 +693,106 @@ class AgentStreamingService:
                         continue
                     raise
 
-            logger.info("Stream completed — accumulated_content length=%d", len(accumulated_content))
-
-            # Check for pending interrupts after stream completes
-            has_pending_interrupt = False
-            try:
-                graph_state = await agent_chain.aget_state(config)
-                if hasattr(graph_state, 'tasks'):
-                    for task in graph_state.tasks:
-                        if hasattr(task, 'interrupts') and task.interrupts:
-                            has_pending_interrupt = True
-                            logger.info("PENDING INTERRUPT found in graph state: %s", task.interrupts)
-                            for intr in task.interrupts:
-                                payload = intr.value if hasattr(intr, 'value') else intr
-                                action_requests = []
-                                review_configs = []
-                                if isinstance(payload, dict):
-                                    action_requests = payload.get("action_requests", [])
-                                    review_configs = payload.get("review_configs", [])
-                                yield format_sse_event(
-                                    "hitl_interrupt",
-                                    {
-                                        "action_requests": action_requests,
-                                        "review_configs": review_configs,
-                                    },
-                                )
-            except Exception as state_err:
-                logger.warning("Could not check graph state for interrupts: %s", state_err)
-
-            # If HITL interrupted, emit done with interrupt message and skip normal finalization
-            if has_pending_interrupt:
-                yield format_sse_event(
-                    "done",
-                    {
-                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
-                        "conversation_id": ctx.effective_conv_id,
-                        "files": [],
-                    },
+            raw_response = (
+                structured_response
+                if structured_response is not None
+                else accumulated_content
+            )
+            if resume is not None:
+                approvals.finish(
+                    effective_db, resume.approval.id, resume.final_status,
+                    reason=resume.reason, decisions=resume.decisions, decided_by=resume.decided_by,
                 )
-            else:
-                # ----------------------------------------------------------------
-                # 7. Post-processing phase — delegates to AgentExecutionService
-                # ----------------------------------------------------------------
+                resume_settled = True
 
-                # Log usage metrics if monitoring is enabled
-                if monitoring_handler is not None:
-                    monitoring_mw_config = None
-                    for _assoc in (getattr(ctx.fresh_agent, 'middleware_associations', None) or []):
-                        if _assoc.middleware and _assoc.middleware.middleware_type.value == 'monitoring':
-                            monitoring_mw_config = _assoc.middleware.config or {}
-                            break
-                    _emit_monitoring_log(ctx.fresh_agent.agent_id, monitoring_handler, monitoring_mw_config, logger.info)
-
-                raw_response = (
-                    structured_response
-                    if structured_response is not None
-                    else accumulated_content
+            pause = await _read_pause(agent_chain, config) if hitl_enabled else None
+            if pause is not None:
+                # Paused by HumanInTheLoopMiddleware: nothing to finalize until someone answers.
+                requester = approvals.Requester.from_user_context(ctx.user_context)
+                answerable = approvals.is_interactive(channel) and (
+                    requester.user_id is not None or bool(requester.api_key_hash)
                 )
-
-                result = await self.execution_service._finalize_turn(
-                    ctx, raw_response, effective_db
+                approval = await approvals.open_approval(
+                    effective_db,
+                    agent_chain=agent_chain,
+                    config=config,
+                    conversation_id=ctx.conversation.conversation_id,
+                    agent_id=agent_id,
+                    app_id=ctx.fresh_agent.app_id,
+                    channel=channel,
+                    requester=requester,
+                    hitl_config=human_in_the_loop_config(ctx.fresh_agent),
+                    answerable=answerable,
                 )
-
-                # ----------------------------------------------------------------
-                # 8. Emit done event
-                # ----------------------------------------------------------------
-                yield format_sse_event(
-                    "done",
-                    {
-                        "response": result["parsed_response"],
-                        "conversation_id": result["effective_conv_id"],
-                        "files": result["files_data"],
-                        "lightrag_graph": lightrag_graph_data,
-                    },
+                if answerable:
+                    yield AgentStreamEvent(SSE_HITL_INTERRUPT, approvals.sse_payload(approval))
+                    terminal_event_yielded = True
+                    yield AgentStreamEvent(
+                        "done",
+                        {
+                            "response": "",
+                            "conversation_id": ctx.effective_conv_id,
+                            "files": [],
+                            "hitl_paused": True,
+                            "status": "requires_approval",
+                            "approval_id": approval.id,
+                        },
+                        extra={"conversation_id": ctx.effective_conv_id, "approval_id": approval.id},
+                    )
+                    return
+                await self.execution_service._reject_in_place(
+                    RunPausedForApproval(agent_chain, config), approval, effective_db
                 )
+                tools = ", ".join(a["name"] for a in approval.actions)
+                exc = approvals.ApprovalNotSupportedError(
+                    f"This agent needs human approval before running {tools}, which this chat cannot provide. "
+                    "The tool was not executed.",
+                    approval_id=approval.id,
+                )
+                metrics_status, metrics_error_code, metrics_error_message = "ERROR", exc.code, str(exc)
+                terminal_event_yielded = True
+                yield AgentStreamEvent(
+                    "error", exc.to_dict(), extra={"error_code": exc.code, "error_kind": "approval"}
+                )
+                return
+
+            if buffer_output and structured_response is None:
+                raw_response = await _final_answer_text(agent_chain, config)
+
+            # ----------------------------------------------------------------
+            # 7. Post-processing phase — delegates to AgentExecutionService
+            # ----------------------------------------------------------------
+            result = await self.execution_service._finalize_turn(
+                ctx, raw_response, effective_db
+            )
+
+            # ----------------------------------------------------------------
+            # 8. Emit done event
+            # ----------------------------------------------------------------
+            done_data = {
+                "response": result["parsed_response"],
+                "conversation_id": result["effective_conv_id"],
+                "files": result["files_data"],
+                "status": "completed",
+                "lightrag_graph": lightrag_graph_data,
+            }
+            # Validate up front rather than let format_sse_event's json.dumps
+            # raise inside the SSE bridge: a failure there would surface
+            # through contextlib.aclosing's teardown of this generator and
+            # get misreported as a cancellation instead of a real error, and
+            # no SSE error event would ever reach the client.
+            _assert_json_serializable(done_data, event_type="done")
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "done",
+                done_data,
+                extra={
+                    "structured": structured_response is not None,
+                    "parsed_response": result["parsed_response"],
+                    "files_data": result["files_data"],
+                    "conversation_id": result["effective_conv_id"],
+                },
+            )
 
         except (
             psycopg.errors.AdminShutdown,
@@ -578,54 +809,82 @@ class AgentStreamingService:
             )
             metrics_status, metrics_error_code = "ERROR", type(exc).__name__
             metrics_error_message = "Connection error, please retry."
-            yield format_sse_event("error", {"message": "Connection error, please retry."})
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "error",
+                {"message": "Connection error, please retry."},
+                extra={"error_code": metrics_error_code, "error_kind": "connection"},
+            )
         except (asyncio.CancelledError, GeneratorExit):
-            # Client went away mid-stream.
-            metrics_status, metrics_error_code, metrics_error_message = "ERROR", "Cancelled", "Stream cancelled"
+            # Client went away mid-stream -- UNLESS `terminal_event_yielded`
+            # is already True, in which case this is `aclosing`/the
+            # consumer's own `aclose()` tearing down an already-finished
+            # generator right after its terminal event, not a real
+            # cancellation; the outcome recorded above (SUCCESS or a specific
+            # ERROR) must stand.
+            if not terminal_event_yielded:
+                metrics_status, metrics_error_code, metrics_error_message = "ERROR", "Cancelled", "Stream cancelled"
             raise
+        except PIIDetectionError as exc:
+            # PIIMiddleware(strategy="block"): expected outcome, not a server error.
+            metrics_status, metrics_error_code, metrics_error_message = "ERROR", "PIIDetectionError", str(exc)
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "error",
+                {"message": pii_blocked_message(exc)},
+                extra={"error_code": metrics_error_code, "error_kind": "pii_blocked"},
+            )
+        except _AgentStreamSerializationError as exc:
+            logger.exception(
+                "Non-serializable event payload in streaming agent chat: %s",
+                str(exc),
+            )
+            metrics_status, metrics_error_code = "ERROR", "SerializationError"
+            metrics_error_message = str(exc)[:2000]
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "error",
+                {"message": _AGENT_EXECUTION_FAILED},
+                extra={"error_code": metrics_error_code, "error_kind": "serialization"},
+            )
+        except HTTPException as exc:
+            logger.warning(
+                "HTTPException during streaming agent chat: status=%s detail=%s",
+                exc.status_code,
+                exc.detail if exc.status_code < 500 else "<redacted>",
+            )
+            metrics_status, metrics_error_code = "ERROR", "HTTPException"
+            metrics_error_message = (
+                str(exc.detail)[:2000] if exc.status_code < 500 else "Internal error"
+            )
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "error",
+                {"message": _AGENT_EXECUTION_FAILED},
+                extra={
+                    "error_code": "HTTPException",
+                    "error_kind": "http",
+                    "status_code": exc.status_code,
+                    "detail": exc.detail if exc.status_code < 500 else None,
+                },
+            )
         except Exception as exc:
-            # Check if this is a GraphInterrupt from HumanInTheLoop middleware
-            from langgraph.types import Interrupt
-            exc_type = type(exc).__name__
-            if exc_type == "GraphInterrupt" or (
-                hasattr(exc, "interrupts") or "interrupt" in exc_type.lower()
-            ):
-                interrupts = getattr(exc, "interrupts", [])
-                logger.info(
-                    "GraphInterrupt caught — HITL middleware paused execution. "
-                    "Interrupts: %s", interrupts
-                )
-                # Emit HITL interrupt event to the frontend
-                for intr in interrupts:
-                    payload = intr.value if hasattr(intr, "value") else intr
-                    action_requests = []
-                    review_configs = []
-                    if isinstance(payload, dict):
-                        action_requests = payload.get("action_requests", [])
-                        review_configs = payload.get("review_configs", [])
-                    yield format_sse_event(
-                        "hitl_interrupt",
-                        {
-                            "action_requests": action_requests,
-                            "review_configs": review_configs,
-                        },
-                    )
-                # Emit done with a placeholder so the UI shows the interrupt message
-                yield format_sse_event(
-                    "done",
-                    {
-                        "response": "⏸️ Ejecución pausada — esperando aprobación humana.",
-                        "conversation_id": ctx.effective_conv_id if ctx else None,
-                        "files": [],
-                    },
-                )
-            else:
-                logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
-                metrics_status, metrics_error_code = "ERROR", type(exc).__name__
-                metrics_error_message = str(exc)[:2000]
-                yield format_sse_event("error", {"message": "Agent execution failed"})
+            logger.error("Error in streaming agent chat: %s", str(exc), exc_info=True)
+            metrics_status, metrics_error_code = "ERROR", type(exc).__name__
+            metrics_error_message = str(exc)[:2000]
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "error",
+                {"message": _AGENT_EXECUTION_FAILED},
+                extra={"error_code": metrics_error_code, "error_kind": "agent_failure"},
+            )
 
         finally:
+            if not resume_settled and effective_db is not None:
+                # The run failed or was cancelled after the approval was claimed. If it never
+                # consumed the pause the approval is answerable again; otherwise the next
+                # attempt finds it stale.
+                approvals.release(effective_db, resume.approval.id, metrics_error_message or "Run did not finish")
             if ctx is not None and sandbox_turn_active:
                 self.execution_service._end_sandbox_turn(ctx, db=effective_db)
             if mcp_client:
@@ -651,6 +910,67 @@ class AgentStreamingService:
                         if first_token_at is not None else None
                     ),
                 )
+
+    async def stream_agent_chat(
+        self,
+        agent_id: int,
+        message: str,
+        file_references: list | None = None,
+        search_params: dict | None = None,
+        user_context: dict | None = None,
+        conversation_id: int | None = None,
+        db: Session | None = None,
+        channel: ApprovalChannel = ApprovalChannel.PLAYGROUND,
+        resume: "approvals.ResumeRequest | None" = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream an agent chat turn as SSE events.
+
+        This is a thin presentation-layer bridge: it is a byte-for-byte SSE
+        rendering of :meth:`stream_agent_events`, the canonical streaming
+        seam (AD-5). Every event it yields is one
+        ``format_sse_event(ev.type, ev.data)`` string per
+        :class:`~tools.streaming_utils.AgentStreamEvent` produced by that
+        generator — SSE is a presentation of the typed event stream, not the
+        source of truth. See :meth:`stream_agent_events` for the full event
+        sequence and semantics.
+
+        Args:
+            agent_id: Primary key of the agent to execute.
+            message: The user's text message.
+            file_references: Pre-resolved file-reference objects as returned by
+                ``FileManagementService``.  Each object must expose
+                ``filename``, ``content``, ``file_type``, ``file_id``, and
+                ``file_path``.
+            search_params: Optional silo search parameters forwarded to
+                ``create_agent``.
+            user_context: Caller context dict (``user_id``, ``app_id``,
+                ``email``, …).
+            conversation_id: ID of an existing conversation to continue.  When
+                ``None`` and the agent has memory enabled a new conversation is
+                created automatically.
+            db: SQLAlchemy session.  If omitted the instance-level ``self.db``
+                is used.
+            channel: Where the turn comes from (see :meth:`stream_agent_events`).
+            resume: Claimed approval to answer instead of sending ``message``.
+
+        Yields:
+            SSE-formatted strings (``"data: {...}\\n\\n"``).
+        """
+        async with contextlib.aclosing(
+            self.stream_agent_events(
+                agent_id,
+                message,
+                file_references=file_references,
+                search_params=search_params,
+                user_context=user_context,
+                conversation_id=conversation_id,
+                db=db,
+                channel=channel,
+                resume=resume,
+            )
+        ) as events:
+            async for ev in events:
+                yield format_sse_event(ev.type, ev.data)
 
     # ------------------------------------------------------------------
     # Private helpers

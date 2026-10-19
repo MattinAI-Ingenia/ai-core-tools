@@ -9,6 +9,7 @@ import {
 } from '../../utils/lightragModelSpecs';
 import { LightRAGModelHints } from './LightRAGModelHints';
 import { LightRAGAdvancedSettings, sanitizeEntityTypesList } from './LightRAGAdvancedSettings';
+import { MediaServicesFields } from './MediaServicesFields';
 
 interface VectorDbOption {
   code: string;
@@ -43,6 +44,8 @@ interface Silo {
   lightrag_entity_types?: string;
   lightrag_entity_types_mode?: 'infer' | 'manual';
   source_label_fields?: string;
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
   ai_services?: AIServiceOption[];
 }
 
@@ -53,6 +56,7 @@ interface AIServiceOption {
   is_system?: boolean;
   description?: string;
   model_name?: string;
+  supports_video?: boolean;
 }
 
 // Define the form data type
@@ -77,6 +81,9 @@ interface SiloFormData {
   lightrag_entity_types?: string;
   lightrag_entity_types_mode?: 'infer' | 'manual';
   source_label_fields?: string;
+  // null clears the service; the backend keeps a field only when it is omitted
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
 }
 
 type RoleServiceField = 'extract_service_id' | 'keywords_service_id' | 'vlm_service_id';
@@ -176,6 +183,8 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
       lightrag_entity_types: silo?.lightrag_entity_types || '',
       lightrag_entity_types_mode: silo?.lightrag_entity_types_mode || 'infer',
       source_label_fields: silo?.source_label_fields || '',
+      transcription_service_id: silo?.transcription_service_id ?? null,
+      video_ai_service_id: silo?.video_ai_service_id ?? null,
     }));
   }, [silo]);
 
@@ -568,6 +577,21 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
               </div>
 
             </div>
+          )}
+
+          {/* Media (video/audio) indexing */}
+          {(silo?.ai_services?.length ?? 0) > 0 && (
+            <fieldset className="space-y-4 border-t border-gray-200 pt-6">
+              <legend className="text-sm font-semibold text-gray-900">Video and audio</legend>
+              <MediaServicesFields
+                scope="silo"
+                aiServices={silo?.ai_services ?? []}
+                transcriptionServiceId={formData.transcription_service_id}
+                videoServiceId={formData.video_ai_service_id}
+                disabled={isSubmitting}
+                onChange={(field, value) => setFormData(prev => ({ ...prev, [field]: value }))}
+              />
+            </fieldset>
           )}
 
           {/* Error Message */}

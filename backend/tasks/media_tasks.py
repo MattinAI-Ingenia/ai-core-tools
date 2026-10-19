@@ -3,7 +3,11 @@ from db.database import SessionLocal
 from services.transcription_service import TranscriptionService
 from services.silo_service import SiloService
 from services.video_analysis_service import VideoAnalysisService
+from services.service_health_service import ServiceHealthService
+from models.ai_service import AIService
+from models.embedding_service import EmbeddingService
 from utils.logger import get_logger
+from utils.provider_errors import ProviderError, classify_provider_error
 import json
 import os
 import subprocess
@@ -13,6 +17,25 @@ from datetime import datetime
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
+
+
+class MediaStepError(Exception):
+    """A pipeline step failed; the message is the user-facing reason stored on the media."""
+
+
+def _provider_failure(exc: Exception, model, service, step: str, service_kind: str) -> ProviderError:
+    """Classify a failed call to ``service`` and record it on the service when it needs action."""
+    label = f"{service_kind} '{service.name}'" if service is not None else service_kind
+    error = classify_provider_error(exc, label, step=step)
+    ServiceHealthService.record_failure(model, service, error)
+    return error
+
+
+def media_storage_folder(media: Media) -> str:
+    """Folder for a media item's files: its repository's folder, or the silo's media folder."""
+    if media.repository_id:
+        return os.path.join(REPO_BASE_FOLDER, str(media.repository_id))
+    return os.path.join(REPO_BASE_FOLDER, "silo_media", str(media.silo_id))
 
 def process_media_task_sync(media_id: int):
     """
@@ -37,19 +60,18 @@ def process_media_task_sync(media_id: int):
         
         logger.info(f"Starting processing for media {media_id} ({media.source_type})")
         
-        # Resolve service IDs from repository configuration
-        effective_transcription_id = (
-            media.repository.transcription_service_id if media.repository else None
-        )
-        effective_video_service_id = (
-            media.repository.video_ai_service_id if media.repository else None
-        )
-        
+        # Media services are configured on the silo the media is indexed into
+        # (set from the silo itself or from the repository that owns it).
+        silo = media.silo
+        effective_transcription_id = silo.transcription_service_id if silo else None
+        effective_video_service_id = silo.video_ai_service_id if silo else None
+
         if not effective_transcription_id:
             raise ValueError(
-                f"No transcription service configured on repository {media.repository_id}. "
-                f"Please configure a transcription service on the agent's media settings."
+                f"No transcription service configured on silo {media.silo_id}. "
+                f"Configure one on the silo (or on the repository that owns it)."
             )
+        media_folder = os.path.dirname(media.file_path) if media.file_path else media_storage_folder(media)
         
         logger.info(
             f"Media {media_id} effective services — "
@@ -61,7 +83,7 @@ def process_media_task_sync(media_id: int):
             media.status = 'downloading'
             db.commit()
             
-            file_path = _download_youtube(media.source_url, media_id, media.repository_id)
+            file_path = _download_youtube(media.source_url, media_id, media_folder)
             media.file_path = file_path
             db.commit()
             
@@ -77,19 +99,24 @@ def process_media_task_sync(media_id: int):
                 "file that contains speech."
             )
 
-        audio_path = _extract_audio(media.file_path, media_id, media.repository_id)
+        audio_path = _extract_audio(media.file_path, media_id, os.path.dirname(media.file_path))
         logger.info(f"Extracted audio for media {media_id}: {audio_path}")
         
         # Step 3: Transcribe
         media.status = 'transcribing'
         db.commit()
         
-        transcription = TranscriptionService.transcribe_audio(
-            audio_path,
-            language=media.forced_language,  # Use forced language if specified
-            ai_service_id=effective_transcription_id,
-            db=db
-        )
+        try:
+            transcription = TranscriptionService.transcribe_audio(
+                audio_path,
+                language=media.forced_language,  # Use forced language if specified
+                ai_service_id=effective_transcription_id,
+                db=db
+            )
+        except Exception as e:
+            error = _provider_failure(e, AIService, silo.transcription_service, "Transcription", "Transcription service")
+            raise MediaStepError(error.message) from e
+        ServiceHealthService.record_success(AIService, silo.transcription_service)
         
         # Update media with transcription metadata
         media.language = transcription['language']
@@ -144,10 +171,12 @@ def process_media_task_sync(media_id: int):
 
                 media.processing_mode = 'multimodal'
                 db.commit()
+                ServiceHealthService.record_success(AIService, silo.video_ai_service)
                 logger.info(f"Split into {len(chunks_data)} audio+visual chunks for media {media_id}")
                 
             except Exception as e:
                 logger.warning(f"Video analysis failed for media {media_id}, continuing with audio-only chunks: {str(e)}")
+                _provider_failure(e, AIService, silo.video_ai_service, "Video analysis", "Video AI service")
                 media.processing_mode = 'basic'
                 db.commit()
                 # Don't fail the entire pipeline — continue with audio-only chunks
@@ -156,11 +185,20 @@ def process_media_task_sync(media_id: int):
         media.status = 'indexing'
         db.commit()
 
-        for idx, chunk_data in enumerate(chunks_data):
-            # Preserve chunk_index set by split_audio_visual_chunks so audio/visual
-            # pairs from the same time window share the same index for retrieval correlation.
-            chunk_data.setdefault('chunk_index', idx)
-            SiloService.index_media_chunk(chunk_data, media, db)
+        embedding_service = silo.embedding_service
+        if embedding_service is None:
+            # index_media_chunk would skip every chunk and the media would end "ready" with nothing indexed.
+            raise MediaStepError("The silo has no embedding service configured.")
+        try:
+            for idx, chunk_data in enumerate(chunks_data):
+                # Preserve chunk_index set by split_audio_visual_chunks so audio/visual
+                # pairs from the same time window share the same index for retrieval correlation.
+                chunk_data.setdefault('chunk_index', idx)
+                SiloService.index_media_chunk(chunk_data, media, db)
+        except Exception as e:
+            error = _provider_failure(e, EmbeddingService, embedding_service, "Indexing", "Embedding service")
+            raise MediaStepError(error.message) from e
+        ServiceHealthService.record_success(EmbeddingService, embedding_service)
 
         logger.info(f"Indexed {len(chunks_data)} chunks for media {media_id}")
         
@@ -168,6 +206,13 @@ def process_media_task_sync(media_id: int):
         media.status = 'ready'
         media.processed_at = datetime.utcnow()
         db.commit()
+
+        # Media sent straight to a silo only feeds the vector store: like documents, nothing
+        # else is kept (files and row). Repository media stays, the repository manages it.
+        if media.repository_id is None:
+            _discard_silo_media_files(media)
+            db.delete(media)
+            db.commit()
         
         logger.info(f"✅ Media {media_id} processed successfully")
         
@@ -180,6 +225,10 @@ def process_media_task_sync(media_id: int):
             if media:
                 media.status = 'error'
                 media.error_message = str(e)[:500]  # Limit error message length
+                if media.repository_id is None:
+                    # Keep only the row, so the caller can read the error; never the files.
+                    _discard_silo_media_files(media)
+                    media.file_path = None
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update error status: {str(update_error)}")
@@ -187,19 +236,30 @@ def process_media_task_sync(media_id: int):
     finally:
         db.close()
 
-def _download_youtube(url: str, media_id: int, repo_id: int) -> str:
+def _discard_silo_media_files(media: Media) -> None:
+    """Delete a silo media item's file and extracted audio."""
+    if not media.file_path:
+        return
+    for path in (media.file_path, os.path.splitext(media.file_path)[0] + "_audio.wav"):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as exc:
+            logger.warning(f"Could not delete media file {path}: {exc}")
+
+
+def _download_youtube(url: str, media_id: int, output_dir: str) -> str:
     """
     Download YouTube video using yt-dlp
     
     Args:
         url: YouTube URL
         media_id: Media ID for filename
-        repo_id: Repository ID for folder structure
-    
+        output_dir: Folder where the media's files live
+
     Returns:
         Path to downloaded video file
     """
-    output_dir = os.path.join(REPO_BASE_FOLDER, str(repo_id))
     os.makedirs(output_dir, exist_ok=True)
     
     output_path = os.path.join(output_dir, f"{media_id}.%(ext)s")
@@ -312,19 +372,18 @@ def _has_video_stream(path: str) -> bool:
         logger.warning("Could not probe video streams for %s: %s", path, exc)
         return False
 
-def _extract_audio(video_path: str, media_id: int, repo_id: int) -> str:
+def _extract_audio(video_path: str, media_id: int, output_dir: str) -> str:
     """
     Extract and normalize audio from video
     
     Args:
         video_path: Path to video file
         media_id: Media ID for filename
-        repo_id: Repository ID for folder structure
-    
+        output_dir: Folder where the media's files live
+
     Returns:
         Path to normalized audio file (WAV, 16kHz, mono)
     """
-    output_dir = os.path.join(REPO_BASE_FOLDER, str(repo_id))
     audio_path = os.path.join(output_dir, f"{media_id}_audio.wav")
     
     try:

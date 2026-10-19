@@ -101,6 +101,9 @@ class RepositoryDetailSchema(BaseModel):
     # were extracted, so they must stop changing (see is_lightrag_config_locked).
     lightrag_config_locked: bool = False
 
+    # Recorded failures of the services the repository's silo uses (e.g. a revoked API key)
+    service_warnings: List[str] = []
+
     model_config = ConfigDict(from_attributes=True)
 
 

@@ -1,349 +1,134 @@
-# Middleware Testing - Mattin AI Agent Orchestrator
+# Agent middlewares — behaviour and testing
 
-## Objective
+Middlewares are app-scoped, reusable [LangChain agent middlewares](https://docs.langchain.com/oss/python/langchain/middleware)
+that an agent runs around every model and tool call. They are created under
+**App → Middlewares** and attached from the agent's **Advanced** tab.
 
-This document shows how different middlewares were tested in the **Mattin AI** agent orchestrator:
+## Types
 
-1. **Monitoring Middleware**
-2. **Human-in-the-Loop Middleware**
-3. **PII Detection / Redaction Middleware**
-4. **Summarization Middleware**
-
-The test uses an agent configured to force specific behaviours and verify whether the middlewares correctly intercept tool calls, execution logs, and sensitive information.
-
----
-
-## 1. Test Agent
-
-### Configured system prompt
-
-```text
-You are a test assistant. Respond directly to the user WITHOUT calling tools unless explicitly asked.
-
-STRICT RULES:
-- Use the "Greeting Agent" tool when you are going to send a greeting.
-- Only use "anonymize_text" if the user explicitly asks to anonymize text.
-- For any other question, respond directly without using tools.
-```
-
-### Test intention
-
-The prompt forces three behaviours:
-
-| Case | Expected behaviour |
-|---|---|
-| User greeting | The agent must call `Greeting Agent` |
-| Explicit anonymization request | The agent must call `anonymize_text` |
-| Any other question | The agent must respond directly, without tools |
-
----
-
-## 2. Monitoring Middleware
-
-### Tested case
-
-The agent is triggered and the middleware is expected to log execution metrics.
-
-### Generated log
-
-```text
-mattin-backend  | 2026-05-19 12:20:41,996 - services.agent_streaming_service - INFO - [Monitoring] agent_id=3 | models=['gpt-5.2-2025-12-11'] | input_tokens=3309 | output_tokens=818 | total_tokens=4127 | llm_calls=1
-```
-
-### Expected result
-
-The middleware correctly captures:
-
-| Metric | Value |
-|---|---:|
-| `agent_id` | `3` |
-| Model used | `gpt-5.2-2025-12-11` |
-| Input tokens | `3309` |
-| Output tokens | `818` |
-| Total tokens | `4127` |
-| LLM calls | `1` |
-
-### Validation
-
-The **Monitoring Middleware** works correctly because it logs the model, token consumption, and number of LLM calls during the agent execution.
-
----
-
-## 3. Human-in-the-Loop Middleware - Greeting Agent
-
-### Tested case
-
-The user sends a greeting:
-
-```text
-Good morning!
-```
-
-According to the system prompt, the agent must use the `Greeting Agent` tool.
-
-Since the HITL middleware is active, execution is paused before running the tool and human approval is requested.
-
-### Recreated conversation
-
-```text
-User
-14:31
-Good morning!
-```
-
-```text
-⏸️ Execution paused - waiting for human approval.
-14:31
-
-Greeting Agent
-```
-
-### Approval required
-
-```text
-⚠️ Approval required
-
-🔧 Greeting_Agent
-
-{
-  "query": "Good morning!",
-  "args": null,
-  "kwargs": null
-}
-
-✓ Approve
-✗ Reject
-```
-
-### Expected result
-
-The user must be able to:
-
-| Action | Result |
-|---|---|
-| Approve | `Greeting_Agent` is executed |
-| Reject | The tool execution is blocked |
-
-### Validation
-
-The **Human-in-the-Loop Middleware** works correctly because it intercepts the call to `Greeting_Agent` before execution and requires explicit user approval.
-
----
-
-## 4. Human-in-the-Loop Middleware - anonymize_text
-
-### Tested case
-
-The user explicitly asks to anonymize text containing sensitive information:
-
-```text
-Anonymize this: usuario@mattin.de, password 1234_mattin
-```
-
-According to the system prompt, the agent may use `anonymize_text` because the user explicitly requested anonymization.
-
-### Recreated conversation
-
-```text
-User
-14:36
-Anonymize this: usuario@mattin.de, password 1234_mattin
-```
-
-```text
-⏸️ Execution paused - waiting for human approval.
-14:36
-
-anonymize text
-```
-
-### Approval required
-
-```text
-⚠️ Approval required
-
-🔧 anonymize_text
-
-{
-  "text": "usuario@mattin.de, password 1234_mattin",
-  "model_family": "spaCy",
-  "model_name": "en_core_web_lg",
-  "threshold": 0.4
-}
-
-✓ Approve
-✗ Reject
-```
-
-### Response after approval
-
-```text
-Here is the anonymized text:
-
-[EMAIL_ADDRESS], password [PASSWORD]
-
-Detected:
-
-EMAIL_ADDRESS: usuario@mattin.de
-```
-
-### Expected result
-
-The HITL middleware pauses execution before calling `anonymize_text`.
-
-After approval, the tool returns the anonymized text:
-
-```text
-[EMAIL_ADDRESS], password [PASSWORD]
-```
-
-### Validation
-
-The **Human-in-the-Loop Middleware** works correctly because:
-
-1. It detects a tool call.
-2. It pauses execution.
-3. It displays the exact arguments that will be sent.
-4. It allows the user to approve or reject execution.
-5. It continues correctly after approval.
-
----
-
-## 5. PII Detection / Redaction Middleware
-
-### Tested case
-
-The user sends a message containing personal data:
-
-```text
-My email is pedro_perez@gmail.com and my IP address is 194.22.23.3
-```
-
-### Message received by the LLM
-
-Before reaching the model, the middleware replaces sensitive data with placeholders.
-
-```text
-My email is [REDACTED_EMAIL] and my IP address is [REDACTED_IP]
-```
-
-### Generated log
-
-```text
-mattin-backend  | 2026-05-19 12:53:08,258 - tools.agentTools - INFO - [PII] Message after redaction: My email is [REDACTED_EMAIL] and my IP address is [REDACTED_IP]
-```
-
-### Expected result
-
-| Original data | Redacted data |
-|---|---|
-| `pedro_perez@gmail.com` | `[REDACTED_EMAIL]` |
-| `194.22.23.3` | `[REDACTED_IP]` |
-
-### Validation
-
-The **PII Detection Middleware** works correctly because it redacts sensitive information before the message reaches the LLM and before it is stored in the conversation.
-
----
-
-## 6. Model Call Limit Middleware
-
-### Configuration
-
-The middleware was configured with:
-
-```text
-Max LLM calls per run = 1
-```
-
-### Tested case
-
-```text
-Anonymize this: usuario@mattin.de, password 1234_mattin
-15:26
-Model call limits exceeded: run limit (1/1)
-```
-
-### Why this happens
-
-When a tool is involved (for example `anonymize_text`), the run usually needs **2 model calls**:
-
-| LLM call | Purpose |
-|---|---|
-| Call 1 | The model decides to invoke the tool and emits the tool call |
-| Call 2 | After tool output is available, the model composes the final user-facing answer |
-
-With `run_limit = 1`, the first call is allowed, but the second call is blocked.
-
-### Expected result
-
-The middleware stops the run and returns:
-
-```text
-Model call limits exceeded: run limit (1/1)
-```
-
-### Validation
-
-The **Model Call Limit Middleware** works correctly because it enforces the per-run LLM cap and prevents the second model call required to finish a tool-based answer.
-
----
-
-## 7. Summarization Middleware
-
-### Configuration
-
-The middleware was configured with:
-
-```text
-trigger=('tokens', 500)
-keep=('messages', 2)
-trim_tokens_to_summarize=500
-```
-
-### What this middleware does
-
-When the conversation history exceeds the trigger threshold, the middleware summarizes older messages and keeps only the most recent context (plus the generated summary), reducing memory size while preserving continuity.
-
-### Activation evidence
-
-```text
-mattin-backend  | 2026-05-19 14:26:51,174 - tools.agentTools - INFO - [Summarization] abefore_model: agent=3, messages=5, approx_tokens=2396, trigger=('tokens', 500)
-mattin-backend  | 2026-05-19 14:26:55 - INFO - [Summarization] TRIGGERED for agent 3: reduced to 4 messages (summary generated)
-mattin-backend  | 2026-05-19 14:26:55,516 - tools.agentTools - INFO - [Summarization] TRIGGERED for agent 3: reduced to 4 messages (summary generated)
-```
-
-### Validation
-
-The **Summarization Middleware** works correctly because:
-
-1. It detects when the token threshold is exceeded (`approx_tokens=2396 > 500`).
-2. It triggers summarization before the model call.
-3. It rewrites conversation memory with a compact summary and reduced message window.
-
----
-
-## 8. Results Summary
-
-| Middleware | Tested case | Result |
+| Type (`middleware_type`) | LangChain implementation | Config (validated server-side) |
 |---|---|---|
-| Monitoring | Logging tokens, model, and LLM calls | ✅ Correct |
-| HITL | Call to `Greeting_Agent` | ✅ Correct |
-| HITL | Call to `anonymize_text` | ✅ Correct |
-| PII Detection | Email and IP redaction | ✅ Correct |
-| Model Call Limit (`run_limit=1`) | Tool flow with `anonymize_text` | ✅ Correct (blocked at second LLM call) |
-| Summarization (`trigger=('tokens', 500)`) | Long conversation memory compaction | ✅ Correct (triggered and summary generated) |
+| `guardrails` | `GuardrailsMiddleware` (`backend/tools/middleware/guardrails.py`): appends a policy to the system prompt of each call via `wrap_model_call` + `request.override(system_message=...)`. Never writes to the conversation state. Prompt-based, best effort. | `input.{block_malicious_prompts,block_jailbreak}`, `output.{prevent_pii_leakage,block_toxic_biased,enforce_business_facts}`, `custom_prompt` (≤ 4000 chars) |
+| `pii` | One built-in `PIIMiddleware` per selected type, plus the optional `LLMPIIMiddleware` (`backend/tools/middleware/llm_pii.py`) for entities without a fixed pattern | `pii_types` ⊆ `email, credit_card, ip, mac_address, url`; `strategy` = `redact`/`mask`/`hash`/`block`; `apply_to_input/output/tool_results`; `llm_detector.{enabled, ai_service, extra_entities}` |
+| `human_in_the_loop` | `HumanInTheLoopMiddleware` | `interrupt_on: {tool_name: {allowed_decisions: [approve, edit, reject]}}`, `description_prefix`, `approval_timeout_seconds` (60 – `HITL_MAX_APPROVAL_TTL_SECONDS`, default 3600) |
+| `model_call_limit` | `ModelCallLimitMiddleware(run_limit=max_calls)` | `max_calls` 1–10000 |
+| `tool_call_limit` | `ToolCallLimitMiddleware(run_limit=max_calls)` | `max_calls` 1–10000 |
+| `summarization` | `SummarizationMiddleware` (replaces the default one of agents with memory) | `summarization_model` (`agent_llm` or `ai_service:<id>` of the same app), `trigger_tokens` (empty = 85% of the model window, max 150k; 32k without a model profile), `keep_messages` (default 20), `trim_tokens` (empty = no limit) |
 
----
+The chain is built in `backend/tools/middleware/factory.py`. Summarization always runs first; the
+rest follow the agent's order (`agent_middlewares.order`).
 
-## 9. Conclusion
+## Rules
 
-The tested middlewares work as expected:
+- **One middleware per type per agent.** LangChain rejects duplicate middleware instances, so the
+  API returns `400` and the UI disables a second middleware of the same type.
+- **Human approval requires conversation memory** (the checkpointer is what pauses and resumes the
+  run). Selecting it in the UI turns memory on; the API returns `400` otherwise, also when memory is
+  turned off on an agent that already has it.
+- **Agents used as tools run their own middlewares** (guardrails, PII, limits, summarization). They
+  cannot pause for a person, so the tools their approval rules gate are not given to them.
+- **Approval rules follow renamed tool agents:** renaming an agent rewrites the rules that name it
+  (`Old_Name` → `New_Name`) and cancels the pending approvals of the agents using those rules.
+- **AI services in use cannot be deleted:** deleting one that a summarization or PII middleware
+  references returns `409` naming the middlewares (otherwise they would silently fall back to the
+  agent's model).
+- **Tenant isolation:** middlewares, and the AI services a config references, must belong to the
+  same app (`404`/`400`/`422` otherwise).
+- **Stored configs are re-validated** when the chain is built: an invalid row is skipped with a
+  warning instead of breaking the chat.
+- **Deletion:** deleting a middleware detaches it from its agents; deleting an agent removes its
+  associations, conversations (with their checkpoints, media, sandboxes and files) and approvals but
+  keeps the middlewares; deleting an app removes everything, middlewares before AI services.
+- **Export/import:** a middleware can be exported and imported on its own (Middlewares page), and
+  travels with agent and full-app exports. The AI service it references travels by name; if the target
+  app has none with that name the import keeps the agent's model and reports a warning. Agent imports
+  reuse an identical existing middleware, otherwise import a renamed copy.
+- **PII output redaction and streaming:** with `apply_to_output`, tokens are not streamed; the
+  redacted answer arrives in the `done` event. `strategy="block"` ends the turn with
+  "The message was blocked because it contains personal data (…)" (SSE `error` / HTTP 422).
 
-- **Monitoring** logs execution metrics.
-- **HITL** intercepts tool calls and requires human approval.
-- **PII Detection** redacts sensitive data before it reaches the LLM and before it is persisted in the conversation.
-- **Model Call Limit** enforces per-run limits and can intentionally block tool-based flows when the cap is too low (e.g., `1`).
-- **Summarization** compacts long conversation history when token thresholds are exceeded, preserving recent context while reducing memory size.
+## Human-in-the-loop flow
 
-The architecture provides stronger control over agent behaviour, especially for sensitive operations such as tool execution or handling personal data.
+Every pause is recorded in `hitl_approval` (owner, actions, status, `expires_at`); the LangGraph
+checkpointer keeps the paused graph. See [Human approval in the public API](../guides/human-approval.md)
+for the integrator view.
+
+1. The run pauses → an approval is opened with one action per gated tool call (`action_id` = the
+   tool call id). Interactive channels (playground, marketplace, public API) get it back:
+   SSE `hitl_interrupt` (`{approval_id, status, expires_at, actions}`) + `done{status: "requires_approval"}`,
+   or `status: "requires_approval"` + `pending_approval` from `/call`.
+2. Only the requester can answer: the same user (`/internal/approvals/{id}/decisions/stream`,
+   `/internal/approvals/{id}/cancel`) or the same API key (`/public/v1/app/{app}/approvals/{id}/decisions[/stream]`).
+   Anyone else gets `404`.
+3. Decisions are addressed by `action_id`, one per action, validated (allowed type, edited args size
+   and `args_schema`) and then claimed with a compare-and-set: a second answer gets
+   `409 approval_already_decided`, a late one `409 approval_expired`, and a pause the graph no longer
+   has `409 approval_stale`.
+4. A new message on a conversation that is waiting gets `409 approval_pending` (it would discard the pause).
+5. Unanswered approvals expire: they are **rejected**, never approved. A background sweep (every
+   `HITL_EXPIRY_SWEEP_SECONDS`, default 60, under a PostgreSQL advisory lock) resumes them with
+   reject decisions, so the conversation gets the agent's final answer and accepts messages again. A
+   message sent after the deadline resolves it first.
+6. Channels that cannot ask a person (MCP, scheduled tasks, OpenAI-compatible API, platform chatbot,
+   non-streaming internal chat) reject the pause on the spot and return
+   `409 approval_not_supported_in_channel` (scheduled runs record it as their output). The
+   conversation is never left paused.
+7. Changing an agent's approval rules (editing/detaching/deleting its human-approval middleware)
+   cancels its pending approvals: a resume re-runs the middleware with the current rules, so an
+   answer given under the old rules could be ignored.
+8. Agent streams send `: ping` every 15 s and every turn is bounded by `AICT_AGENT_RUN_TIMEOUT_SECONDS`
+   (default 600): a hung model or tool ends with an `error{code: "run_timeout"}` event.
+
+## Manual test checklist
+
+Use an app with an AI service, an agent marked **is tool** (e.g. "Docs Search") and a main agent
+using it, with memory on.
+
+1. **Guardrails** — attach it, ask something that makes the agent call the tool. Expect a normal
+   answer; with an Anthropic model too. The conversation history must not show policy text.
+2. **PII** — `email`, `redact`, all "apply to" on. Send "my email is jane@example.com": the LLM
+   receives `[REDACTED_EMAIL]`, the answer appears at once (no token streaming) and the backend
+   log contains no message text. With `block`, the chat shows the blocked message.
+3. **Human approval** — tool `Docs_Search` (the name the UI shows), decisions approve + reject,
+   time to answer 2 minutes.
+   - Ask for the tool: the card appears with a countdown, arguments read-only, the composer is
+     locked and the tool panel shows *awaiting approval*. Reload: the card is back.
+   - Approve → *running* → final answer. Reject → *rejected*, the agent says it did not run it.
+     **Cancel request** → *cancelled*, same answer.
+   - Allow `edit`, change the arguments → *edited*, the tool runs with your arguments.
+   - Let it expire: the card shows *Expired*, and within about a minute the agent's answer appears
+     and the composer unlocks.
+   - Public API: `/call` returns `requires_approval`; answer it with
+     `POST /public/v1/app/{app}/approvals/{id}/decisions`; a second answer gets `409`; another API key gets `404`.
+4. **Limits** — model call limit 1 on an agent that needs a tool: the run stops after one call.
+5. **Ordering / duplicates** — select two guardrails: the second is disabled. Reorder with the
+   arrows, save, reopen: order kept.
+6. **Deletion** — delete a middleware in use (agents lose it), an agent with middlewares and
+   conversations, and the app (no agent is left behind). Deleting an AI service a PII detector uses
+   returns `409`.
+7. **Tool agents** — give an agent used as a tool a guardrail: its answers follow it. Rename it: the
+   approval rule of the calling agent follows the new name.
+8. **Export/import** — export a PII middleware with an LLM detector and import it into another app,
+   with and without an AI service of the same name (the second shows a warning).
+
+## Automated tests
+
+| Area | Tests |
+|---|---|
+| Guardrails (system prompt only, tool-call message order, no state writes) | `tests/unit/tools/test_guardrails_middleware.py` |
+| LLM PII detector | `tests/unit/tools/test_llm_pii_middleware.py` |
+| Chain building from DB rows (order, invalid config skipped, one per type) | `tests/integration/tools/test_agent_middleware_chain_integration.py` |
+| CRUD, config validation, tenant isolation, agent selection rules, cascades | `tests/integration/routers/internal/test_middlewares.py` |
+| Agent/app deletion, AI service in use, tool-agent rename, export/import | `tests/integration/routers/internal/test_middleware_relations.py` |
+| Approval endpoints (requester only, invalid decisions, expired) | `tests/integration/routers/test_approval_routers.py` |
+| Expiry sweeper (advisory lock, failures, stuck transitions) | `tests/unit/services/test_hitl_expiry_worker.py` |
+| Summarization defaults, chain of agents used as tools | `tests/unit/tools/test_middleware_factory.py` |
+| Approval ownership, action ids, decision validation, expiry status | `tests/unit/services/test_hitl_approval_service.py` |
+| Claim compare-and-set, one pending approval per conversation, cascade | `tests/integration/repositories/test_hitl_approval_repository.py` |
+| Streaming pause / resume / stale / non-interactive channel / busy conversation | `tests/unit/services/test_agent_streaming_service.py` |
+| Heartbeat, run timeout, cancellation of agent streams | `tests/unit/tools/test_stream_guard.py` |
+| Tool events for rejected / edited calls | `tests/unit/tools/test_streaming_utils.py` |
+
+CI runs the unit suite plus these integration files in the **Middleware Integration Tests** job
+(`.github/workflows/test.yml`, real PostgreSQL); its coverage (`coverage-middlewares.xml`) is sent
+to SonarCloud with the unit and A2A coverage.

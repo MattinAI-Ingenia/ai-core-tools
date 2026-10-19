@@ -42,6 +42,13 @@ class Silo(Base):
     vlm_service_id = Column(Integer, ForeignKey('AIService.service_id', ondelete='SET NULL'), nullable=True)
     vlm_service = relationship('AIService', uselist=False, foreign_keys=[vlm_service_id])
 
+    # Media (video/audio) indexing: transcription is required to index media into this silo,
+    # the video service (supports_video) optionally adds visual analysis. Configured from the
+    # silo itself or from the repository that owns it.
+    transcription_service_id = Column(Integer, ForeignKey('AIService.service_id', ondelete='SET NULL'), nullable=True)
+    video_ai_service_id = Column(Integer, ForeignKey('AIService.service_id', ondelete='SET NULL'), nullable=True)
+    transcription_service = relationship('AIService', foreign_keys=[transcription_service_id])
+    video_ai_service = relationship('AIService', foreign_keys=[video_ai_service_id])
     vector_db_type = Column(String(45), default='PGVECTOR')
 
     # Secondary selector used only when vector_db_type == LIGHTRAG.

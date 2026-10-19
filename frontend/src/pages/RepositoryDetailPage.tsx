@@ -29,7 +29,7 @@ interface Resource {
   created_at: string;
   folder_id?: number;
   folder_path?: string;
-  status?: string;
+  status?: string | null;
   progress_done?: number | null;
   progress_total?: number | null;
   error_message?: string | null;
@@ -61,6 +61,7 @@ interface RepositoryDetail {
   media: Media[];
   transcription_service_id?: number | null;
   video_ai_service_id?: number | null;
+  service_warnings?: string[];
 }
 
 export interface CostEstimationResult {
@@ -461,6 +462,14 @@ const RepositoryDetailPage: React.FC = () => {
         }
       }
 
+      // Uploaded but not indexed (e.g. the embedding service rejected its API key)
+      if (result.indexing_failures && result.indexing_failures.length > 0) {
+        const indexingMessages = result.indexing_failures.map((failed: { filename: string; error: string }) =>
+          `${failed.filename}: ${failed.error}`
+        ).join('\n');
+        setError(`Uploaded, but indexing failed (not searchable until reindexed):\n${indexingMessages}`);
+      }
+
       // Start monitoring ingestion progress if the backend returned a session_id
       if (result.session_id) {
         setIngestionSessionId(result.session_id);
@@ -830,6 +839,7 @@ const RepositoryDetailPage: React.FC = () => {
     } catch (err) {
       setReindexNotice({ type: 'error', text: err instanceof Error ? err.message : 'Reindex failed' });
     } finally {
+      await loadRepository(false);
       setReindexingId(null);
       setTimeout(() => setReindexNotice(null), 4000);
     }
@@ -1196,6 +1206,15 @@ const RepositoryDetailPage: React.FC = () => {
         </div>
       )}
       {reindexNotice && <Alert type={reindexNotice.type} message={reindexNotice.text} onDismiss={() => setReindexNotice(null)} className="mb-6" />}
+      {repository?.service_warnings?.map((warning) => (
+        <Alert
+          key={warning}
+          type="warning"
+          title="A service used by this repository is failing"
+          message={`${warning} Check the service settings (or ask your platform administrator for system services), then reindex the affected files.`}
+          className="mb-6"
+        />
+      ))}
 
       {/* Main Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -1378,6 +1397,14 @@ const RepositoryDetailPage: React.FC = () => {
                               {(resource.file_type || 'unknown').toUpperCase()} • Uploaded{' '}
                               {formatDate(resource.created_at)}
                             </p>
+                            {resource.status === 'error' && (
+                              <p className="text-sm text-red-600 mt-1 flex items-start gap-2">
+                                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 whitespace-nowrap">
+                                  indexing failed<span className="sr-only">:</span>
+                                </span>
+                                <span>{resource.error_message || 'Indexing failed.'}{canEdit ? ' Fix the cause, then reindex.' : ''}</span>
+                              </p>
+                            )}
                           </div>
                         </div>
 

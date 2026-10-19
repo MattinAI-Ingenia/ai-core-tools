@@ -7,7 +7,8 @@ import re
 import uuid
 from models.media import Media
 from models.silo import Silo
-from models.resource import Resource
+from models.resource import Resource, RESOURCE_STATUS_ERROR, RESOURCE_STATUS_INDEXED
+from models.embedding_service import EmbeddingService
 from db.database import SessionLocal
 from db.database import db as db_obj
 from sqlalchemy import func, select
@@ -29,6 +30,8 @@ from utils.vector_db_immutability import assert_vector_db_type_immutable, assert
 from schemas.silo_schemas import SiloListItemSchema, SiloDetailSchema, CreateUpdateSiloSchema
 from repositories.silo_repository import SiloRepository
 from services.folder_service import FolderService
+from services.service_health_service import ServiceHealthService
+from utils.provider_errors import classify_provider_error
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv("REPO_BASE_FOLDER"))
 COLLECTION_PREFIX = 'silo_'
@@ -38,6 +41,14 @@ LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 
 # Per-chunk marker stamping each indexing run; lets reindex delete only stale chunks.
 INDEX_BATCH_FIELD = 'index_batch'
+
+class ResourceIndexingError(Exception):
+    """Indexing a resource failed. The message is user-facing (stored on the resource)."""
+
+
+class ResourceNotIndexableError(ResourceIndexingError, ValueError):
+    """The resource has nothing that can be indexed (no text, no embedding service)."""
+
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -771,8 +782,8 @@ class SiloService:
                 collection_name,
                 silo.embedding_service,
                 merged_search_kwargs,
+                use_async=True,  # Use async psycopg engine for LangGraph compatibility
                 search_type=retriever_search_type,
-                use_async=True  # Use async psycopg engine for LangGraph compatibility
             )
         except Exception as e:
             logger.error(f"Failed to create retriever for silo {silo_id}: {str(e)}", exc_info=True)
@@ -1220,6 +1231,17 @@ class SiloService:
                 logger.info(f"Setting metadata_definition_id from fallback to: {silo_data['metadata_definition_id']}")
                 silo.metadata_definition_id = silo_data['metadata_definition_id']
             
+            # Media (video/audio) services: only touched when the caller sends them, so
+            # callers that don't manage media never wipe an existing configuration.
+            if 'transcription_service_id' in silo_data or 'video_ai_service_id' in silo_data:
+                SiloService.apply_media_services(
+                    silo,
+                    silo_data.get('transcription_service_id', silo.transcription_service_id),
+                    silo_data.get('video_ai_service_id', silo.video_ai_service_id),
+                    int(silo_data['app_id']),
+                    session,
+                )
+
             # Update silo attributes
             SiloService._update_silo(silo, silo_data)
             
@@ -1233,6 +1255,56 @@ class SiloService:
             if should_close:
                 session.close()
     
+    @staticmethod
+    def service_warnings(silo: Optional[Silo]) -> List[str]:
+        """Recorded failures (rejected key, exhausted quota) of the services this silo indexes with."""
+        if not silo:
+            return []
+        services = (silo.embedding_service, silo.transcription_service, silo.video_ai_service)
+        warnings = []
+        for service in services:
+            if service is not None and service.last_error and service.last_error not in warnings:
+                warnings.append(service.last_error)
+        return warnings
+
+    @staticmethod
+    def media_ai_service_options(app_id: int, db: Session) -> List[Dict[str, Any]]:
+        """AI services (app + system) selectable as transcription / video services."""
+        from repositories.ai_service_repository import AIServiceRepository
+        services = AIServiceRepository.get_by_app_id(db, app_id) + AIServiceRepository.get_system_services(db)
+        return [
+            {"service_id": s.service_id, "name": s.name, "supports_video": bool(s.supports_video)}
+            for s in services
+        ]
+
+    @staticmethod
+    def apply_media_services(
+        silo: Silo,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        app_id: int,
+        db: Session,
+    ) -> None:
+        """Set the silo's media services after checking they are usable by this app.
+
+        Both are AIServices of the app (or system services). The video service must
+        support video input. None clears a service.
+        """
+        from models.ai_service import AIService
+
+        def _check(service_id: Optional[int], label: str, needs_video: bool = False) -> Optional[int]:
+            if not service_id:
+                return None
+            service = db.query(AIService).filter(AIService.service_id == int(service_id)).first()
+            if service is None or (service.app_id is not None and service.app_id != app_id):
+                raise ValidationError(f"{label} {service_id} not found")
+            if needs_video and not service.supports_video:
+                raise ValidationError(f"{label} {service_id} does not support video")
+            return service.service_id
+
+        silo.transcription_service_id = _check(transcription_service_id, "Transcription service")
+        silo.video_ai_service_id = _check(video_ai_service_id, "Video AI service", needs_video=True)
+
     @staticmethod
     def _update_silo(silo: Silo, data: dict):
         """
@@ -1274,8 +1346,9 @@ class SiloService:
             db.add(silo)
             db.commit()
             
-            # Now delete the silo using repository
+            # Now delete the silo using repository (its Media rows go with it: ON DELETE CASCADE)
             SiloRepository.delete(silo_id, db)
+            SiloService.remove_silo_media_files(silo_id)
 
             # Finally delete the output parser if it exists
             if metadata_definition_id:
@@ -1621,6 +1694,7 @@ class SiloService:
         Returns 0 on any error so the caller can continue safely.
         """
         session = SessionLocal()
+        resource_with_relations = None
         try:
             resource_with_relations = session.query(Resource).filter(Resource.resource_id == resource.resource_id).first()
             if not resource_with_relations:
@@ -1711,13 +1785,18 @@ class SiloService:
 
             if not docs:
                 logger.warning(f"No content extracted from resource {resource_with_relations.resource_id} ({resource_with_relations.uri}). The file may be empty or contain only images/scans without text.")
-                return index_batch
+                message = "No text could be extracted from this file. It may be empty or a scanned document without a text layer."
+                SiloService._set_index_status(resource_with_relations, session, message)
+                raise ResourceNotIndexableError(message)
 
+            silo_id = resource_with_relations.repository.silo_id
             embedding_service = resource_with_relations.repository.silo.embedding_service
 
             if not embedding_service:
-                logger.warning(f"Silo {resource_with_relations.repository.silo_id} has no embedding service, skipping indexing for resource {resource_with_relations.resource_id}")
-                return index_batch
+                logger.warning(f"Silo {silo_id} has no embedding service, skipping indexing for resource {resource_with_relations.resource_id}")
+                message = "The repository's silo has no embedding service configured."
+                SiloService._set_index_status(resource_with_relations, session, message)
+                raise ResourceNotIndexableError(message)
 
             silo = resource_with_relations.repository.silo
             app_id = silo.app_id
@@ -1747,9 +1826,15 @@ class SiloService:
             except Exception as exc:
                 _index_failed = True
                 _metric_kwargs["status"] = "failed"
+                error = classify_provider_error(exc, f"Embedding service '{embedding_service.name}'", step="Indexing")
+                ServiceHealthService.record_failure(EmbeddingService, embedding_service, error)
+                SiloService._set_index_status(resource_with_relations, session, error.message)
                 logger.error(f"Error indexing resource {resource_id}: {exc}")
                 raise
             else:
+                # Before the status commit expires the loaded instances.
+                ServiceHealthService.record_success(EmbeddingService, embedding_service)
+                SiloService._set_index_status(resource_with_relations, session, None)
                 _metric_kwargs["status"] = "success"
                 if usage and isinstance(usage, dict):
                     _metric_kwargs.update({
@@ -1834,9 +1919,16 @@ class SiloService:
                     MetadataValuesCacheService.invalidate(silo_id)
                 except Exception as _cache_exc:
                     logger.warning("metadata_values_cache: invalidation failed after index_resource for silo=%d: %s", silo_id, _cache_exc)
-        except Exception as e:
-            logger.error(f"Error indexing resource {resource.resource_id}: {str(e)}")
+        except ResourceIndexingError as e:
+            # Outcome already stored on the resource.
+            logger.exception(f"Error indexing resource {resource.resource_id}: {e}")
             raise
+        except Exception as e:
+            logger.exception(f"Error indexing resource {resource.resource_id}: {e}")
+            message = classify_provider_error(e, "Indexing", step="Indexing").message
+            if resource_with_relations is not None:
+                SiloService._set_index_status(resource_with_relations, session, message)
+            raise ResourceIndexingError(message) from e
         finally:
             session.close()
 
@@ -2085,6 +2177,20 @@ class SiloService:
             session.close()
 
     @staticmethod
+    def _set_index_status(resource: Resource, session: Session, error: Optional[str]) -> None:
+        """Record the outcome of indexing ``resource``: ``error`` is None on success.
+
+        Never raises: failing to store the outcome must not hide the indexing result itself.
+        """
+        try:
+            resource.status = RESOURCE_STATUS_ERROR if error else RESOURCE_STATUS_INDEXED
+            resource.error_message = error
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.warning(f"Could not store indexing status of resource {resource.resource_id}: {exc}")
+
+    @staticmethod
     def _delete_resource_chunks(resource_id: int, collection_name: str, silo) -> None:
         """Delete all vector chunks for a resource. Propagates vector-store exceptions.
 
@@ -2164,14 +2270,20 @@ class SiloService:
             logger.error("Media not provided for chunk indexing")
             return
 
-        collection_name = COLLECTION_PREFIX + str(media.repository.silo_id)
+        silo = media.silo
+        collection_name = COLLECTION_PREFIX + str(media.silo_id)
+        folder_path = FolderService.get_folder_path(media.folder_id, db) if media.folder_id else ""
+        file_ext = os.path.splitext(media.file_path)[1] if media.file_path else ""
+
+        # Caller metadata (public API) first, so the system keys below always win.
+        metadata = dict(media.custom_metadata or {})
 
         # Build metadata from chunk dict and media
         chunk_type = chunk.get('chunk_type', 'audio')  # 'audio' or 'visual'
-        metadata = {
+        metadata.update({
             "repository_id": media.repository_id,
             "media_id": media.media_id,
-            "silo_id": media.repository.silo_id,
+            "silo_id": media.silo_id,
             "content_type": "media_chunk",
             "chunk_type": chunk_type,
             
@@ -2186,33 +2298,24 @@ class SiloService:
             "source_type": media.source_type,
             "source_url": media.source_url,
             "language": media.language,
-            "file_type": os.path.splitext(media.file_path)[1].lower() if media.file_path else None,
-            "source": media.file_path,
+            "file_type": file_ext.lower() or None,
+            # Silo media files are deleted once indexed: keep the original name, not a dead path.
+            "source": media.file_path if media.repository_id else f"{media.name}{file_ext}",
             "processing_mode": media.processing_mode or "basic",
             
             # Folder information
             "folder_id": media.folder_id,
-            "folder_path": FolderService.get_folder_path(media.folder_id, db) if media.folder_id else "",
-            
-            # Reference path (similar to resource 'ref')
-            "ref": os.path.join(
-                str(media.repository_id),
-                FolderService.get_folder_path(media.folder_id, db) if media.folder_id else "",
-                f"{media.media_id}{os.path.splitext(media.file_path)[1]}" if media.file_path else ""
+            "folder_path": folder_path,
+
+            # Reference path (similar to resource 'ref'); silo-only media has no repository folder.
+            "ref": (
+                os.path.join(str(media.repository_id), folder_path, f"{media.media_id}{file_ext}")
+                if media.repository_id else f"silo_media/{media.silo_id}/{media.media_id}{file_ext}"
             ).replace("\\", "/"),
-            
+
             # Media metadata
             "media_duration": media.duration
-        }
-
-        # Add folder information if media is in a folder
-        if media.folder_id:
-            folder_path = FolderService.get_folder_path(media.folder_id, db)
-            metadata["folder_id"] = media.folder_id
-            metadata["folder_path"] = folder_path
-        else:
-            metadata["folder_id"] = None
-            metadata["folder_path"] = ""
+        })
 
         # Create Document and index
         page_content = chunk.get('text', '')
@@ -2222,23 +2325,23 @@ class SiloService:
             metadata=metadata
         )
 
-        embedding_service = media.repository.silo.embedding_service
+        embedding_service = silo.embedding_service if silo else None
         if not embedding_service:
-            logger.warning(f"Silo {media.repository.silo_id} has no embedding service, skipping indexing for media {media.media_id}")
+            logger.warning(f"Silo {media.silo_id} has no embedding service, skipping indexing for media {media.media_id}")
             return
 
         try:
-            _get_vector_store(media.repository.silo).index_documents(
+            _get_vector_store(silo).index_documents(
                 collection_name,
                 [doc],
                 embedding_service
             )
-            logger.info(f"Indexed media chunk (media {media.media_id}) in silo {media.repository.silo_id}")
+            logger.info(f"Indexed media chunk (media {media.media_id}) in silo {media.silo_id}")
             try:
                 from services.metadata_values_cache_service import MetadataValuesCacheService
-                MetadataValuesCacheService.invalidate(media.repository.silo_id)
+                MetadataValuesCacheService.invalidate(media.silo_id)
             except Exception as _cache_exc:
-                logger.warning("metadata_values_cache: invalidation failed after index_media_chunk for silo=%d: %s", media.repository.silo_id, _cache_exc)
+                logger.warning("metadata_values_cache: invalidation failed after index_media_chunk for silo=%d: %s", media.silo_id, _cache_exc)
         except Exception as e:
             logger.error(f"Error indexing media chunk for media {media.media_id}: {str(e)}")
             raise
@@ -2246,14 +2349,14 @@ class SiloService:
     @staticmethod
     def delete_media(media: Media):
         """Delete all chunks for a media"""
-        logger.info(f"Eliminando recurso {media.media_id} del silo {media.repository.silo_id}")
-        collection_name = COLLECTION_PREFIX + str(media.repository.silo_id)
+        logger.info(f"Eliminando recurso {media.media_id} del silo {media.silo_id}")
+        collection_name = COLLECTION_PREFIX + str(media.silo_id)
         
         # For resource operations, we need a fresh session since this might be called from other contexts
         session = SessionLocal()
         try:
             # Load silo within the session to avoid detached instance issues
-            silo = SiloRepository.get_by_id(media.repository.silo_id, session)
+            silo = SiloRepository.get_by_id(media.silo_id, session)
             if not silo:
                 logger.error(f"Silo no encontrado para la media {media.media_id}")
                 return
@@ -2687,8 +2790,8 @@ class SiloService:
                 # Form data
                 output_parsers=[],
                 embedding_services=[],
-                ai_services=ai_services,
-                vector_db_options=vector_db_options
+                vector_db_options=vector_db_options,
+                ai_services=SiloService.media_ai_service_options(app_id, db),
             )
         
         # Existing silo
@@ -2780,11 +2883,13 @@ class SiloService:
                 lightrag_entity_types_mode=getattr(silo, 'lightrag_entity_types_mode', None),
                 lightrag_config_locked=SiloService.is_lightrag_config_locked(silo_id, db),
                 source_label_fields=getattr(silo, 'source_label_fields', None),
+                transcription_service_id=silo.transcription_service_id,
+                video_ai_service_id=silo.video_ai_service_id,
                 # Form data
                 output_parsers=output_parsers,
                 embedding_services=embedding_services,
-                ai_services=ai_services,
                 vector_db_options=vector_db_options,
+                ai_services=SiloService.media_ai_service_options(app_id, db),
                 # Metadata definition fields for playground
                 metadata_fields=metadata_fields
             )
@@ -2830,7 +2935,11 @@ class SiloService:
             'lightrag_entity_types_mode': getattr(silo_data, 'lightrag_entity_types_mode', None),
             'source_label_fields': getattr(silo_data, 'source_label_fields', None),
         }
-
+        fields_set = getattr(silo_data, 'model_fields_set', set())
+        for field in ('transcription_service_id', 'video_ai_service_id'):
+            if field in fields_set:
+                form_data[field] = getattr(silo_data, field)
+        
         # Create or update using the existing service
         silo = SiloService.create_or_update_silo(form_data, db=db)
         return silo
@@ -2840,7 +2949,29 @@ class SiloService:
         """
         Delete a silo and all its documents
         """
-        return SiloRepository.delete(silo_id, db)
+        deleted = SiloRepository.delete(silo_id, db)
+        if deleted:
+            SiloService.remove_silo_media_files(silo_id)
+        return deleted
+
+    @staticmethod
+    def remove_silo_media_files(silo_id: int) -> None:
+        """Delete the files of media indexed straight into the silo (public API uploads)."""
+        import shutil
+        base = os.getenv('REPO_BASE_FOLDER')
+        if not base:
+            return
+        media_root = os.path.realpath(os.path.join(base, "silo_media"))
+        folder = os.path.realpath(os.path.join(media_root, str(int(silo_id))))
+        # Never delete outside the silo media root (silo_id comes from the request path).
+        if os.path.dirname(folder) != media_root:
+            logger.warning(f"Refusing to delete media folder outside {media_root}: {folder}")
+            return
+        try:
+            if os.path.isdir(folder):
+                shutil.rmtree(folder)
+        except Exception as e:
+            logger.warning(f"Could not delete media files of silo {silo_id}: {e}")
     
     @staticmethod
     async def _search_via_lightrag_retriever(
