@@ -299,6 +299,10 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 
 No status column exists: `active` / `deprecated` / `retired` is computed at read time from `end_of_service_at` and the system setting `service_end_of_service_warning_days` (default 30, `0` = no deprecated phase; env override `AICT_SYSTEM_SERVICE_END_OF_SERVICE_WARNING_DAYS`). Existing rows stay NULL. Logic lives in `backend/utils/service_lifecycle.py` (pure helpers) and `backend/services/service_lifecycle_service.py` (usage, bulk move, warnings).
 
+### Silo output parser ownership
+
+A silo's `metadata_definition_id` (output parser) must belong to the silo's app; it is checked on create/update, and deleting a silo or repository only deletes a parser of the same app. Migration `siloparser001` (down revision `svceos001`) sets `metadata_definition_id` to NULL on silos whose parser is missing or belongs to another app. It is a data fix: the downgrade is a no-op and cleared links are not restored.
+
 ### BaseService
 
 **Table**: `BaseService`  
