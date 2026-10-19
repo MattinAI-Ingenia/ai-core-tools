@@ -18,6 +18,7 @@ from services.embedding_service_import_service import EmbeddingServiceImportServ
 from services.output_parser_import_service import OutputParserImportService
 from repositories.silo_repository import SiloRepository
 import logging
+from utils.service_lifecycle import SERVICE_KIND_EMBEDDING, RetiredServiceAssignmentError, ensure_assignable
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,23 @@ class SiloImportService:
         self.silo_repo = SiloRepository()
         self.embedding_service_import = EmbeddingServiceImportService(session)
         self.output_parser_import = OutputParserImportService(session)
+
+    def _ensure_embedding_assignable(
+        self,
+        embedding_service: EmbeddingService,
+        export_data: SiloExportFileSchema,
+        app_id: int,
+        conflict_mode: ConflictMode,
+    ) -> None:
+        """Reject newly assigning a retired embedding service (OVERRIDE may keep the silo's current one)."""
+        current_id = None
+        if conflict_mode == ConflictMode.OVERRIDE:
+            existing_silo = self.get_by_name_and_app(export_data.silo.name, app_id)
+            current_id = existing_silo.embedding_service_id if existing_silo is not None else None
+        try:
+            ensure_assignable(embedding_service, current_id, "embedding_service_id", SERVICE_KIND_EMBEDDING)
+        except RetiredServiceAssignmentError as exc:
+            raise ValueError(str(exc)) from exc
 
     def get_by_name_and_app(self, name: str, app_id: int) -> Optional[Silo]:
         """Get Silo by name and app ID.
@@ -201,6 +219,7 @@ class SiloImportService:
                         f"Selected embedding service {selected_embedding_service_id} "
                         f"not found in app {app_id}"
                     )
+                self._ensure_embedding_assignable(embedding_service, export_data, app_id, conflict_mode)
                 embedding_service_id = selected_embedding_service_id
                 logger.info(
                     f"Using selected embedding service '{embedding_service.name}'"
@@ -216,6 +235,7 @@ class SiloImportService:
                     .first()
                 )
                 if existing_service:
+                    self._ensure_embedding_assignable(existing_service, export_data, app_id, conflict_mode)
                     embedding_service_id = existing_service.service_id
                     logger.info(
                         f"Resolved embedding service by name: '{existing_service.name}'"

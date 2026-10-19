@@ -34,6 +34,7 @@ from repositories.silo_repository import SiloRepository
 from repositories.output_parser_repository import OutputParserRepository
 from repositories.mcp_config_repository import MCPConfigRepository
 from utils.schema_utils import sanitize_identifier
+from utils.service_lifecycle import SERVICE_KIND_AI, RetiredServiceAssignmentError, ensure_assignable
 import logging
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,21 @@ def _a2a_import_fields(agent_schema: ExportAgentSchema) -> Dict[str, object]:
 
 class AgentImportService:
     """Service for importing Agents (configuration only)."""
+
+    @staticmethod
+    def _ensure_ai_service_assignable(
+        service: AIService, existing_agent: Optional[Agent], conflict_mode: ConflictMode
+    ) -> None:
+        """Reject newly assigning a retired AI service (OVERRIDE may keep the agent's current one)."""
+        current_id = (
+            existing_agent.service_id
+            if existing_agent is not None and conflict_mode == ConflictMode.OVERRIDE
+            else None
+        )
+        try:
+            ensure_assignable(service, current_id, "service_id", SERVICE_KIND_AI)
+        except RetiredServiceAssignmentError as exc:
+            raise ValueError(str(exc)) from exc
 
     def __init__(self, session: Session):
         """Initialize Agent import service.
@@ -495,6 +511,7 @@ class AgentImportService:
                 raise ValueError(
                     f"Selected AI service {selected_ai_service_id} not found"
                 )
+            self._ensure_ai_service_assignable(service, existing_agent, conflict_mode)
             service_id = selected_ai_service_id
         # Priority 3: Try to find by name (for existing services)
         elif export_data.agent.service_name and not export_data.ai_service:
@@ -507,6 +524,7 @@ class AgentImportService:
                 .first()
             )
             if service:
+                self._ensure_ai_service_assignable(service, existing_agent, conflict_mode)
                 service_id = service.service_id
             else:
                 raise ValueError(

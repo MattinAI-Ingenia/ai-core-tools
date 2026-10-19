@@ -9,6 +9,7 @@ import { useAppRole } from '../hooks/useAppRole';
 import { AppRole } from '../types/roles';
 import ReadOnlyBanner from '../components/ui/ReadOnlyBanner';
 import ImportModal, { type ConflictMode, type ImportResponse } from '../components/ui/ImportModal';
+import type { ServiceOptionLike } from '../utils/serviceLifecycle';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiMutation } from '../hooks/useApiMutation';
 import { MESSAGES, errorMessage } from '../constants/messages';
@@ -39,7 +40,7 @@ function SilosPage() {
   const [error, setError] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [requiresEmbeddingServiceSelection, setRequiresEmbeddingServiceSelection] = useState(false);
-  const [availableEmbeddingServices, setAvailableEmbeddingServices] = useState<Array<{ id: number; name: string }>>([]);
+  const [availableEmbeddingServices, setAvailableEmbeddingServices] = useState<ServiceOptionLike[]>([]);
   const [selectedEmbeddingServiceId, setSelectedEmbeddingServiceId] = useState<number | undefined>(undefined);
   const navigate = useNavigate();
 
@@ -143,10 +144,8 @@ function SilosPage() {
         // Check if embedding service is needed but not bundled
         if (fileData.silo?.embedding_service_name && !fileData.embedding_service) {
           // Fetch available embedding services
-          const services = await apiService.getEmbeddingServices(Number.parseInt(appId));
-          setAvailableEmbeddingServices(
-            services.map((svc: any) => ({ id: svc.service_id, name: svc.name }))
-          );
+          const services: ServiceOptionLike[] = await apiService.getEmbeddingServices(Number.parseInt(appId));
+          setAvailableEmbeddingServices(services);
           setRequiresEmbeddingServiceSelection(true);
           
           return {
