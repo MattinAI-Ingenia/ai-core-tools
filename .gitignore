@@ -64,6 +64,7 @@ reports/
 
 # Docker local overrides (never commit, use .env for secrets)
 docker/docker-compose.override.yml
+docker/compose.override.*.yaml
 
 # Spec-kit
 .github/agents/speckit.*

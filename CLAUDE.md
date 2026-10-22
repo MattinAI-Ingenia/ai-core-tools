@@ -120,8 +120,10 @@ docker compose down -v           # Parar y borrar volúmenes
 | -------- | --------- |
 | **Agent** | Core AI agent. Configured with system prompt, LLM (AIService), optional RAG (Silo), memory settings, output parser, skills, and MCP tool configs. Agents with `is_tool=True` can be used as tools by other agents. |
 | **OCRAgent** | Agent subclass (STI via `type` column). Dual-LLM: vision model for scanned pages + text model for structuring output. |
+| **SystemOneAgent** | Agent subclass (`type='system_one_agent'`). Uses one SystemOneService (FK `SET NULL`: deleting the service leaves the agent inoperative, like AIService) and a fixed list of questions (`noul`/`choice`/`score`; limits come from the server's `/v1/limits`); no LLM, memory or prompt, only an optional summarization LLM for long texts. Evaluates text (images only with a provider that accepts them, e.g. OpenAI Decisions); usable as a tool (`IACTSystemOneTool`). See `docs/guides/system-one.md`. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom). |
 | **EmbeddingService** | Embedding model config for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
+| **SystemOneService** | Per-app connection to a System One decision-model server: URL, optional Bearer token, model, per-process concurrency cap. Not an LLM. |
 | **Skill** | Reusable markdown prompt block attached to agents (M:N). Injected into system prompt at execution time. App-scoped or system-wide (`app_id IS NULL`). |
 | **SkillFile** | One bundled package file (script, reference, template) for a Skill, text/bytes split with checksum. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Dynamically generates a Pydantic model at runtime. |
@@ -139,7 +141,7 @@ docker compose down -v           # Parar y borrar volúmenes
 User ──owns──► App (1:N)
 User ◄──collaborates──► App  (M:N via AppCollaborator with role + status: PENDING→ACCEPTED/DECLINED)
 
-App ──has──► Agent, Silo, Repository, Domain, AIService, EmbeddingService,
+App ──has──► Agent, Silo, Repository, Domain, AIService, EmbeddingService, SystemOneService,
              OutputParser, Skill, MCPServer, MCPConfig, APIKey (all 1:N)
 
 Agent ──uses──► AIService (N:1)

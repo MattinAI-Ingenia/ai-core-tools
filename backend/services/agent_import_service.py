@@ -29,6 +29,7 @@ from services.output_parser_import_service import OutputParserImportService
 from services.mcp_config_import_service import MCPConfigImportService
 from services.middleware_import_service import MiddlewareImportService
 from repositories.agent_repository import AgentRepository
+from services.system_one_porting import import_system_one_agent
 from repositories.ai_service_repository import AIServiceRepository
 from repositories.silo_repository import SiloRepository
 from repositories.output_parser_repository import OutputParserRepository
@@ -421,6 +422,7 @@ class AgentImportService:
         import_bundled_mcp_configs: bool = True,
         import_bundled_agent_tools: bool = True,
         middleware_id_map: Optional[Dict[str, int]] = None,
+        system_one_service_id_map: Optional[dict] = None,
     ) -> ImportSummarySchema:
         """Import Agent configuration.
 
@@ -455,6 +457,14 @@ class AgentImportService:
 
         # Validate version
         validate_export_version(export_data.metadata.export_version)
+
+        # System One agents have no LLM service: they follow their own, shorter flow.
+        if export_data.agent.type == "system_one_agent":
+            return import_system_one_agent(
+                self.session, export_data, app_id, conflict_mode, new_name,
+                service_id_map=system_one_service_id_map,
+                bundled_services=export_data.system_one_services,
+            )
 
         # Step 0: Determine agent's final name (needed for dependency naming)
         agent_name = export_data.agent.name
@@ -737,6 +747,7 @@ class AgentImportService:
                     agent=tool_agent,
                     ai_service=export_data.ai_service,  # Share AI service
                     middlewares=export_data.middlewares,
+                    system_one_services=export_data.system_one_services,
                 )
                 tool_import_result = self.import_agent(
                     tool_export_data,
@@ -802,6 +813,8 @@ class AgentImportService:
                 )
                 existing_agent.temperature = export_data.agent.temperature
                 existing_agent.lightrag_query_mode = export_data.agent.lightrag_query_mode
+                if export_data.agent.is_tool is not None:
+                    existing_agent.is_tool = export_data.agent.is_tool
 
                 # Restore A2A fields (FR-24, AC-39) via the shared helper, so
                 # this path and the create paths below can never drift apart
@@ -909,7 +922,7 @@ class AgentImportService:
                 text_system_prompt=export_data.agent.text_system_prompt,
                 create_date=datetime.now(),
                 request_count=0,
-                is_tool=bool(export_data.agent.is_tool),
+                is_tool=bool(export_data.agent.is_tool),  # None (old files): False
                 # A2A fields restored (FR-24, AC-39) via the shared helper;
                 # a2a_enabled is always forced to False there.
                 **_a2a_import_fields(export_data.agent),
@@ -935,7 +948,7 @@ class AgentImportService:
                 lightrag_query_mode=export_data.agent.lightrag_query_mode,
                 create_date=datetime.now(),
                 request_count=0,
-                is_tool=bool(export_data.agent.is_tool),
+                is_tool=bool(export_data.agent.is_tool),  # None (old files): False
                 type="agent",
                 # A2A fields restored (FR-24, AC-39) via the shared helper;
                 # a2a_enabled is always forced to False there.

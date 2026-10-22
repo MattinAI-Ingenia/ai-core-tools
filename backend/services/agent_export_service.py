@@ -16,6 +16,7 @@ from services.output_parser_export_service import OutputParserExportService
 from services.mcp_config_export_service import MCPConfigExportService
 from services.middleware_export_service import MiddlewareExportService
 from repositories.agent_repository import AgentRepository
+from services.system_one_porting import export_system_one_service, system_one_export_fields
 import logging
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,10 @@ class AgentExportService(BaseExportService):
             agent = AgentRepository.get_ocr_agent_by_id(self.session, agent_id)
             if not agent:
                 raise ValueError(f"OCR Agent with ID {agent_id} not found")
+        elif agent.type == 'system_one_agent':
+            agent = AgentRepository.get_system_one_agent_by_id(self.session, agent_id)
+            if not agent:
+                raise ValueError(f"System One Agent with ID {agent_id} not found")
 
         # Permission check
         if agent.app_id != app_id:
@@ -163,6 +168,8 @@ class AgentExportService(BaseExportService):
             a2a_description_override=agent.a2a_description_override,
             a2a_skill_tags=list(agent.a2a_skill_tags or []),
             a2a_examples=list(agent.a2a_examples or []),
+            # System One-specific fields ({} for other agent types)
+            **system_one_export_fields(agent),
         )
 
         # Create metadata
@@ -177,6 +184,13 @@ class AgentExportService(BaseExportService):
         bundled_middlewares = (
             MiddlewareExportService(self.session).export_for_agent(agent) if include_middlewares else []
         )
+        bundled_system_one_services = {}  # by name: the agent's own service and those of its System One tools
+
+        # Bundle the System One service (never its token): the file then imports into another app
+        if include_ai_service and agent.type == 'system_one_agent' and agent.system_one_service:
+            bundled_system_one_services[agent.system_one_service.name] = export_system_one_service(
+                agent.system_one_service
+            )
 
         # Bundle AI Service
         if include_ai_service and agent.service_id:
@@ -267,6 +281,8 @@ class AgentExportService(BaseExportService):
                         bundled_middlewares.extend(
                             m for m in tool_agent_export.middlewares if m.name not in known
                         )
+                        for service in tool_agent_export.system_one_services:
+                            bundled_system_one_services.setdefault(service.name, service)
                     except Exception as e:
                         logger.warning(
                             f"Failed to bundle agent tool "
@@ -284,4 +300,5 @@ class AgentExportService(BaseExportService):
             mcp_configs=bundled_mcp_configs,
             middlewares=bundled_middlewares,
             agent_tools=bundled_agent_tools,
+            system_one_services=list(bundled_system_one_services.values()),
         )

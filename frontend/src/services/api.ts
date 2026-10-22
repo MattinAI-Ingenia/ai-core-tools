@@ -2,6 +2,14 @@ import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
 import type { StreamEvent, LightRAGGraphData, HitlCancelResult, HitlDecision, HitlPendingApproval } from '../types/streaming';
+import type {
+  SystemOneConnectionResult,
+  SystemOneQuestion,
+  SystemOneResult,
+  SystemOneService,
+  SystemOneServiceDetail,
+  SystemOneServicePayload,
+} from '../types/systemOne';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
@@ -164,6 +172,11 @@ export interface Agent {
   // LightRAG-specific: query mode (skill-routed | local | global | hybrid | mix | naive | bypass)
   lightrag_query_mode?: string | null;
   lightrag_query_modes?: string[];
+  // System One-specific fields (type 'system_one_agent')
+  system_one_service_id?: number | null;
+  questions?: SystemOneQuestion[] | null;
+  summarization_service_id?: number | null;
+  max_state_chars?: number | null;
   // Media processing configuration
   transcription_service_id?: number | null;
   video_ai_service_id?: number | null;
@@ -198,6 +211,7 @@ export interface Agent {
   };
   output_parsers: Array<{ parser_id: number; name: string }>;
   sandbox_services: Array<{ service_id: number; name: string }>;
+  system_one_services?: Array<{ service_id: number; name: string }>;
   tools: Array<{ agent_id: number; name: string }>;
   mcp_configs: Array<{ config_id: number; name: string }>;
   skills: Array<{ skill_id: number; name: string; description?: string }>;
@@ -1447,6 +1461,75 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/sandbox-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  // ==================== SYSTEM ONE SERVICES ====================
+  async getSystemOneServices(appId: number): Promise<SystemOneService[]> {
+    return this.request(`/internal/apps/${appId}/system-one-services/`);
+  }
+
+  async getSystemOneService(appId: number, serviceId: number): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}`);
+  }
+
+  async createSystemOneService(appId: number, data: SystemOneServicePayload): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/0`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSystemOneService(appId: number, serviceId: number, data: SystemOneServicePayload): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async copySystemOneService(appId: number, serviceId: number): Promise<SystemOneServiceDetail> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}/copy`, {
+      method: 'POST',
+    });
+  }
+
+  async deleteSystemOneService(appId: number, serviceId: number) {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testSystemOneService(appId: number, serviceId: number): Promise<SystemOneConnectionResult> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}/test`, {
+      method: 'POST',
+    });
+  }
+
+  /** Reachability and token check for the services table (read-only, never spends tokens). */
+  async getSystemOneServiceStatus(appId: number, serviceId: number): Promise<{ status: 'success' | 'error'; message: string; verifiable: boolean }> {
+    return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}/status`);
+  }
+
+  async testSystemOneServiceWithConfig(
+    appId: number,
+    data: Pick<SystemOneServicePayload, 'endpoint' | 'api_key' | 'provider'> & { model?: string },
+    serviceId?: number,
+  ): Promise<SystemOneConnectionResult> {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/apps/${appId}/system-one-services/test-connection${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async evaluateSystemOne(appId: number, agentId: number, text: string, files: File[] = []): Promise<SystemOneResult> {
+    const formData = new FormData();
+    formData.append('text', text);
+    for (const file of files) formData.append('files', file);
+
+    return this.request(`/internal/apps/${appId}/system-one/${agentId}/evaluate`, {
+      method: 'POST',
+      body: formData,
     });
   }
 
