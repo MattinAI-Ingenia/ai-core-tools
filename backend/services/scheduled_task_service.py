@@ -12,6 +12,8 @@ from models.agent import Agent, MarketplaceVisibility
 from models.conversation import Conversation
 from models.scheduled_task import ScheduledTask, ScheduledTaskRun
 from models.output_delivery import OutputDelivery
+from schemas.scheduled_task_schemas import ScheduledTaskResponseSchema
+from services.service_lifecycle_service import ServiceLifecycleService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -122,6 +124,24 @@ class ScheduledTaskService:
         if agent_id is not None:
             query = query.filter(ScheduledTask.agent_id == agent_id)
         return query.order_by(ScheduledTask.created_at.desc()).all()
+
+    def to_responses(self, tasks: List[ScheduledTask], app_id: int) -> List[ScheduledTaskResponseSchema]:
+        """Response schemas with ``lifecycle_warnings``; the lookup context is built once for all ``tasks``."""
+        ctx = ServiceLifecycleService.build_context(self.db, app_id, {t.agent_id for t in tasks})
+        responses = []
+        for task in tasks:
+            response = ScheduledTaskResponseSchema.model_validate(task)
+            response.lifecycle_warnings = ServiceLifecycleService.warnings_for_task(task, ctx)
+            responses.append(response)
+        return responses
+
+    def to_response(self, task: ScheduledTask) -> ScheduledTaskResponseSchema:
+        """Response schema of a single task, with its dependency warnings."""
+        return self.to_responses([task], task.app_id)[0]
+
+    def list_responses(self, app_id: int, agent_id: Optional[int] = None) -> List[ScheduledTaskResponseSchema]:
+        """``list`` serialised with dependency warnings."""
+        return self.to_responses(self.list(app_id, agent_id), app_id)
 
     def update(self, task_id: int, app_id: int, changes: Dict[str, Any]) -> ScheduledTask:
         task = self._task(task_id, app_id)

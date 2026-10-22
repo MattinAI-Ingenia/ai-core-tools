@@ -1,0 +1,229 @@
+{
+  "model": "gpt-5.4",
+  "pass1": [
+    {
+      "name": "Modelo",
+      "why": "El corpus está dominado por gamas y variantes de equipos; un técnico las buscaría por denominación comercial o variante exacta.",
+      "examples": [
+        "JAKA HFD CONDENS 20",
+        "SH-30HM",
+        "TERMA HV 23",
+        "HTP 100--150",
+        "BT DUO ME 500",
+        "BioClass HC 66",
+        "Evol Top NG",
+        "TERMAT 6 KW",
+        "HYDREA 150",
+        "DUAL CLIMA 16RT"
+      ]
+    },
+    {
+      "name": "CodigoAlarma",
+      "why": "Hay secciones explícitas de códigos de alarma/error y en los extractos aparecen identificadores literales de fallo mostrados en display o tablas.",
+      "examples": [
+        "AP",
+        "At",
+        "AT",
+        "E 02",
+        "E01",
+        "P01",
+        "P02"
+      ]
+    },
+    {
+      "name": "Magnitud",
+      "why": "Las tablas técnicas nombran valores concretos con unidad de potencia, presión, temperatura, volumen, peso, caudal, intensidad o rendimiento.",
+      "examples": [
+        "110 ºC",
+        "0,5 bar",
+        "1 y 1,5 bar",
+        "19 kW",
+        "0,226 kW",
+        "100 L",
+        "683 733",
+        "230 V~ / 50 Hz"
+      ]
+    },
+    {
+      "name": "Norma",
+      "why": "Se citan reglamentos y normas técnicas concretas de cumplimiento o clasificación, útiles como nodos normativos.",
+      "examples": [
+        "RITE",
+        "EN 303-5",
+        "ER-0170/1996",
+        "CGM-04/392"
+      ]
+    },
+    {
+      "name": "Funcion",
+      "why": "Aparecen funciones activables o configurables del control que un técnico puede querer localizar o relacionar con equipos.",
+      "examples": [
+        "FUNCIÓN ANTILEGIONELA",
+        "FUNCIÓN ANTI-HIELO",
+        "FUNCIÓN ANTIBLOQUEO DE BOMBAS",
+        "FUNCIÓN SG READY",
+        "MODO SILENCIOSO"
+      ]
+    },
+    {
+      "name": "Componente",
+      "why": "Los manuales nombran piezas físicas y órganos de la instalación, especialmente en listados de componentes y descripciones técnicas.",
+      "examples": [
+        "válvula de seguridad",
+        "bomba de circulación",
+        "quemador",
+        "termostato de seguridad",
+        "manómetro",
+        "purgador automático",
+        "compresor",
+        "caudalímetro"
+      ]
+    },
+    {
+      "name": "Sensor",
+      "why": "En menús técnicos y tablas de error se distinguen sensores y sondas concretos como entidades separadas de otros componentes.",
+      "examples": [
+        "sensor de humos",
+        "sensor de caudal",
+        "Sensor de temperatura inferior del acumulador",
+        "Sensor de temperatura de evaporación",
+        "sonda exterior",
+        "sonda de temperatura de descarga"
+      ]
+    },
+    {
+      "name": "Conexion",
+      "why": "Las características y esquemas identifican bocas y conexiones abreviadas o nombradas que un técnico consulta directamente.",
+      "examples": [
+        "IC",
+        "RC",
+        "EG",
+        "ES",
+        "SS",
+        "VSC",
+        "VC",
+        "EA"
+      ]
+    },
+    {
+      "name": "Sustancia",
+      "why": "Se mencionan combustibles, fluidos y emisiones/sustancias medidas o contenidas, relevantes para operación y cumplimiento.",
+      "examples": [
+        "gasóleo",
+        "pellet",
+        "CO",
+        "OGC",
+        "óxidos de nitrógeno",
+        "condensados"
+      ]
+    },
+    {
+      "name": "Accesorio",
+      "why": "Se citan kits, módulos y accesorios opcionales con denominación propia, buscables como elementos instalables o compatibles.",
+      "examples": [
+        "interacumulador Sanit",
+        "KIT DE SUELO RADIANTE SRC2 Ó SRM2",
+        "Kit hidráulico S200",
+        "módulo ICONNECT",
+        "CENICERO COMPRESOR AUTOMATICO",
+        "SILENT BLOCK"
+      ]
+    }
+  ],
+  "pass2": [
+    {
+      "name": "Modelo",
+      "why": "Agrupa referencias comerciales o designaciones de producto/equipo. Un técnico las buscaría como modelos, aunque sean de caldera, termo o acumulador.",
+      "examples": [
+        "JAKA HFD CONDENS 20",
+        "SH-30HM",
+        "TERMA HV 23",
+        "HTP 100--150"
+      ]
+    },
+    {
+      "name": "CodigoAlarma",
+      "why": "Reúne códigos breves de alarma o error usados para diagnóstico. Se consultan en tablas de fallos, no junto a magnitudes o ajustes.",
+      "examples": [
+        "AP",
+        "At",
+        "AT",
+        "E 02"
+      ]
+    },
+    {
+      "name": "Magnitud",
+      "why": "Incluye valores numéricos con unidad de distintas variables técnicas. Un técnico los localizaría como especificaciones o umbrales medidos/configurados.",
+      "examples": [
+        "110 ºC",
+        "0,5 bar",
+        "1 y 1,5 bar",
+        "19 kW"
+      ]
+    },
+    {
+      "name": "Norma",
+      "why": "Agrupa normas, reglamentos y referencias de certificación/documentación normativa. Se consultan en el mismo contexto regulatorio.",
+      "examples": [
+        "RITE",
+        "EN 303-5",
+        "ER-0170/1996",
+        "CGM-04/392"
+      ]
+    },
+    {
+      "name": "Funcion",
+      "why": "Reúne funciones o modos funcionales del equipo. Se buscan como prestaciones o comportamientos del sistema.",
+      "examples": [
+        "FUNCIÓN ANTILEGIONELA",
+        "FUNCIÓN ANTI-HIELO",
+        "FUNCIÓN ANTIBLOQUEO DE BOMBAS",
+        "FUNCIÓN SG READY"
+      ]
+    },
+    {
+      "name": "Componente",
+      "why": "Mantiene juntos los elementos físicos internos del equipo. Aunque algunos sean sensores, estos se consultan como piezas/componentes del sistema.",
+      "examples": [
+        "válvula de seguridad",
+        "bomba de circulación",
+        "quemador",
+        "termostato de seguridad",
+        "sensor de humos",
+        "sensor de caudal",
+        "Sensor de temperatura inferior del acumulador",
+        "Sensor de temperatura de evaporación"
+      ]
+    },
+    {
+      "name": "Conexion",
+      "why": "Agrupa siglas de bornes, conexiones o interfaces identificadas por código corto. Se consultan en esquemas de conexionado.",
+      "examples": [
+        "IC",
+        "RC",
+        "EG",
+        "ES"
+      ]
+    },
+    {
+      "name": "Sustancia",
+      "why": "Reúne combustibles, gases o compuestos medidos/empleados por el equipo. Se buscan por tipo de sustancia, no como componente o accesorio.",
+      "examples": [
+        "gasóleo",
+        "pellet",
+        "CO",
+        "OGC"
+      ]
+    },
+    {
+      "name": "Accesorio",
+      "why": "Agrupa elementos añadidos o kits opcionales asociados al equipo, distintos de los componentes internos principales.",
+      "examples": [
+        "interacumulador Sanit",
+        "KIT DE SUELO RADIANTE SRC2 Ó SRM2",
+        "Kit hidráulico S200",
+        "módulo ICONNECT"
+      ]
+    }
+  ]
+}

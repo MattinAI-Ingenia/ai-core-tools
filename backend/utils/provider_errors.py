@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+from utils.service_lifecycle import ServiceRetiredError
+
 # botocore reports failures as error codes rather than HTTP statuses.
 _BEDROCK_AUTH_CODES = {
     "UnrecognizedClientException",
@@ -29,6 +31,7 @@ class ProviderErrorKind(str, Enum):
     AUTH = "auth"              # 401/403: key missing, wrong, revoked or without access
     RATE_LIMIT = "rate_limit"  # 429: rate limit or quota exhausted
     UNAVAILABLE = "unavailable"  # 5xx: provider-side failure
+    RETIRED = "retired"        # our own end-of-service guard fired; the provider was never called
     OTHER = "other"
 
 
@@ -104,6 +107,18 @@ def _kind_of(exc: BaseException) -> ProviderErrorKind:
     return ProviderErrorKind.OTHER
 
 
+def _retired_cause(exc: BaseException) -> Optional[ServiceRetiredError]:
+    """The ServiceRetiredError in ``exc``'s cause chain, if any."""
+    seen = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ServiceRetiredError):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def classify_provider_error(exc: BaseException, service_label: str, step: Optional[str] = None) -> ProviderError:
     """Classify ``exc`` and build the message to show for it.
 
@@ -115,6 +130,9 @@ def classify_provider_error(exc: BaseException, service_label: str, step: Option
     tokens, SQL or internal hosts, and these messages reach app users and the public API.
     Callers log the full exception server-side.
     """
+    retired = _retired_cause(exc)
+    if retired is not None:
+        return ProviderError(kind=ProviderErrorKind.RETIRED, message=retired.message)
     kind = _kind_of(exc)
     if kind is ProviderErrorKind.AUTH:
         message = f"{service_label} rejected its credentials (API key missing, wrong or revoked)."

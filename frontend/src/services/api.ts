@@ -1,7 +1,7 @@
 import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
-import type { StreamEvent, LightRAGGraphData, HitlCancelResult, HitlDecision, HitlPendingApproval } from '../types/streaming';
+import type { HitlCancelResult, HitlDecision, HitlPendingApproval, StreamEvent, LightRAGGraphData } from '../types/streaming';
 import type {
   SystemOneConnectionResult,
   SystemOneQuestion,
@@ -10,6 +10,15 @@ import type {
   SystemOneServiceDetail,
   SystemOneServicePayload,
 } from '../types/systemOne';
+import type {
+  ExistingSandboxService,
+  ExistingService,
+  MoveAgentsResult,
+  MoveSandboxServiceUsageResult,
+  ServiceLifecycleFields,
+  ServiceLifecycleWarning,
+  ServiceUsage,
+} from '../types/services';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
@@ -129,6 +138,7 @@ export interface AgentRagFixedFilter {
 }
 
 export interface Agent {
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   agent_id: number;
   name: string;
   description?: string;
@@ -240,6 +250,7 @@ export interface ScheduledTask {
   created_at: string;
   updated_at: string;
   next_run_at?: string | null;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export type OutputContentMode = 'result' | 'excerpt' | 'link_only';
@@ -358,7 +369,7 @@ export interface ScheduledTaskTriggerResponse {
   status: string;
 }
 
-export interface AIService {
+export interface AIService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -369,7 +380,7 @@ export interface AIService {
   is_system?: boolean;
 }
 
-export interface EmbeddingService {
+export interface EmbeddingService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
@@ -390,6 +401,7 @@ export interface Silo {
   description?: string;
   type?: string;
   created_at?: string;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   docs_count: number;
   vector_db_type?: string;
   metadata_definition_id?: number;
@@ -428,6 +440,7 @@ export interface RepositoryListItem {
   name: string;
   created_at: string;
   resource_count: number;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export interface Media {
@@ -445,6 +458,7 @@ export interface Media {
 }
 
 export interface Repository {
+  lifecycle_warnings?: ServiceLifecycleWarning[];
   repository_id: number;
   name: string;
   created_at: string;
@@ -690,26 +704,32 @@ export interface TierConfigEntry {
   limit_value: number;
 }
 
-export interface SystemAIService {
+export interface SystemAIService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
   model_name: string;
   api_key: string;
   base_url: string;
+  api_version?: string;
+  aws_access_key_id?: string;
+  aws_region?: string;
   is_system: boolean;
   supports_video: boolean;
   created_at: string;
   available_providers: Array<{ value: string; name: string }>;
 }
 
-export interface SystemEmbeddingService {
+export interface SystemEmbeddingService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   provider: string;
   model_name: string;
   api_key: string;
   base_url: string;
+  api_version?: string;
+  aws_access_key_id?: string;
+  aws_region?: string;
   is_system: boolean;
   created_at?: string;
 }
@@ -1214,6 +1234,59 @@ class ApiService {
     return response.json();
   }
 
+  async getAIServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/used-by`);
+  }
+
+  async getEmbeddingServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}/used-by`);
+  }
+
+  async getSystemAIServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-ai-services/${serviceId}/used-by`);
+  }
+
+  async getSystemEmbeddingServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-embedding-services/${serviceId}/used-by`);
+  }
+
+  async getSandboxServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/used-by`);
+  }
+
+  async moveSandboxServiceUsage(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedAgentCount: number,
+    expectedAppCount: number,
+  ): Promise<MoveSandboxServiceUsageResult> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/move-usage`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_service_id: targetServiceId,
+        expected_agent_count: expectedAgentCount,
+        expected_app_count: expectedAppCount,
+      }),
+    });
+  }
+
+  async getSystemSandboxServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-sandbox-services/${serviceId}/used-by`);
+  }
+
+  async moveAgentsToAIService(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedCount: number,
+  ): Promise<MoveAgentsResult> {
+    return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/move-agents`, {
+      method: 'POST',
+      body: JSON.stringify({ target_service_id: targetServiceId, expected_count: expectedCount }),
+    });
+  }
+
   async getAIServices(appId: number): Promise<AIService[]> {
     return this.request(`/internal/apps/${appId}/ai-services/`);
   }
@@ -1325,7 +1398,7 @@ class ApiService {
     return this.request(`/internal/apps/${appId}/embedding-services/`);
   }
 
-  async getEmbeddingService(appId: number, serviceId: number): Promise<EmbeddingService> {
+  async getEmbeddingService(appId: number, serviceId: number): Promise<ExistingService> {
     return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}`);
   }
 
@@ -3616,6 +3689,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemAIService> {
     return this.request('/internal/admin/system-ai-services', {
       method: 'POST',
@@ -3629,6 +3704,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemAIService> {
     return this.request(`/internal/admin/system-ai-services/${serviceId}`, {
       method: 'PUT',
@@ -3729,6 +3806,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemEmbeddingService> {
     return this.request('/internal/admin/system-embedding-services', {
       method: 'POST',
@@ -3742,6 +3821,8 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
   }): Promise<SystemEmbeddingService> {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}`, {
       method: 'PUT',
@@ -3797,7 +3878,7 @@ class ApiService {
     return this.request('/internal/admin/system-sandbox-services');
   }
 
-  async getSystemSandboxService(serviceId: number) {
+  async getSystemSandboxService(serviceId: number): Promise<ExistingSandboxService> {
     return this.request(`/internal/admin/system-sandbox-services/${serviceId}`);
   }
 

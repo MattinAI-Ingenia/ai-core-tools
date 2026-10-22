@@ -34,6 +34,7 @@ from services.conversation_service import ConversationService
 from services.file_management_service import FileManagementService
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -111,6 +112,7 @@ async def _cancel_on_disconnect(request: Request, coro):
     tags=["Agent Chat"],
     response_model=AgentResponseSchema,
     responses={
+        409: {"description": "A service used by this resource was retired"},
         500: {
             "description": "Agent execution failed",
             "content": {
@@ -215,7 +217,7 @@ async def call_agent(
         logger.info(f"Public API chat request processed for agent {agent_id}, conversation: {result.get('conversation_id')}")
         return response_data
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in public chat endpoint: {str(e)}")
@@ -232,6 +234,7 @@ async def call_agent(
     summary="Call agent (streaming)",
     tags=["Agent Chat"],
     responses={
+        409: {"description": "A service used by this resource was retired"},
         500: {
             "description": "Agent execution failed",
             "content": {
@@ -330,7 +333,7 @@ async def call_agent_stream(
             },
         )
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in public streaming chat endpoint: {str(e)}")

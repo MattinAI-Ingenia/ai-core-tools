@@ -775,22 +775,12 @@ async def update_app(
 
     langsmith_key_rotated = (langsmith_key or "") != (app.langsmith_api_key or "")
 
-    # Validate default_sandbox_service_id references an existing sandbox service that is
-    # either system-scoped or belongs to this app (None = inherit system default is always valid).
-    if app_data.default_sandbox_service_id is not None:
-        from repositories.sandbox_service_repository import SandboxServiceRepository
-
-        sandbox_service = SandboxServiceRepository.get_by_id(db, app_data.default_sandbox_service_id)
-        if sandbox_service is None or (
-            sandbox_service.app_id is not None and sandbox_service.app_id != app_id
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"default_sandbox_service_id '{app_data.default_sandbox_service_id}' does not "
-                    "reference a valid sandbox service for this app."
-                ),
-            )
+    try:
+        app_service.validate_default_sandbox_service(
+            app_id, app_data.default_sandbox_service_id, app.default_sandbox_service_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
     update_dict = {
         'app_id': app_id,

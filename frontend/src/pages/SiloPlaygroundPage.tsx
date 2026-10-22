@@ -10,6 +10,7 @@ import Modal from '../components/ui/Modal';
 import { useSiloSearch } from '../hooks/useSiloSearch';
 import type { PanelState } from '../hooks/useSiloSearch';
 import SiloGraphView from '../components/silo/SiloGraphView';
+import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
 
 function SiloPlaygroundPage() {
   const { appId, siloId } = useParams();
@@ -241,6 +242,8 @@ const {
           <ArrowLeft className="w-4 h-4 inline-block mr-1" /> Back to Silos
         </button>
       </div>
+
+      <ServiceLifecycleAlert warnings={silo.lifecycle_warnings} variant="full" className="max-h-48 overflow-y-auto" />
 
       {/* Tabs */}
       <div>

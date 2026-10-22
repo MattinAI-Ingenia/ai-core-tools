@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import FormActions from './FormActions';
 import { apiService, type AIService } from '../../services/api';
+import { ServiceOptionStatus, ServiceSelectOptions, serviceStatusId } from '../ui/ServiceOptionStatus';
 import type { MCPConfig, Middleware, MiddlewarePayload, MiddlewareType } from '../../core/types';
 import { MIDDLEWARE_TYPES, MIDDLEWARE_TYPE_INFO, agentToolName } from '../../constants/middlewares';
 
@@ -125,6 +126,13 @@ function validate(type: MiddlewareType, name: string, config: Record<string, any
   return CONFIG_VALIDATORS[type](config);
 }
 
+/** `"ai_service:12"` -> 12; anything else (e.g. `agent_llm`) -> null. */
+function savedServiceId(value: unknown): number | null {
+  if (typeof value !== 'string' || !value.startsWith('ai_service:')) return null;
+  const id = Number.parseInt(value.slice('ai_service:'.length), 10);
+  return Number.isNaN(id) ? null : id;
+}
+
 function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<MiddlewareFormProps>) {
   const isEditing = !!middleware;
   const [type, setType] = useState<MiddlewareType>(middleware?.middleware_type ?? 'guardrails');
@@ -237,15 +245,22 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
     }
   };
 
-  const serviceSelect = (id: string, value: string, onChange: (v: string) => void) => (
-    <select id={id} value={value} onChange={(e) => onChange(e.target.value)} className={inputClass} disabled={isSubmitting}>
-      <option value="agent_llm">The agent's own model</option>
-      {aiServices.map((svc) => (
-        <option key={svc.service_id} value={`ai_service:${svc.service_id}`}>
-          {svc.name} ({svc.provider} · {svc.model_name})
-        </option>
-      ))}
-    </select>
+  const serviceSelect = (id: string, value: string, savedValue: unknown, onChange: (v: string) => void) => (
+    <>
+      <select
+        id={id} value={value} onChange={(e) => onChange(e.target.value)} className={inputClass}
+        disabled={isSubmitting} aria-describedby={serviceStatusId(aiServices, savedServiceId(value), id)}
+      >
+        <option value="agent_llm">The agent's own model</option>
+        <ServiceSelectOptions
+          options={aiServices}
+          savedValue={savedServiceId(savedValue)}
+          getValue={(svc) => `ai_service:${svc.service_id}`}
+          getLabel={(svc) => `${svc.name} (${svc.provider} · ${svc.model_name})`}
+        />
+      </select>
+      <ServiceOptionStatus selectId={id} options={aiServices} selectedId={savedServiceId(value)} />
+    </>
   );
 
   const knownTools: ToolOption[] = [
@@ -351,7 +366,7 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
         <div className="space-y-4">
           <div>
             <label htmlFor="mw-sum-model" className={labelClass}>Model used to summarize</label>
-            {serviceSelect('mw-sum-model', config.summarization_model, (v) => patch({ summarization_model: v }))}
+            {serviceSelect('mw-sum-model', config.summarization_model, middleware?.config?.summarization_model, (v) => patch({ summarization_model: v }))}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
@@ -438,7 +453,7 @@ function MiddlewareForm({ middleware, appId, onSubmit, onCancel }: Readonly<Midd
                 <p className="text-xs text-gray-500">Adds one extra model call per message checked.</p>
                 <div>
                   <label htmlFor="mw-pii-model" className={labelClass}>Detection model</label>
-                  {serviceSelect('mw-pii-model', config.llm_detector.ai_service, (v) => patchGroup('llm_detector', { ai_service: v }))}
+                  {serviceSelect('mw-pii-model', config.llm_detector.ai_service, middleware?.config?.llm_detector?.ai_service, (v) => patchGroup('llm_detector', { ai_service: v }))}
                 </div>
                 <div>
                   <label htmlFor="mw-pii-entities" className={labelClass}>Extra data types (comma separated)</label>

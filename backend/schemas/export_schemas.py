@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 from schemas.agent_schemas import A2AAgentFieldsMixin
+from schemas.service_lifecycle_schemas import ServiceLifecycleFieldsMixin
 
 
 # ==================== METADATA ====================
@@ -28,7 +29,7 @@ class ExportMetadataSchema(BaseModel):
 # ==================== AI SERVICE ====================
 
 
-class ExportAIServiceSchema(BaseModel):
+class ExportAIServiceSchema(ServiceLifecycleFieldsMixin):
     """AI Service export schema"""
 
     name: str = Field(..., min_length=1, max_length=255)
@@ -57,7 +58,7 @@ class ExportSystemOneServiceSchema(BaseModel):
 # ==================== EMBEDDING SERVICE ====================
 
 
-class ExportEmbeddingServiceSchema(BaseModel):
+class ExportEmbeddingServiceSchema(ServiceLifecycleFieldsMixin):
     """Embedding Service export schema"""
 
     name: str = Field(..., min_length=1, max_length=255)

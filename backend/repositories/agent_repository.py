@@ -20,6 +20,7 @@ from repositories.mcp_config_repository import MCPConfigRepository
 from repositories.skill_repository import SkillRepository
 from repositories.middleware_repository import MiddlewareRepository
 from utils.logger import get_logger
+from utils.service_lifecycle import to_utc
 
 logger = get_logger(__name__)
 
@@ -320,7 +321,7 @@ class AgentRepository:
         # Get metadata definition if it exists
         if silo.metadata_definition_id:
             metadata_parser = AgentRepository.get_output_parser_by_id(db, silo.metadata_definition_id)
-            if metadata_parser and metadata_parser.fields:
+            if metadata_parser and metadata_parser.app_id == silo.app_id and metadata_parser.fields:
                 silo_info["metadata_definition"] = {
                     "fields": metadata_parser.fields
                 }
@@ -354,6 +355,8 @@ class AgentRepository:
                 "name": f"[System] {s.name}" if s.app_id is None else s.name,
                 "supports_video": s.supports_video,
                 "is_system": s.app_id is None,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
             }
             for s in ai_services
         ]
@@ -361,7 +364,12 @@ class AgentRepository:
         # Get sandbox services
         sandbox_services = AgentRepository.get_sandbox_services_by_app_id(db, app_id)
         sandbox_services_list = [
-            {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+            {
+                "service_id": s.service_id,
+                "name": f"[System] {s.name}" if s.app_id is None else s.name,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
+            }
             for s in sandbox_services
         ]
 

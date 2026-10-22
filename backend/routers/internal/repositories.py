@@ -24,7 +24,6 @@ from schemas.export_schemas import RepositoryExportFileSchema
 from routers.internal.auth_utils import get_current_user_oauth
 from routers.controls import enforce_file_size_limit
 from routers.controls.role_authorization import require_min_role, AppRole
-from repositories.media_repository import MediaRepository
 from utils.error_handlers import ValidationError
 from schemas.silo_schemas import CostEstimationResponseSchema
 from services.import_job_service import ImportJobService, ConflictError
@@ -40,9 +39,14 @@ from schemas.blob_ingest_schemas import (
 from services.azure_blob_ingest_service import AzureBlobIngestService, ConflictError as AzureBlobConflictError
 from services.blob import azure_blob_client
 from utils.blob_url_guard import BlobUrlRejected
+from utils.service_lifecycle import ServiceRetiredError
 
 # Import database dependency
 from db.database import get_db
+from routers.controls.repository_scope import (
+    require_repository_in_app,
+    require_repository_in_app_or_new,
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -51,6 +55,9 @@ repositories_router = APIRouter()
 
 # Debug log when router is loaded
 logger.info("Repositories router loaded successfully")
+
+
+REPOSITORY_IN_APP = Depends(require_repository_in_app)
 
 
 def _validate_repository_app_ownership(repository_id: int, app_id: int, db) -> None:
@@ -163,7 +170,7 @@ async def list_repositories(
     return RepositoryService.get_repositories_list(app_id, db)
 
 
-@repositories_router.get("/{repository_id}",
+@repositories_router.get("/{repository_id}", dependencies=[Depends(require_repository_in_app_or_new)],
                         summary="Get repository details",
                         tags=["Repositories"],
                         response_model=RepositoryDetailSchema)
@@ -209,7 +216,7 @@ async def create_repository(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@repositories_router.put("/{repository_id}",
+@repositories_router.put("/{repository_id}", dependencies=[REPOSITORY_IN_APP],
                          summary="Update repository",
                          tags=["Repositories"],
                          response_model=RepositoryDetailSchema)
@@ -224,7 +231,6 @@ async def update_repository(
     """
     Update an existing repository. Note: vector_db_type cannot be changed after creation.
     """
-    _validate_repository_app_ownership(repository_id, app_id, db)
     try:
         repo = RepositoryService.update_repository_router(app_id, repository_id, repo_data, db)
         return RepositoryService.get_repository_detail(app_id, repo.repository_id, db)
@@ -237,7 +243,7 @@ async def update_repository(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@repositories_router.delete("/{repository_id}",
+@repositories_router.delete("/{repository_id}", dependencies=[REPOSITORY_IN_APP],
                            summary="Delete repository",
                            tags=["Repositories"])
 async def delete_repository(
@@ -250,15 +256,14 @@ async def delete_repository(
     """
     Delete a repository and all its resources.
     """
-    
-    # Use RepositoryService for business logic
+
     RepositoryService.delete_repository_router(repository_id, db)
     
     return {"message": "Repository deleted successfully"}
 
 
 @repositories_router.post(
-    "/{repository_id}/export",
+    "/{repository_id}/export", dependencies=[REPOSITORY_IN_APP],
     summary="Export Repository",
     tags=["Repositories", "Export/Import"],
     status_code=status.HTTP_200_OK,
@@ -320,7 +325,7 @@ async def export_repository(
 
 # ==================== RESOURCE MANAGEMENT ====================
 
-@repositories_router.post("/{repository_id}/resources",
+@repositories_router.post("/{repository_id}/resources", dependencies=[REPOSITORY_IN_APP],
                          summary="Upload resources",
                          tags=["Resources"])
 async def upload_resources(
@@ -353,6 +358,7 @@ async def upload_resources(
 
 
 @repositories_router.post("/{repository_id}/resources/estimate",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Estimate indexing cost for uploaded files",
                          tags=["Resources"],
                          response_model=CostEstimationResponseSchema)
@@ -478,6 +484,7 @@ def _raise_azure_blob_http_error(e: Exception, sas_token: Optional[str]) -> NoRe
 
 @repositories_router.post(
     "/{repository_id}/ingest-azure-blobs",
+    dependencies=[REPOSITORY_IN_APP],
     summary="Ingest an Azure Blob Storage container into this repository",
     tags=["Resources"],
     response_model=IngestAzureBlobsResponseSchema,
@@ -513,6 +520,7 @@ async def ingest_azure_blobs(
 
 @repositories_router.post(
     "/{repository_id}/preview-azure-blobs",
+    dependencies=[REPOSITORY_IN_APP],
     summary="Count the Azure Blob blobs a Load from this source would ingest",
     tags=["Resources"],
     response_model=PreviewAzureBlobsResponseSchema,
@@ -549,6 +557,7 @@ async def preview_azure_blobs(
 # ==================== CSV IMPORT ====================
 
 @repositories_router.post("/{repository_id}/csv-imports/preview",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Preview CSV headers for import",
                          tags=["CSV Import"],
                          response_model=CsvPreviewResponseSchema)
@@ -566,6 +575,7 @@ async def preview_csv_import(
 
 
 @repositories_router.post("/{repository_id}/csv-imports",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Start a CSV → PDF import",
                          tags=["CSV Import"],
                          response_model=ImportJobResponseSchema,
@@ -593,6 +603,7 @@ async def create_csv_import(
 
 
 @repositories_router.get("/{repository_id}/csv-imports/active",
+    dependencies=[REPOSITORY_IN_APP],
                         summary="Get the active CSV import job, if any",
                         tags=["CSV Import"],
                         response_model=Optional[ImportJobResponseSchema])
@@ -611,6 +622,7 @@ async def get_active_csv_import(
 
 
 @repositories_router.get("/{repository_id}/csv-imports/{import_job_id}",
+    dependencies=[REPOSITORY_IN_APP],
                         summary="Get a CSV import job with its rows",
                         tags=["CSV Import"],
                         response_model=ImportJobResponseSchema)
@@ -630,6 +642,7 @@ async def get_csv_import(
 
 
 @repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/rows/{row_id}/retry",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Retry a failed CSV import row",
                          tags=["CSV Import"],
                          response_model=ImportJobResponseSchema)
@@ -651,6 +664,7 @@ async def retry_csv_import_row(
 
 
 @repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/estimate",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Estimate LightRAG indexing cost for selected CSV import rows",
                          tags=["CSV Import"],
                          response_model=CostEstimationResponseSchema)
@@ -672,6 +686,7 @@ async def estimate_csv_import_rows(
 
 
 @repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/confirm",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Confirm selected CSV import rows into Resources",
                          tags=["CSV Import"],
                          response_model=ConfirmRowsResponseSchema)
@@ -690,6 +705,7 @@ async def confirm_csv_import_rows(
 
 
 @repositories_router.post("/{repository_id}/csv-imports/{import_job_id}/discard",
+    dependencies=[REPOSITORY_IN_APP],
                          summary="Discard selected CSV import rows",
                          tags=["CSV Import"])
 async def discard_csv_import_rows(
@@ -719,7 +735,7 @@ def _import_job_response(import_job_id: int, db: Session) -> Optional[ImportJobR
     )
 
 
-@repositories_router.post("/{repository_id}/resources/{resource_id}/move",
+@repositories_router.post("/{repository_id}/resources/{resource_id}/move", dependencies=[REPOSITORY_IN_APP],
                          summary="Move resource to different folder",
                          tags=["Resources"])
 async def move_resource(
@@ -749,7 +765,7 @@ async def move_resource(
     return result
 
 
-@repositories_router.delete("/{repository_id}/resources/{resource_id}",
+@repositories_router.delete("/{repository_id}/resources/{resource_id}", dependencies=[REPOSITORY_IN_APP],
                            summary="Delete resource",
                            tags=["Resources"])
 async def delete_resource(
@@ -779,6 +795,7 @@ async def delete_resource(
 
 
 @repositories_router.delete("/{repository_id}/resources",
+    dependencies=[REPOSITORY_IN_APP],
                            summary="Delete all resources in a repository",
                            tags=["Resources"])
 async def delete_all_resources(
@@ -805,7 +822,7 @@ async def delete_all_resources(
     return result
 
 
-@repositories_router.get("/{repository_id}/resources/{resource_id}/download",
+@repositories_router.get("/{repository_id}/resources/{resource_id}/download", dependencies=[REPOSITORY_IN_APP],
                         summary="Download resource",
                         tags=["Resources"])
 async def download_resource(
@@ -842,7 +859,7 @@ async def download_resource(
 
 
 # ==================== MEDIA MANAGEMENT ====================
-@repositories_router.post("/{repository_id}/media", response_model=MediaUploadResponse, responses={500: {"description": "Internal server error"}})
+@repositories_router.post("/{repository_id}/media", dependencies=[REPOSITORY_IN_APP], response_model=MediaUploadResponse, responses={500: {"description": "Internal server error"}})
 async def upload_media(
     app_id: int,
     repository_id: int,
@@ -893,11 +910,13 @@ async def upload_media(
             created_media=[MediaResponse(**m.__dict__) for m in created_media],
             failed_files=failed_files
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error uploading media: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@repositories_router.post("/{repository_id}/media/youtube", response_model=MediaResponse, responses={400: {"description": "Validation error"}, 500: {"description": "Internal server error"}})
+@repositories_router.post("/{repository_id}/media/youtube", dependencies=[REPOSITORY_IN_APP], response_model=MediaResponse, responses={400: {"description": "Validation error"}, 500: {"description": "Internal server error"}})
 async def add_youtube_video(
     app_id: int,
     background_tasks: BackgroundTasks,
@@ -947,6 +966,8 @@ async def add_youtube_video(
         )
 
         return MediaResponse(**media.__dict__)
+    except HTTPException:
+        raise
     except ValueError as e:
         # Handle validation errors (invalid URL, duplicate)
         raise HTTPException(status_code=400, detail=str(e))
@@ -954,7 +975,7 @@ async def add_youtube_video(
         logger.error(f"Error adding YouTube video: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@repositories_router.get("/{repository_id}/media", response_model=List[MediaResponse])
+@repositories_router.get("/{repository_id}/media", dependencies=[REPOSITORY_IN_APP], response_model=List[MediaResponse])
 async def list_media(
     app_id: int,
     repository_id: int,
@@ -971,7 +992,7 @@ async def list_media(
     )
     return [MediaResponse(**{k: v for k, v in m.__dict__.items() if not k.startswith('_')}) for m in media_list]
 
-@repositories_router.post("/{repository_id}/media/{media_id}/move",
+@repositories_router.post("/{repository_id}/media/{media_id}/move", dependencies=[REPOSITORY_IN_APP],
                          summary="Move media to different folder",
                          tags=["Media"])
 async def move_media(
@@ -1001,7 +1022,7 @@ async def move_media(
     
     return result
 
-@repositories_router.get("/{repository_id}/media/{media_id}", response_model=MediaResponse, responses={404: {"description": "Media not found"}})
+@repositories_router.get("/{repository_id}/media/{media_id}", dependencies=[REPOSITORY_IN_APP], response_model=MediaResponse, responses={404: {"description": "Media not found"}})
 async def get_media_status(
     app_id: int,
     repository_id: int,
@@ -1010,12 +1031,9 @@ async def get_media_status(
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
 ):
-    media = MediaRepository.get_by_id(media_id, db)
-    if not media:
-        raise HTTPException(status_code=404, detail="Media not found")
-    return media
+    return MediaService.get_repository_media(repository_id, media_id, db)
 
-@repositories_router.delete("/{repository_id}/media/{media_id}")
+@repositories_router.delete("/{repository_id}/media/{media_id}", dependencies=[REPOSITORY_IN_APP])
 async def delete_media(
     app_id: int,
     repository_id: int,
@@ -1042,9 +1060,10 @@ async def delete_media(
 
 # ==================== REPOSITORY SEARCH ====================
 
-@repositories_router.post("/{repository_id}/search",
+@repositories_router.post("/{repository_id}/search", dependencies=[REPOSITORY_IN_APP],
                          summary="Search documents in repository",
-                         tags=["Repositories", "Search"])
+                         tags=["Repositories", "Search"],
+                         responses={409: {"description": "A service used by this resource was retired"}})
 async def search_repository_documents(
     app_id: int,
     repository_id: int,
@@ -1075,7 +1094,7 @@ async def search_repository_documents(
         logger.info(f"Repository search completed - found {len(result.get('results', []))} results")
         return result
         
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error searching repository {repository_id}: {str(e)}", exc_info=True)
@@ -1087,6 +1106,7 @@ async def search_repository_documents(
 
 @repositories_router.post(
     "/{repository_id}/resume-indexing",
+    dependencies=[REPOSITORY_IN_APP],
     summary="Resume an interrupted ingestion",
     tags=["Resources"],
 )
@@ -1114,6 +1134,7 @@ async def resume_indexing(
 
 @repositories_router.post(
     "/{repository_id}/stop-indexing",
+    dependencies=[REPOSITORY_IN_APP],
     summary="Pause or cancel the running ingestion",
     tags=["Resources"],
 )
@@ -1149,6 +1170,7 @@ async def stop_indexing(
 
 @repositories_router.get(
     "/{repository_id}/ingestion-status",
+    dependencies=[REPOSITORY_IN_APP],
     summary="Check if repository silo has an active ingestion",
     tags=["Resources"],
 )
@@ -1183,6 +1205,7 @@ async def get_ingestion_status(
 
 @repositories_router.get(
     "/{repository_id}/ingestion-progress/{session_id}",
+    dependencies=[REPOSITORY_IN_APP],
     summary="Stream ingestion progress via SSE",
     tags=["Resources"],
 )

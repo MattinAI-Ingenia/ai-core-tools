@@ -104,3 +104,22 @@ def test_vector_store_http_errors_are_not_provider_errors():
     QdrantError = type("UnexpectedResponse", (Exception,), {"__module__": "qdrant_client.http.exceptions", "status_code": 401})
     assert classify_provider_error(QdrantError("unauthorized"), LABEL).kind is ProviderErrorKind.OTHER
 
+
+
+def test_wrapped_service_retired_error_is_retired_and_not_a_service_concern():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from utils.service_lifecycle import ServiceRetiredError
+
+    retired = ServiceRetiredError(
+        SimpleNamespace(service_id=1, name="old", end_of_service_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        "embedding",
+    )
+    try:
+        raise RuntimeError("indexing failed") from retired
+    except RuntimeError as wrapped:
+        error = classify_provider_error(wrapped, LABEL, step="Indexing")
+    assert error.kind is ProviderErrorKind.RETIRED
+    assert error.message == retired.message
+    assert error.concerns_service is False

@@ -40,6 +40,8 @@ from routers.controls.role_authorization import require_min_role, AppRole
 from models.agent import MarketplaceVisibility
 
 from utils.logger import get_logger
+from utils.error_handlers import ValidationError
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -688,6 +690,7 @@ async def _save_uploaded_file(upload_file: UploadFile) -> str:
     response_model=ChatResponseSchema,
     responses={
         404: {"description": "Agent not found"},
+        409: {"description": "A service used by this resource was retired"},
         429: {"description": "Marketplace call quota exceeded"},
         500: {"description": "Internal server error"},
     },
@@ -770,7 +773,7 @@ async def chat_with_agent(
         logger.info(f"Chat request processed for agent {agent_id} by user {auth_context.identity.id}")
         return ChatResponseSchema(**result)
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}")
@@ -783,7 +786,10 @@ async def chat_with_agent(
     "/{agent_id}/chat/stream",
     summary="Chat with agent (streaming)",
     tags=["Agents"],
-    responses={500: {"description": "Internal server error"}},
+    responses={
+        409: {"description": "A service used by this resource was retired"},
+        500: {"description": "Internal server error"},
+    },
 )
 async def chat_with_agent_stream(
     app_id: int,
@@ -869,7 +875,7 @@ async def chat_with_agent_stream(
             },
         )
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in streaming chat endpoint: {str(e)}")
@@ -1118,7 +1124,10 @@ async def get_conversation_history(
     "/{agent_id}/upload-file",
     summary="Upload file for chat",
     tags=["Agents"],
-    responses={500: {"description": "File upload failed"}},
+    responses={
+        409: {"description": "A service used by this resource was retired"},
+        500: {"description": "File upload failed"},
+    },
 )
 async def upload_file_for_chat(
     app_id: int,
@@ -1186,6 +1195,11 @@ async def upload_file_for_chat(
                         content=file_ref.content,
                         db=db,
                     )
+                except ServiceRetiredError:
+                    await file_service.discard_uploaded_file(
+                        file_ref.file_id, agent_id, user_context, conversation_id
+                    )
+                    raise
                 except Exception as vec_err:
                     logger.warning(f"File vectorization at upload failed: {vec_err}")
 
@@ -1205,7 +1219,7 @@ async def upload_file_for_chat(
             "mime_type": file_ref.mime_type
         }
         
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in file upload endpoint: {str(e)}")
@@ -1523,9 +1537,9 @@ async def upload_playground_media(
             ],
             "failed_files": result["failed_files"],
         }
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error uploading playground media: {e}", exc_info=True)
@@ -1580,9 +1594,9 @@ async def add_playground_youtube(
             "silo_id": result["silo_id"],
             "media": MR.model_validate(result["media"], from_attributes=True),
         }
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error adding playground YouTube: {e}", exc_info=True)

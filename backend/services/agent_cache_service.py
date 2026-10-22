@@ -26,6 +26,11 @@ _MISSING_TOOL_OUTPUT_MARKERS = (
     "did not have response messages",
 )
 
+# Part of the per-process connection budget documented in db/database.py.
+CHECKPOINTER_POOL_MIN = int(os.getenv("CHECKPOINTER_POOL_MIN", "2"))
+CHECKPOINTER_POOL_MAX = int(os.getenv("CHECKPOINTER_POOL_MAX", "10"))
+CHECKPOINTER_APPLICATION_NAME = "mattin-checkpointer"
+
 
 def is_missing_tool_output_error(exc: BaseException) -> bool:
     """Return True when a provider rejects a stale incomplete tool-call checkpoint."""
@@ -108,16 +113,17 @@ class CheckpointerCacheService:
 
         cls._pool = AsyncConnectionPool(
             conninfo=db_uri,
-            open=False,
-            min_size=2,
-            max_size=10,
+            min_size=CHECKPOINTER_POOL_MIN,
+            max_size=CHECKPOINTER_POOL_MAX,
             max_lifetime=1800,   # recycle connections after 30 min
             max_idle=300,        # close connections idle longer than 5 min
             reconnect_timeout=30,  # retry broken connections for up to 30 s
+            open=False,          # open explicitly below (constructor open is deprecated)
             kwargs={
                 "autocommit": True,
                 "prepare_threshold": 0,
                 "row_factory": dict_row,
+                "application_name": CHECKPOINTER_APPLICATION_NAME,
             },
         )
         await cls._pool.open(wait=True)

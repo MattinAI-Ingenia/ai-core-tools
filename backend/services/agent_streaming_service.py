@@ -55,6 +55,7 @@ from services.agent_cache_service import (
     is_missing_tool_output_error,
 )
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError, agent_turn_context_kwargs, set_service_call_context
 
 logger = get_logger(__name__)
 
@@ -167,7 +168,8 @@ class AgentStreamingService:
            occurs; ``extra["error_code"]`` carries the metrics error code and
            ``extra["error_kind"]`` a stable, small vocabulary (``"connection"``,
            ``"incomplete_turn"``, ``"http"``, ``"serialization"``,
-           ``"agent_failure"``, ``"approval"``, ``"pii_blocked"``) a non-SSE
+           ``"agent_failure"``, ``"approval"``, ``"pii_blocked"``,
+           ``"service_retired"``) a non-SSE
            consumer can switch on.
 
         Consumer contract:
@@ -247,6 +249,10 @@ class AgentStreamingService:
         # its own caller closes the generator afterwards.
         terminal_event_yielded = False
         resume_settled = resume is None
+
+        # Who is calling, for the log line of a blocked (retired-service) call. Plain
+        # ContextVar set, never reset across a yield.
+        set_service_call_context(**agent_turn_context_kwargs(channel, user_context, agent_id))
 
         try:
             # ----------------------------------------------------------------
@@ -790,6 +796,16 @@ class AgentStreamingService:
                 "error",
                 {"message": pii_blocked_message(exc)},
                 extra={"error_code": metrics_error_code, "error_kind": "pii_blocked"},
+            )
+        except ServiceRetiredError as exc:
+            # Expected outcome: the message is built by our own helper (service name, date,
+            # admin notice), so it is safe to show. Already logged once by the guard.
+            metrics_status, metrics_error_code, metrics_error_message = "ERROR", "SERVICE_RETIRED", exc.message
+            terminal_event_yielded = True
+            yield AgentStreamEvent(
+                "error",
+                {"message": exc.message, "code": "service_retired"},
+                extra={"error_code": "SERVICE_RETIRED", "error_kind": "service_retired", "detail": exc.message},
             )
         except _AgentStreamSerializationError as exc:
             logger.exception(

@@ -24,6 +24,7 @@ if sys.platform == 'win32':
 
 import errno
 from contextlib import asynccontextmanager
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,6 +61,7 @@ from utils.provider import initialize_provider, shutdown_provider, get_provider
 from lks_idprovider_fastapi.dependencies import get_default_provider
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from utils.auth_config import AuthConfig
 from utils.secret_key import validate_secret_key
 from deployment_mode import is_saas_mode, validate_saas_env
@@ -399,15 +401,32 @@ async def _oserror_handler(_request: Request, exc: OSError) -> JSONResponse:
     raise exc
 
 
-@app.exception_handler(SQLAlchemyPoolTimeout)
-async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout) -> JSONResponse:
-    """Map DB connection-pool exhaustion to 503 with Retry-After instead of an opaque 500."""
-    logger.error("Database connection pool exhausted: %s", exc)
+def _database_unavailable_response() -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={"detail": "Service temporarily unavailable, please retry shortly."},
         headers={"Retry-After": "5"},
     )
+
+
+@app.exception_handler(SQLAlchemyPoolTimeout)
+async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout) -> JSONResponse:
+    """Map DB connection-pool exhaustion to 503 with Retry-After instead of an opaque 500."""
+    logger.error("Database connection pool exhausted: %s", exc)
+    return _database_unavailable_response()
+
+
+@app.exception_handler(SQLAlchemyOperationalError)
+async def _db_operational_error_handler(_request: Request, exc: SQLAlchemyOperationalError) -> JSONResponse:
+    """Map an unreachable or saturated database (e.g. no connection slots left) to 503."""
+    logger.error("Database unavailable: %s", exc.orig if exc.orig is not None else exc)
+    return _database_unavailable_response()
+
+
+@app.exception_handler(ServiceRetiredError)
+async def _service_retired_handler(_request: Request, exc: ServiceRetiredError) -> JSONResponse:
+    """Map a retired service to 409 with its message (the guard already logged it)."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message, "error_code": exc.error_code})
 
 
 # Mount routers - clean structure with no nesting

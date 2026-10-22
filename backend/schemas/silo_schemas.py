@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from schemas.embedding_service_schemas import EmbeddingServiceOptionSchema
+from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
 
 
 class SiloListItemSchema(BaseModel):
@@ -15,6 +16,7 @@ class SiloListItemSchema(BaseModel):
     vector_db_type: Optional[str] = None
     lightrag_vector_db_type: Optional[str] = None
     is_frozen: bool = False
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +66,7 @@ class SiloDetailSchema(BaseModel):
     # Metadata definition fields for playground
     metadata_fields: Optional[List[Dict[str, Any]]] = None
     is_frozen: bool = False
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 

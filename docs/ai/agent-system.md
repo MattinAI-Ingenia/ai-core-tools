@@ -178,6 +178,14 @@ with LangChain's `SummarizationMiddleware` (`backend/tools/middleware/factory.py
 The legacy `memory_max_messages`, `memory_max_tokens` and `memory_summarize_threshold` agent columns are
 kept for export/import compatibility but are no longer read.
 
+## Retired Services
+
+When a service an agent needs (main LLM, OCR vision/text model, transcription, video, embedding of a linked silo, middleware LLM, or an agent-as-tool's LLM) is past its end of service, the turn fails with `ServiceRetiredError` (HTTP `409 SERVICE_RETIRED`, SSE `error` with `code: "service_retired"`, scheduled runs failed without retry). The exception is the sandbox service: a retired one disables the code interpreter for the turn instead of failing it ([details](rfc-sandbox-providers.md#sandbox-service-end-of-service)). See [Service End of Service](../guides/chat-bot/kb-ai-services.md#service-end-of-service) for the user-facing behavior.
+
+Known limitations:
+- A tool that turns out to be retired mid-turn may leave an unanswered tool call in the agent's memory; the next turn recovers through the existing checkpoint rollback.
+- Users of a published marketplace agent see the retirement message (service name and notice) of the owning App's service. This is accepted.
+
 ## Conversation Persistence
 
 ### ConversationService

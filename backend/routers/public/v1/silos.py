@@ -34,6 +34,7 @@ from utils.error_handlers import ValidationError
 from utils.vector_db_immutability import assert_vector_db_type_immutable, assert_embedding_service_immutable
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from utils.async_files import write_temp_file
 
 logger = get_logger(__name__)
@@ -250,6 +251,7 @@ async def delete_silo(
     summary="Search documents in silo",
     tags=["Silos"],
     response_model=PublicSiloSearchResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def search_silo(
     app_id: int,
@@ -291,7 +293,7 @@ async def search_silo(
             total_results=result["total_results"],
         )
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error searching silo {silo_id} for app {app_id}: {str(e)}")
@@ -338,6 +340,7 @@ async def count_docs_in_silo(
     summary="Index content",
     tags=["Silos"],
     response_model=MessageResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def index_single_document(
     app_id: int,
@@ -358,7 +361,7 @@ async def index_single_document(
             db=db,
         )
         return MessageResponseSchema(message="Document indexed successfully")
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error indexing document in silo {silo_id} for app {app_id}: {str(e)}")
@@ -373,6 +376,7 @@ async def index_single_document(
     summary="Index multiple documents",
     tags=["Silos"],
     response_model=MessageResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def index_multiple_documents(
     app_id: int,
@@ -391,7 +395,7 @@ async def index_multiple_documents(
         return MessageResponseSchema(
             message=f"Successfully indexed {len(documents)} document(s)"
         )
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error indexing multiple documents in silo {silo_id} for app {app_id}: {str(e)}")
@@ -510,6 +514,7 @@ async def delete_all_docs_in_collection(
     summary="Find docs in collection",
     tags=["Silos"],
     response_model=DocsResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def find_docs_in_collection(
     app_id: int,
@@ -557,7 +562,7 @@ async def find_docs_in_collection(
             )
 
         return DocsResponseSchema(docs=doc_schemas)
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error finding documents in silo {silo_id} for app {app_id}: {str(e)}")
@@ -595,6 +600,7 @@ def _media_accepted(media: Media) -> FileIndexResponseSchema:
     summary="Index file content",
     tags=["Silos"],
     response_model=FileIndexResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def index_file_document(
     app_id: int,
@@ -665,7 +671,7 @@ async def index_file_document(
         return FileIndexResponseSchema(
             message="File indexed successfully", num_documents=len(docs)
         )
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error indexing file in silo {silo_id} for app {app_id}: {str(e)}")

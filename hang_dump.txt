@@ -1,0 +1,61 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.1.1, pluggy-1.7.0
+rootdir: /work
+configfile: pytest.ini
+plugins: asyncio-1.4.0, mock-3.17.0, Faker-40.43.0, platformdirs-4.12.2, anyio-4.15.1, langsmith-0.14.11
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 1 item
+
+tests/integration/test_system_one_end_to_end.py::test_a_normal_agent_gets_the_system_one_agent_as_a_typed_tool ERROR [100%]Fatal Python error: Aborted
+
+Current thread 0x00007ee7f1a20340 (most recent call first):
+  File "/usr/local/lib/python3.11/site-packages/psycopg/connection.py", line 495 in wait
+  File "/usr/local/lib/python3.11/site-packages/psycopg/cursor.py", line 113 in execute
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 1192 in do_execute
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1953 in _exec_single_context
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1832 in _execute_context
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1567 in _execute_ddl
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/ddl.py", line 203 in _execute_on_connection
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1458 in execute
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/ddl.py", line 337 in _invoke_with
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/ddl.py", line 1736 in visit_foreign_key_constraint
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/visitors.py", line 650 in traverse_single
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/ddl.py", line 1646 in visit_metadata
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/visitors.py", line 650 in traverse_single
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 2446 in _run_ddl_visitor
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 3245 in _run_ddl_visitor
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/schema.py", line 6728 in drop_all
+  File "/work/tests/conftest.py", line 172 in test_engine
+  File "/usr/local/lib/python3.11/site-packages/_pytest/fixtures.py", line 1014 in _teardown_yield_fixture
+  File "/usr/local/lib/python3.11/site-packages/_pytest/fixtures.py", line 1156 in finish
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 568 in teardown_exact
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 199 in pytest_runtest_teardown
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_execution.py", line 147 in _multicall
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_manager.py", line 183 in _hookexec
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_caller.py", line 197 in __call__
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 250 in <lambda>
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 361 in from_call
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 249 in call_and_report
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 144 in runtestprotocol
+  File "/usr/local/lib/python3.11/site-packages/_pytest/runner.py", line 118 in pytest_runtest_protocol
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_execution.py", line 147 in _multicall
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_manager.py", line 183 in _hookexec
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_caller.py", line 197 in __call__
+  File "/usr/local/lib/python3.11/site-packages/_pytest/main.py", line 408 in pytest_runtestloop
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_execution.py", line 147 in _multicall
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_manager.py", line 183 in _hookexec
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_caller.py", line 197 in __call__
+  File "/usr/local/lib/python3.11/site-packages/_pytest/main.py", line 384 in _main
+  File "/usr/local/lib/python3.11/site-packages/_pytest/main.py", line 330 in wrap_session
+  File "/usr/local/lib/python3.11/site-packages/_pytest/main.py", line 377 in pytest_cmdline_main
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_execution.py", line 147 in _multicall
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_manager.py", line 183 in _hookexec
+  File "/usr/local/lib/python3.11/site-packages/pluggy/_caller.py", line 197 in __call__
+  File "/usr/local/lib/python3.11/site-packages/_pytest/config/__init__.py", line 229 in _main
+  File "/usr/local/lib/python3.11/site-packages/_pytest/config/__init__.py", line 253 in _console_main
+  File "/usr/local/lib/python3.11/site-packages/pytest/__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 198 in _run_module_as_main
+
+Extension modules: charset_normalizer.md, charset_normalizer.cd, requests.packages.charset_normalizer.md, requests.packages.chardet.md, requests.packages.charset_normalizer.cd, requests.packages.chardet.cd, psutil._psutil_linux, zstandard.backend_c, xxhash._xxhash, sqlalchemy.util._collections_cy, sqlalchemy.util._immutabledict_cy, sqlalchemy.sql._util_cy, sqlalchemy.sql._cache_key_cy, sqlalchemy.engine._processors_cy, sqlalchemy.engine._util_cy, sqlalchemy.engine._row_cy, sqlalchemy.engine._result_cy, greenlet._greenlet, psycopg_binary.pq, psycopg_binary._psycopg, yarl._quoting_c, multidict._multidict, propcache._helpers_c, aiohttp._http_writer, aiohttp._http_parser, aiohttp._websocket.mask, aiohttp._websocket.reader_c, frozenlist._frozenlist, _cffi_backend, yaml._yaml, PIL._imaging, websockets.speedups, google._upb._message (total: 33)
+Aborted (core dumped)

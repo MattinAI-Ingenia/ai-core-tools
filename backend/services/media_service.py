@@ -1,6 +1,6 @@
 import os
 from typing import List, Tuple, Optional
-from fastapi import UploadFile, BackgroundTasks
+from fastapi import HTTPException, UploadFile, BackgroundTasks, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from models.media import Media
@@ -17,6 +17,27 @@ class MediaService:
     # Supported file extensions
     SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.mpeg', '.mpg'}
     SUPPORTED_AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.wma'}
+
+    @staticmethod
+    def get_repository_media(repository_id: int, media_id: int, db: Session) -> Media:
+        """Return a media item that belongs to ``repository_id``.
+
+        Raises:
+            HTTPException: 404 if the media does not exist or belongs to another repository.
+        """
+        media = MediaRepository.get_by_id(media_id, db)
+        if not media or media.repository_id != repository_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+        return media
+
+    @staticmethod
+    def _validate_folder_in_repository(folder_id: Optional[int], repository_id: int, db: Session) -> None:
+        """Raise 404 if ``folder_id`` is set and does not belong to ``repository_id``."""
+        if folder_id is None:
+            return
+        from services.folder_service import FolderService
+        if not FolderService.validate_folder_access(folder_id, repository_id, db):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
 
     @staticmethod
     def list_media(
@@ -53,7 +74,8 @@ class MediaService:
         # Convert 0 to None for root folder
         if folder_id == 0:
             folder_id = None
-        
+        MediaService._validate_folder_in_repository(folder_id, repository_id, db)
+
         created_media = []
         failed_files = []
         
@@ -92,26 +114,15 @@ class MediaService:
         Move a media item to a different folder within the same repository.
         Updates file system location (media + audio), database record, and re-indexes in vector DB.
         """
+        # Convert 0 to None for root folder
+        if new_folder_id == 0:
+            new_folder_id = None
+
+        # Child must belong to the repository (404, no existence oracle)
+        media = MediaService.get_repository_media(repository_id, media_id, db)
+        MediaService._validate_folder_in_repository(new_folder_id, repository_id, db)
+
         try:
-            # Convert 0 to None for root folder
-            if new_folder_id == 0:
-                new_folder_id = None
-
-            # Get the media
-            media = db.query(Media).filter(Media.media_id == media_id).one_or_none()
-            if not media:
-                raise ValueError(f"Media {media_id} not found")
-
-            # Validate repository ownership
-            if media.repository_id != repository_id:
-                raise ValueError(f"Media {media_id} does not belong to repository {repository_id}")
-
-            # Validate target folder if provided
-            if new_folder_id is not None:
-                from services.folder_service import FolderService
-                if not FolderService.validate_folder_access(new_folder_id, repository_id, db):
-                    raise ValueError(f"Folder {new_folder_id} does not belong to repository {repository_id}")
-
             # Get old paths
             old_media_path = media.file_path
             if not old_media_path:
@@ -197,10 +208,7 @@ class MediaService:
 
         logger.info(f"Delete media service called - app_id: {app_id}, repository_id: {repository_id}, media_id: {media_id}")
         
-        media = MediaRepository.get_by_id(media_id, db)
-        if not media:
-            logger.warning(f"Media {media_id} not found for deletion")
-            return False
+        media = MediaService.get_repository_media(repository_id, media_id, db)
         return MediaService.delete_media_item(media, db)
 
     @staticmethod
@@ -377,6 +385,7 @@ class MediaService:
         # Convert 0 to None for root folder
         if folder_id == 0:
             folder_id = None
+        MediaService._validate_folder_in_repository(folder_id, repository_id, db)
         return MediaService._create_youtube(
             url, db, background_tasks,
             silo_id=MediaService._repository_silo_id(repository_id, db),

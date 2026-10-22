@@ -4,8 +4,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 from models.agent import DEFAULT_AGENT_TEMPERATURE, DEFAULT_MEMORY_SUMMARIZE_THRESHOLD
-from utils.logger import get_logger
 from schemas.system_one_schemas import QuestionList
+from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -293,6 +294,7 @@ class AgentListItemSchema(BaseModel):
     marketplace_visibility: Optional[str] = None
     is_frozen: bool = False
     a2a_enabled: bool = False
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -382,6 +384,7 @@ class AgentDetailSchema(BaseModel):
     a2a_examples: List[str] = []
     a2a_card_url: Optional[str] = None
     a2a_rpc_url: Optional[str] = None
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 

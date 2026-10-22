@@ -1,0 +1,10 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.1.1, pluggy-1.7.0 -- /usr/local/bin/python
+cachedir: .pytest_cache
+rootdir: /work
+configfile: pytest.ini
+plugins: asyncio-1.4.0, mock-3.17.0, Faker-40.43.0, platformdirs-4.12.2, anyio-4.15.1, langsmith-0.14.11
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/integration/test_system_one_end_to_end.py::test_a_normal_agent_gets_the_system_one_agent_as_a_typed_tool ERROR [100%]

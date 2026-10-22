@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Bot, MessageCircle, Paperclip, Plus, Square, Timer } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiService } from '../services/api';
+import { apiService, ApiError } from '../services/api';
 import MessageContent from '../components/playground/MessageContent';
 import StreamingMessage from '../components/playground/StreamingMessage';
 import AttachedFilesPanel from '../components/playground/AttachedFilesPanel';
@@ -399,11 +399,7 @@ export default function MarketplaceChatPage() {
       void fetchQuotaInfo();
     } catch (err) {
       setHoldStreamingContent(false);
-      const isQuotaError =
-        err instanceof Error &&
-        (err.message.toLowerCase().includes('quota') ||
-          err.message.toLowerCase().includes('429') ||
-          err.message.toLowerCase().includes('limit'));
+      const isQuotaError = err instanceof ApiError && err.status === 429;
       const content = isQuotaError
         ? 'Marketplace call quota exceeded. Your quota resets at the start of next month.'
         : errorMessage(err, 'Failed to send message. Please try again.');

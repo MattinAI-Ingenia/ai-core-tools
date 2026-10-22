@@ -84,6 +84,20 @@ def engine(test_db_url):
     from db.database import Base
 
     eng = create_engine(test_db_url)
+    # Fork: PostgreSQL ENUM types declared with create_type=False (Alembic-owned;
+    # see spoint001 and friends) are never emitted by create_all. This throwaway
+    # database is built via create_all only, so create the types here first.
+    import sqlalchemy as _sa
+    with eng.begin() as conn:
+        for table in Base.metadata.tables.values():
+            for column in table.columns:
+                typ = column.type
+                if isinstance(typ, _sa.Enum) and not typ.create_type:
+                    labels = ", ".join(f"'{label}'" for label in typ.enums)
+                    try:
+                        conn.exec_driver_sql(f"CREATE TYPE {typ.name} AS ENUM ({labels})")
+                    except Exception:
+                        pass  # already exists from a previous run's failed cleanup
     Base.metadata.create_all(bind=eng)
     yield eng
     Base.metadata.drop_all(bind=eng)

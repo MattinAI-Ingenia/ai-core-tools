@@ -2,6 +2,7 @@ import enum
 from sqlalchemy import Column, String, Integer, ForeignKey
 from sqlalchemy.orm import relationship
 from models.base_service import BaseService
+from models.service_lifecycle import ServiceLifecycleMixin
 from models.service_health import ServiceHealthMixin, track_service_health
 
 class EmbeddingProvider(enum.Enum):
@@ -23,7 +24,7 @@ class EmbeddingProvider(enum.Enum):
     GoogleCloud = "GoogleCloud"
     Bedrock = "Bedrock"
 
-class EmbeddingService(ServiceHealthMixin, BaseService):
+class EmbeddingService(ServiceLifecycleMixin, ServiceHealthMixin, BaseService):
     __tablename__ = 'embedding_service'
 
     provider = Column(String(45), nullable=False)

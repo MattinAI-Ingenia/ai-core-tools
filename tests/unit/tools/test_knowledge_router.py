@@ -91,6 +91,8 @@ def _router_tool(name, react_agent, offset, lock, silo_id=7, silo_name="Manuales
     agent = Agent(name=name, description=f"{name} manuals", system_prompt="")
     agent.agent_id = silo_id
     agent.silo_id = silo_id
+    # IACTTool requires an ai_service at construction (upstream lazy-LLM design).
+    agent.ai_service = MagicMock()
     with patch("tools.agentTools.get_llm", return_value=MagicMock()):
         tool = agentTools.IACTTool(agent)
     tool.silo_name = silo_name
@@ -170,6 +172,7 @@ async def test_same_specialist_twice_in_a_turn_keeps_numbering(no_writer):
 @pytest.mark.asyncio
 async def test_classic_mode_still_returns_plain_text(no_writer):
     agent = Agent(name="Classic", description="", system_prompt="")
+    agent.ai_service = MagicMock()
     with patch("tools.agentTools.get_llm", return_value=MagicMock()):
         tool = agentTools.IACTTool(agent)
     tool.react_agent = _CitingReactAgent(["a"])
@@ -473,6 +476,7 @@ async def test_specialist_react_agent_gets_a_tool_call_limit():
     from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
 
     agent = Agent(name="ES", description="d", system_prompt="")
+    agent.ai_service = MagicMock()
     with (
         patch("tools.agentTools.get_llm", return_value=MagicMock()),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as build,
@@ -516,6 +520,7 @@ async def test_sub_agent_never_fans_out_parallel_tool_calls():
     top-level agent pre-binds parallel_tool_calls=False for this; sub-agents must too."""
     llm = MagicMock()
     agent = Agent(name="ES", description="d", system_prompt="")
+    agent.ai_service = MagicMock()
     with (
         patch("tools.agentTools.get_llm", return_value=llm),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as build,
@@ -532,6 +537,7 @@ async def test_sub_agent_falls_back_when_provider_rejects_parallel_tool_calls():
     llm = MagicMock()
     llm.bind_tools.side_effect = [TypeError("unexpected keyword"), "bound-plain"]
     agent = Agent(name="ES", description="d", system_prompt="")
+    agent.ai_service = MagicMock()
     with (
         patch("tools.agentTools.get_llm", return_value=llm),
         patch("tools.agentTools.create_langchain_agent", return_value=MagicMock()) as build,

@@ -35,6 +35,7 @@ from repositories.silo_repository import SiloRepository
 from repositories.output_parser_repository import OutputParserRepository
 from repositories.mcp_config_repository import MCPConfigRepository
 from utils.schema_utils import sanitize_identifier
+from utils.service_lifecycle import SERVICE_KIND_AI, RetiredServiceAssignmentError, ensure_assignable
 import logging
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,42 @@ def _a2a_import_fields(agent_schema: ExportAgentSchema) -> Dict[str, object]:
 
 class AgentImportService:
     """Service for importing Agents (configuration only)."""
+
+    @staticmethod
+    def _ensure_ai_service_assignable(
+        service: AIService, existing_agent: Optional[Agent], conflict_mode: ConflictMode
+    ) -> None:
+        """Reject newly assigning a retired AI service (OVERRIDE may keep the agent's current one)."""
+        current_id = (
+            existing_agent.service_id
+            if existing_agent is not None and conflict_mode == ConflictMode.OVERRIDE
+            else None
+        )
+        try:
+            ensure_assignable(service, current_id, "service_id", SERVICE_KIND_AI)
+        except RetiredServiceAssignmentError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _find_ai_service_by_name(self, name: str, app_id: int) -> Optional[AIService]:
+        """Resolve an AI service by name: the app's own first, then a system one (app_id NULL).
+
+        Another app's services are never matched. When several services of the same scope share
+        the name, the lowest service_id wins so the result is deterministic.
+        """
+        for scope in (AIService.app_id == app_id, AIService.app_id.is_(None)):
+            service = (
+                self.session.query(AIService)
+                .filter(AIService.name == name, scope)
+                .order_by(AIService.service_id)
+                .first()
+            )
+            if service is not None:
+                logger.info(
+                    f"Resolved AI service by name '{name}' -> ID {service.service_id} "
+                    f"({'system' if service.app_id is None else 'app'} service)"
+                )
+                return service
+        return None
 
     def __init__(self, session: Session):
         """Initialize Agent import service.
@@ -498,25 +535,21 @@ class AgentImportService:
             )
         # Priority 2: User selected existing AI service
         elif selected_ai_service_id:
-            service = AIServiceRepository.get_by_id_and_app_id(
-                self.session, selected_ai_service_id, app_id
-            )
+            service = AIServiceRepository.get_by_id(self.session, selected_ai_service_id)
+            # System services (app_id NULL) are allowed; another app's services never are.
+            if service is not None and service.app_id is not None and service.app_id != app_id:
+                service = None
             if not service:
                 raise ValueError(
                     f"Selected AI service {selected_ai_service_id} not found"
                 )
+            self._ensure_ai_service_assignable(service, existing_agent, conflict_mode)
             service_id = selected_ai_service_id
         # Priority 3: Try to find by name (for existing services)
         elif export_data.agent.service_name and not export_data.ai_service:
-            service = (
-                self.session.query(AIService)
-                .filter(
-                    AIService.name == export_data.agent.service_name,
-                    AIService.app_id == app_id,
-                )
-                .first()
-            )
+            service = self._find_ai_service_by_name(export_data.agent.service_name, app_id)
             if service:
+                self._ensure_ai_service_assignable(service, existing_agent, conflict_mode)
                 service_id = service.service_id
             else:
                 raise ValueError(
@@ -888,15 +921,15 @@ class AgentImportService:
             # Resolve vision service if specified
             vision_service_id = None
             if export_data.agent.vision_service_name:
-                vision_service = (
-                    self.session.query(AIService)
-                    .filter(
-                        AIService.name == export_data.agent.vision_service_name,
-                        AIService.app_id == app_id,
-                    )
-                    .first()
+                vision_service = self._find_ai_service_by_name(
+                    export_data.agent.vision_service_name, app_id
                 )
                 if vision_service:
+                    # New agent only, so any retired service is a new assignment.
+                    try:
+                        ensure_assignable(vision_service, None, "vision_service_id", SERVICE_KIND_AI)
+                    except RetiredServiceAssignmentError as exc:
+                        raise ValueError(str(exc)) from exc
                     vision_service_id = vision_service.service_id
             
             new_agent = OCRAgent(

@@ -13,11 +13,13 @@ from repositories.middleware_repository import MiddlewareRepository
 from models.middleware import AgentMiddleware, MiddlewareType
 from repositories.app_repository import AppRepository
 from services.a2a_server.lifecycle_service import schedule_owner_purge
+from services.service_lifecycle_service import ServiceLifecycleService
 from utils import a2a_config
 from repositories.system_one_service_repository import SystemOneServiceRepository
 from schemas.system_one_schemas import QuestionList, questions_error_message
 from services.system_one_state import MIN_TEXT_ROOM_CHARS, question_overhead_chars
 from utils.logger import get_logger
+from types import SimpleNamespace
 
 logger = get_logger(__name__)
 
@@ -244,7 +246,10 @@ class AgentService:
         
         # Get AI services for this app
         ai_services_dict = AgentRepository.get_ai_services_dict_by_app_id(db, app_id)
-        
+
+        # Dependency warnings: one lookup context for the whole list, never per agent.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id, all_agents=True)
+
         result = []
         for agent in agents:
             # Get AI service details if agent has one
@@ -274,6 +279,9 @@ class AgentService:
                     else None
                 ),
                 a2a_enabled=bool(_typed_attr(agent, 'a2a_enabled', bool, False)),
+                lifecycle_warnings=ServiceLifecycleService.warnings_for_agent(
+                    lifecycle_ctx.agent_refs.get(agent.agent_id), lifecycle_ctx
+                ),
             ))
 
         return result
@@ -297,6 +305,24 @@ class AgentService:
         
         # Get form data for dropdowns
         form_data = self._get_form_data(db, app_id, agent_id)
+
+        # Lifecycle: status of every offered AI service and the agent's dependency warnings, computed
+        # from one warning-days read and one lookup context.
+        lifecycle_ctx = ServiceLifecycleService.build_context(db, app_id, [agent_id] if agent_id != 0 else [])
+        ai_service_options = [
+            {**option, **ServiceLifecycleService.option_fields(
+                SimpleNamespace(**option), lifecycle_ctx.warning_days)}
+            for option in form_data['ai_services']
+        ]
+        sandbox_service_options = [
+            {**option, **ServiceLifecycleService.option_fields(
+                SimpleNamespace(**option), lifecycle_ctx.warning_days)}
+            for option in form_data['sandbox_services']
+        ]
+        lifecycle_warnings = (
+            ServiceLifecycleService.warnings_for_agent(lifecycle_ctx.agent_refs.get(agent_id), lifecycle_ctx)
+            if agent_id != 0 else []
+        )
         
         # Get agent associations
         associations = self._get_agent_associations(db, agent_id)
@@ -382,8 +408,8 @@ class AgentService:
             silo=silo_info,
             output_parser=output_parser_info,
             # Form data
-            ai_services=form_data.get('ai_services', []),
-            sandbox_services=form_data.get('sandbox_services', []),
+            ai_services=ai_service_options,
+            sandbox_services=sandbox_service_options,
             system_one_services=form_data.get('system_one_services', []),
             silos=form_data.get('silos', []),
             output_parsers=form_data.get('output_parsers', []),
@@ -418,6 +444,7 @@ class AgentService:
             a2a_examples=_typed_attr(agent, 'a2a_examples', list, []) or [],
             a2a_card_url=a2a_card_url,
             a2a_rpc_url=a2a_rpc_url,
+            lifecycle_warnings=lifecycle_warnings,
         )
 
     def _get_agent_for_detail(self, db: Session, agent_id: int, app_id: Optional[int] = None):
@@ -524,7 +551,7 @@ class AgentService:
         # services) that doesn't belong to this app (or isn't a system-wide resource
         # where that's allowed) before persisting anything — otherwise a caller could
         # point an agent at another tenant's resource (IDOR).
-        self._validate_referenced_resource_ids(db, agent_data)
+        self._validate_referenced_resource_ids(db, agent_data, None if is_new_agent else agent)
 
         # Validate rag_fixed_filters fields against the silo's metadata_definition.
         # Fixed filters are only meaningful with a silo; reject them otherwise so a
@@ -605,23 +632,46 @@ class AgentService:
             return
         raise ValueError(f"{field_name} does not exist or does not belong to this app")
 
-    def _validate_referenced_resource_ids(self, db: Session, data: dict) -> None:
+    def _validate_referenced_resource_ids(
+        self, db: Session, data: dict, existing_agent: Optional[Agent] = None
+    ) -> None:
         """Ensure every foreign-key id referenced by an agent create/update payload
         belongs to ``data['app_id']`` (or is a system-wide resource, where allowed).
 
         Without this check, an editor of one app could point their agent at another
         tenant's AI service, silo, output parser, or media-processing service (IDOR).
-        ``sandbox_service_id`` is validated separately in ``_update_normal_agent``, and
         ``tool_ids`` / ``mcp_config_ids`` are validated in ``update_agent_tools`` /
         ``update_agent_mcps`` respectively (they're only known after this call).
+
+        A retired AI/embedding service cannot be newly assigned: the value must equal the
+        one ``existing_agent`` already has (``None`` for a new agent).
+        Raises ``RetiredServiceAssignmentError`` (a ``ValueError``).
         """
+        from utils.service_lifecycle import (
+            ensure_assignable, SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, SERVICE_KIND_SANDBOX,
+        )
+
         app_id = data['app_id']
+
+        def _current(field_name: str) -> Optional[int]:
+            return getattr(existing_agent, field_name, None) if existing_agent is not None else None
 
         service_id = data.get('service_id') or None
         if service_id:
             from repositories.ai_service_repository import AIServiceRepository
             service = AIServiceRepository.get_by_id(db, service_id)
             self._validate_owned_resource(service, app_id, 'service_id', allow_system=True)
+            ensure_assignable(service, _current('service_id'), 'service_id', SERVICE_KIND_AI)
+
+        # A sandbox service of another app would run code against that app's provider credentials/quota.
+        sandbox_service_id = data.get('sandbox_service_id') or None
+        if sandbox_service_id:
+            from repositories.sandbox_service_repository import SandboxServiceRepository
+            sandbox_service = SandboxServiceRepository.get_by_id(db, sandbox_service_id)
+            self._validate_owned_resource(sandbox_service, app_id, 'sandbox_service_id', allow_system=True)
+            ensure_assignable(
+                sandbox_service, _current('sandbox_service_id'), 'sandbox_service_id', SERVICE_KIND_SANDBOX
+            )
 
         silo_id = data.get('silo_id') or None
         if silo_id:
@@ -642,6 +692,7 @@ class AgentService:
                 from repositories.ai_service_repository import AIServiceRepository
                 service = AIServiceRepository.get_by_id(db, value)
                 self._validate_owned_resource(service, app_id, field_name, allow_system=True)
+                ensure_assignable(service, _current(field_name), field_name, SERVICE_KIND_AI)
 
         media_embedding_service_id = data.get('media_embedding_service_id') or None
         if media_embedding_service_id:
@@ -649,6 +700,10 @@ class AgentService:
             embedding_service = EmbeddingServiceRepository.get_by_id(db, media_embedding_service_id)
             self._validate_owned_resource(
                 embedding_service, app_id, 'media_embedding_service_id', allow_system=True
+            )
+            ensure_assignable(
+                embedding_service, _current('media_embedding_service_id'),
+                'media_embedding_service_id', SERVICE_KIND_EMBEDDING,
             )
 
     @staticmethod
@@ -763,21 +818,8 @@ class AgentService:
         agent.status = data.get('status')
         agent.service_id = data.get('service_id') or None
 
-        # Validate sandbox_service_id belongs to the target app (or is system-scoped)
-        # before assigning it. Without this check, any caller could point an agent at
-        # a SandboxService owned by a different App, silently running code execution
-        # against that other App's provider credentials/endpoint/quota.
+        # Ownership and lifecycle of sandbox_service_id are validated in _validate_referenced_resource_ids.
         sandbox_service_id = data.get('sandbox_service_id') or None
-        if sandbox_service_id:
-            from repositories.sandbox_service_repository import SandboxServiceRepository
-            sandbox_service = SandboxServiceRepository.get_by_id(db, sandbox_service_id)
-            if sandbox_service is None or (
-                sandbox_service.app_id is not None and sandbox_service.app_id != data['app_id']
-            ):
-                raise ValueError(
-                    f"sandbox_service_id {sandbox_service_id} does not exist or does not "
-                    "belong to this app"
-                )
         agent.sandbox_service_id = sandbox_service_id
         if is_new_agent:
             agent.app_id = data['app_id']

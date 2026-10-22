@@ -20,6 +20,8 @@ import { CsvImportBanner } from '../components/import/CsvImportBanner';
 import { CsvImportReviewModal } from '../components/import/CsvImportReviewModal';
 import { useCsvImportPolling } from '../hooks/useCsvImportPolling';
 import AzureBlobIngestModal, { AZURE_BLOB_SAMPLE_SIZE } from '../components/repository/AzureBlobIngestModal';
+import type { ServiceLifecycleWarning } from '../types/services';
+import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
 
 interface Resource {
   resource_id: number;
@@ -62,6 +64,7 @@ interface RepositoryDetail {
   transcription_service_id?: number | null;
   video_ai_service_id?: number | null;
   service_warnings?: string[];
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export interface CostEstimationResult {
@@ -1206,6 +1209,7 @@ const RepositoryDetailPage: React.FC = () => {
         </div>
       )}
       {reindexNotice && <Alert type={reindexNotice.type} message={reindexNotice.text} onDismiss={() => setReindexNotice(null)} className="mb-6" />}
+      <ServiceLifecycleAlert warnings={repository?.lifecycle_warnings} variant="full" className="mb-6" />
       {repository?.service_warnings?.map((warning) => (
         <Alert
           key={warning}

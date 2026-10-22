@@ -1,3 +1,4 @@
+from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
 from schemas.media_schemas import MediaResponse
 from pydantic import BaseModel, ConfigDict, model_validator
 from typing import Optional, List, Dict, Any, Literal
@@ -20,6 +21,7 @@ class RepositoryListItemSchema(BaseModel):
     created_at: Optional[datetime] = None
     resource_count: int
     vector_db_type: Optional[str] = None
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -103,6 +105,7 @@ class RepositoryDetailSchema(BaseModel):
 
     # Recorded failures of the services the repository's silo uses (e.g. a revoked API key)
     service_warnings: List[str] = []
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 

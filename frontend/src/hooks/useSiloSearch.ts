@@ -7,6 +7,7 @@ import type { SearchControlsValue } from '../components/playground/SearchControl
 import type { SearchResult } from '../components/playground/ResultCard';
 import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
 import type { LightRAGGraphData } from '../types/streaming';
+import type { ServiceLifecycleWarning } from '../types/services';
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -20,6 +21,7 @@ export interface Silo {
   docs_count: number;
   metadata_fields?: SearchFilterMetadataField[];
   vector_db_type?: string;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export interface QueryHistoryEntry {

@@ -85,8 +85,8 @@ export function useServicesManager<T = any>(
     }
   }
 
-  async function handleDelete(id: number) {
-    if (!appId) return;
+  async function handleDelete(id: number): Promise<boolean> {
+    if (!appId) return false;
 
     const warning = options.deleteWarning?.(services.find((s: any) => s.service_id === id));
     const ok = await confirm({
@@ -97,7 +97,7 @@ export function useServicesManager<T = any>(
       variant: 'danger',
       confirmLabel: 'Delete',
     });
-    if (!ok) return;
+    if (!ok) return false;
 
     const result = await mutate(
       () => api.delete(Number.parseInt(appId), id),
@@ -107,11 +107,12 @@ export function useServicesManager<T = any>(
         error: (err) => errorMessage(err, MESSAGES.DELETE_FAILED(entity)),
       },
     );
-    if (result === undefined) return;
+    if (result === undefined) return false;
 
     const newServices = services.filter((s: any) => s.service_id !== id);
     setServices(newServices);
     cache.set(appId, newServices);
+    return true;
   }
 
   async function handleEdit(id: number) {

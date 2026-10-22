@@ -8,7 +8,15 @@ from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
 from utils.logger import get_logger
 from utils.provider_errors import ProviderError, classify_provider_error
+from utils.service_lifecycle import (
+    SERVICE_KIND_AI,
+    SERVICE_KIND_EMBEDDING,
+    ServiceRetiredError,
+    ensure_service_active,
+    service_call_context,
+)
 import json
+from contextlib import ExitStack
 import os
 import subprocess
 import yt_dlp
@@ -21,6 +29,18 @@ logger = get_logger(__name__)
 
 class MediaStepError(Exception):
     """A pipeline step failed; the message is the user-facing reason stored on the media."""
+
+
+def _is_retired_failure(exc: BaseException) -> bool:
+    """True when ``exc`` is, or was caused by, a ``ServiceRetiredError`` (already logged once)."""
+    seen = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ServiceRetiredError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _provider_failure(exc: Exception, model, service, step: str, service_kind: str) -> ProviderError:
@@ -50,6 +70,7 @@ def process_media_task_sync(media_id: int):
     6. Update media status
     """
     db = SessionLocal()
+    call_context = ExitStack()
     
     try:
         # Fetch media
@@ -63,6 +84,12 @@ def process_media_task_sync(media_id: int):
         # Media services are configured on the silo the media is indexed into
         # (set from the silo itself or from the repository that owns it).
         silo = media.silo
+        call_context.enter_context(service_call_context(
+            channel="media_task",
+            app_id=getattr(silo, "app_id", None),
+            resource_type="media",
+            resource_id=media_id,
+        ))
         effective_transcription_id = silo.transcription_service_id if silo else None
         effective_video_service_id = silo.video_ai_service_id if silo else None
 
@@ -71,6 +98,18 @@ def process_media_task_sync(media_id: int):
                 f"No transcription service configured on silo {media.silo_id}. "
                 f"Configure one on the silo (or on the repository that owns it)."
             )
+
+        # Fail before any download/transcription work when a needed service is already retired.
+        if silo is not None:
+            try:
+                ensure_service_active(silo.embedding_service, SERVICE_KIND_EMBEDDING)
+                ensure_service_active(silo.video_ai_service if effective_video_service_id else None, SERVICE_KIND_AI)
+                ensure_service_active(
+                    silo.transcription_service if effective_transcription_id else None, SERVICE_KIND_AI
+                )
+            except ServiceRetiredError as exc:
+                raise MediaStepError(exc.message) from exc
+
         media_folder = os.path.dirname(media.file_path) if media.file_path else media_storage_folder(media)
         
         logger.info(
@@ -175,6 +214,10 @@ def process_media_task_sync(media_id: int):
                 logger.info(f"Split into {len(chunks_data)} audio+visual chunks for media {media_id}")
                 
             except Exception as e:
+                if _is_retired_failure(e):
+                    # A retired video service is a configuration decision, not a transient failure (AD-13).
+                    error = _provider_failure(e, AIService, silo.video_ai_service, "Video analysis", "Video AI service")
+                    raise MediaStepError(error.message) from e
                 logger.warning(f"Video analysis failed for media {media_id}, continuing with audio-only chunks: {str(e)}")
                 _provider_failure(e, AIService, silo.video_ai_service, "Video analysis", "Video AI service")
                 media.processing_mode = 'basic'
@@ -217,7 +260,11 @@ def process_media_task_sync(media_id: int):
         logger.info(f"✅ Media {media_id} processed successfully")
         
     except Exception as e:
-        logger.error(f"❌ Error processing media {media_id}: {str(e)}")
+        if _is_retired_failure(e):
+            # The blocked call was already logged once; the message is stored on the media below.
+            logger.info(f"Media {media_id} not processed: a service it needs is retired")
+        else:
+            logger.error(f"❌ Error processing media {media_id}: {str(e)}")
         
         # Update status to error
         try:
@@ -234,6 +281,7 @@ def process_media_task_sync(media_id: int):
             logger.error(f"Failed to update error status: {str(update_error)}")
         
     finally:
+        call_context.close()
         db.close()
 
 def _discard_silo_media_files(media: Media) -> None:
