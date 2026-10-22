@@ -88,6 +88,7 @@ def engine(test_db_url):
     # see spoint001 and friends) are never emitted by create_all. This throwaway
     # database is built via create_all only, so create the types here first.
     import sqlalchemy as _sa
+    import psycopg.errors as _psycopg_errors
     with eng.begin() as conn:
         for table in Base.metadata.tables.values():
             for column in table.columns:
@@ -96,7 +97,7 @@ def engine(test_db_url):
                     labels = ", ".join(f"'{label}'" for label in typ.enums)
                     try:
                         conn.exec_driver_sql(f"CREATE TYPE {typ.name} AS ENUM ({labels})")
-                    except Exception:
+                    except _psycopg_errors.DuplicateObject:
                         pass  # already exists from a previous run's failed cleanup
     Base.metadata.create_all(bind=eng)
     yield eng
