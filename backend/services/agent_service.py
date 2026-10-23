@@ -27,8 +27,17 @@ LIGHTRAG_ROUTER_SKILL_NAME = "LightRAG Query Router"
 
 ROUTER_SKILL_CONTENT = """# LightRAG Query Router
 
-You have access to `retrieve_from_knowledge_base(query, mode)`.
-Before every retrieval call, select the `mode` that best matches the CURRENT question.
+**RULE 0 — MANDATORY: on EVERY user question, your first tool call must be the
+System One query-classifier tool (passing the user's question as `text`), BEFORE any
+retrieval and BEFORE deciding anything yourself.** This includes questions that look
+obvious to you (comparisons, enumerations, definitions) — do NOT classify them
+yourself while the classifier is available.
+The classifier returns JSON with two decisions: `tool` (retrieve | list_documents)
+selects between `retrieve_from_knowledge_base` and `list_documents_mentioning`;
+`lightrag_mode` (local | global | hybrid | mix | naive) is the `mode` you pass to
+`retrieve_from_knowledge_base(query, mode)`.
+Only when a decision is `null` (uncertain), or the classifier tool is missing,
+unavailable or fails, fall back to the Mode Guide below.
 
 **Re-derive the mode fresh every single time.** Never reuse the mode from a
 previous tool call in this conversation just because it worked before — a
@@ -38,6 +47,10 @@ run of nine `hybrid` calls in a row does not make the tenth question
 ---
 
 ## Mode Guide
+
+If NO classifier tool is available to you (or its decisions were null/unavailable),
+this guide IS your routing logic. If the classifier IS available, treat this guide
+only as the fallback for null or failed decisions.
 
 ### global
 **Strategy:** Queries community-level summaries built from clusters of related
@@ -181,8 +194,7 @@ with no request to explain, compare, or synthesize?**
 **Step 4 — Does the question ask for document-wide synthesis, enumeration of a whole category, or overall themes spanning many entities (no single anchor concept)?**
   → Yes → global
 
-**Otherwise → hybrid**
-"""
+**Otherwise → hybrid**"""
 
 
 def _typed_attr(obj, name: str, expected_type, default=None):
