@@ -1803,10 +1803,36 @@ class IACTTool(BaseTool):
         # off one shared counter, so they must run one at a time; fanned out in the same
         # step, the order they claim numbers can differ from the order their chunks land
         # in the payload and cite://N opens another document.
-        try:
-            sub_llm = instance.llm.bind_tools(tools, parallel_tool_calls=False)
-        except TypeError:
-            sub_llm = instance.llm.bind_tools(tools)
+        if tools and hasattr(instance.llm, "bind_tools"):
+            try:
+                sub_llm = instance.llm.bind_tools(tools, parallel_tool_calls=False)
+            except TypeError:
+                sub_llm = instance.llm.bind_tools(tools)
+        else:
+            sub_llm = instance.llm
+
+        # Structured output (Data Structure), as in create_agent: the sub-agent answers with
+        # its output parser's schema, and the tool returns that JSON to the caller.
+        pydantic_model = None
+        if agent.output_parser_id is not None:
+            try:
+                pydantic_model = get_parser_model_by_id(agent.output_parser_id)
+                format_instructions = get_output_parser(agent).get_format_instructions()
+                # Same brace escaping as create_agent: the instructions embed literal
+                # JSON braces and must survive any .format() of the prompt downstream.
+                format_instructions = format_instructions.replace('{', '{{').replace('}', '}}')
+                tool_system_prompt += (
+                    "\n<output_format_instructions>"
+                    + format_instructions
+                    + "</output_format_instructions>"
+                )
+            except Exception as e:
+                logger.error(f"Error getting Pydantic model for sub-agent {agent.agent_id}: {str(e)}")
+                pydantic_model = None
+
+        agent_kwargs: Dict[str, Any] = {}
+        if pydantic_model:
+            agent_kwargs["response_format"] = pydantic_model
 
         # Create sub-agent
         instance.react_agent = create_langchain_agent(
@@ -1814,6 +1840,7 @@ class IACTTool(BaseTool):
             tools=tools,
             system_prompt=tool_system_prompt if tool_system_prompt else None,
             middleware=middleware,
+            **agent_kwargs,
         )
         return instance
 
@@ -1832,7 +1859,7 @@ class IACTTool(BaseTool):
             formatted_prompt = self._format_tool_query(query)
             messages = [HumanMessage(content=formatted_prompt)]
             result = self.react_agent.invoke({"messages": messages})
-            return self._extract_last_message_content(result)
+            return self._extract_result(result)
         except ServiceRetiredError as e:
             error = e
             raise
@@ -1880,6 +1907,15 @@ class IACTTool(BaseTool):
                         f"Could not format prompt_template for agent {self.agent.name}, using query directly"
                     )
         return query
+
+    def _extract_result(self, result: Any) -> str:
+        """Return the sub-agent's structured output as JSON if it has one, else its last message."""
+        if isinstance(result, dict) and result.get("structured_response") is not None:
+            parsed = parse_agent_response(result["structured_response"], self.agent)
+            if isinstance(parsed, str):
+                return parsed
+            return json.dumps(parsed, ensure_ascii=False, default=str)
+        return self._extract_last_message_content(result)
 
     @staticmethod
     def _last_ai_text(result: Any) -> str:
@@ -1998,6 +2034,10 @@ class IACTTool(BaseTool):
 
         if stream_writer is None or not hasattr(self.react_agent, "astream"):
             result = await self.react_agent.ainvoke({"messages": messages})
+            # Structured output (output parser, #284): surface the parsed schema
+            # instead of the last AI message when the agent graph produced one.
+            if isinstance(result, dict) and result.get("structured_response") is not None:
+                return self._extract_result({"structured_response": result["structured_response"]}), graph
             for msg in (result.get("messages") or []) if isinstance(result, dict) else []:
                 turn_messages.append(msg)
                 raw = extract_lightrag_graph_from_artifact(getattr(msg, "artifact", None))
@@ -2006,13 +2046,18 @@ class IACTTool(BaseTool):
             return extract(result) or ("The specialist returned no answer." if router else ""), graph
 
         latest_state: Any = None
+        structured_response: Any = None
         async for mode, chunk in self.react_agent.astream(
             {"messages": messages},
             stream_mode=["updates", "custom"],
         ):
             if mode == "updates" and isinstance(chunk, dict):
                 for state_delta in chunk.values():
-                    if isinstance(state_delta, dict) and "messages" in state_delta:
+                    if not isinstance(state_delta, dict):
+                        continue
+                    if state_delta.get("structured_response") is not None:
+                        structured_response = state_delta["structured_response"]
+                    if "messages" in state_delta:
                         latest_state = state_delta
                         turn_messages.extend(state_delta["messages"] or [])
 
@@ -2022,6 +2067,8 @@ class IACTTool(BaseTool):
                 else:
                     self._emit_subagent_stream_event(stream_writer, event)
 
+        if structured_response is not None:
+            return self._extract_result({"structured_response": structured_response}), graph
         text = extract(latest_state) if latest_state is not None else ""
         return text or ("The specialist returned no answer." if router else ""), graph
 
