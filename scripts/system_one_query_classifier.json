@@ -1,0 +1,36 @@
+{
+  "metadata": {
+    "description": "Calibrated System One query-classifier for skill-routed LightRAG agents. Create a SystemOneAgent from this config, then attach it as a tool to every skill-routed LightRAG specialist agent (one agent_tools row per agent; agent IDs are instance-specific). The router skill (ROUTER_SKILL_CONTENT in backend/services/agent_service.py) mandates this classifier as the agent's first tool call (RULE 0) and falls back to the in-skill guide only when the classifier is absent or returns null.",
+    "classifier_name": "clasificador_consulta_silo",
+    "calibrated": "2026-10-27, benchmark on 30/103 historical questions (12 ALL + 6 ES + 6 EN + 6 NS, UC1-UC7): routing decision vs expected label 27/30 with the System One classifier attached (23/30 without), RULE 0 compliance 30/30, decision determinism 29/30, end-to-end latency -35.6% mean (paired, 68.8s vs 106.9s), citations 30/30, doc recall 0.98 (same as baseline, in line with the 103-question historical run). Thresholds below (min_probability 0.5) are the output of that calibration; the 4 remaining borderline calls (p 0.50-0.56) are questions the historical pipeline answered with both tools.",
+    "export_version": "1.0.0"
+  },
+  "system_one_agent": {
+    "name": "clasificador_consulta_silo",
+    "questions": [
+      {
+        "key": "tool",
+        "instructions": "Which retrieval tool should the agent use for this question? Choose list_documents when the question asks which document(s) contain, mention, include or document something - enumerating every matching document, locating the document that holds a fact, or checking where something appears (e.g. In which manuals does SG Ready appear? Which manual documents a unit change in its revision table? Which doc includes row X in its specs table?). Choose retrieve ONLY when the question needs an explanation, comparison, synthesis or a specific fact answered from the content itself, with no document-locating goal.",
+        "type": "choice",
+        "criteria": [
+          { "key": "retrieve" },
+          { "key": "list_documents" }
+        ],
+        "min_probability": 0.5
+      },
+      {
+        "key": "lightrag_mode",
+        "instructions": "LightRAG retrieval mode for this question. Evaluate in order, first match wins. 1) Explicit comparison between two or more items (X vs Y, compare A and B) or explicit exhaustive-coverage language (list ALL, every, comprehensive) -> mix. 2) Question about ONE named product, model or concept, including a numeric or technical spec of it (COP, power, volume, weight, dimensions, pressure): -> local (the product concept dominates - NOT naive, NOT global). 3) Pure verbatim lookup with no named product: a name, date, number or quoted phrase you could Ctrl+F -> naive. 4) Document-wide synthesis, enumeration of a whole category, or overall themes spanning many entities with no single anchor concept -> global. NEVER choose global for a product-specific fact. Otherwise -> hybrid.",
+        "type": "choice",
+        "criteria": [
+          { "key": "local" },
+          { "key": "global" },
+          { "key": "hybrid" },
+          { "key": "mix" },
+          { "key": "naive" }
+        ],
+        "min_probability": 0.5
+      }
+    ]
+  }
+}
