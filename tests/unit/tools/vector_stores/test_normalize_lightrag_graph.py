@@ -45,6 +45,43 @@ def test_known_endpoints_add_no_partial_nodes():
     assert all("partial" not in e for e in entities)
 
 
+def test_relationship_with_both_endpoints_truncated_is_dropped():
+    """Neither endpoint made LightRAG's entity list: the relationship anchors
+    nothing to the returned knowledge, so it is dropped instead of synthesizing
+    a stub-to-stub gray island."""
+    raw = {
+        "data": {
+            "entities": [{"entity_name": "Real"}],
+            "relationships": [{"src_id": "Installation Manual", "tgt_id": "Service Manual"}],
+        }
+    }
+
+    out = _normalize_lightrag_graph(raw)["data"]
+    assert out["relationships"] == []
+    assert [e["id"] for e in out["entities"]] == ["Real"]
+
+
+def test_truncated_stub_decision_is_order_independent():
+    """(A,B) is dropped because neither is real, even when a later relationship
+    (B, real C) pulls B in as a partial: A must not reappear attached to B."""
+    raw = {
+        "data": {
+            "entities": [{"entity_name": "C"}],
+            "relationships": [
+                {"src_id": "A", "tgt_id": "B"},
+                {"src_id": "B", "tgt_id": "C"},
+            ],
+        }
+    }
+
+    out = _normalize_lightrag_graph(raw)["data"]
+    ids = {e["id"] for e in out["entities"]}
+    assert ids == {"B", "C"}
+    by_id = {e["id"]: e for e in out["entities"]}
+    assert by_id["B"]["partial"] is True
+    assert {(r["source"], r["target"]) for r in out["relationships"]} == {("B", "C")}
+
+
 def test_name_map_rewrites_ids_names_and_endpoints():
     """Display names (canonical → most-mentioned variant) must flow through
     entity ids AND relationship endpoints, and the partial-node builder must

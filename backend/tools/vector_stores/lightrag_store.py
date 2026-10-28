@@ -1700,10 +1700,19 @@ def _normalize_lightrag_graph(raw_data: dict, name_map: Optional[Dict[str, str]]
         })
 
     relationships = []
+    # Names LightRAG actually returned in the entity list — the anchor set for
+    # the truncated-relationship rule below (stubs synthesized later must NOT
+    # count as anchors, so the decision stays order-independent).
+    real = set(known)
     for i, r in enumerate(data.get("relationships", [])):
         raw_src, raw_tgt = _graph_relation_endpoints(r)
         src = display(raw_src)
         tgt = display(raw_tgt)
+        # A relationship whose BOTH endpoints were truncated anchors nothing to
+        # the returned knowledge (neither entity made the entity list): drop it
+        # instead of synthesizing a stub-to-stub gray island in the canvas.
+        if not (src and src in real) and not (tgt and tgt in real):
+            continue
         relationships.append({
             "id": r.get("id") or f"rel_{i}",
             "source": src,
@@ -1713,9 +1722,11 @@ def _normalize_lightrag_graph(raw_data: dict, name_map: Optional[Dict[str, str]]
             "source_id": r.get("source_id", ""),
         })
         # LightRAG truncates entities and relationships by independent token
-        # budgets, so a relationship endpoint may not appear in the entity list.
-        # Add it as a minimal "partial" node so the edge can still be drawn;
-        # the frontend renders these in a muted color.
+        # budgets, so a relationship may reference an entity absent from the
+        # entity list. Add that endpoint as a minimal "partial" node so the edge
+        # can still be drawn; the frontend renders these in a muted color.
+        # Relationships with no real endpoint were dropped above, so a stub is
+        # always anchored to a real entity.
         for endpoint in (src, tgt):
             if endpoint and endpoint not in known:
                 known.add(endpoint)

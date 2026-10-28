@@ -344,7 +344,10 @@ def merge_lightrag_graph(accumulated: dict | None, new: dict) -> dict:
 
     Entities are deduped by (silo_id, id): id is the entity name (stable) and
     silo_id (set only on knowledge-router payloads, None otherwise) keeps the same
-    name from two silos as two nodes. Relationships are
+    name from two silos as two nodes. When the same entity appears as a real
+    entity in one call and as a truncated "partial" stub in a later one, the real
+    one wins — the stub carries no source_id/description and would gray the node
+    and break citation highlighting. Relationships are
     concatenated without dedup: ponytail — when LightRAG gives no real id,
     lightrag_store.py falls back to a call-local "rel_{i}" that collides across
     calls, so dedup-by-id could wrongly merge two unrelated relationships. A
@@ -357,7 +360,12 @@ def merge_lightrag_graph(accumulated: dict | None, new: dict) -> dict:
     new_data = new.get("data", {}) or {}
 
     entities_by_id = {(e.get("silo_id"), e.get("id")): e for e in acc_data.get("entities", [])}
-    entities_by_id.update({(e.get("silo_id"), e.get("id")): e for e in new_data.get("entities", [])})
+    for e in new_data.get("entities", []):
+        existing = entities_by_id.get((e.get("silo_id"), e.get("id")))
+        # Real entity beats a later truncated stub (see docstring).
+        if e.get("partial") and existing is not None and not existing.get("partial"):
+            continue
+        entities_by_id[(e.get("silo_id"), e.get("id"))] = e
 
     return {
         **accumulated,
