@@ -1,13 +1,14 @@
 """Tests for LightRAGRetriever — only_need_context is always True."""
+import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.documents import Document
 
 pytestmark = pytest.mark.asyncio
 
 
-async def test_retriever_always_uses_only_need_context():
+async def test_retriever_always_uses_only_need_context(monkeypatch):
     """QueryParam must always have only_need_context=True and the Document
     must carry the raw_data in metadata."""
     from tools.vector_stores.lightrag_store import LightRAGRetriever
@@ -43,14 +44,21 @@ async def test_retriever_always_uses_only_need_context():
         captured_params.append(p)
         return p
 
-    with patch.dict("sys.modules", {"lightrag.base": MagicMock(QueryParam=fake_query_param)}):
-        retriever = LightRAGRetriever(
-            store=mock_store,
-            collection_name="silo_1",
-            query_mode="hybrid",
-            top_k=5,
-        )
-        docs = await retriever._aget_relevant_documents("test query")
+    # monkeypatch.setitem restores ONLY this key. patch.dict(sys.modules, ...)
+    # snapshots the WHOLE dict and would also drop modules imported during the
+    # window — _best_variant_names runs in a worker thread (lightrag_store.py
+    # asyncio.to_thread) and lazily imports repositories.*; dropping it leaves a
+    # stale attribute on the `repositories` namespace package, so later
+    # monkeypatch.setattr(string) patches a dead module object and the real
+    # record_mentions runs (KeyError 'args' in test_lightrag_variant_persistence).
+    monkeypatch.setitem(sys.modules, "lightrag.base", MagicMock(QueryParam=fake_query_param))
+    retriever = LightRAGRetriever(
+        store=mock_store,
+        collection_name="silo_1",
+        query_mode="hybrid",
+        top_k=5,
+    )
+    docs = await retriever._aget_relevant_documents("test query")
 
     assert len(captured_params) == 1
     assert captured_params[0].only_need_context is True
