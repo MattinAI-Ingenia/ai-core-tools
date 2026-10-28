@@ -4,8 +4,6 @@ export interface SiloGraph {
   siloId?: number;
   siloName?: string;
   graph: LightRAGGraphData;
-  /** 1-based citation numbers (cite://N) of graph.data.chunks in the full payload. */
-  chunkNumbers: number[];
 }
 
 /** Split a turn's merged LightRAG payload into one graph per source silo
@@ -19,7 +17,7 @@ export function splitGraphBySilo(graph: LightRAGGraphData): SiloGraph[] {
   const siloIds = [...new Set(all.map((x) => x.silo_id))];
 
   if (siloIds.length <= 1) {
-    return [{ siloId: siloIds[0], siloName: all[0]?.silo_name, graph, chunkNumbers: chunks.map((_, i) => i + 1) }];
+    return [{ siloId: siloIds[0], siloName: all[0]?.silo_name, graph }];
   }
   return siloIds.map((siloId) => ({
     siloId,
@@ -33,6 +31,5 @@ export function splitGraphBySilo(graph: LightRAGGraphData): SiloGraph[] {
         chunks: chunks.filter((c) => c.silo_id === siloId),
       },
     },
-    chunkNumbers: chunks.flatMap((c, i) => (c.silo_id === siloId ? [i + 1] : [])),
   }));
 }

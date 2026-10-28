@@ -16,7 +16,8 @@ interface Props {
   siloId?: number;
   /** Silo name shown before the counts when the turn spans several silos. */
   title?: string;
-  /** Global citation number of each chunk (defaults to its position + 1). */
+  /** Display number of each chunk at its position (0 = not cited → hidden).
+   *  Omitted → fall back to 1-based positions (silo search view). */
   chunkNumbers?: number[];
 }
 
@@ -128,7 +129,11 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const chunkCount = chunkGroups.length;
   const openGroup = openChunk !== null ? chunkGroups[openChunk] : undefined;
   // Every [N] the answer can use for this chunk (one per copy in the payload).
-  const openNumbers = openGroup?.positions.map((p) => chunkNumbers?.[p] ?? p + 1) ?? [];
+  // With renumbered citations the caller passes 0 for chunks the answer did not
+  // cite — hide those; without any numbering fall back to 1-based positions.
+  const openNumbers = chunkNumbers
+    ? [...new Set((openGroup?.positions ?? []).map((p) => chunkNumbers?.[p]).filter((n): n is number => !!n))]
+    : (openGroup?.positions ?? []).map((p) => p + 1);
 
   // Memoize the cited-chunk set on a stable key so identity churn in the parent
   // doesn't force the graph to re-layout every render.
@@ -281,7 +286,9 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                 {openGroup.chunk.file_path && openGroup.chunk.file_path !== 'unknown_source'
                   ? openGroup.chunk.file_path
                   : 'Unknown source'}
-                <span className="ml-1 font-normal text-gray-400">· {openNumbers.length === 1 ? 'Chunk' : 'Chunks'} {openNumbers.join(', ')}</span>
+                {openNumbers.length > 0 && (
+                  <span className="ml-1 font-normal text-gray-400">· {openNumbers.length === 1 ? 'Chunk' : 'Chunks'} {openNumbers.join(', ')}</span>
+                )}
               </span>
               <button
                 onClick={() => { setOpenChunk(null); setPopoverPos(null); }}
@@ -300,7 +307,9 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
             </div>
             <OpenPdfButton
               appId={appId}
-              siloId={siloId}
+              // The cited-evidence bubble spans silos, so fall back to the
+              // chunk's own silo when the caller doesn't pass one.
+              siloId={siloId ?? openGroup.chunk.silo_id}
               resourceId={openGroup.chunk.resource_id}
               page={openGroup.chunk.page}
             />

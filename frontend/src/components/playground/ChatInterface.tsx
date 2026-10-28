@@ -18,6 +18,8 @@ import type { HitlDecision } from '../../types/streaming';
 import type { VideoTimestamp } from './VideoPlayer';
 import LightRAGGraphBubble from './LightRAGGraphBubble';
 import { splitGraphBySilo } from '../../utils/splitGraphBySilo';
+import { buildCitedGraph, numberingFromContent, EMPTY_NUMBERING } from '../../utils/buildCitedGraph';
+import ConsultedChunksDropdown from './ConsultedChunksDropdown';
 import type { LightRAGGraphData } from '../../types/streaming';
 
 interface Message {
@@ -1149,13 +1151,15 @@ function ChatInterface({
                   // Map those N back to chunk ids so the subgraph can highlight the
                   // entities/relationships that came from them.
                   const graphChunks = message.lightragGraph?.data?.chunks ?? [];
-                  const citedChunkIds = graphChunks.length
-                    ? Array.from(new Set(
-                        Array.from(String(message.content).matchAll(/\(cite:\/\/(\d+)\)/g))
-                          .map((m) => graphChunks[Number(m[1]) - 1]?.id)
-                          .filter((id): id is string => Boolean(id))
-                      ))
-                    : [];
+                  // Cited chunks in first-citation order + the 1..X display
+                  // renumbering shared by the badges and both graph bubbles.
+                  const numbering = message.lightragGraph
+                    ? numberingFromContent(String(message.content), graphChunks)
+                    : EMPTY_NUMBERING;
+                  const citedChunkIds = numbering.citedChunkIds;
+                  const citedGraph = message.lightragGraph
+                    ? buildCitedGraph(message.lightragGraph, citedChunkIds)
+                    : null;
                   return (
                     <div
                       key={message.id}
@@ -1167,10 +1171,21 @@ function ChatInterface({
                             content={stripTimestampLabels(message.content)}
                             resolveFileUrl={resolveFileUrl}
                             citationChunks={message.lightragGraph?.data?.chunks}
+                            citationNumbers={message.lightragGraph ? numbering.numbersByCite : undefined}
                             appId={appId}
                             siloId={siloId}
                           />
                         </div>
+                        {citedGraph && (
+                          <LightRAGGraphBubble
+                            graphData={citedGraph.graph}
+                            citedChunkIds={citedChunkIds}
+                            appId={appId}
+                            siloId={siloId}
+                            title="Fuentes citadas"
+                            chunkNumbers={citedGraph.chunkNumbers}
+                          />
+                        )}
                         {msgTimestamps.length > 0 &&
                           readyVideoMedias.map((media) => {
                             const streamUrl = videoStreamUrls[media.media_id];
@@ -1190,17 +1205,23 @@ function ChatInterface({
                               />
                             );
                           })}
-                        {message.lightragGraph && splitGraphBySilo(message.lightragGraph).map((g) => (
-                          <LightRAGGraphBubble
-                            key={g.siloId ?? 'all'}
-                            graphData={g.graph}
-                            citedChunkIds={citedChunkIds}
-                            appId={appId}
-                            siloId={g.siloId ?? siloId}
-                            title={g.siloName}
-                            chunkNumbers={g.chunkNumbers}
-                          />
-                        ))}
+                        {message.lightragGraph && (
+                          <ConsultedChunksDropdown
+                            count={new Set((message.lightragGraph.data?.chunks ?? []).map((c) => c.id).filter(Boolean)).size}
+                          >
+                            {splitGraphBySilo(message.lightragGraph).map((g) => (
+                              <LightRAGGraphBubble
+                                key={g.siloId ?? 'all'}
+                                graphData={g.graph}
+                                citedChunkIds={citedChunkIds}
+                                appId={appId}
+                                siloId={g.siloId ?? siloId}
+                                title={g.siloName}
+                                chunkNumbers={g.graph.data?.chunks?.map((c) => (c.id ? numbering.numberByChunkId.get(c.id) ?? 0 : 0)) ?? []}
+                              />
+                            ))}
+                          </ConsultedChunksDropdown>
+                        )}
                         <div className="mt-1">
                           <span className="text-xs text-gray-400 dark:text-gray-500">
                             {message.timestamp.toLocaleTimeString([], {

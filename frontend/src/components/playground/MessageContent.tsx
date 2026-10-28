@@ -11,6 +11,9 @@ interface MessageContentProps {
   content: string | object;
   resolveFileUrl?: (fileId: string) => Promise<string>;
   citationChunks?: LightRAGChunk[];
+  /** cite://N → display number (1..X over distinct cited sources, citation
+   *  order). Without it badges keep the raw payload position. */
+  citationNumbers?: Map<number, number>;
   /** For "open source PDF" links on citation chunks. */
   appId?: number;
   siloId?: number;
@@ -18,7 +21,7 @@ interface MessageContentProps {
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 const ResolveFileUrlContext = createContext<((fileId: string) => Promise<string>) | undefined>(undefined);
-const CitationChunksContext = createContext<{ chunks?: LightRAGChunk[]; appId?: number; siloId?: number }>({});
+const CitationChunksContext = createContext<{ chunks?: LightRAGChunk[]; appId?: number; siloId?: number; citationNumbers?: Map<number, number> }>({});
 
 function isImageFilename(filename: string): boolean {
   const ext = filename.toLowerCase().lastIndexOf('.');
@@ -142,12 +145,14 @@ function MarkdownImage({ src, alt }: any) {
 
 function MarkdownLink({ children, href, ...props }: any) {
   const resolveFileUrl = useContext(ResolveFileUrlContext);
-  const { chunks: citationChunks, appId, siloId } = useContext(CitationChunksContext);
+  const { chunks: citationChunks, appId, siloId, citationNumbers } = useContext(CitationChunksContext);
   // Inline LightRAG citation: [N](cite://N) — render as a source badge, not a link.
+  // The href keeps the payload position (machine pointer); the shown number is
+  // renumbered 1..X over the distinct cited sources when a map is provided.
   if (href?.startsWith('cite://')) {
     const index = parseInt(href.slice('cite://'.length), 10);
     if (Number.isFinite(index) && index > 0) {
-      return <CitationBadge index={index} chunk={citationChunks?.[index - 1]} appId={appId} siloId={siloId} />;
+      return <CitationBadge index={citationNumbers?.get(index) ?? index} chunk={citationChunks?.[index - 1]} appId={appId} siloId={siloId} />;
     }
     return <>{children}</>;
   }
@@ -228,7 +233,7 @@ const markdownComponents: Record<string, React.ComponentType<any>> = {
   td: MarkdownTd,
 };
 
-const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl, citationChunks, appId, siloId }) => {
+const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl, citationChunks, citationNumbers, appId, siloId }) => {
   const renderedContent = useMemo(() => {
     if (typeof content === 'object' && content !== null) {
       return (
@@ -263,7 +268,7 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, resolveFileUrl
 
   return (
     <ResolveFileUrlContext.Provider value={resolveFileUrl}>
-      <CitationChunksContext.Provider value={{ chunks: citationChunks, appId, siloId }}>
+      <CitationChunksContext.Provider value={{ chunks: citationChunks, appId, siloId, citationNumbers }}>
         <div className="text-gray-800 dark:text-gray-200" style={{ overflowWrap: 'anywhere', wordBreak: 'normal' }}>
           {renderedContent}
         </div>
