@@ -235,6 +235,22 @@ function getPageDescription(type: string, isNewAgent: boolean, agentName?: strin
   return `Modify agent: ${agentName}`;
 }
 
+const EMPTY_MARKETPLACE_PROFILE: MarketplaceProfileUpdate = {
+  display_name: null,
+  short_description: null,
+  long_description: null,
+  category: null,
+  tags: null,
+  icon_url: null,
+  cover_image_url: null,
+  conversation_starters: [],
+};
+
+// Serialized editor state; compared against the snapshot to detect unsaved changes.
+function serializeEditorState(formData: AgentFormData, marketplaceProfile: MarketplaceProfileUpdate): string {
+  return JSON.stringify({ formData, marketplaceProfile });
+}
+
 function ScheduledTaskReference({ appId, agentId }: { appId: number; agentId: number }) {
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   useEffect(() => { void apiService.getScheduledTasks(appId, agentId).then(setTasks).catch(() => undefined); }, [appId, agentId]);
@@ -248,7 +264,6 @@ function AgentFormPage() {
   const returnTo = (location.state as { returnTo?: string } | null)?.returnTo;
   const mutate = useApiMutation();
   const { hasMinRole } = useAppRole(appId);
-  const canEditA2A = hasMinRole(AppRole.EDITOR);
   const canEdit = hasMinRole(AppRole.EDITOR);
   const canCreateShared = hasMinRole(AppRole.ADMINISTRATOR);
   const confirm = useConfirm();
@@ -337,16 +352,7 @@ function AgentFormPage() {
   // Marketplace state
   const [showMarketplace, setShowMarketplace] = useState(false);
   const [marketplaceVisibility, setMarketplaceVisibility] = useState<MarketplaceVisibility>('unpublished');
-  const [marketplaceProfile, setMarketplaceProfile] = useState<MarketplaceProfileUpdate>({
-    display_name: null,
-    short_description: null,
-    long_description: null,
-    category: null,
-    tags: null,
-    icon_url: null,
-    cover_image_url: null,
-    conversation_starters: [],
-  });
+  const [marketplaceProfile, setMarketplaceProfile] = useState<MarketplaceProfileUpdate>(EMPTY_MARKETPLACE_PROFILE);
 
   // Load agent data when component mounts
   useEffect(() => {
@@ -410,8 +416,9 @@ function AgentFormPage() {
     };
   }, [appId, formData.silo_id]);
 
-  async function loadAgentData() {
-    if (!appId || !agentId) return;
+  // Reloads the agent and its marketplace profile. Returns false when the reload failed.
+  async function loadAgentData(): Promise<boolean> {
+    if (!appId || !agentId) return false;
 
     try {
       setLoading(true);
@@ -470,7 +477,6 @@ function AgentFormPage() {
         a2a_examples: response.a2a_examples ?? [],
       };
       setFormData(loadedFormData);
-      setSnapshot(JSON.stringify(loadedFormData));
       setA2aCardUrl(response.a2a_card_url ?? null);
       setA2aRpcUrl(response.a2a_rpc_url ?? null);
 
@@ -478,6 +484,7 @@ function AgentFormPage() {
       setShowOutputParser(!!response.output_parser_id);
 
       // Load MCP usage and marketplace profile for existing agents
+      let loadedProfile: MarketplaceProfileUpdate = EMPTY_MARKETPLACE_PROFILE;
       if (Number.parseInt(agentId) !== 0) {
         try {
           const usage = await apiService.getAgentMCPUsage(Number.parseInt(appId), Number.parseInt(agentId));
@@ -486,22 +493,21 @@ function AgentFormPage() {
           console.error('Error loading MCP usage:', usageErr);
         }
 
-          try {
-            const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
-            setMarketplaceProfile({
-              display_name: profile.display_name || null,
-              short_description: profile.short_description || null,
-              long_description: profile.long_description || null,
-              category: profile.category || null,
-              tags: profile.tags || null,
-              icon_url: profile.icon_url || null,
-              cover_image_url: profile.cover_image_url || null,
-              conversation_starters: profile.conversation_starters?.map(s => s.prompt) || [],
-            });
-          } catch {
-            // Profile may not exist yet — that's fine
-          }
-
+        try {
+          const profile = await apiService.getAgentMarketplaceProfile(Number.parseInt(appId), Number.parseInt(agentId));
+          loadedProfile = {
+            display_name: profile.display_name || null,
+            short_description: profile.short_description || null,
+            long_description: profile.long_description || null,
+            category: profile.category || null,
+            tags: profile.tags || null,
+            icon_url: profile.icon_url || null,
+            cover_image_url: profile.cover_image_url || null,
+            conversation_starters: profile.conversation_starters?.map(s => s.prompt) || [],
+          };
+        } catch {
+          // Profile may not exist yet — fall back to the empty profile
+        }
 
         // Marketplace visibility comes from agent detail
         if (response.marketplace_visibility) {
@@ -509,9 +515,14 @@ function AgentFormPage() {
           setShowMarketplace(response.marketplace_visibility !== 'unpublished');
         }
       }
+
+      setMarketplaceProfile(loadedProfile);
+      setSnapshot(serializeEditorState(loadedFormData, loadedProfile));
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent data');
       console.error('Error loading agent data:', err);
+      return false;
     } finally {
       setLoading(false);
     }
@@ -630,7 +641,8 @@ function AgentFormPage() {
   }, [appId, agentId, marketplaceProfile, mutate]);
 
   // Saves the agent. Returns true on success. Navigates away unless `stay` is set, in which
-  // case the agent is reloaded so the form matches what the backend stored.
+  // case the agent is reloaded so the form matches what the backend stored, and the result
+  // is whether that reload succeeded.
   async function submitAgent(options?: { stay?: boolean }): Promise<boolean> {
     if (!appId || !agentId) return false;
 
@@ -746,10 +758,9 @@ function AgentFormPage() {
 
     if (result !== undefined) {
       if (options?.stay) {
-        await loadAgentData();
-      } else {
-        navigate(returnTo || `/apps/${appId}/agents`);
+        return loadAgentData();
       }
+      navigate(returnTo || `/apps/${appId}/agents`);
       return true;
     }
 
@@ -776,12 +787,13 @@ function AgentFormPage() {
   // The visual editor needs a saved agent, so a new agent always shows the form.
   const view: AgentView = !isNewAgent && searchParams.get('view') === 'visual' ? 'visual' : 'form';
   const isDirty = useMemo(
-    () => snapshot !== null && JSON.stringify(formData) !== snapshot,
-    [formData, snapshot],
+    () => snapshot !== null && serializeEditorState(formData, marketplaceProfile) !== snapshot,
+    [formData, marketplaceProfile, snapshot],
   );
 
+  // Keeps location.state (returnTo) so the link back to the list survives the toggle.
   const changeView = (next: AgentView) => {
-    setSearchParams(next === 'visual' ? { view: 'visual' } : {});
+    setSearchParams(next === 'visual' ? { view: 'visual' } : {}, { state: location.state });
   };
 
   const handleViewChange = async (next: AgentView) => {
@@ -804,8 +816,8 @@ function AgentFormPage() {
         if (saveFirst) {
           const saved = await submitAgent({ stay: true });
           if (!saved) return;
-        } else {
-          await loadAgentData();
+        } else if (!(await loadAgentData())) {
+          return;
         }
       }
       changeView('visual');
@@ -813,7 +825,7 @@ function AgentFormPage() {
     }
 
     // Leaving the canvas always reloads, so the form shows what the backend holds.
-    await loadAgentData();
+    if (!(await loadAgentData())) return;
     changeView('form');
   };
 
@@ -2104,7 +2116,7 @@ function AgentFormPage() {
                 onChange={handleA2AChange}
                 cardUrl={a2aCardUrl}
                 rpcUrl={a2aRpcUrl}
-                disabled={!canEditA2A}
+                disabled={!canEdit}
                 fieldErrors={a2aFieldErrors}
               />
             )}
