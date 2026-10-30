@@ -30,6 +30,7 @@ export function PieceNode({ data, isConnectable }: NodeProps<CanvasFlowNode>) {
             {data.portLabels.join(', ')}
           </p>
         )}
+        {data.loose && <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">Not connected</p>}
       </div>
       <Handle
         type="source"
