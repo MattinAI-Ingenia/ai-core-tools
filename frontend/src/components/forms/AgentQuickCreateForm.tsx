@@ -36,6 +36,7 @@ function AgentQuickCreateForm({ appId, onCreated, onCancel, mode }: Readonly<Age
   const [submitting, setSubmitting] = useState(false);
 
   async function save(next: 'form' | 'visual') {
+    if (submitting) return;
     const trimmedName = name.trim();
     if (!trimmedName) {
       setNameError('Name is required');

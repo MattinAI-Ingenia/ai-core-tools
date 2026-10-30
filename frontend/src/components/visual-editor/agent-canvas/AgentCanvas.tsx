@@ -46,6 +46,7 @@ import { PieceNode } from './PieceNode';
 import { CanvasPalette, PIECE_DRAG_MIME, parsePieceDragPayload, pieceKindPhrase } from './CanvasPalette';
 import { CanvasInspector } from './CanvasInspector';
 import { CreatePieceModal } from './CreatePieceModal';
+import type { LifecycleStatus } from '../../../types/services';
 import { useAgentCanvasData, type CanvasPiece } from './useAgentCanvasData';
 
 /** What the inspector panel receives when something is selected. */
@@ -59,6 +60,12 @@ export interface AgentCanvasProps {
   readonly agentId: number;
   /** False for roles below EDITOR: no connecting, no disconnecting (panning/dragging still works). */
   readonly canEdit: boolean;
+  /**
+   * True for ADMINISTRATOR and up: enables the palette `+` for the kinds that
+   * create shared resources (AI services, embedding, sandbox, skills, MCP,
+   * output parsers, middlewares). Silos and agents only need `canEdit`.
+   */
+  readonly canCreateShared?: boolean;
   /** Invoked with the selection on click; null when the pane is clicked. */
   readonly onSelect?: (selection: CanvasSelection | null) => void;
 }
@@ -360,7 +367,7 @@ function PortChooser({ name, ports, onPick, onCancel }: PortChooserProps) {
  * save immediately, one step per gesture. The inspector on the right edits
  * the selected agent, piece or connection through the same save queue.
  */
-export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasProps) {
+export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, onSelect }: AgentCanvasProps) {
   const { agent, pieces, toolEdges, loading, error, refetch } = useAgentCanvasData(appId, agentId);
   const storage = useMemo(safeLocalStorage, []);
   const queue = useMemo(() => createSaveQueue(), []);
@@ -693,17 +700,22 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
 
   /**
    * A piece saved from a «+»: refetch so it is in the pieces list, then place
-   * it the way a drop would - connect through its resolved port, ask when
-   * several ports take it, or leave it as a loose card when none does.
+   * it the way a drop would. A piece no port takes stays as a loose card; any
+   * other piece goes through the same drop path (direct connect or chooser).
    */
   const handlePieceCreated = useCallback(
-    async (kind: PieceKind, id: number, name: string): Promise<void> => {
+    async (kind: PieceKind, id: number, name: string, lifecycleStatus?: LifecycleStatus): Promise<void> => {
       setCreatingKind(null);
       await refetch();
       // A new agent is never a tool yet, so connecting it through Tools adds is_tool first.
-      const piece: CanvasPiece = kind === 'agent' ? { kind, id, name, isTool: false } : { kind, id, name };
-      const target = resolveDropPort(agentType, kind);
-      if (target === null) {
+      const piece: CanvasPiece = {
+        kind,
+        id,
+        name,
+        ...(kind === 'agent' ? { isTool: false } : {}),
+        ...(lifecycleStatus ? { lifecycleStatus } : {}),
+      };
+      if (resolveDropPort(agentType, kind) === null) {
         const nodeId = pieceNodeId(piece);
         updateLayout((current) => ({
           positions: current.positions,
@@ -711,15 +723,9 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
         }));
         return;
       }
-      const ports = portsFor(agentType);
-      if (target === 'ask') {
-        setChoice({ piece, ports: ports.filter((port) => port.accepts.includes(kind)) });
-        return;
-      }
-      const port = ports.find((entry) => entry.id === target);
-      if (port) connectPiece(port, piece);
+      dropOnAgent(piece);
     },
-    [agentType, refetch, connectPiece, updateLayout],
+    [agentType, refetch, dropOnAgent, updateLayout],
   );
 
   /** True when `point` (flow coordinates) lies on the agent node. */
@@ -944,7 +950,13 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
 
   return (
     <div className="flex w-full flex-col gap-3 md:flex-row">
-      <CanvasPalette pieces={pieces} agentType={agentType} canEdit={canEdit} onCreate={handleCreate} />
+      <CanvasPalette
+        pieces={pieces}
+        agentType={agentType}
+        canEdit={canEdit}
+        canCreateShared={canCreateShared}
+        onCreate={handleCreate}
+      />
       <div
         className="relative h-[70vh] w-full min-h-[400px] min-w-0 flex-1 overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900"
         onDragOver={handleDragOver}
