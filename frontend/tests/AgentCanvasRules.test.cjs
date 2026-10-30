@@ -46,7 +46,7 @@ test('refuses connecting anything from a read-only viewer', () => {
 
 test('refuses a piece kind the port does not accept', () => {
   const result = canConnect({ ...base, port: visionPort, kind: 'skill' });
-  assert.deepEqual(plain(result), { ok: false, reason: "A Skill can't be connected to Vision" });
+  assert.deepEqual(plain(result), { ok: false, reason: "A skill can't be connected to Vision" });
 });
 
 test('refuses an agent that would use itself as a tool', () => {
