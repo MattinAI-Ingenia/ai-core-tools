@@ -75,6 +75,8 @@ export interface AgentCanvasProps {
   readonly canCreateShared?: boolean;
   /** Invoked with the selection on click; null when the pane is clicked. */
   readonly onSelect?: (selection: CanvasSelection | null) => void;
+  /** Invoked after each successful save (connect, disconnect or inspector field), e.g. to refresh the page header. */
+  readonly onSaved?: () => void;
 }
 
 interface CanvasEdgeData extends Record<string, unknown> {
@@ -374,7 +376,7 @@ function PortChooser({ name, ports, onPick, onCancel }: PortChooserProps) {
  * save immediately, one step per gesture. The inspector on the right edits
  * the selected agent, piece or connection through the same save queue.
  */
-export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, onSelect }: AgentCanvasProps) {
+export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, onSelect, onSaved }: AgentCanvasProps) {
   const { agent, pieces, toolEdges, loading, error, refetch } = useAgentCanvasData(appId, agentId);
   const storage = useMemo(safeLocalStorage, []);
   const queue = useMemo(() => createSaveQueue(), []);
@@ -582,9 +584,10 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         }
       }
       await refetch();
+      if (saved) onSaved?.();
       return saved;
     },
-    [appId, queue, refetch],
+    [appId, queue, refetch, onSaved],
   );
 
   /** Inspector field saves: one step through the same queue and executor as the connects. */
@@ -597,9 +600,10 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
    * The one connect path: every gesture that connects a piece (a handle drag
    * or a drop on the agent) ends here. Rule check, then the planned saves are
    * queued and refetched; a loose piece leaves `loose` once its save succeeds.
+   * `toastSuffix` extends the success toast (a drop hint for other ports).
    */
   const connectPiece = useCallback(
-    (port: PortDef, piece: CanvasPiece): void => {
+    (port: PortDef, piece: CanvasPiece, toastSuffix?: string): void => {
       if (!agent) return;
       if (connected.some((entry) => entry.port === port.id && entry.kind === piece.kind && entry.id === piece.id)) {
         toast.info(`${piece.name} is already connected`);
@@ -614,6 +618,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         kind: piece.kind,
         pieceId: piece.id,
         lifecycleStatus: piece.lifecycleStatus,
+        supportsVideo: piece.supportsVideo,
         toolEdges,
       });
       if (result.ok === false) {
@@ -642,6 +647,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         targetIsTool: piece.isTool,
         codeInterpreterOn: agent.enable_code_interpreter === true,
         replacedName,
+        toastSuffix,
         pieceName: piece.name,
       }).map((step) =>
         step.agentId === agent.agent_id
@@ -689,9 +695,16 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         return;
       }
       const port = ports.find((entry) => entry.id === target);
-      if (port) connectPiece(port, piece);
+      if (!port) return;
+      // An AI service landing on the default Model port still has to be
+      // dropped on Transcription/Video explicitly; nudge when either is empty.
+      const toastSuffix =
+        target === 'model' && piece.kind === 'ai_service' && !connected.some((entry) => entry.port === 'transcription' || entry.port === 'video')
+          ? ' — to use it for transcription or video, drop it on that port'
+          : undefined;
+      connectPiece(port, piece, toastSuffix);
     },
-    [agentType, connectPiece],
+    [agentType, connected, connectPiece],
   );
 
   const handleChoosePort = useCallback(
@@ -857,11 +870,14 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
             toast.error(saveErrorMessage(err, MESSAGES.UPDATE_FAILED('connection')));
           }
         }
-        if (succeeded) toast.success(MESSAGES.UPDATED('connection'));
+        if (succeeded) {
+          toast.success(MESSAGES.UPDATED('connection'));
+          onSaved?.();
+        }
         await refetch();
       })();
     },
-    [agent, agentType, appId, queue, refetch],
+    [agent, agentType, appId, queue, refetch, onSaved],
   );
 
   const handleDragOver = useCallback(

@@ -845,6 +845,7 @@ class AgentService:
         if new_ids and agent_id:
             # DFS from each new id: reaching agent_id means the new edge closes a cycle.
             # agent_id's own outgoing edges are never expanded (reaching it raises first).
+            # ponytail: read-then-write without a lock — two simultaneous opposite saves (A→B, B→A) can both pass; lock the App row (SELECT … FOR UPDATE) if that ever matters
             edges = AgentRepository.get_tool_edges_by_app_id(db, app_id)
             for tool_id in new_ids:
                 seen = set()

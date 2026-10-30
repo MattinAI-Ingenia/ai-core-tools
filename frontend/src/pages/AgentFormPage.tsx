@@ -455,7 +455,8 @@ function AgentFormPage() {
         rag_k: response.rag_k ?? 10,
         rag_search_type: response.rag_search_type ?? 'similarity',
         rag_score_threshold: response.rag_score_threshold ?? null,
-        rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
+        // Null means unlimited retrieval calls, so it is kept as is (not coerced to a number).
+        rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? null,
         rag_fixed_filters: (response.rag_fixed_filters ?? []).map((f) => ({
           ...f,
           _key: randomId(),
@@ -811,6 +812,16 @@ function AgentFormPage() {
     setSearchParams(next === 'visual' ? { view: 'visual' } : {}, { state: location.state });
   };
 
+  // Canvas saves don't reload the form, so refresh only what the header shows
+  // (agent name and lifecycle warnings). The form itself reloads when switching back.
+  const refreshAgentHeader = useCallback(() => {
+    if (!appId || !agentId) return;
+    apiService
+      .getAgent(Number.parseInt(appId), Number.parseInt(agentId))
+      .then(setAgent)
+      .catch((err) => console.error('Error refreshing agent data:', err));
+  }, [appId, agentId]);
+
   const handleViewChange = async (next: AgentView) => {
     if (next === view) return;
 
@@ -950,6 +961,7 @@ function AgentFormPage() {
               agentId={Number(agentId)}
               canEdit={canEdit}
               canCreateShared={canCreateShared}
+              onSaved={refreshAgentHeader}
             />
           </div>
         ) : (

@@ -30,7 +30,17 @@ export interface CanvasNodeData extends Record<string, unknown> {
 
 export type CanvasFlowNode = Node<CanvasNodeData>;
 
-function PortRow({ port, isConnectable }: { readonly port: PortDef; readonly isConnectable: boolean }) {
+function PortRow({
+  port,
+  isConnected,
+  isConnectable,
+}: {
+  readonly port: PortDef;
+  readonly isConnected: boolean;
+  readonly isConnectable: boolean;
+}) {
+  // Empty transcription/video ports hint at how to fill them (drag an AI service).
+  const showHint = (port.id === 'transcription' || port.id === 'video') && !isConnected;
   return (
     <div className="relative flex items-center py-0.5">
       <Handle
@@ -40,9 +50,16 @@ function PortRow({ port, isConnectable }: { readonly port: PortDef; readonly isC
         isConnectable={isConnectable}
         className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 !bg-indigo-400 dark:!bg-indigo-500"
       />
-      <span className="ml-4 truncate text-xs text-gray-600 dark:text-gray-300" title={port.label}>
-        {port.label}
-      </span>
+      <div className="ml-4 min-w-0">
+        <span className="block truncate text-xs text-gray-600 dark:text-gray-300" title={port.label}>
+          {port.label}
+        </span>
+        {showHint && (
+          <span className="block truncate text-[10px] italic text-gray-400 dark:text-gray-500">
+            Drop an AI service here
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -83,10 +100,10 @@ export function AgentPortNode({ data, isConnectable }: NodeProps<CanvasFlowNode>
       {/* Full-bleed rows so the port handles sit on the card's left border. */}
       <div className="-mx-3 mt-2 space-y-0.5 border-t border-gray-100 px-3 pt-2 dark:border-gray-800">
         {ports.map((port) => (
-          <PortRow key={port.id} port={port} isConnectable={isConnectable} />
+          <PortRow key={port.id} port={port} isConnected={connected.has(port.id)} isConnectable={isConnectable} />
         ))}
         {visibleSecondary.map((port) => (
-          <PortRow key={port.id} port={port} isConnectable={isConnectable} />
+          <PortRow key={port.id} port={port} isConnected={connected.has(port.id)} isConnectable={isConnectable} />
         ))}
       </div>
 

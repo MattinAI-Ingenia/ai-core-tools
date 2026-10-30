@@ -347,7 +347,15 @@ function AgentFields({ agent, agentType, canEdit, onSaveFields }: AgentFieldsPro
           help="Maintains conversation memory"
           checked={values.has_memory}
           disabled={!canEdit}
-          onToggle={(checked) => void persist('has_memory', checked)}
+          onToggle={(checked) => {
+            // Backend rule: conversational agents index chat uploads in a per-conversation
+            // silo, which needs a media embedding service. Refuse without one (non-OCR only).
+            if (checked && !isOcr && !agent.media_embedding_service_id) {
+              toast.error('Conversational agents need a media embedding service to index files uploaded in chat — connect one to the Media embedding port first');
+              return;
+            }
+            void persist('has_memory', checked);
+          }}
         />
         <ToggleField
           id={`${baseId}-enable_code_interpreter`}
