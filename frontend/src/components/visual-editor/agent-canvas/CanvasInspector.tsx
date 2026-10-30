@@ -1,5 +1,6 @@
 import { useId, useMemo, useRef, useState, type FocusEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 import RagConfigSection, { type RagConfigValue, type RagFixedFilter } from '../../forms/RagConfigSection';
 import type { SearchFilterMetadataField } from '../../playground/SearchFilters';
 import type { Agent } from '../../../services/api';
@@ -122,12 +123,25 @@ interface Drafts<T> {
   readonly clear: (key: keyof T) => void;
   /** Drops the draft only while it still holds `sent`: an edit made during the save keeps its draft. */
   readonly settle: (key: keyof T, sent: unknown) => void;
+  /** Records a save as dispatched; until its refetch lands it is the value edits compare against. */
+  readonly dispatch: (patch: Record<string, unknown>) => void;
+  /** Forgets a dispatched value once its save resolved (the refetch has landed by then), if no newer save replaced it. */
+  readonly landed: (key: keyof T, sent: unknown) => void;
+  /** Last dispatched value for `key`, else `saved`. */
+  readonly baseline: <K extends keyof T>(key: K, saved: T[K]) => T[K];
+  /** True while a save for `key` is in flight or not yet refetched. */
+  readonly isPending: (key: keyof T) => boolean;
 }
 
-/** Unsaved field edits. Drafts show at once and are dropped when a save settles, so a failed save reverts the field. */
+/**
+ * Unsaved field edits. Drafts show at once and are dropped when a save settles,
+ * so a failed save reverts the field. Dispatched values bridge the gap until the
+ * refetch lands, so an edit compares against what was last sent, not the stale fetch.
+ */
 function useDrafts<T extends object>(): Drafts<T> {
   const [values, setValues] = useState<Partial<T>>({});
   const latest = useRef<Partial<T>>({});
+  const dispatched = useRef<Map<string, unknown>>(new Map());
 
   const replace = (next: Partial<T>) => {
     latest.current = next;
@@ -148,6 +162,16 @@ function useDrafts<T extends object>(): Drafts<T> {
     settle: (key, sent) => {
       if (latest.current[key] === sent) clear(key);
     },
+    dispatch: (patch) => {
+      for (const [key, value] of Object.entries(patch)) dispatched.current.set(key, value);
+    },
+    landed: (key, sent) => {
+      const name = String(key);
+      if (dispatched.current.has(name) && dispatched.current.get(name) === sent) dispatched.current.delete(name);
+    },
+    baseline: (key, saved) =>
+      dispatched.current.has(String(key)) ? (dispatched.current.get(String(key)) as typeof saved) : saved,
+    isPending: (key) => dispatched.current.has(String(key)),
   };
 }
 
@@ -199,33 +223,31 @@ function AgentFields({ agent, agentType, canEdit, onSaveFields }: AgentFieldsPro
   const drafts = useDrafts<AgentFieldValues>();
   const values = useMemo<AgentFieldValues>(() => ({ ...saved, ...drafts.values }), [saved, drafts.values]);
   const isOcr = agentType === 'ocr_agent';
+  // Temperature text while the user types; null shows the value. Parsed and clamped on blur only.
+  const [temperatureText, setTemperatureText] = useState<string | null>(null);
 
+  /** Saves one field unless it matches the last dispatched (or saved) value; a failed save reverts through settle. */
   async function persist<K extends keyof AgentFieldValues>(field: K, value: AgentFieldValues[K]): Promise<void> {
+    if (value === drafts.baseline(field, saved[field])) {
+      if (!drafts.isPending(field)) drafts.clear(field);
+      return;
+    }
     drafts.set(field, value);
+    drafts.dispatch({ [field]: value });
     await onSaveFields({ [field]: value });
+    drafts.landed(field, value);
     drafts.settle(field, value);
   }
 
   function commitText(field: TextField, text: string): void {
-    if (text === saved[field]) {
-      drafts.clear(field);
-      return;
-    }
     void persist(field, text);
   }
 
   function commitTemperature(text: string): void {
+    setTemperatureText(null);
     const parsed = Number.parseFloat(text);
-    if (!Number.isFinite(parsed)) {
-      drafts.clear('temperature');
-      return;
-    }
-    const next = Math.min(TEMPERATURE_MAX, Math.max(TEMPERATURE_MIN, parsed));
-    if (next === saved.temperature) {
-      drafts.clear('temperature');
-      return;
-    }
-    void persist('temperature', next);
+    if (!Number.isFinite(parsed)) return;
+    void persist('temperature', Math.min(TEMPERATURE_MAX, Math.max(TEMPERATURE_MIN, parsed)));
   }
 
   const textInput = (field: TextField, label: string) => (
@@ -292,13 +314,10 @@ function AgentFields({ agent, agentType, canEdit, onSaveFields }: AgentFieldsPro
           min={TEMPERATURE_MIN}
           max={TEMPERATURE_MAX}
           step={0.1}
-          value={values.temperature}
+          value={temperatureText ?? String(values.temperature)}
           disabled={!canEdit}
           aria-describedby={`${baseId}-temperature-help`}
-          onChange={(event) => {
-            const parsed = Number.parseFloat(event.currentTarget.value);
-            if (Number.isFinite(parsed)) drafts.set('temperature', parsed);
-          }}
+          onChange={(event) => setTemperatureText(event.currentTarget.value)}
           onBlur={(event) => commitTemperature(event.currentTarget.value)}
           className={INPUT_CLASS}
         />
@@ -383,16 +402,29 @@ function KnowledgeSettings({ agent, canEdit, onSaveFields }: KnowledgeSettingsPr
       if (draft === undefined) continue;
       if (thresholdMissing && THRESHOLD_KEYS.includes(key)) continue;
       const next = Array.isArray(draft) ? cleanFilters(draft) : draft;
-      if (JSON.stringify(next) === JSON.stringify(saved[key])) {
-        drafts.clear(key);
+      if (JSON.stringify(next) === JSON.stringify(drafts.baseline(key, saved[key]))) {
+        if (!drafts.isPending(key)) drafts.clear(key);
         continue;
       }
       patch[key] = next;
       sent[key] = draft;
     }
+    // Leaving the threshold strategy drops the saved threshold too (as the agent form does).
+    if (
+      patch.rag_search_type !== undefined &&
+      effective.rag_search_type !== 'similarity_score_threshold' &&
+      drafts.baseline('rag_score_threshold', saved.rag_score_threshold) !== null
+    ) {
+      patch.rag_score_threshold = null;
+    }
+    if (thresholdMissing && (pending.rag_search_type !== undefined || pending.rag_score_threshold !== undefined)) {
+      toast.info('Score threshold (0–1) is required before the threshold strategy can be saved');
+    }
     if (Object.keys(patch).length === 0) return;
 
+    drafts.dispatch(patch);
     void onSaveFields(patch).then(() => {
+      for (const key of Object.keys(patch) as Array<keyof RagConfigValue>) drafts.landed(key, patch[key]);
       for (const key of Object.keys(sent) as Array<keyof RagConfigValue>) drafts.settle(key, sent[key]);
     });
   }
@@ -413,7 +445,11 @@ function KnowledgeSettings({ agent, canEdit, onSaveFields }: KnowledgeSettingsPr
 
   // RagConfigSection has no disabled prop, so the fieldset disables its controls.
   return (
-    <fieldset disabled={!canEdit} onBlur={handleBlur} className="m-0 min-w-0 border-0 p-0">
+    <fieldset
+      disabled={!canEdit}
+      onBlur={handleBlur}
+      className="m-0 min-w-0 border-0 p-0 [&_:disabled]:cursor-not-allowed [&_:disabled]:opacity-60"
+    >
       <legend className="sr-only">Retrieval settings</legend>
       <RagConfigSection value={value} onChange={handleChange} metadataFields={metadataFields} loadingMetadata={false} />
     </fieldset>
@@ -495,7 +531,7 @@ export function CanvasInspector({ appId, agent, agentType, selection, canEdit, o
           <PieceDetails
             appId={appId}
             piece={selection.piece}
-            connection={`Connected to ${portsFor(agentType).find((port) => port.id === selection.port)?.label ?? 'this port'}. Press Delete or Backspace on the canvas to disconnect it.`}
+            connection={`Connected to ${portsFor(agentType).find((port) => port.id === selection.port)?.label ?? 'this port'}.${canEdit ? ' Press Delete or Backspace on the canvas to disconnect it.' : ''}`}
           />
         )}
       </div>

@@ -25,8 +25,8 @@ import {
 import '@xyflow/react/dist/style.css';
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiService, type Agent } from '../../../services/api';
-import { MESSAGES, errorMessage } from '../../../constants/messages';
+import { apiService, ApiError, type Agent } from '../../../services/api';
+import { MESSAGES, errorMessage, validationDetailMessage } from '../../../constants/messages';
 import { PIECE_VISUALS } from '../nodeKindConfig';
 import {
   buildPortPatch,
@@ -557,7 +557,9 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
             if (step.toast) toast.success(step.toast);
           });
         } catch (err) {
-          toast.error(errorMessage(err, MESSAGES.UPDATE_FAILED(failureLabel)));
+          // A 422 carries the backend's validation message in `detail`, not in `message`.
+          const validation = err instanceof ApiError && err.status === 422 ? validationDetailMessage(err.detail) : null;
+          toast.error(validation ?? errorMessage(err, MESSAGES.UPDATE_FAILED(failureLabel)));
           saved = false;
           break;
         }
