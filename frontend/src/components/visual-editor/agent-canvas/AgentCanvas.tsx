@@ -62,6 +62,18 @@ interface CanvasEdgeData extends Record<string, unknown> {
 
 type CanvasEdge = Edge<CanvasEdgeData, 'default'>;
 
+/**
+ * A save step plus, when it targets the edited agent, the connection intent
+ * behind it. The port patch is rebuilt from the freshly fetched agent inside
+ * the queued task, so two rapid connects on the same port can't overwrite
+ * each other's addition (`step.patch` still carries the plan's extras such
+ * as `enable_code_interpreter`).
+ */
+interface CanvasSaveStep {
+  readonly step: SaveStep;
+  readonly connect?: { readonly port: PortId; readonly kind: PieceKind; readonly pieceId: number };
+}
+
 const NODE_TYPES: Record<string, ComponentType<NodeProps<CanvasFlowNode>>> = {
   agent: AgentPortNode,
   piece: PieceNode,
@@ -128,16 +140,31 @@ function buildFlowNodes(
   const ordered = [...connected].sort(
     (a, b) => (portOrder.get(a.port) ?? 0) - (portOrder.get(b.port) ?? 0) || a.id - b.id,
   );
-  ordered.forEach((entry, index) => {
+  // One card per piece even when it feeds several ports (e.g. one AI service
+  // on Model and Transcription); the port labels aggregate in port order.
+  const deduped: Array<{ nodeId: string; piece: CanvasPiece; portLabels: string[] }> = [];
+  const dedupeIndex = new Map<string, number>();
+  for (const entry of ordered) {
     const piece = byPieceId.get(`${entry.kind}:${entry.id}`);
-    if (!piece) return;
+    if (!piece) continue;
+    const nodeId = `${entry.kind}:${entry.id}`;
+    const label = ports[portOrder.get(entry.port) ?? 0].label;
+    const seenAt = dedupeIndex.get(nodeId);
+    if (seenAt !== undefined) {
+      deduped[seenAt].portLabels.push(label);
+      continue;
+    }
+    dedupeIndex.set(nodeId, deduped.length);
+    deduped.push({ nodeId, piece, portLabels: [label] });
+  }
+  deduped.forEach((entry, index) => {
     nodes.push({
-      id: `${entry.kind}:${entry.id}`,
+      id: entry.nodeId,
       type: 'piece',
       position:
-        savedPositions[`${entry.kind}:${entry.id}`] ??
-        { x: PIECE_COLUMN_X, y: (index - (ordered.length - 1) / 2) * PIECE_ROW_HEIGHT },
-      data: { label: piece.name, piece, portLabel: ports[portOrder.get(entry.port) ?? 0].label },
+        savedPositions[entry.nodeId] ??
+        { x: PIECE_COLUMN_X, y: (index - (deduped.length - 1) / 2) * PIECE_ROW_HEIGHT },
+      data: { label: entry.piece.name, piece: entry.piece, portLabels: entry.portLabels },
       deletable: false,
       connectable: canEdit,
     });
@@ -251,6 +278,8 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
   }, [agent, agentNodeId, pieces, storage, appId, agentId]);
 
   const [pendingEdges, setPendingEdges] = useState<CanvasEdge[]>([]);
+  /** Gesture token for pending-edge ids, so one gesture's cleanup can't cross into another's. */
+  const pendingSeq = useRef(0);
 
   // Ports with a pending connection also render their handle, so the dashed
   // optimistic edge has somewhere to land until the refetch resolves.
@@ -303,6 +332,13 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
     });
   }, [flowEdges, pendingEdges]);
 
+  // A failed background refetch (canvas already populated) keeps the live
+  // view and reports through a toast; the full error screen is only for the
+  // initial load.
+  useEffect(() => {
+    if (error && agent) toast.error(error);
+  }, [error, agent]);
+
   const onNodesChange: OnNodesChange<CanvasFlowNode> = useCallback((changes) => {
     setNodes((current) => applyNodeChanges(changes, current));
   }, []);
@@ -324,12 +360,18 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
 
   /** Saves `steps` one at a time (fetch → merge patch → update), stopping at the first failure; then refetches. */
   const runSteps = useCallback(
-    async (steps: readonly SaveStep[]): Promise<void> => {
-      for (const step of steps) {
+    async (steps: readonly CanvasSaveStep[]): Promise<void> => {
+      for (const { step, connect } of steps) {
         try {
           await queue.run(step.agentId, async () => {
             const fresh = await apiService.getAgent(appId, step.agentId);
-            await apiService.updateAgent(appId, step.agentId, { ...fresh, ...step.patch });
+            // Rebuild the port patch from the fresh agent so rapid gestures on
+            // the same port don't overwrite each other; step.patch still
+            // carries the plan's extras (enable_code_interpreter).
+            const patch = connect
+              ? { ...step.patch, ...buildPortPatch(fresh, connect.port, connect.kind, connect.pieceId, 'add') }
+              : step.patch;
+            await apiService.updateAgent(appId, step.agentId, { ...fresh, ...patch });
             if (step.toast) toast.success(step.toast);
           });
         } catch (err) {
@@ -382,7 +424,11 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
       const replacedName = replaced
         ? (pieces.find((entry) => entry.kind === replaced.kind && entry.id === replaced.id)?.name ?? null)
         : null;
-      const steps = planConnect({
+      // planConnect decides the steps and toasts; steps for the edited agent
+      // carry the connection intent so runSteps rebuilds the port patch from
+      // the fresh agent inside the queue (the is_tool step saves another
+      // agent and keeps its patch as is).
+      const steps: CanvasSaveStep[] = planConnect({
         agentId: agent.agent_id,
         port: port.id,
         kind: piece.kind,
@@ -392,11 +438,18 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
         codeInterpreterOn: agent.enable_code_interpreter === true,
         replacedName,
         pieceName: piece.name,
-      });
+      }).map((step) =>
+        step.agentId === agent.agent_id
+          ? { step, connect: { port: port.id, kind: piece.kind, pieceId: piece.id } }
+          : { step },
+      );
 
-      const pendingId = `pending:${port.id}:${piece.kind}:${piece.id}`;
+      // Unique id per gesture: one gesture's cleanup must never remove
+      // another gesture's still-in-flight pending edge.
+      pendingSeq.current += 1;
+      const pendingId = `pending:${port.id}:${piece.kind}:${piece.id}:${pendingSeq.current}`;
       setPendingEdges((current) => [
-        ...current.filter((edge) => edge.id !== pendingId),
+        ...current,
         makeCanvasEdge({ port: port.id, piece, targetId: agentNodeId, id: pendingId, pending: true }),
       ]);
 
@@ -510,7 +563,7 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
   // load; a background refetch must never unmount the flow (same as the old
   // canvas - it would reset the viewport on every connect/disconnect).
   if (loading && !agent) return <CanvasLoading />;
-  if (error) return <CanvasError error={error} onRetry={refetch} />;
+  if (error && !agent) return <CanvasError error={error} onRetry={refetch} />;
   if (!agent) return <CanvasLoading />;
 
   return (
