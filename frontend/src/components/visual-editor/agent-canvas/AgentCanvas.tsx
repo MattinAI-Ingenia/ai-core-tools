@@ -44,9 +44,10 @@ import { createSaveQueue, planConnect, type SaveStep } from './savePlan';
 import { AgentPortNode, type CanvasFlowNode } from './AgentPortNode';
 import { PieceNode } from './PieceNode';
 import { CanvasPalette, PIECE_DRAG_MIME, parsePieceDragPayload, pieceKindPhrase } from './CanvasPalette';
+import { CanvasInspector } from './CanvasInspector';
 import { useAgentCanvasData, type CanvasPiece } from './useAgentCanvasData';
 
-/** What the inspector panel (later task) receives when something is selected. */
+/** What the inspector panel receives when something is selected. */
 export type CanvasSelection =
   | { type: 'agent' }
   | { type: 'piece'; piece: CanvasPiece }
@@ -355,7 +356,8 @@ function PortChooser({ name, ports, onPick, onCancel }: PortChooserProps) {
  * connection rules and save queue. Pieces dragged from the palette and
  * dropped on the agent connect; dropped elsewhere they stay as loose cards.
  * Layout (positions + loose pieces) lives only in localStorage; connections
- * save immediately, one step per gesture.
+ * save immediately, one step per gesture. The inspector on the right edits
+ * the selected agent, piece or connection through the same save queue.
  */
 export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasProps) {
   const { agent, pieces, toolEdges, loading, error, refetch } = useAgentCanvasData(appId, agentId);
@@ -495,6 +497,29 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
     setChoice(null);
   }, [agentId]);
 
+  // The selection belongs to the agent it was made for; the inspector only
+  // shows it while its piece is still on the canvas and its connection still exists.
+  const [selectionState, setSelectionState] = useState<{ agentId: number; selection: CanvasSelection } | null>(null);
+  const selectCanvas = useCallback(
+    (selection: CanvasSelection | null) => {
+      setSelectionState(selection ? { agentId, selection } : null);
+      onSelect?.(selection);
+    },
+    [agentId, onSelect],
+  );
+  const resolvedSelection = useMemo<CanvasSelection | null>(() => {
+    if (!selectionState || selectionState.agentId !== agentId || !agent) return null;
+    const selected = selectionState.selection;
+    if (selected.type === 'agent') return selected;
+    const piece = pieces.find((entry) => entry.kind === selected.piece.kind && entry.id === selected.piece.id);
+    if (!piece) return null;
+    if (selected.type === 'piece') return { type: 'piece', piece };
+    const stillConnected = connected.some(
+      (entry) => entry.port === selected.port && entry.kind === piece.kind && entry.id === piece.id,
+    );
+    return stillConnected ? { type: 'edge', port: selected.port, piece } : null;
+  }, [selectionState, agentId, agent, pieces, connected]);
+
   /**
    * Removes a node from the live copy so the next sync re-adds it at its
    * layout position: the sync keeps live positions for nodes it already has.
@@ -511,9 +536,12 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
     setEdges((current) => applyEdgeChanges(changes, current));
   }, []);
 
-  /** Saves `steps` one at a time (fetch → merge patch → update), stopping at the first failure; then refetches. Resolves true when every step saved. */
+  /**
+   * Saves `steps` one at a time (fetch → merge patch → update), stopping at the first failure; then refetches.
+   * Resolves true when every step saved. `failureLabel` names what failed in the error toast.
+   */
   const runSteps = useCallback(
-    async (steps: readonly CanvasSaveStep[]): Promise<boolean> => {
+    async (steps: readonly CanvasSaveStep[], failureLabel = 'connection'): Promise<boolean> => {
       let saved = true;
       for (const { step, connect } of steps) {
         try {
@@ -529,7 +557,7 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
             if (step.toast) toast.success(step.toast);
           });
         } catch (err) {
-          toast.error(errorMessage(err, MESSAGES.UPDATE_FAILED('connection')));
+          toast.error(errorMessage(err, MESSAGES.UPDATE_FAILED(failureLabel)));
           saved = false;
           break;
         }
@@ -538,6 +566,12 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
       return saved;
     },
     [appId, queue, refetch],
+  );
+
+  /** Inspector field saves: one step through the same queue and executor as the connects. */
+  const saveAgentFields = useCallback(
+    (patch: Record<string, unknown>): Promise<boolean> => runSteps([{ step: { agentId, patch } }], 'agent'),
+    [agentId, runSteps],
   );
 
   /**
@@ -825,26 +859,25 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
 
   const handleNodeClick: NodeMouseHandler<CanvasFlowNode> = useCallback(
     (_event, node) => {
-      if (!onSelect) return;
       if (node.type === 'agent') {
-        onSelect({ type: 'agent' });
+        selectCanvas({ type: 'agent' });
         return;
       }
-      if (node.data.piece) onSelect({ type: 'piece', piece: node.data.piece });
+      if (node.data.piece) selectCanvas({ type: 'piece', piece: node.data.piece });
     },
-    [onSelect],
+    [selectCanvas],
   );
 
   const handleEdgeClick: EdgeMouseHandler<CanvasEdge> = useCallback(
     (_event, edge) => {
-      if (edge.data) onSelect?.({ type: 'edge', port: edge.data.port, piece: edge.data.piece });
+      if (edge.data) selectCanvas({ type: 'edge', port: edge.data.port, piece: edge.data.piece });
     },
-    [onSelect],
+    [selectCanvas],
   );
 
   const handlePaneClick = useCallback(() => {
-    onSelect?.(null);
-  }, [onSelect]);
+    selectCanvas(null);
+  }, [selectCanvas]);
 
   // Inline `style` outranks React Flow's `.selected` CSS class, so overlay a
   // bold consistent "selected" look at render time (same as the old canvas).
@@ -929,6 +962,14 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
           />
         )}
       </div>
+      <CanvasInspector
+        appId={appId}
+        agent={agent}
+        agentType={agentType}
+        selection={resolvedSelection}
+        canEdit={canEdit}
+        onSaveFields={saveAgentFields}
+      />
     </div>
   );
 }
