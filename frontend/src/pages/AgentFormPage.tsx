@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, Settings, FileText, MessageSquare, Lightbulb, Info, Zap, Search, Image, Terminal, FolderSearch, Wrench, Plug, Target, Store, Plus, Tv } from 'lucide-react';
 import { apiService, ApiError, type ScheduledTask } from '../services/api';
 import { useApiMutation } from '../hooks/useApiMutation';
@@ -27,6 +27,15 @@ import { AppRole } from '../types/roles';
 import { randomId } from '../utils/randomId';
 import type { ServiceLifecycleWarning } from '../types/services';
 import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
+import { AgentCanvas } from '../components/visual-editor/agent-canvas/AgentCanvas';
+import { useConfirm } from '../contexts/ConfirmContext';
+
+type AgentView = 'form' | 'visual';
+
+const VIEW_OPTIONS: ReadonlyArray<{ readonly id: AgentView; readonly label: string }> = [
+  { id: 'form', label: 'Form' },
+  { id: 'visual', label: 'Visual' },
+];
 
 // Define the Agent types
 interface Agent {
@@ -215,7 +224,7 @@ function extractA2AFieldErrors(err: unknown): AgentA2AFieldErrors | null {
 }
 
 function getPageTitle(type: string, isNewAgent: boolean): string {
-  if (type === 'ocr_agent') return 'Agente OCR';
+  if (type === 'ocr_agent') return 'OCR agent';
   if (isNewAgent) return 'Create Agent';
   return 'Edit Agent';
 }
@@ -240,6 +249,9 @@ function AgentFormPage() {
   const mutate = useApiMutation();
   const { hasMinRole } = useAppRole(appId);
   const canEditA2A = hasMinRole(AppRole.EDITOR);
+  const canEdit = hasMinRole(AppRole.EDITOR);
+  const confirm = useConfirm();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [a2aCardUrl, setA2aCardUrl] = useState<string | null>(null);
   const [a2aRpcUrl, setA2aRpcUrl] = useState<string | null>(null);
@@ -282,6 +294,8 @@ function AgentFormPage() {
   };
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // JSON of formData as loaded from (or last saved to) the backend; used to detect unsaved changes.
+  const [snapshot, setSnapshot] = useState<string | null>(null);
   const [formData, setFormData] = useState<AgentFormData>({
     name: '',
     description: '',
@@ -405,7 +419,7 @@ function AgentFormPage() {
       setAgent(response);
 
       // Initialize form data
-      setFormData({
+      const loadedFormData: AgentFormData = {
         name: response.name || '',
         description: response.description || '',
         system_prompt: response.system_prompt || '',
@@ -453,7 +467,9 @@ function AgentFormPage() {
         a2a_description_override: response.a2a_description_override ?? null,
         a2a_skill_tags: response.a2a_skill_tags ?? [],
         a2a_examples: response.a2a_examples ?? [],
-      });
+      };
+      setFormData(loadedFormData);
+      setSnapshot(JSON.stringify(loadedFormData));
       setA2aCardUrl(response.a2a_card_url ?? null);
       setA2aRpcUrl(response.a2a_rpc_url ?? null);
 
@@ -612,10 +628,10 @@ function AgentFormPage() {
     });
   }, [appId, agentId, marketplaceProfile, mutate]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!appId || !agentId) return;
+  // Saves the agent. Returns true on success. Navigates away unless `stay` is set, in which
+  // case the agent is reloaded so the form matches what the backend stored.
+  async function submitAgent(options?: { stay?: boolean }): Promise<boolean> {
+    if (!appId || !agentId) return false;
 
     const hasSilo = !!formData.silo_id;
     const usesThreshold = formData.rag_search_type === 'similarity_score_threshold';
@@ -624,14 +640,14 @@ function AgentFormPage() {
     if (!formData.prompt_template.includes(DEFAULT_PROMPT_TEMPLATE)) {
       setActiveTab('prompts');
       setError('The Prompt Template must include {question} before saving.');
-      return;
+      return false;
     }
 
     // Mirror the backend invariant: a threshold strategy needs a threshold value.
     if (usesThreshold && formData.rag_score_threshold == null) {
       setActiveTab('configuration');
       setError(SCORE_THRESHOLD_REQUIRED_MSG);
-      return;
+      return false;
     }
 
     // Mirror the backend invariant: conversational agents keep uploaded documents in a
@@ -639,7 +655,7 @@ function AgentFormPage() {
     if (formData.has_memory && !formData.media_embedding_service_id) {
       setActiveTab('configuration');
       setError('Conversational agents require a media embedding service in Media Processing.');
-      return;
+      return false;
     }
 
     // Drop incomplete filter rows and the editor-only _key; clear the threshold unless the
@@ -728,8 +744,12 @@ function AgentFormPage() {
     setSaving(false);
 
     if (result !== undefined) {
-      navigate(returnTo || `/apps/${appId}/agents`);
-      return;
+      if (options?.stay) {
+        await loadAgentData();
+      } else {
+        navigate(returnTo || `/apps/${appId}/agents`);
+      }
+      return true;
     }
 
     try {
@@ -743,9 +763,58 @@ function AgentFormPage() {
       // Keep the existing top-level banner in addition to the per-field messages.
       setError(errorMessage(err, MESSAGES.SAVE_FAILED('agent')));
     }
+    return false;
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitAgent();
   };
 
   const isNewAgent = Number.parseInt(agentId || '0') === 0;
+  // The visual editor needs a saved agent, so a new agent always shows the form.
+  const view: AgentView = !isNewAgent && searchParams.get('view') === 'visual' ? 'visual' : 'form';
+  const isDirty = useMemo(
+    () => snapshot !== null && JSON.stringify(formData) !== snapshot,
+    [formData, snapshot],
+  );
+
+  const changeView = (next: AgentView) => {
+    setSearchParams(next === 'visual' ? { view: 'visual' } : {});
+  };
+
+  const handleViewChange = async (next: AgentView) => {
+    if (next === view) return;
+
+    if (next === 'visual') {
+      if (isDirty) {
+        // Closing the dialog without choosing keeps the form and its edits.
+        let dismissed = false;
+        const saveFirst = await confirm({
+          title: 'Unsaved changes',
+          message: 'Save your changes before opening the visual editor?',
+          confirmLabel: 'Save and continue',
+          cancelLabel: 'Discard',
+          onDismiss: () => {
+            dismissed = true;
+          },
+        });
+        if (dismissed) return;
+        if (saveFirst) {
+          const saved = await submitAgent({ stay: true });
+          if (!saved) return;
+        } else {
+          await loadAgentData();
+        }
+      }
+      changeView('visual');
+      return;
+    }
+
+    // Leaving the canvas always reloads, so the form shows what the backend holds.
+    await loadAgentData();
+    changeView('form');
+  };
 
   if (loading) {
     return (
@@ -791,14 +860,43 @@ function AgentFormPage() {
               {pageDescription}
             </p>
           </div>
-          <button
-            onClick={() => navigate(`/apps/${appId}/agents`)}
-            className="flex items-center px-6 py-3 bg-white hover:bg-gray-50 rounded-xl text-gray-700 shadow-sm border border-gray-200 transition-all duration-200"
-          >
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            {' '}
-            Back to Agents
-          </button>
+          <div className="flex items-center gap-3">
+            {!isNewAgent && (
+              <div
+                role="group"
+                aria-label="Editor view"
+                className="inline-flex items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800"
+              >
+                {VIEW_OPTIONS.map((option) => {
+                  const active = view === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      aria-pressed={active}
+                      disabled={saving}
+                      onClick={() => void handleViewChange(option.id)}
+                      className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+                        active
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-200 dark:text-gray-300 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <button
+              onClick={() => navigate(`/apps/${appId}/agents`)}
+              className="flex items-center px-6 py-3 bg-white hover:bg-gray-50 rounded-xl text-gray-700 shadow-sm border border-gray-200 transition-all duration-200 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-700"
+            >
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              {' '}
+              Back to Agents
+            </button>
+          </div>
         </div>
 
         {agent && (
@@ -816,901 +914,821 @@ function AgentFormPage() {
           />
         )}
 
-        {/* Agent Form */}
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Tab Navigation */}
-          <Tabs
-            tabs={tabs}
-            activeTab={activeTab}
-            onChange={setActiveTab}
-          />
-          {!isNewAgent && agent && <ScheduledTaskReference appId={Number.parseInt(appId ?? '0')} agentId={agent.agent_id} />}
+        {/* Agent Form, or the visual editor. The canvas sits outside the <form> so Enter in its inputs cannot submit the agent. */}
+        {view === 'visual' ? (
+          <div className="h-[calc(100vh-12rem)] min-h-[32rem]">
+            <AgentCanvas
+              key={`${appId}:${agentId}`}
+              appId={Number(appId)}
+              agentId={Number(agentId)}
+              canEdit={canEdit}
+            />
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Tab Navigation */}
+            <Tabs
+              tabs={tabs}
+              activeTab={activeTab}
+              onChange={setActiveTab}
+            />
+            {!isNewAgent && agent && <ScheduledTaskReference appId={Number.parseInt(appId ?? '0')} agentId={agent.agent_id} />}
 
-          {/* TAB 1: BASIC */}
-          {activeTab === 'basic' && (
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-              <div className="flex items-center mb-6">
-                <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
-                  <FileText className="w-5 h-5 text-blue-600" />
+            {/* TAB 1: BASIC */}
+            {activeTab === 'basic' && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                <div className="flex items-center mb-6">
+                  <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
+                    <FileText className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900">Basic Information</h3>
                 </div>
-                <h3 className="text-xl font-semibold text-gray-900">Basic Information</h3>
-              </div>
               
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                    Name *
-                  </label>
-                  <input
-                    type="text"
-                    id="name"
-                    value={formData.name}
-                    onChange={(e) => handleInputChange('name', e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    required
-                    placeholder="Name..."
-                  />
-                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
+                      Name *
+                    </label>
+                    <input
+                      type="text"
+                      id="name"
+                      value={formData.name}
+                      onChange={(e) => handleInputChange('name', e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      required
+                      placeholder="Name..."
+                    />
+                  </div>
 
-                <div>
-                  <label htmlFor="type" className="block text-sm font-medium text-gray-700 mb-2">
-                    Agent Type
-                  </label>
-                  <select
-                    id="type"
-                    value={formData.type}
-                    onChange={(e) => handleInputChange('type', e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                  >
-                    <option value="agent">AI Agent</option>
-                    <option value="ocr_agent">OCR Agent</option>
-                  </select>
-                </div>
+                  <div>
+                    <label htmlFor="type" className="block text-sm font-medium text-gray-700 mb-2">
+                      Agent Type
+                    </label>
+                    <select
+                      id="type"
+                      value={formData.type}
+                      onChange={(e) => handleInputChange('type', e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                    >
+                      <option value="agent">AI Agent</option>
+                      <option value="ocr_agent">OCR Agent</option>
+                    </select>
+                  </div>
 
-                <div className="md:col-span-2">
-                  <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
-                    Description
-                  </label>
-                  <input
-                    type="text"
-                    id="description"
-                    value={formData.description}
-                    onChange={(e) => handleInputChange('description', e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    placeholder="Description..."
-                  />
+                  <div className="md:col-span-2">
+                    <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
+                      Description
+                    </label>
+                    <input
+                      type="text"
+                      id="description"
+                      value={formData.description}
+                      onChange={(e) => handleInputChange('description', e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      placeholder="Description..."
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* TAB 2: PROMPTS */}
-          {activeTab === 'prompts' && (
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-              <div className="flex items-center mb-6">
-                <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
-                  <MessageSquare className="w-5 h-5 text-purple-600" />
+            {/* TAB 2: PROMPTS */}
+            {activeTab === 'prompts' && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                <div className="flex items-center mb-6">
+                  <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
+                    <MessageSquare className="w-5 h-5 text-purple-600" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900">Prompts & Instructions</h3>
                 </div>
-                <h3 className="text-xl font-semibold text-gray-900">Prompts & Instructions</h3>
-              </div>
               
+                <div className="space-y-6">
+                  <div>
+                    <label htmlFor="system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
+                      System Prompt
+                    </label>
+                    <textarea
+                      id="system_prompt"
+                      value={formData.system_prompt}
+                      onChange={(e) => handleInputChange('system_prompt', e.target.value)}
+                      rows={4}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      placeholder="Define the agent's behavior and capabilities..."
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="prompt_template" className="block text-sm font-medium text-gray-700 mb-2">
+                      Prompt Template
+                    </label>
+                    <textarea
+                      id="prompt_template"
+                      value={formData.prompt_template}
+                      onChange={(e) => handleInputChange('prompt_template', e.target.value)}
+                      rows={4}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      placeholder="Template for user interactions (must include {question})..."
+                    />
+                    <p className="text-xs text-gray-500 mt-2 flex items-center gap-1"><Lightbulb className="w-3 h-3" /> The template must include {'{question}'} to work properly</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: CONFIGURATION */}
+            {activeTab === 'configuration' && (
               <div className="space-y-6">
-                <div>
-                  <label htmlFor="system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
-                    System Prompt
-                  </label>
-                  <textarea
-                    id="system_prompt"
-                    value={formData.system_prompt}
-                    onChange={(e) => handleInputChange('system_prompt', e.target.value)}
-                    rows={4}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    placeholder="Define the agent's behavior and capabilities..."
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="prompt_template" className="block text-sm font-medium text-gray-700 mb-2">
-                    Prompt Template
-                  </label>
-                  <textarea
-                    id="prompt_template"
-                    value={formData.prompt_template}
-                    onChange={(e) => handleInputChange('prompt_template', e.target.value)}
-                    rows={4}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    placeholder="Template for user interactions (must include {question})..."
-                  />
-                  <p className="text-xs text-gray-500 mt-2 flex items-center gap-1"><Lightbulb className="w-3 h-3" /> The template must include {'{question}'} to work properly</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: CONFIGURATION */}
-          {activeTab === 'configuration' && (
-            <div className="space-y-6">
-              {/* Configuration for regular agents */}
-              {formData.type !== 'ocr_agent' && (
-                <>
-                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                    <div className="flex items-center mb-6">
-                      <div className="w-10 h-10 bg-orange-100 rounded-xl flex items-center justify-center mr-4">
-                        <Settings className="w-5 h-5 text-orange-600" />
+                {/* Configuration for regular agents */}
+                {formData.type !== 'ocr_agent' && (
+                  <>
+                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                      <div className="flex items-center mb-6">
+                        <div className="w-10 h-10 bg-orange-100 rounded-xl flex items-center justify-center mr-4">
+                          <Settings className="w-5 h-5 text-orange-600" />
+                        </div>
+                        <h3 className="text-xl font-semibold text-gray-900">Configuration</h3>
                       </div>
-                      <h3 className="text-xl font-semibold text-gray-900">Configuration</h3>
-                    </div>
                     
-                    {/* No AI Services Warning */}
-                    {agent?.ai_services.length === 0 && renderNoAIServicesWarning(false)}
+                      {/* No AI Services Warning */}
+                      {agent?.ai_services.length === 0 && renderNoAIServicesWarning(false)}
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div>
-                        <label htmlFor="ai_service" className="block text-sm font-medium text-gray-700 mb-2">
-                          AI Service *
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                          <label htmlFor="ai_service" className="block text-sm font-medium text-gray-700 mb-2">
+                            AI Service *
+                          </label>
+                          <select
+                            id="ai_service"
+                            aria-describedby={serviceStatusId(agent?.ai_services, formData.service_id, "ai_service")}
+                            value={formData.service_id || ''}
+                            onChange={(e) => handleInputChange('service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                            required
+                          >
+                            <option value="">Select AI Service</option>
+                            <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.service_id} />
+                          </select>
+                          <ServiceOptionStatus selectId="ai_service" options={agent?.ai_services} selectedId={formData.service_id} />
+                        </div>
+
+                        <div>
+                          <label htmlFor="silo" className="block text-sm font-medium text-gray-700 mb-2">
+                            Knowledge Base (Silo)
+                          </label>
+                          <select
+                            id="silo"
+                            value={formData.silo_id || ''}
+                            onChange={(e) => handleInputChange('silo_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          >
+                            <option value="">Select Knowledge Base</option>
+                            {agent?.silos.map((silo) => (
+                              <option key={silo.silo_id} value={silo.silo_id}>
+                                {silo.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label htmlFor="temperature" className="block text-sm font-medium text-gray-700 mb-2">
+                            Temperature
+                          </label>
+                          <div className="flex items-center space-x-4">
+                            <input
+                              type="range"
+                              id="temperature"
+                              min="0"
+                              max="2"
+                              step="0.1"
+                              value={formData.temperature}
+                              onChange={(e) => handleInputChange('temperature', Number.parseFloat(e.target.value))}
+                              className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                            />
+                            <span className="text-sm font-medium text-gray-600 w-12">
+                              {formData.temperature.toFixed(1)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">
+                            Controls randomness: 0 = deterministic, 2 = very creative
+                          </p>
+                        </div>
+
+                        <div>
+                          <OutputParserField
+                            showOutputParser={showOutputParser}
+                            setShowOutputParser={setShowOutputParser}
+                            formData={formData}
+                            handleInputChange={handleInputChange}
+                            agent={agent}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* RAG retrieval config — only meaningful when a silo is selected */}
+                    {formData.silo_id && (
+                      <RagConfigSection
+                        value={{
+                          rag_k: formData.rag_k,
+                          rag_search_type: formData.rag_search_type,
+                          rag_score_threshold: formData.rag_score_threshold,
+                          rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
+                          rag_fixed_filters: formData.rag_fixed_filters,
+                        }}
+                        onChange={(patch: Partial<RagConfigValue>) =>
+                          setFormData((prev) => ({ ...prev, ...patch }))
+                        }
+                        metadataFields={siloMetadataFields}
+                        loadingMetadata={loadingSiloMetadata}
+                      />
+                    )}
+
+                    {/* Agent Capabilities Card */}
+                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                      <div className="flex items-center mb-6">
+                        <div className="w-10 h-10 bg-green-100 rounded-xl flex items-center justify-center mr-4">
+                          <Zap className="w-5 h-5 text-green-600" />
+                        </div>
+                        <h3 className="text-xl font-semibold text-gray-900">Capabilities</h3>
+                      </div>
+
+                      {/* MCP Warning Dialog */}
+                      {showMcpWarning && mcpUsage && mcpUsage.mcp_servers.length > 0 && (
+                        <div className="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4">
+                          <div className="flex items-start">
+                            <span className="text-amber-500 text-xl mr-3">!</span>
+                            <div className="flex-1">
+                              <h4 className="text-sm font-semibold text-amber-900 mb-2">
+                                This agent is used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
+                              </h4>
+                              <p className="text-sm text-amber-800 mb-2">
+                                Unmarking this agent as a tool will make it unavailable in the following MCP servers:
+                              </p>
+                              <ul className="text-sm text-amber-700 list-disc list-inside mb-3">
+                                {mcpUsage.mcp_servers.map(s => (
+                                  <li key={s.server_id}>{s.server_name}</li>
+                                ))}
+                              </ul>
+                              <div className="flex space-x-3">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleInputChange('is_tool', false);
+                                    setShowMcpWarning(false);
+                                  }}
+                                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors"
+                                >
+                                  Unmark as Tool Anyway
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowMcpWarning(false)}
+                                  className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-medium rounded-lg transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                          <input
+                            id="is_tool"
+                            type="checkbox"
+                            checked={formData.is_tool}
+                            onChange={(e) => {
+                              // If unmarking as tool and agent is used in MCP servers, show warning
+                              if (!e.target.checked && mcpUsage && mcpUsage.mcp_servers.length > 0) {
+                                setShowMcpWarning(true);
+                              } else {
+                                handleInputChange('is_tool', e.target.checked);
+                              }
+                            }}
+                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="ml-3">
+                            <label htmlFor="is_tool" className="text-sm font-medium text-gray-900">Tool Agent</label>
+                            <p className="text-xs text-gray-500">Can be used by other agents</p>
+                            {mcpUsage && mcpUsage.mcp_servers.length > 0 && formData.is_tool && (
+                              <p className="text-xs text-purple-600 mt-1">
+                                Used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                          <input
+                            id="has_memory"
+                            type="checkbox"
+                            checked={formData.has_memory}
+                            onChange={(e) => handleInputChange('has_memory', e.target.checked)}
+                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="ml-3">
+                            <label htmlFor="has_memory" className="text-sm font-medium text-gray-900">Conversational</label>
+                            <p className="text-xs text-gray-500">Maintains conversation memory</p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                          <input
+                            id="enable_code_interpreter"
+                            type="checkbox"
+                            checked={formData.enable_code_interpreter}
+                            onChange={(e) => handleInputChange('enable_code_interpreter', e.target.checked)}
+                            aria-describedby="enable_code_interpreter_help"
+                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="ml-3">
+                            <label htmlFor="enable_code_interpreter" className="text-sm font-medium text-gray-900">Code Interpreter</label>
+                            <p id="enable_code_interpreter_help" className="text-xs text-gray-500">Allows the agent to execute Python code (pandas, openpyxl, numpy)</p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center p-4 bg-gray-50 rounded-xl">
+                          <input
+                            id="skill_router_enabled"
+                            type="checkbox"
+                            checked={formData.skill_router_enabled}
+                            onChange={(e) => handleInputChange('skill_router_enabled', e.target.checked)}
+                            aria-describedby="skill_router_enabled_help"
+                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="ml-3">
+                            <label htmlFor="skill_router_enabled" className="text-sm font-medium text-gray-900">Skill Router</label>
+                            <p id="skill_router_enabled_help" className="text-xs text-gray-500">Let the model pre-select at most 2 skills per turn; off by default.</p>
+                          </div>
+                        </div>
+
+                        {formData.enable_code_interpreter && (
+                          <div className="md:col-span-2">
+                            <label htmlFor="sandbox_service" className="block text-sm font-medium text-gray-700 mb-2">
+                              Sandbox Service
+                            </label>
+                            <select
+                              id="sandbox_service"
+                              aria-describedby={serviceStatusId(agent?.sandbox_services, formData.sandbox_service_id, 'sandbox_service')}
+                              value={formData.sandbox_service_id || ''}
+                              onChange={(e) => handleInputChange('sandbox_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                            >
+                              <option value="">Use app/system default</option>
+                              <ServiceSelectOptions options={agent?.sandbox_services} savedValue={agent?.sandbox_service_id} />
+                            </select>
+                            <ServiceOptionStatus selectId="sandbox_service" options={agent?.sandbox_services} selectedId={formData.sandbox_service_id} />
+                            <p className="text-xs text-gray-500 mt-1">
+                              Overrides the sandbox environment used to run this agent's Python code. Leave unset to use the app's default Sandbox Service.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Provider-side Tools */}
+                      <div className="mt-6 pt-6 border-t border-gray-100">
+                        <div className="mb-3">
+                          <h4 className="text-sm font-semibold text-gray-800">Provider-side Tools</h4>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            These tools run on the AI provider's infrastructure — no extra backend setup needed.
+                            Only tools supported by the agent's selected provider will be active.
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          {[
+                            {
+                              id: 'web_search',
+                              icon: <Search className="w-4 h-4" />,
+                              label: 'Web Search',
+                              description: 'Real-time internet search',
+                              providers: ['OpenAI', 'Anthropic', 'Google', 'Azure'],
+                            },
+                            {
+                              id: 'image_generation',
+                              icon: <Image className="w-4 h-4" />,
+                              label: 'Image Generation',
+                              description: 'Generate images with DALL-E',
+                              providers: ['OpenAI', 'Azure'],
+                            },
+                            {
+                              id: 'code_interpreter',
+                              icon: <Terminal className="w-4 h-4" />,
+                              label: 'Code Interpreter',
+                              description: 'Provider-sandboxed code execution',
+                              providers: ['OpenAI', 'Anthropic', 'Azure'],
+                            },
+                            {
+                              id: 'file_search',
+                              icon: <FolderSearch className="w-4 h-4" />,
+                              label: 'File Search',
+                              description: 'Vector search over uploaded files',
+                              providers: ['OpenAI', 'Azure'],
+                            },
+                          ].map((tool) => {
+                            const active = formData.server_tools.includes(tool.id);
+                            const toggle = () => handleInputChange(
+                              'server_tools',
+                              active
+                                ? formData.server_tools.filter(t => t !== tool.id)
+                                : [...formData.server_tools, tool.id]
+                            );
+                            return (
+                              <button
+                                key={tool.id}
+                                type="button"
+                                onClick={toggle}
+                                className={`text-left p-3 rounded-xl border-2 transition-colors ${
+                                  active
+                                    ? 'border-blue-500 bg-blue-50'
+                                    : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-base">{tool.icon}</span>
+                                  <span className={`text-sm font-medium ${active ? 'text-blue-800' : 'text-gray-800'}`}>
+                                    {tool.label}
+                                  </span>
+                                  {active && (
+                                    <span className="ml-auto text-xs font-medium text-blue-600 bg-blue-100 px-1.5 py-0.5 rounded-full">ON</span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-500 mb-2">{tool.description}</p>
+                                <div className="flex flex-wrap gap-1">
+                                  {tool.providers.map(p => (
+                                    <span key={p} className="text-xs px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">{p}</span>
+                                  ))}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-amber-600 mt-3 flex items-start gap-1">
+                          <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> Some tools require specific models — e.g. Image Generation needs gpt-image-1 (OpenAI Responses API).
+                          Unsupported tools for the selected provider are silently ignored.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Media Processing Card */}
+                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                      <div className="flex items-center mb-6">
+                        <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
+                          <Tv className="w-5 h-5 text-purple-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl font-semibold text-gray-900">Media Processing</h3>
+                          <p className="text-sm text-gray-500">
+                            Default configuration used when uploading audio/video or YouTube URLs in the playground.
+                            Set it here once so uploads only require choosing the file or URL.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mb-6">
+                        <label htmlFor="media_embedding_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Embedding Service {formData.has_memory && <span className="text-red-500">*</span>}
                         </label>
                         <select
-                          id="ai_service"
-                          aria-describedby={serviceStatusId(agent?.ai_services, formData.service_id, "ai_service")}
+                          id="media_embedding_service"
+                          aria-describedby={serviceStatusId(embeddingServices, formData.media_embedding_service_id, "media_embedding_service")}
+                          required={formData.has_memory}
+                          value={formData.media_embedding_service_id || ''}
+                          onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">None (no temporary knowledge base)</option>
+                          <ServiceSelectOptions options={embeddingServices} savedValue={agent?.media_embedding_service_id} />
+                        </select>
+                        <ServiceOptionStatus selectId="media_embedding_service" options={embeddingServices} selectedId={formData.media_embedding_service_id} />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Model used to vectorize uploaded media/documents into the conversation's temporary
+                          knowledge base for retrieval. Required for conversational agents; optional otherwise
+                          (documents are then sent in full to the agent, and audio/video uploads are unavailable).
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                          <label htmlFor="transcription_service" className="block text-sm font-medium text-gray-700 mb-2">
+                            Transcription Service
+                          </label>
+                          <select
+                            id="transcription_service"
+                            aria-describedby={serviceStatusId(agent?.ai_services, formData.transcription_service_id, "transcription_service")}
+                            value={formData.transcription_service_id || ''}
+                            onChange={(e) => handleInputChange('transcription_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          >
+                            <option value="">Select Transcription Service</option>
+                            <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.transcription_service_id} />
+                          </select>
+                          <ServiceOptionStatus selectId="transcription_service" options={agent?.ai_services} selectedId={formData.transcription_service_id} />
+                          <p className="text-xs text-gray-500 mt-1">Speech-to-text model used to transcribe media.</p>
+                        </div>
+
+                        <div>
+                          <label htmlFor="video_ai_service" className="block text-sm font-medium text-gray-700 mb-2">
+                            Video Analysis Service (optional)
+                          </label>
+                          <select
+                            id="video_ai_service"
+                            aria-describedby={serviceStatusId(videoServiceOptions, formData.video_ai_service_id, "video_ai_service")}
+                            value={formData.video_ai_service_id || ''}
+                            onChange={(e) => handleInputChange('video_ai_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          >
+                            <option value="">None (audio only)</option>
+                            <ServiceSelectOptions options={videoServiceOptions} savedValue={agent?.video_ai_service_id} />
+                          </select>
+                          <ServiceOptionStatus selectId="video_ai_service" options={videoServiceOptions} selectedId={formData.video_ai_service_id} />
+                          <p className="text-xs text-gray-500 mt-1">Enables multimodal analysis (visual descriptions from video frames).</p>
+                        </div>
+
+                        <div>
+                          <label htmlFor="media_forced_language" className="block text-sm font-medium text-gray-700 mb-2">
+                            Language
+                          </label>
+                          <select
+                            id="media_forced_language"
+                            value={formData.media_forced_language || ''}
+                            onChange={(e) => handleInputChange('media_forced_language', e.target.value || undefined)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          >
+                            <option value="">Auto-detect</option>
+                            <option value="es">Spanish</option>
+                            <option value="en">English</option>
+                            <option value="eu">Basque</option>
+                            <option value="fr">French</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
+                        <div>
+                          <label htmlFor="media_chunk_min_duration" className="block text-sm font-medium text-gray-700 mb-2">
+                            Min Chunk (s)
+                          </label>
+                          <input
+                            id="media_chunk_min_duration"
+                            type="number"
+                            min={10}
+                            max={60}
+                            value={formData.media_chunk_min_duration}
+                            onChange={(e) => handleInputChange('media_chunk_min_duration', Number.parseInt(e.target.value) || 30)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="media_chunk_max_duration" className="block text-sm font-medium text-gray-700 mb-2">
+                            Max Chunk (s)
+                          </label>
+                          <input
+                            id="media_chunk_max_duration"
+                            type="number"
+                            min={60}
+                            max={300}
+                            value={formData.media_chunk_max_duration}
+                            onChange={(e) => handleInputChange('media_chunk_max_duration', Number.parseInt(e.target.value) || 120)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="media_chunk_overlap" className="block text-sm font-medium text-gray-700 mb-2">
+                            Overlap (s)
+                          </label>
+                          <input
+                            id="media_chunk_overlap"
+                            type="number"
+                            min={0}
+                            max={20}
+                            value={formData.media_chunk_overlap}
+                            onChange={(e) => handleInputChange('media_chunk_overlap', Number.parseInt(e.target.value) || 5)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+                {/* Configuration for OCR agents */}
+                {formData.type === 'ocr_agent' && (
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                    <div className="flex items-center mb-6">
+                      <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
+                        <FileText className="w-5 h-5 text-blue-600" />
+                      </div>
+                      <h3 className="text-xl font-semibold text-gray-900">OCR Configuration</h3>
+                    </div>
+
+                    {/* Agent Capabilities Card for OCR agents — Tool Agent checkbox */}
+                    <div className="bg-gray-50 rounded-xl border border-gray-200 p-6 mb-6">
+                      <div className="flex items-center mb-4">
+                        <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center mr-3">
+                          <Zap className="w-4 h-4 text-green-600" />
+                        </div>
+                        <h4 className="text-base font-semibold text-gray-900">Capabilities</h4>
+                      </div>
+                      <div className="space-y-4">
+                        <div className="flex items-center p-3 bg-white rounded-lg border border-gray-200">
+                          <input
+                            id="is_tool_ocr"
+                            type="checkbox"
+                            checked={formData.is_tool}
+                            onChange={(e) => {
+                              if (!e.target.checked && mcpUsage && mcpUsage.mcp_servers.length > 0) {
+                                setShowMcpWarning(true);
+                              } else {
+                                handleInputChange('is_tool', e.target.checked);
+                              }
+                            }}
+                            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="ml-3">
+                            <label htmlFor="is_tool_ocr" className="text-sm font-medium text-gray-900">Tool Agent</label>
+                            <p className="text-xs text-gray-500">Can be used by other agents (including OCR tools)</p>
+                            {mcpUsage && mcpUsage.mcp_servers.length > 0 && formData.is_tool && (
+                              <p className="text-xs text-purple-600 mt-1">
+                                Used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* No AI Services Warning */}
+                    {agent?.ai_services.length === 0 && renderNoAIServicesWarning(true)}
+
+                    <div className="space-y-6">
+                      <div>
+                        <label htmlFor="vision_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Modelo de Visión
+                        </label>
+                        <select
+                          id="vision_service"
+                          aria-describedby={serviceStatusId(agent?.ai_services, formData.vision_service_id, "vision_service")}
+                          value={formData.vision_service_id || ''}
+                          onChange={(e) => handleInputChange('vision_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                        >
+                          <option value="">-- Seleccionar modelo de visión --</option>
+                          <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.vision_service_id} />
+                        </select>
+                        <ServiceOptionStatus selectId="vision_service" options={agent?.ai_services} selectedId={formData.vision_service_id} />
+                      </div>
+
+                      <div>
+                        <label htmlFor="vision_system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
+                          System Prompt (Visión)
+                        </label>
+                        <textarea
+                          id="vision_system_prompt"
+                          value={formData.vision_system_prompt || ''}
+                          onChange={(e) => handleInputChange('vision_system_prompt', e.target.value)}
+                          rows={2}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                          placeholder="Añade el system prompt para el modelo de visión..."
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="text_service" className="block text-sm font-medium text-gray-700 mb-2">
+                          Modelo de Texto
+                        </label>
+                        <select
+                          id="text_service"
+                          aria-describedby={serviceStatusId(agent?.ai_services, formData.service_id, "text_service")}
                           value={formData.service_id || ''}
                           onChange={(e) => handleInputChange('service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                          required
                         >
-                          <option value="">Select AI Service</option>
+                          <option value="">-- Seleccionar modelo de texto --</option>
                           <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.service_id} />
                         </select>
-                        <ServiceOptionStatus selectId="ai_service" options={agent?.ai_services} selectedId={formData.service_id} />
+                        <ServiceOptionStatus selectId="text_service" options={agent?.ai_services} selectedId={formData.service_id} />
                       </div>
 
                       <div>
-                        <label htmlFor="silo" className="block text-sm font-medium text-gray-700 mb-2">
-                          Knowledge Base (Silo)
+                        <label htmlFor="text_system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
+                          System Prompt (Texto)
                         </label>
-                        <select
-                          id="silo"
-                          value={formData.silo_id || ''}
-                          onChange={(e) => handleInputChange('silo_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
+                        <textarea
+                          id="text_system_prompt"
+                          value={formData.text_system_prompt || ''}
+                          onChange={(e) => handleInputChange('text_system_prompt', e.target.value)}
+                          rows={2}
                           className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        >
-                          <option value="">Select Knowledge Base</option>
-                          {agent?.silos.map((silo) => (
-                            <option key={silo.silo_id} value={silo.silo_id}>
-                              {silo.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label htmlFor="temperature" className="block text-sm font-medium text-gray-700 mb-2">
-                          Temperature
-                        </label>
-                        <div className="flex items-center space-x-4">
-                          <input
-                            type="range"
-                            id="temperature"
-                            min="0"
-                            max="2"
-                            step="0.1"
-                            value={formData.temperature}
-                            onChange={(e) => handleInputChange('temperature', Number.parseFloat(e.target.value))}
-                            className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                          />
-                          <span className="text-sm font-medium text-gray-600 w-12">
-                            {formData.temperature.toFixed(1)}
-                          </span>
-                        </div>
-                        <p className="text-xs text-gray-500 mt-1">
-                          Controls randomness: 0 = deterministic, 2 = very creative
-                        </p>
-                      </div>
-
-                      <div>
-                        <OutputParserField
-                          showOutputParser={showOutputParser}
-                          setShowOutputParser={setShowOutputParser}
-                          formData={formData}
-                          handleInputChange={handleInputChange}
-                          agent={agent}
+                          placeholder="Añade el system prompt para el modelo de texto..."
                         />
                       </div>
+
+                      <OutputParserField
+                        showOutputParser={showOutputParser}
+                        setShowOutputParser={setShowOutputParser}
+                        formData={formData}
+                        handleInputChange={handleInputChange}
+                        agent={agent}
+                      />
                     </div>
                   </div>
+                )}
+              </div>
+            )}
 
-                  {/* RAG retrieval config — only meaningful when a silo is selected */}
-                  {formData.silo_id && (
-                    <RagConfigSection
-                      value={{
-                        rag_k: formData.rag_k,
-                        rag_search_type: formData.rag_search_type,
-                        rag_score_threshold: formData.rag_score_threshold,
-                        rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
-                        rag_fixed_filters: formData.rag_fixed_filters,
-                      }}
-                      onChange={(patch: Partial<RagConfigValue>) =>
-                        setFormData((prev) => ({ ...prev, ...patch }))
-                      }
-                      metadataFields={siloMetadataFields}
-                      loadingMetadata={loadingSiloMetadata}
-                    />
-                  )}
-
-                  {/* Agent Capabilities Card */}
+            {/* TAB 4: ADVANCED */}
+            {activeTab === 'advanced' && (
+              <div className="space-y-6">
+                {/* Tools Card - Only for regular agents */}
+                {agent && agent.tools.length > 0 && formData.type !== 'ocr_agent' && (
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
                     <div className="flex items-center mb-6">
-                      <div className="w-10 h-10 bg-green-100 rounded-xl flex items-center justify-center mr-4">
-                        <Zap className="w-5 h-5 text-green-600" />
+                      <div className="w-10 h-10 bg-yellow-100 rounded-xl flex items-center justify-center mr-4">
+                        <Wrench className="w-5 h-5 text-yellow-600" />
                       </div>
-                      <h3 className="text-xl font-semibold text-gray-900">Capabilities</h3>
+                      <h3 className="text-xl font-semibold text-gray-900">Available Tools</h3>
                     </div>
-
-                    {/* MCP Warning Dialog */}
-                    {showMcpWarning && mcpUsage && mcpUsage.mcp_servers.length > 0 && (
-                      <div className="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4">
-                        <div className="flex items-start">
-                          <span className="text-amber-500 text-xl mr-3">!</span>
-                          <div className="flex-1">
-                            <h4 className="text-sm font-semibold text-amber-900 mb-2">
-                              This agent is used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
-                            </h4>
-                            <p className="text-sm text-amber-800 mb-2">
-                              Unmarking this agent as a tool will make it unavailable in the following MCP servers:
-                            </p>
-                            <ul className="text-sm text-amber-700 list-disc list-inside mb-3">
-                              {mcpUsage.mcp_servers.map(s => (
-                                <li key={s.server_id}>{s.server_name}</li>
-                              ))}
-                            </ul>
-                            <div className="flex space-x-3">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  handleInputChange('is_tool', false);
-                                  setShowMcpWarning(false);
-                                }}
-                                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors"
-                              >
-                                Unmark as Tool Anyway
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setShowMcpWarning(false)}
-                                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-medium rounded-lg transition-colors"
-                              >
-                                Cancel
-                              </button>
+                  
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {agent.tools.map((tool) => (
+                        <label
+                          key={tool.agent_id}
+                          className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full block ${
+                            formData.tool_ids.includes(tool.agent_id)
+                              ? 'border-blue-500 bg-blue-50'
+                              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={formData.tool_ids.includes(tool.agent_id)}
+                                onChange={() => handleToolToggle(tool.agent_id)}
+                                className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="ml-3 text-sm font-medium text-gray-900">
+                                {tool.name}
+                              </span>
                             </div>
+                            <div 
+                              className={`w-2 h-2 rounded-full ${
+                              formData.tool_ids.includes(tool.agent_id)
+                                ? 'bg-blue-500'
+                                : 'bg-gray-300'
+                              }`}
+                            />
                           </div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="flex items-center p-4 bg-gray-50 rounded-xl">
-                        <input
-                          id="is_tool"
-                          type="checkbox"
-                          checked={formData.is_tool}
-                          onChange={(e) => {
-                            // If unmarking as tool and agent is used in MCP servers, show warning
-                            if (!e.target.checked && mcpUsage && mcpUsage.mcp_servers.length > 0) {
-                              setShowMcpWarning(true);
-                            } else {
-                              handleInputChange('is_tool', e.target.checked);
-                            }
-                          }}
-                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <div className="ml-3">
-                          <label htmlFor="is_tool" className="text-sm font-medium text-gray-900">Tool Agent</label>
-                          <p className="text-xs text-gray-500">Can be used by other agents</p>
-                          {mcpUsage && mcpUsage.mcp_servers.length > 0 && formData.is_tool && (
-                            <p className="text-xs text-purple-600 mt-1">
-                              Used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center p-4 bg-gray-50 rounded-xl">
-                        <input
-                          id="has_memory"
-                          type="checkbox"
-                          checked={formData.has_memory}
-                          onChange={(e) => handleInputChange('has_memory', e.target.checked)}
-                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <div className="ml-3">
-                          <label htmlFor="has_memory" className="text-sm font-medium text-gray-900">Conversational</label>
-                          <p className="text-xs text-gray-500">Maintains conversation memory</p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center p-4 bg-gray-50 rounded-xl">
-                        <input
-                          id="enable_code_interpreter"
-                          type="checkbox"
-                          checked={formData.enable_code_interpreter}
-                          onChange={(e) => handleInputChange('enable_code_interpreter', e.target.checked)}
-                          aria-describedby="enable_code_interpreter_help"
-                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <div className="ml-3">
-                          <label htmlFor="enable_code_interpreter" className="text-sm font-medium text-gray-900">Code Interpreter</label>
-                          <p id="enable_code_interpreter_help" className="text-xs text-gray-500">Allows the agent to execute Python code (pandas, openpyxl, numpy)</p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center p-4 bg-gray-50 rounded-xl">
-                        <input
-                          id="skill_router_enabled"
-                          type="checkbox"
-                          checked={formData.skill_router_enabled}
-                          onChange={(e) => handleInputChange('skill_router_enabled', e.target.checked)}
-                          aria-describedby="skill_router_enabled_help"
-                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <div className="ml-3">
-                          <label htmlFor="skill_router_enabled" className="text-sm font-medium text-gray-900">Skill Router</label>
-                          <p id="skill_router_enabled_help" className="text-xs text-gray-500">Let the model pre-select at most 2 skills per turn; off by default.</p>
-                        </div>
-                      </div>
-
-                      {formData.enable_code_interpreter && (
-                        <div className="md:col-span-2">
-                          <label htmlFor="sandbox_service" className="block text-sm font-medium text-gray-700 mb-2">
-                            Sandbox Service
-                          </label>
-                          <select
-                            id="sandbox_service"
-                            aria-describedby={serviceStatusId(agent?.sandbox_services, formData.sandbox_service_id, 'sandbox_service')}
-                            value={formData.sandbox_service_id || ''}
-                            onChange={(e) => handleInputChange('sandbox_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
-                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                          >
-                            <option value="">Use app/system default</option>
-                            <ServiceSelectOptions options={agent?.sandbox_services} savedValue={agent?.sandbox_service_id} />
-                          </select>
-                          <ServiceOptionStatus selectId="sandbox_service" options={agent?.sandbox_services} selectedId={formData.sandbox_service_id} />
-                          <p className="text-xs text-gray-500 mt-1">
-                            Overrides the sandbox environment used to run this agent's Python code. Leave unset to use the app's default Sandbox Service.
-                          </p>
-                        </div>
-                      )}
+                        </label>
+                      ))}
                     </div>
-
-                    {/* Provider-side Tools */}
-                    <div className="mt-6 pt-6 border-t border-gray-100">
-                      <div className="mb-3">
-                        <h4 className="text-sm font-semibold text-gray-800">Provider-side Tools</h4>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          These tools run on the AI provider's infrastructure — no extra backend setup needed.
-                          Only tools supported by the agent's selected provider will be active.
+                  
+                    {formData.tool_ids.length > 0 && (
+                      <div className="mt-4 p-4 bg-blue-50 rounded-xl">
+                        <p className="text-sm text-blue-800">
+                          <span className="font-medium">{formData.tool_ids.length}</span> tool{formData.tool_ids.length === 1 ? '' : 's'} selected
                         </p>
                       </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {[
-                          {
-                            id: 'web_search',
-                            icon: <Search className="w-4 h-4" />,
-                            label: 'Web Search',
-                            description: 'Real-time internet search',
-                            providers: ['OpenAI', 'Anthropic', 'Google', 'Azure'],
-                          },
-                          {
-                            id: 'image_generation',
-                            icon: <Image className="w-4 h-4" />,
-                            label: 'Image Generation',
-                            description: 'Generate images with DALL-E',
-                            providers: ['OpenAI', 'Azure'],
-                          },
-                          {
-                            id: 'code_interpreter',
-                            icon: <Terminal className="w-4 h-4" />,
-                            label: 'Code Interpreter',
-                            description: 'Provider-sandboxed code execution',
-                            providers: ['OpenAI', 'Anthropic', 'Azure'],
-                          },
-                          {
-                            id: 'file_search',
-                            icon: <FolderSearch className="w-4 h-4" />,
-                            label: 'File Search',
-                            description: 'Vector search over uploaded files',
-                            providers: ['OpenAI', 'Azure'],
-                          },
-                        ].map((tool) => {
-                          const active = formData.server_tools.includes(tool.id);
-                          const toggle = () => handleInputChange(
-                            'server_tools',
-                            active
-                              ? formData.server_tools.filter(t => t !== tool.id)
-                              : [...formData.server_tools, tool.id]
-                          );
-                          return (
-                            <button
-                              key={tool.id}
-                              type="button"
-                              onClick={toggle}
-                              className={`text-left p-3 rounded-xl border-2 transition-colors ${
-                                active
-                                  ? 'border-blue-500 bg-blue-50'
-                                  : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-base">{tool.icon}</span>
-                                <span className={`text-sm font-medium ${active ? 'text-blue-800' : 'text-gray-800'}`}>
-                                  {tool.label}
-                                </span>
-                                {active && (
-                                  <span className="ml-auto text-xs font-medium text-blue-600 bg-blue-100 px-1.5 py-0.5 rounded-full">ON</span>
-                                )}
-                              </div>
-                              <p className="text-xs text-gray-500 mb-2">{tool.description}</p>
-                              <div className="flex flex-wrap gap-1">
-                                {tool.providers.map(p => (
-                                  <span key={p} className="text-xs px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">{p}</span>
-                                ))}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <p className="text-xs text-amber-600 mt-3 flex items-start gap-1">
-                        <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> Some tools require specific models — e.g. Image Generation needs gpt-image-1 (OpenAI Responses API).
-                        Unsupported tools for the selected provider are silently ignored.
-                      </p>
-                    </div>
+                    )}
                   </div>
+                )}
 
-                  {/* Media Processing Card */}
+                {/* MCP Configs Card - Only for regular agents */}
+                {agent?.mcp_configs && formData.type !== 'ocr_agent' && (
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
                     <div className="flex items-center mb-6">
                       <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
-                        <Tv className="w-5 h-5 text-purple-600" />
+                        <Plug className="w-5 h-5 text-purple-600" />
                       </div>
-                      <div>
-                        <h3 className="text-xl font-semibold text-gray-900">Media Processing</h3>
-                        <p className="text-sm text-gray-500">
-                          Default configuration used when uploading audio/video or YouTube URLs in the playground.
-                          Set it here once so uploads only require choosing the file or URL.
-                        </p>
+                      <h3 className="text-xl font-semibold text-gray-900">MCP Servers</h3>
+                      <div className="ml-3 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                        Model Context Protocol
                       </div>
                     </div>
-
-                    <div className="mb-6">
-                      <label htmlFor="media_embedding_service" className="block text-sm font-medium text-gray-700 mb-2">
-                        Embedding Service {formData.has_memory && <span className="text-red-500">*</span>}
-                      </label>
-                      <select
-                        id="media_embedding_service"
-                        aria-describedby={serviceStatusId(embeddingServices, formData.media_embedding_service_id, "media_embedding_service")}
-                        required={formData.has_memory}
-                        value={formData.media_embedding_service_id || ''}
-                        onChange={(e) => handleInputChange('media_embedding_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                      >
-                        <option value="">None (no temporary knowledge base)</option>
-                        <ServiceSelectOptions options={embeddingServices} savedValue={agent?.media_embedding_service_id} />
-                      </select>
-                      <ServiceOptionStatus selectId="media_embedding_service" options={embeddingServices} selectedId={formData.media_embedding_service_id} />
-                      <p className="text-xs text-gray-500 mt-1">
-                        Model used to vectorize uploaded media/documents into the conversation's temporary
-                        knowledge base for retrieval. Required for conversational agents; optional otherwise
-                        (documents are then sent in full to the agent, and audio/video uploads are unavailable).
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div>
-                        <label htmlFor="transcription_service" className="block text-sm font-medium text-gray-700 mb-2">
-                          Transcription Service
-                        </label>
-                        <select
-                          id="transcription_service"
-                          aria-describedby={serviceStatusId(agent?.ai_services, formData.transcription_service_id, "transcription_service")}
-                          value={formData.transcription_service_id || ''}
-                          onChange={(e) => handleInputChange('transcription_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        >
-                          <option value="">Select Transcription Service</option>
-                          <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.transcription_service_id} />
-                        </select>
-                        <ServiceOptionStatus selectId="transcription_service" options={agent?.ai_services} selectedId={formData.transcription_service_id} />
-                        <p className="text-xs text-gray-500 mt-1">Speech-to-text model used to transcribe media.</p>
-                      </div>
-
-                      <div>
-                        <label htmlFor="video_ai_service" className="block text-sm font-medium text-gray-700 mb-2">
-                          Video Analysis Service (optional)
-                        </label>
-                        <select
-                          id="video_ai_service"
-                          aria-describedby={serviceStatusId(videoServiceOptions, formData.video_ai_service_id, "video_ai_service")}
-                          value={formData.video_ai_service_id || ''}
-                          onChange={(e) => handleInputChange('video_ai_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        >
-                          <option value="">None (audio only)</option>
-                          <ServiceSelectOptions options={videoServiceOptions} savedValue={agent?.video_ai_service_id} />
-                        </select>
-                        <ServiceOptionStatus selectId="video_ai_service" options={videoServiceOptions} selectedId={formData.video_ai_service_id} />
-                        <p className="text-xs text-gray-500 mt-1">Enables multimodal analysis (visual descriptions from video frames).</p>
-                      </div>
-
-                      <div>
-                        <label htmlFor="media_forced_language" className="block text-sm font-medium text-gray-700 mb-2">
-                          Language
-                        </label>
-                        <select
-                          id="media_forced_language"
-                          value={formData.media_forced_language || ''}
-                          onChange={(e) => handleInputChange('media_forced_language', e.target.value || undefined)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        >
-                          <option value="">Auto-detect</option>
-                          <option value="es">Spanish</option>
-                          <option value="en">English</option>
-                          <option value="eu">Basque</option>
-                          <option value="fr">French</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
-                      <div>
-                        <label htmlFor="media_chunk_min_duration" className="block text-sm font-medium text-gray-700 mb-2">
-                          Min Chunk (s)
-                        </label>
-                        <input
-                          id="media_chunk_min_duration"
-                          type="number"
-                          min={10}
-                          max={60}
-                          value={formData.media_chunk_min_duration}
-                          onChange={(e) => handleInputChange('media_chunk_min_duration', Number.parseInt(e.target.value) || 30)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="media_chunk_max_duration" className="block text-sm font-medium text-gray-700 mb-2">
-                          Max Chunk (s)
-                        </label>
-                        <input
-                          id="media_chunk_max_duration"
-                          type="number"
-                          min={60}
-                          max={300}
-                          value={formData.media_chunk_max_duration}
-                          onChange={(e) => handleInputChange('media_chunk_max_duration', Number.parseInt(e.target.value) || 120)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="media_chunk_overlap" className="block text-sm font-medium text-gray-700 mb-2">
-                          Overlap (s)
-                        </label>
-                        <input
-                          id="media_chunk_overlap"
-                          type="number"
-                          min={0}
-                          max={20}
-                          value={formData.media_chunk_overlap}
-                          onChange={(e) => handleInputChange('media_chunk_overlap', Number.parseInt(e.target.value) || 5)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-              {/* Configuration for OCR agents */}
-              {formData.type === 'ocr_agent' && (
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                  <div className="flex items-center mb-6">
-                    <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
-                      <FileText className="w-5 h-5 text-blue-600" />
-                    </div>
-                    <h3 className="text-xl font-semibold text-gray-900">OCR Configuration</h3>
-                  </div>
-
-                  {/* Agent Capabilities Card for OCR agents — Tool Agent checkbox */}
-                  <div className="bg-gray-50 rounded-xl border border-gray-200 p-6 mb-6">
-                    <div className="flex items-center mb-4">
-                      <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center mr-3">
-                        <Zap className="w-4 h-4 text-green-600" />
-                      </div>
-                      <h4 className="text-base font-semibold text-gray-900">Capabilities</h4>
-                    </div>
-                    <div className="space-y-4">
-                      <div className="flex items-center p-3 bg-white rounded-lg border border-gray-200">
-                        <input
-                          id="is_tool_ocr"
-                          type="checkbox"
-                          checked={formData.is_tool}
-                          onChange={(e) => {
-                            if (!e.target.checked && mcpUsage && mcpUsage.mcp_servers.length > 0) {
-                              setShowMcpWarning(true);
-                            } else {
-                              handleInputChange('is_tool', e.target.checked);
-                            }
-                          }}
-                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <div className="ml-3">
-                          <label htmlFor="is_tool_ocr" className="text-sm font-medium text-gray-900">Tool Agent</label>
-                          <p className="text-xs text-gray-500">Can be used by other agents (including OCR tools)</p>
-                          {mcpUsage && mcpUsage.mcp_servers.length > 0 && formData.is_tool && (
-                            <p className="text-xs text-purple-600 mt-1">
-                              Used in {mcpUsage.mcp_servers.length} MCP server{mcpUsage.mcp_servers.length === 1 ? '' : 's'}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* No AI Services Warning */}
-                  {agent?.ai_services.length === 0 && renderNoAIServicesWarning(true)}
-
-                  <div className="space-y-6">
-                    <div>
-                      <label htmlFor="vision_service" className="block text-sm font-medium text-gray-700 mb-2">
-                        Modelo de Visión
-                      </label>
-                      <select
-                        id="vision_service"
-                        aria-describedby={serviceStatusId(agent?.ai_services, formData.vision_service_id, "vision_service")}
-                        value={formData.vision_service_id || ''}
-                        onChange={(e) => handleInputChange('vision_service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                      >
-                        <option value="">-- Seleccionar modelo de visión --</option>
-                        <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.vision_service_id} />
-                      </select>
-                      <ServiceOptionStatus selectId="vision_service" options={agent?.ai_services} selectedId={formData.vision_service_id} />
-                    </div>
-
-                    <div>
-                      <label htmlFor="vision_system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
-                        System Prompt (Visión)
-                      </label>
-                      <textarea
-                        id="vision_system_prompt"
-                        value={formData.vision_system_prompt || ''}
-                        onChange={(e) => handleInputChange('vision_system_prompt', e.target.value)}
-                        rows={2}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        placeholder="Añade el system prompt para el modelo de visión..."
-                      />
-                    </div>
-
-                    <div>
-                      <label htmlFor="text_service" className="block text-sm font-medium text-gray-700 mb-2">
-                        Modelo de Texto
-                      </label>
-                      <select
-                        id="text_service"
-                        aria-describedby={serviceStatusId(agent?.ai_services, formData.service_id, "text_service")}
-                        value={formData.service_id || ''}
-                        onChange={(e) => handleInputChange('service_id', e.target.value ? Number.parseInt(e.target.value) : undefined)}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                      >
-                        <option value="">-- Seleccionar modelo de texto --</option>
-                        <ServiceSelectOptions options={agent?.ai_services} savedValue={agent?.service_id} />
-                      </select>
-                      <ServiceOptionStatus selectId="text_service" options={agent?.ai_services} selectedId={formData.service_id} />
-                    </div>
-
-                    <div>
-                      <label htmlFor="text_system_prompt" className="block text-sm font-medium text-gray-700 mb-2">
-                        System Prompt (Texto)
-                      </label>
-                      <textarea
-                        id="text_system_prompt"
-                        value={formData.text_system_prompt || ''}
-                        onChange={(e) => handleInputChange('text_system_prompt', e.target.value)}
-                        rows={2}
-                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                        placeholder="Añade el system prompt para el modelo de texto..."
-                      />
-                    </div>
-
-                    <OutputParserField
-                      showOutputParser={showOutputParser}
-                      setShowOutputParser={setShowOutputParser}
-                      formData={formData}
-                      handleInputChange={handleInputChange}
-                      agent={agent}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 4: ADVANCED */}
-          {activeTab === 'advanced' && (
-            <div className="space-y-6">
-              {/* Tools Card - Only for regular agents */}
-              {agent && agent.tools.length > 0 && formData.type !== 'ocr_agent' && (
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                  <div className="flex items-center mb-6">
-                    <div className="w-10 h-10 bg-yellow-100 rounded-xl flex items-center justify-center mr-4">
-                      <Wrench className="w-5 h-5 text-yellow-600" />
-                    </div>
-                    <h3 className="text-xl font-semibold text-gray-900">Available Tools</h3>
-                  </div>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {agent.tools.map((tool) => (
-                      <label
-                        key={tool.agent_id}
-                        className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full block ${
-                          formData.tool_ids.includes(tool.agent_id)
-                            ? 'border-blue-500 bg-blue-50'
-                            : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center">
-                            <input
-                              type="checkbox"
-                              checked={formData.tool_ids.includes(tool.agent_id)}
-                              onChange={() => handleToolToggle(tool.agent_id)}
-                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                            />
-                            <span className="ml-3 text-sm font-medium text-gray-900">
-                              {tool.name}
-                            </span>
-                          </div>
-                          <div 
-                            className={`w-2 h-2 rounded-full ${
-                            formData.tool_ids.includes(tool.agent_id)
-                              ? 'bg-blue-500'
-                              : 'bg-gray-300'
-                            }`}
-                          />
-                        </div>
-                      </label>
-                    ))}
-                  </div>
-                  
-                  {formData.tool_ids.length > 0 && (
-                    <div className="mt-4 p-4 bg-blue-50 rounded-xl">
-                      <p className="text-sm text-blue-800">
-                        <span className="font-medium">{formData.tool_ids.length}</span> tool{formData.tool_ids.length === 1 ? '' : 's'} selected
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* MCP Configs Card - Only for regular agents */}
-              {agent?.mcp_configs && formData.type !== 'ocr_agent' && (
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                  <div className="flex items-center mb-6">
-                    <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center mr-4">
-                      <Plug className="w-5 h-5 text-purple-600" />
-                    </div>
-                    <h3 className="text-xl font-semibold text-gray-900">MCP Servers</h3>
-                    <div className="ml-3 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
-                      Model Context Protocol
-                    </div>
-                  </div>
-                  
-                  {agent.mcp_configs.length > 0 ? (
-                    <>
-                      <div className="mb-4 p-4 bg-purple-50 rounded-xl">
-                        <div className="flex items-start">
-                          <Info className="w-5 h-5 text-purple-500 mr-3 shrink-0" />
-                          <div>
-                            <p className="text-sm text-purple-800 font-medium">What are MCP Servers?</p>
-                            <p className="text-xs text-purple-700 mt-1">
-                              MCP (Model Context Protocol) servers allow agents to connect to external tools and data sources. 
-                              Select the servers this agent should have access to.
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {agent.mcp_configs.map((mcp) => (
-                          <label
-                            key={mcp.config_id}
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
-                              formData.mcp_config_ids.includes(mcp.config_id)
-                                ? 'border-purple-500 bg-purple-50'
-                                : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center">
-                                <input
-                                  type="checkbox"
-                                  checked={formData.mcp_config_ids.includes(mcp.config_id)}
-                                  onChange={() => handleMCPToggle(mcp.config_id)}
-                                  className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                />
-                                <span className="ml-3 text-sm font-medium text-gray-900">{mcp.name}</span>
-                              </div>
-                              <div className={`w-2 h-2 rounded-full ${
-                                formData.mcp_config_ids.includes(mcp.config_id) ? 'bg-purple-500' : 'bg-gray-300'
-                              }`} />
+                    {agent.mcp_configs.length > 0 ? (
+                      <>
+                        <div className="mb-4 p-4 bg-purple-50 rounded-xl">
+                          <div className="flex items-start">
+                            <Info className="w-5 h-5 text-purple-500 mr-3 shrink-0" />
+                            <div>
+                              <p className="text-sm text-purple-800 font-medium">What are MCP Servers?</p>
+                              <p className="text-xs text-purple-700 mt-1">
+                                MCP (Model Context Protocol) servers allow agents to connect to external tools and data sources. 
+                                Select the servers this agent should have access to.
+                              </p>
                             </div>
-                          </label>
-                        ))}
-                      </div>
-                      
-                      {formData.mcp_config_ids.length > 0 && (
-                        <div className="mt-4 p-4 bg-purple-50 rounded-xl">
-                          <p className="text-sm text-purple-800">
-                            <span className="font-medium">{formData.mcp_config_ids.length}</span> MCP server{formData.mcp_config_ids.length === 1 ? '' : 's'} selected
-                          </p>
+                          </div>
                         </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="text-center py-8">
-                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <Plug className="w-8 h-8 text-gray-400" />
-                      </div>
-                      <h4 className="text-lg font-medium text-gray-900 mb-2">No MCP Servers Available</h4>
-                      <p className="text-gray-500 mb-4">
-                        You haven't configured any MCP servers yet. Create MCP configurations in the settings to enable external tool access.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => navigate(`/apps/${appId}/settings/mcp-configs`)}
-                        className="inline-flex items-center px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors"
-                      >
-                        <Settings className="w-4 h-4 mr-2" />
-                        {' '}Configure MCP Servers
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Middlewares Card - Only for regular agents */}
-              {agent?.middlewares && formData.type !== 'ocr_agent' && (
-                <AgentMiddlewaresCard
-                  middlewares={agent.middlewares}
-                  selectedIds={formData.middleware_ids}
-                  hasMemory={formData.has_memory}
-                  onChange={(ids) => setFormData((prev) => ({ ...prev, middleware_ids: ids }))}
-                  onRequireMemory={() => setFormData((prev) => ({ ...prev, has_memory: true }))}
-                  onManage={() => navigate(`/apps/${appId}/middlewares`)}
-                />
-              )}
-
-              {/* Skills Card - Only for regular agents */}
-              {agent?.skills && formData.type !== 'ocr_agent' && (
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                  <div className="flex items-center justify-between mb-6">
-                    <div>
-                      <h3 className="text-xl font-semibold text-gray-900 flex items-center">
-                        <Target className="w-5 h-5 mr-3" />
-                        {' '}Skills
-                      </h3>
-                      <p className="text-gray-600 mt-1">Assign specialized behaviors that the agent can activate on-demand</p>
-                    </div>
-                  </div>
-
-                  {agent.skills.length > 0 ? (
-                    <>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {agent.skills.map((skill) => {
-                          const descriptionId = skill.description ? `skill-desc-${skill.skill_id}` : undefined;
-                          const disabledBadgeId = skill.is_enabled === false ? `skill-disabled-${skill.skill_id}` : undefined;
-                          const systemBadgeId = skill.is_system ? `skill-system-${skill.skill_id}` : undefined;
-                          const describedBy = [systemBadgeId, disabledBadgeId, descriptionId].filter(Boolean).join(' ') || undefined;
-                          return (
+                      
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {agent.mcp_configs.map((mcp) => (
                             <label
-                              key={skill.skill_id}
+                              key={mcp.config_id}
                               className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
-                                formData.skill_ids.includes(skill.skill_id)
+                                formData.mcp_config_ids.includes(mcp.config_id)
                                   ? 'border-purple-500 bg-purple-50'
                                   : 'border-gray-200 bg-gray-50 hover:border-gray-300'
                               }`}
@@ -1719,324 +1737,415 @@ function AgentFormPage() {
                                 <div className="flex items-center">
                                   <input
                                     type="checkbox"
-                                    checked={formData.skill_ids.includes(skill.skill_id)}
-                                    onChange={() => handleSkillToggle(skill.skill_id)}
-                                    aria-label={skill.name}
-                                    aria-describedby={describedBy}
+                                    checked={formData.mcp_config_ids.includes(mcp.config_id)}
+                                    onChange={() => handleMCPToggle(mcp.config_id)}
                                     className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                   />
-                                  <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
+                                  <span className="ml-3 text-sm font-medium text-gray-900">{mcp.name}</span>
                                 </div>
                                 <div className={`w-2 h-2 rounded-full ${
-                                  formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
+                                  formData.mcp_config_ids.includes(mcp.config_id) ? 'bg-purple-500' : 'bg-gray-300'
                                 }`} />
                               </div>
-                              {skill.is_system && (
-                                <p id={systemBadgeId} className="mt-2 ml-7">
-                                  <Badge label="System" variant="secondary" />
-                                </p>
-                              )}
-                              {skill.is_enabled === false && (
-                                <p id={disabledBadgeId} className="mt-2 ml-7 inline-flex items-center gap-1 text-xs font-medium text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full">
-                                  <AlertTriangle className="w-3 h-3" aria-hidden="true" />
-                                  Disabled — ignored at execution until re-enabled
-                                </p>
-                              )}
-                              {skill.description && (
-                                <p id={descriptionId} className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
-                              )}
                             </label>
-                          );
-                        })}
-                      </div>
-
-                      {formData.skill_ids.length > 0 && (
-                        <div className="mt-4 p-4 bg-purple-50 rounded-xl">
-                          <p className="text-sm text-purple-800">
-                            <span className="font-medium">{formData.skill_ids.length}</span> skill{formData.skill_ids.length === 1 ? '' : 's'} selected.
-                            The agent will have a <code className="bg-purple-100 px-1 rounded">load_skill</code> tool to activate these skills.
-                          </p>
+                          ))}
                         </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="text-center py-8">
-                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <Target className="w-8 h-8 text-gray-400" />
+                      
+                        {formData.mcp_config_ids.length > 0 && (
+                          <div className="mt-4 p-4 bg-purple-50 rounded-xl">
+                            <p className="text-sm text-purple-800">
+                              <span className="font-medium">{formData.mcp_config_ids.length}</span> MCP server{formData.mcp_config_ids.length === 1 ? '' : 's'} selected
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-center py-8">
+                        <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <Plug className="w-8 h-8 text-gray-400" />
+                        </div>
+                        <h4 className="text-lg font-medium text-gray-900 mb-2">No MCP Servers Available</h4>
+                        <p className="text-gray-500 mb-4">
+                          You haven't configured any MCP servers yet. Create MCP configurations in the settings to enable external tool access.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/apps/${appId}/settings/mcp-configs`)}
+                          className="inline-flex items-center px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors"
+                        >
+                          <Settings className="w-4 h-4 mr-2" />
+                          {' '}Configure MCP Servers
+                        </button>
                       </div>
-                      <h4 className="text-lg font-medium text-gray-900 mb-2">No Skills Available</h4>
-                      <p className="text-gray-500 mb-4">
-                        You haven't created any skills yet. Create skills in the settings to enable specialized agent behaviors.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => navigate(`/apps/${appId}/skills`)}
-                        className="inline-flex items-center px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors"
-                      >
-                        <Target className="w-4 h-4 mr-2" />
-                        {' '}Manage Skills
-                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Middlewares Card - Only for regular agents */}
+                {agent?.middlewares && formData.type !== 'ocr_agent' && (
+                  <AgentMiddlewaresCard
+                    middlewares={agent.middlewares}
+                    selectedIds={formData.middleware_ids}
+                    hasMemory={formData.has_memory}
+                    onChange={(ids) => setFormData((prev) => ({ ...prev, middleware_ids: ids }))}
+                    onRequireMemory={() => setFormData((prev) => ({ ...prev, has_memory: true }))}
+                    onManage={() => navigate(`/apps/${appId}/middlewares`)}
+                  />
+                )}
+
+                {/* Skills Card - Only for regular agents */}
+                {agent?.skills && formData.type !== 'ocr_agent' && (
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
+                    <div className="flex items-center justify-between mb-6">
+                      <div>
+                        <h3 className="text-xl font-semibold text-gray-900 flex items-center">
+                          <Target className="w-5 h-5 mr-3" />
+                          {' '}Skills
+                        </h3>
+                        <p className="text-gray-600 mt-1">Assign specialized behaviors that the agent can activate on-demand</p>
+                      </div>
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
 
-          {/* TAB 5: MARKETPLACE */}
-          {activeTab === 'marketplace' && (
-            <div className="bg-white rounded-2xl shadow-sm border border-blue-200 p-8 mb-8">
-              <div className="flex items-center mb-6">
-                <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
-                  <Store className="w-5 h-5 text-blue-600" aria-hidden="true" />
-                </div>
-                <h3 className="text-xl font-semibold text-gray-900">Marketplace Publishing</h3>
+                    {agent.skills.length > 0 ? (
+                      <>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {agent.skills.map((skill) => {
+                            const descriptionId = skill.description ? `skill-desc-${skill.skill_id}` : undefined;
+                            const disabledBadgeId = skill.is_enabled === false ? `skill-disabled-${skill.skill_id}` : undefined;
+                            const systemBadgeId = skill.is_system ? `skill-system-${skill.skill_id}` : undefined;
+                            const describedBy = [systemBadgeId, disabledBadgeId, descriptionId].filter(Boolean).join(' ') || undefined;
+                            return (
+                              <label
+                                key={skill.skill_id}
+                                className={`p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 text-left w-full ${
+                                  formData.skill_ids.includes(skill.skill_id)
+                                    ? 'border-purple-500 bg-purple-50'
+                                    : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center">
+                                    <input
+                                      type="checkbox"
+                                      checked={formData.skill_ids.includes(skill.skill_id)}
+                                      onChange={() => handleSkillToggle(skill.skill_id)}
+                                      aria-label={skill.name}
+                                      aria-describedby={describedBy}
+                                      className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                    />
+                                    <span className="ml-3 text-sm font-medium text-gray-900">{skill.name}</span>
+                                  </div>
+                                  <div className={`w-2 h-2 rounded-full ${
+                                    formData.skill_ids.includes(skill.skill_id) ? 'bg-purple-500' : 'bg-gray-300'
+                                  }`} />
+                                </div>
+                                {skill.is_system && (
+                                  <p id={systemBadgeId} className="mt-2 ml-7">
+                                    <Badge label="System" variant="secondary" />
+                                  </p>
+                                )}
+                                {skill.is_enabled === false && (
+                                  <p id={disabledBadgeId} className="mt-2 ml-7 inline-flex items-center gap-1 text-xs font-medium text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full">
+                                    <AlertTriangle className="w-3 h-3" aria-hidden="true" />
+                                    Disabled — ignored at execution until re-enabled
+                                  </p>
+                                )}
+                                {skill.description && (
+                                  <p id={descriptionId} className="mt-2 ml-7 text-xs text-gray-500 truncate">{skill.description}</p>
+                                )}
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        {formData.skill_ids.length > 0 && (
+                          <div className="mt-4 p-4 bg-purple-50 rounded-xl">
+                            <p className="text-sm text-purple-800">
+                              <span className="font-medium">{formData.skill_ids.length}</span> skill{formData.skill_ids.length === 1 ? '' : 's'} selected.
+                              The agent will have a <code className="bg-purple-100 px-1 rounded">load_skill</code> tool to activate these skills.
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-center py-8">
+                        <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <Target className="w-8 h-8 text-gray-400" />
+                        </div>
+                        <h4 className="text-lg font-medium text-gray-900 mb-2">No Skills Available</h4>
+                        <p className="text-gray-500 mb-4">
+                          You haven't created any skills yet. Create skills in the settings to enable specialized agent behaviors.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/apps/${appId}/skills`)}
+                          className="inline-flex items-center px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors"
+                        >
+                          <Target className="w-4 h-4 mr-2" />
+                          {' '}Manage Skills
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
+            )}
 
-              {/* New agent: prompt user to save first */}
-              {isNewAgent ? (
-                <div className="flex items-start gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
-                  <Info className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span>Save the agent first to configure marketplace publishing.</span>
+            {/* TAB 5: MARKETPLACE */}
+            {activeTab === 'marketplace' && (
+              <div className="bg-white rounded-2xl shadow-sm border border-blue-200 p-8 mb-8">
+                <div className="flex items-center mb-6">
+                  <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
+                    <Store className="w-5 h-5 text-blue-600" aria-hidden="true" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900">Marketplace Publishing</h3>
                 </div>
-              ) : (
-              <>
-              {/* Visibility Control */}
-              <div className="mb-6">
-                <label htmlFor="marketplace-visibility" className="block text-sm font-medium text-gray-700 mb-2">Marketplace Visibility</label>
-                <div className="flex items-center gap-4">
-                  <select
-                    id="marketplace-visibility"
-                    value={marketplaceVisibility}
-                    onChange={(e) => handleVisibilityChange(e.target.value as MarketplaceVisibility)}
-                    disabled={formData.is_tool}
-                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                  >
-                    <option value="unpublished">Unpublished (not listed)</option>
-                    <option value="private">Private (visible to app members only)</option>
-                    <option value="public">Public (visible to all users)</option>
-                  </select>
-                  {formData.is_tool && (
-                    <span className="text-xs text-gray-500 ml-2">Tool agents cannot be published to the marketplace</span>
-                  )}
-                </div>
-              </div>
 
-              {/* Profile Metadata (expandable) */}
-              {showMarketplace && (
-                <div className="space-y-6">
-                  <div>
-                    <label htmlFor="marketplace-display-name" className="block text-sm font-medium text-gray-700 mb-2">Display Name</label>
-                    <input
-                      id="marketplace-display-name"
-                      type="text"
-                      value={marketplaceProfile.display_name ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('display_name', e.target.value)}
-                      maxLength={255}
-                      placeholder="Defaults to agent name if empty"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
+                {/* New agent: prompt user to save first */}
+                {isNewAgent ? (
+                  <div className="flex items-start gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
+                    <Info className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Save the agent first to configure marketplace publishing.</span>
                   </div>
-                  <div>
-                    <label htmlFor="marketplace-short-description" className="block text-sm font-medium text-gray-700 mb-2">Short Description</label>
-                    <textarea
-                      id="marketplace-short-description"
-                      value={marketplaceProfile.short_description ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('short_description', e.target.value)}
-                      maxLength={200}
-                      rows={2}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                    <div className="text-xs text-gray-500 mt-1">
-                      {marketplaceProfile.short_description?.length ?? 0}/200 characters
-                    </div>
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-long-description" className="block text-sm font-medium text-gray-700 mb-2">Long Description</label>
-                    <textarea
-                      id="marketplace-long-description"
-                      value={marketplaceProfile.long_description ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('long_description', e.target.value)}
-                      rows={4}
-                      placeholder="Supports Markdown"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-category" className="block text-sm font-medium text-gray-700 mb-2">Category</label>
+                ) : (
+                <>
+                {/* Visibility Control */}
+                <div className="mb-6">
+                  <label htmlFor="marketplace-visibility" className="block text-sm font-medium text-gray-700 mb-2">Marketplace Visibility</label>
+                  <div className="flex items-center gap-4">
                     <select
-                      id="marketplace-category"
-                      value={marketplaceProfile.category ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('category', e.target.value)}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      id="marketplace-visibility"
+                      value={marketplaceVisibility}
+                      onChange={(e) => handleVisibilityChange(e.target.value as MarketplaceVisibility)}
+                      disabled={formData.is_tool}
+                      className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                     >
-                      <option value="">-- Select a category --</option>
-                      {MARKETPLACE_CATEGORIES.map((cat) => (
-                        <option key={cat} value={cat}>{cat}</option>
-                      ))}
+                      <option value="unpublished">Unpublished (not listed)</option>
+                      <option value="private">Private (visible to app members only)</option>
+                      <option value="public">Public (visible to all users)</option>
                     </select>
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-tags" className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
-                    <TagInput
-                      id="marketplace-tags"
-                      tags={marketplaceProfile.tags ?? []}
-                      onChange={(tags) => handleMarketplaceProfileChange('tags', tags)}
-                      maxTags={5}
-                      placeholder="Add up to 5 tags"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="marketplace-icon-url" className="block text-sm font-medium text-gray-700 mb-2">Icon URL</label>
-                    <input
-                      id="marketplace-icon-url"
-                      type="text"
-                      value={marketplaceProfile.icon_url ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('icon_url', e.target.value)}
-                      placeholder="https://..."
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                    {marketplaceProfile.icon_url && (
-                      <img
-                        src={marketplaceProfile.icon_url}
-                        alt="Icon preview"
-                        className="mt-2 w-10 h-10 rounded"
-                        onError={(e) => (e.currentTarget.style.display = 'none')}
-                      />
+                    {formData.is_tool && (
+                      <span className="text-xs text-gray-500 ml-2">Tool agents cannot be published to the marketplace</span>
                     )}
                   </div>
-                  <div>
-                    <label htmlFor="marketplace-cover-image-url" className="block text-sm font-medium text-gray-700 mb-2">Cover Image URL</label>
-                    <input
-                      id="marketplace-cover-image-url"
-                      type="text"
-                      value={marketplaceProfile.cover_image_url ?? ''}
-                      onChange={(e) => handleMarketplaceProfileChange('cover_image_url', e.target.value)}
-                      placeholder="https://..."
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
-                    />
-                    {marketplaceProfile.cover_image_url && (
-                      <img
-                        src={marketplaceProfile.cover_image_url}
-                        alt="Cover preview"
-                        className="mt-2 w-32 h-16 rounded object-cover"
-                        onError={(e) => (e.currentTarget.style.display = 'none')}
-                      />
-                    )}
-                  </div>
-                   <div>
-                     <label className="block text-sm font-medium text-gray-700 mb-3">Conversation Starters</label>
-                     <p className="text-xs text-gray-500 mb-4">
-                       Suggested opening messages for users. These only appear at the start of a new conversation.
-                     </p>
-                     <div className="space-y-3">
-                       {marketplaceProfile.conversation_starters?.map((starter, idx) => (
-                         <div key={idx} className="flex items-center gap-2">
-                           <input
-                             ref={(el) => {
-                               starterRefs.current[idx] = el;
-                             }}
-                             type="text"
-                             value={starter}
-                             onChange={(e) => {
-                               const newStarters = [...(marketplaceProfile.conversation_starters || [])];
-                               newStarters[idx] = e.target.value;
-                               handleMarketplaceProfileChange('conversation_starters', newStarters);
-                             }}
-                             className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-all"
-                             placeholder="Enter a starter prompt..."
-                           />
-                           <button
-                             type="button"
-                             onClick={() => {
-                               const newStarters = marketplaceProfile.conversation_starters?.filter((_, i) => i !== idx) || [];
-                               handleMarketplaceProfileChange('conversation_starters', newStarters);
-                             }}
-                             className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                           >
-                             <span className="text-xs font-bold">✕</span>
-                           </button>
-                         </div>
-                       ))}
-                       <button
-                         type="button"
-                         onClick={() => {
-                           const newStarters = [...(marketplaceProfile.conversation_starters || []), ''];
-                           handleMarketplaceProfileChange('conversation_starters', newStarters);
-                           requestAnimationFrame(() => {
-                             starterRefs.current[newStarters.length - 1]?.focus();
-                           });
-                         }}
-                         className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
-                       >
-                         <Plus className="w-4 h-4 mr-1" /> Add Starter
-                       </button>
-                     </div>
-                   </div>
                 </div>
-              )}
-              </>
-              )}
-            </div>
-          )}
 
-          {activeTab === 'a2a' && !isNewAgent && (
-            <AgentA2ASettings
-              appId={Number.parseInt(appId ?? '0')}
-              value={{
-                a2a_enabled: formData.a2a_enabled,
-                a2a_card_visibility: formData.a2a_card_visibility,
-                a2a_name_override: formData.a2a_name_override,
-                a2a_description_override: formData.a2a_description_override,
-                a2a_skill_tags: formData.a2a_skill_tags,
-                a2a_examples: formData.a2a_examples,
-              }}
-              onChange={handleA2AChange}
-              cardUrl={a2aCardUrl}
-              rpcUrl={a2aRpcUrl}
-              disabled={!canEditA2A}
-              fieldErrors={a2aFieldErrors}
-            />
-          )}
-
-          {activeTab === 'metrics' && !isNewAgent && (
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8">
-              <AgentMetricsTab
-                appId={Number(appId)}
-                agentId={Number(agentId)}
-              />
-            </div>
-          )}
-
-          {/* Form Actions */}
-          <div className="flex justify-end space-x-4 mt-8 pt-6 border-t border-gray-200">
-            <button
-              type="button"
-              onClick={() => navigate(`/apps/${appId}/agents`)}
-              className="px-8 py-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-medium transition-all duration-200"
-              disabled={saving}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-8 py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl font-medium shadow-lg hover:shadow-xl transition-all duration-200 disabled:opacity-50"
-              disabled={saving}
-            >
-              {(() => {
-                if (saving) {
-                  return (
-                    <div className="flex items-center">
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Saving...
+                {/* Profile Metadata (expandable) */}
+                {showMarketplace && (
+                  <div className="space-y-6">
+                    <div>
+                      <label htmlFor="marketplace-display-name" className="block text-sm font-medium text-gray-700 mb-2">Display Name</label>
+                      <input
+                        id="marketplace-display-name"
+                        type="text"
+                        value={marketplaceProfile.display_name ?? ''}
+                        onChange={(e) => handleMarketplaceProfileChange('display_name', e.target.value)}
+                        maxLength={255}
+                        placeholder="Defaults to agent name if empty"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      />
                     </div>
-                  );
-                }
-                return isNewAgent ? 'Create Agent' : 'Save Changes';
-              })()}
-            </button>
-          </div>
-        </form>
+                    <div>
+                      <label htmlFor="marketplace-short-description" className="block text-sm font-medium text-gray-700 mb-2">Short Description</label>
+                      <textarea
+                        id="marketplace-short-description"
+                        value={marketplaceProfile.short_description ?? ''}
+                        onChange={(e) => handleMarketplaceProfileChange('short_description', e.target.value)}
+                        maxLength={200}
+                        rows={2}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      />
+                      <div className="text-xs text-gray-500 mt-1">
+                        {marketplaceProfile.short_description?.length ?? 0}/200 characters
+                      </div>
+                    </div>
+                    <div>
+                      <label htmlFor="marketplace-long-description" className="block text-sm font-medium text-gray-700 mb-2">Long Description</label>
+                      <textarea
+                        id="marketplace-long-description"
+                        value={marketplaceProfile.long_description ?? ''}
+                        onChange={(e) => handleMarketplaceProfileChange('long_description', e.target.value)}
+                        rows={4}
+                        placeholder="Supports Markdown"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="marketplace-category" className="block text-sm font-medium text-gray-700 mb-2">Category</label>
+                      <select
+                        id="marketplace-category"
+                        value={marketplaceProfile.category ?? ''}
+                        onChange={(e) => handleMarketplaceProfileChange('category', e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      >
+                        <option value="">-- Select a category --</option>
+                        {MARKETPLACE_CATEGORIES.map((cat) => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="marketplace-tags" className="block text-sm font-medium text-gray-700 mb-2">Tags</label>
+                      <TagInput
+                        id="marketplace-tags"
+                        tags={marketplaceProfile.tags ?? []}
+                        onChange={(tags) => handleMarketplaceProfileChange('tags', tags)}
+                        maxTags={5}
+                        placeholder="Add up to 5 tags"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="marketplace-icon-url" className="block text-sm font-medium text-gray-700 mb-2">Icon URL</label>
+                      <input
+                        id="marketplace-icon-url"
+                        type="text"
+                        value={marketplaceProfile.icon_url ?? ''}
+                        onChange={(e) => handleMarketplaceProfileChange('icon_url', e.target.value)}
+                        placeholder="https://..."
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      />
+                      {marketplaceProfile.icon_url && (
+                        <img
+                          src={marketplaceProfile.icon_url}
+                          alt="Icon preview"
+                          className="mt-2 w-10 h-10 rounded"
+                          onError={(e) => (e.currentTarget.style.display = 'none')}
+                        />
+                      )}
+                    </div>
+                    <div>
+                      <label htmlFor="marketplace-cover-image-url" className="block text-sm font-medium text-gray-700 mb-2">Cover Image URL</label>
+                      <input
+                        id="marketplace-cover-image-url"
+                        type="text"
+                        value={marketplaceProfile.cover_image_url ?? ''}
+                        onChange={(e) => handleMarketplaceProfileChange('cover_image_url', e.target.value)}
+                        placeholder="https://..."
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                      />
+                      {marketplaceProfile.cover_image_url && (
+                        <img
+                          src={marketplaceProfile.cover_image_url}
+                          alt="Cover preview"
+                          className="mt-2 w-32 h-16 rounded object-cover"
+                          onError={(e) => (e.currentTarget.style.display = 'none')}
+                        />
+                      )}
+                    </div>
+                     <div>
+                       <label className="block text-sm font-medium text-gray-700 mb-3">Conversation Starters</label>
+                       <p className="text-xs text-gray-500 mb-4">
+                         Suggested opening messages for users. These only appear at the start of a new conversation.
+                       </p>
+                       <div className="space-y-3">
+                         {marketplaceProfile.conversation_starters?.map((starter, idx) => (
+                           <div key={idx} className="flex items-center gap-2">
+                             <input
+                               ref={(el) => {
+                                 starterRefs.current[idx] = el;
+                               }}
+                               type="text"
+                               value={starter}
+                               onChange={(e) => {
+                                 const newStarters = [...(marketplaceProfile.conversation_starters || [])];
+                                 newStarters[idx] = e.target.value;
+                                 handleMarketplaceProfileChange('conversation_starters', newStarters);
+                               }}
+                               className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                               placeholder="Enter a starter prompt..."
+                             />
+                             <button
+                               type="button"
+                               onClick={() => {
+                                 const newStarters = marketplaceProfile.conversation_starters?.filter((_, i) => i !== idx) || [];
+                                 handleMarketplaceProfileChange('conversation_starters', newStarters);
+                               }}
+                               className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                             >
+                               <span className="text-xs font-bold">✕</span>
+                             </button>
+                           </div>
+                         ))}
+                         <button
+                           type="button"
+                           onClick={() => {
+                             const newStarters = [...(marketplaceProfile.conversation_starters || []), ''];
+                             handleMarketplaceProfileChange('conversation_starters', newStarters);
+                             requestAnimationFrame(() => {
+                               starterRefs.current[newStarters.length - 1]?.focus();
+                             });
+                           }}
+                           className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+                         >
+                           <Plus className="w-4 h-4 mr-1" /> Add Starter
+                         </button>
+                       </div>
+                     </div>
+                  </div>
+                )}
+                </>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'a2a' && !isNewAgent && (
+              <AgentA2ASettings
+                appId={Number.parseInt(appId ?? '0')}
+                value={{
+                  a2a_enabled: formData.a2a_enabled,
+                  a2a_card_visibility: formData.a2a_card_visibility,
+                  a2a_name_override: formData.a2a_name_override,
+                  a2a_description_override: formData.a2a_description_override,
+                  a2a_skill_tags: formData.a2a_skill_tags,
+                  a2a_examples: formData.a2a_examples,
+                }}
+                onChange={handleA2AChange}
+                cardUrl={a2aCardUrl}
+                rpcUrl={a2aRpcUrl}
+                disabled={!canEditA2A}
+                fieldErrors={a2aFieldErrors}
+              />
+            )}
+
+            {activeTab === 'metrics' && !isNewAgent && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8">
+                <AgentMetricsTab
+                  appId={Number(appId)}
+                  agentId={Number(agentId)}
+                />
+              </div>
+            )}
+
+            {/* Form Actions */}
+            <div className="flex justify-end space-x-4 mt-8 pt-6 border-t border-gray-200">
+              <button
+                type="button"
+                onClick={() => navigate(`/apps/${appId}/agents`)}
+                className="px-8 py-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-medium transition-all duration-200"
+                disabled={saving}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-8 py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl font-medium shadow-lg hover:shadow-xl transition-all duration-200 disabled:opacity-50"
+                disabled={saving}
+              >
+                {(() => {
+                  if (saving) {
+                    return (
+                      <div className="flex items-center">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                        Saving...
+                      </div>
+                    );
+                  }
+                  return isNewAgent ? 'Create Agent' : 'Save Changes';
+                })()}
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );

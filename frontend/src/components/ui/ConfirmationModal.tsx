@@ -14,6 +14,8 @@ interface ConfirmationModalProps {
   readonly isLoading?: boolean;
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
+  /** Escape, backdrop or the X button; defaults to onCancel. */
+  readonly onDismiss?: () => void;
 }
 
 const variantStyles: Record<
@@ -47,11 +49,12 @@ function ConfirmationModal({
   isLoading = false,
   onConfirm,
   onCancel,
+  onDismiss,
 }: ConfirmationModalProps) {
   const styles = variantStyles[variant];
 
   return (
-    <Modal isOpen={isOpen} onClose={isLoading ? () => {} : onCancel} title={title} size="small">
+    <Modal isOpen={isOpen} onClose={isLoading ? () => {} : (onDismiss ?? onCancel)} title={title} size="small">
       <div className="flex gap-4">
         <div
           className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center ${styles.iconBg}`}
