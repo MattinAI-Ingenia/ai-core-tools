@@ -253,6 +253,7 @@ function AgentFormPage() {
   const { hasMinRole } = useAppRole(appId);
   const canEditA2A = hasMinRole(AppRole.EDITOR);
   const canEdit = hasMinRole(AppRole.EDITOR);
+  const canCreateShared = hasMinRole(AppRole.ADMINISTRATOR);
   const confirm = useConfirm();
   const [searchParams, setSearchParams] = useSearchParams();
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -928,6 +929,7 @@ function AgentFormPage() {
               appId={Number(appId)}
               agentId={Number(agentId)}
               canEdit={canEdit}
+              canCreateShared={canCreateShared}
             />
           </div>
         ) : (

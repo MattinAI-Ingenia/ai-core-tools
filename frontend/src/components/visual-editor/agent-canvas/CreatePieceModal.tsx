@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { apiService, type Agent, type DataStructure } from '../../../services/api';
 import { useApiMutation } from '../../../hooks/useApiMutation';
+import { useSettingsCache } from '../../../contexts/SettingsCacheContext';
 import { MESSAGES, errorMessage } from '../../../constants/messages';
-import type { SandboxServiceFormData, ServiceFormData } from '../../../types/services';
+import type { LifecycleStatus, SandboxServiceFormData, ServiceFormData } from '../../../types/services';
 import Modal from '../../ui/Modal';
 import SiloForm from '../../forms/SiloForm';
 import SkillForm from '../../forms/SkillForm';
@@ -20,12 +21,14 @@ export interface CreatePieceModalProps {
   readonly kind: PieceKind;
   readonly onClose: () => void;
   /** Called once the piece is saved. The caller closes the modal and connects the piece. */
-  readonly onCreated: (kind: PieceKind, id: number, name: string) => void;
+  readonly onCreated: (kind: PieceKind, id: number, name: string, lifecycleStatus?: LifecycleStatus) => void;
 }
 
 interface CreatedPiece {
   readonly id: number;
   readonly name: string;
+  /** Services only: the lifecycle status the create response reports. */
+  readonly lifecycleStatus?: LifecycleStatus;
 }
 
 /**
@@ -35,6 +38,7 @@ interface CreatedPiece {
  */
 export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<CreatePieceModalProps>) {
   const mutate = useApiMutation();
+  const settingsCache = useSettingsCache();
   const [blankParser, setBlankParser] = useState<DataStructure | null>(null);
 
   // Output parsers need the blank structure (with the parser options) before the form can open.
@@ -56,6 +60,34 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
     };
   }, [appId, kind, onClose]);
 
+  /** Drops the settings-cache list this kind's settings page reads, so it reloads with the new piece. */
+  function invalidateSettingsCache(): void {
+    const id = String(appId);
+    switch (kind) {
+      case 'ai_service':
+        settingsCache.invalidateAIServices(id);
+        return;
+      case 'embedding':
+        settingsCache.invalidateEmbeddingServices(id);
+        return;
+      case 'sandbox':
+        settingsCache.invalidateSandboxServices(id);
+        return;
+      case 'skill':
+        settingsCache.invalidateSkills(id);
+        return;
+      case 'mcp':
+        settingsCache.invalidateMCPConfigs(id);
+        return;
+      case 'parser':
+        settingsCache.invalidateDataStructures(id);
+        return;
+      default:
+        // Silos, middlewares and agents have no cached settings list.
+        return;
+    }
+  }
+
   /** Saves through the same toast-wrapped mutation the settings pages use, then reports the new piece. */
   async function save<T>(label: string, create: () => Promise<T>, pick: (created: T) => CreatedPiece): Promise<void> {
     const created = await mutate(create, {
@@ -64,8 +96,9 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
       error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED(label)),
     });
     if (created === undefined) return;
+    invalidateSettingsCache();
     const piece = pick(created);
-    onCreated(kind, piece.id, piece.name);
+    onCreated(kind, piece.id, piece.name, piece.lifecycleStatus);
   }
 
   async function saveService(data: ServiceFormData | SandboxServiceFormData): Promise<void> {
@@ -73,19 +106,19 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
       await save(
         'AI service',
         () => apiService.createAIService(appId, data),
-        (service) => ({ id: service.service_id, name: service.name }),
+        (service) => ({ id: service.service_id, name: service.name, lifecycleStatus: service.lifecycle_status }),
       );
     } else if (kind === 'embedding') {
       await save(
         'embedding service',
         () => apiService.createEmbeddingService(appId, data),
-        (service) => ({ id: service.service_id, name: service.name }),
+        (service) => ({ id: service.service_id, name: service.name, lifecycleStatus: service.lifecycle_status }),
       );
     } else {
       await save(
         'sandbox service',
         () => apiService.createSandboxService(appId, data),
-        (service) => ({ id: service.service_id, name: service.name }),
+        (service) => ({ id: service.service_id, name: service.name, lifecycleStatus: service.lifecycle_status }),
       );
     }
   }
