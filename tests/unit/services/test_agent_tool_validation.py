@@ -1,0 +1,126 @@
+"""
+Unit tests for AgentService.validate_tool_selection and tool_ids on the agent list.
+
+The repository is mocked (pytest-mock), so no database is needed.
+Tests focus on:
+  - Self-reference rejection (an agent cannot use itself as a tool)
+  - Non-tool / cross-app tool rejection
+  - Direct and indirect tool cycle rejection
+  - De-duplication of the selection
+  - tool_ids exposure on AgentListItemSchema
+"""
+
+from datetime import datetime
+from unittest.mock import MagicMock
+
+import pytest
+
+from services.agent_service import AgentService
+
+
+# ---------------------------------------------------------------------------
+# validate_tool_selection
+# ---------------------------------------------------------------------------
+
+class TestValidateToolSelection:
+    """Test AgentService.validate_tool_selection()"""
+
+    def test_self_reference_rejected(self, mocker):
+        """An agent cannot list itself as a tool."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        with pytest.raises(ValueError, match="An agent cannot use itself as a tool"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[1])
+
+    def test_non_tool_rejected(self, mocker):
+        """A selection id that is not a tool agent of this app is rejected."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        with pytest.raises(ValueError, match="Agent 3 is not a tool agent or does not belong to this app"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2, 3])
+
+    def test_direct_cycle_rejected(self, mocker):
+        """Selecting a tool that already uses this agent would create a direct cycle."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={2: [1]})
+
+        with pytest.raises(ValueError, match="Adding agent 2 as a tool would create a cycle"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2])
+
+    def test_indirect_cycle_rejected(self, mocker):
+        """A cycle through an intermediate tool agent is rejected."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={2: [3], 3: [1]})
+
+        with pytest.raises(ValueError, match="Adding agent 2 as a tool would create a cycle"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2])
+
+    def test_new_agent_skips_cycle_check(self, mocker):
+        """A new agent (id 0) has no outgoing edges yet, so no cycle is possible."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={2: [5]})
+
+        result = AgentService.validate_tool_selection(db, app_id=1, agent_id=0, tool_ids=[2])
+
+        assert result == [2]
+
+    def test_valid_selection_returns_deduplicated(self, mocker):
+        """Duplicates are dropped; a valid acyclic selection passes through."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2, 4])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        result = AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2, 2, 4])
+
+        assert result == [2, 4]
+
+    def test_empty_selection_ok(self, mocker):
+        """An empty selection returns early without touching the repository."""
+        db = MagicMock()
+        get_valid = mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[])
+        get_edges = mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        result = AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[])
+
+        assert result == []
+        get_valid.assert_not_called()
+        get_edges.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# AgentListItemSchema.tool_ids
+# ---------------------------------------------------------------------------
+
+class TestListItemIncludesToolIds:
+    """Test that get_agents_list fills tool_ids from agent.tool_associations"""
+
+    def test_list_item_includes_tool_ids(self, mocker):
+        """The agent list item carries the ids of the tool agents it uses."""
+        db = MagicMock()
+        service = AgentService()
+        agent = MagicMock()
+        agent.agent_id = 5
+        agent.name = "Test Agent"
+        agent.description = "Test agent description"
+        agent.type = "agent"
+        agent.is_tool = False
+        agent.create_date = datetime(2024, 1, 1)
+        agent.service_id = None
+        agent.request_count = 0
+        agent.marketplace_visibility = None
+        agent.tool_associations = [MagicMock(tool_id=7)]
+
+        mocker.patch('services.agent_service.AgentRepository.get_by_app_id', return_value=[agent])
+        mocker.patch('services.agent_service.AgentRepository.get_ai_services_dict_by_app_id', return_value={})
+
+        result = service.get_agents_list(db, app_id=1)
+
+        assert len(result) == 1
+        assert result[0].tool_ids == [7]
