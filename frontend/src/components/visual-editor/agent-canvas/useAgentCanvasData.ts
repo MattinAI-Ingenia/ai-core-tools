@@ -15,6 +15,8 @@ export interface CanvasPiece {
   readonly isSystem?: boolean;
   /** Agent pieces only: whether the agent is already usable as a tool. */
   readonly isTool?: boolean;
+  /** AI services only: whether the service can analyse video (absent = unknown = no). */
+  readonly supportsVideo?: boolean;
 }
 
 export interface UseAgentCanvasDataResult {
@@ -33,6 +35,7 @@ interface ServiceOptionItem {
   readonly name: string;
   readonly is_system?: unknown;
   readonly lifecycle_status?: unknown;
+  readonly supports_video?: unknown;
 }
 
 interface SandboxOptionItem {
@@ -76,6 +79,7 @@ function buildPieces(agent: Agent, agents: Agent[], embeddings: EmbeddingService
       name: service.name,
       lifecycleStatus: lifecycleStatus(service.lifecycle_status),
       isSystem: isSystemService(service),
+      supportsVideo: service.supports_video === true,
     });
   }
   for (const service of optionList<SandboxOptionItem>(agent.sandbox_services)) {

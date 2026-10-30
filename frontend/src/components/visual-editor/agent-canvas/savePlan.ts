@@ -22,6 +22,8 @@ export function planConnect(args: {
   targetIsTool?: boolean;
   codeInterpreterOn?: boolean;
   replacedName?: string | null;
+  /** Appended to the connect step's success toast (e.g. a drop hint for other ports). */
+  toastSuffix?: string;
   pieceName: string;
 }): SaveStep[] {
   const steps: SaveStep[] = [];
@@ -43,9 +45,10 @@ export function planConnect(args: {
   steps.push({
     agentId: args.agentId,
     patch: args.patch,
-    toast: args.replacedName
-      ? `Replaced ${args.replacedName} with ${args.pieceName}`
-      : `Connected ${args.pieceName}`,
+    toast:
+      (args.replacedName
+        ? `Replaced ${args.replacedName} with ${args.pieceName}`
+        : `Connected ${args.pieceName}`) + (args.toastSuffix ?? ''),
   });
   return steps;
 }
