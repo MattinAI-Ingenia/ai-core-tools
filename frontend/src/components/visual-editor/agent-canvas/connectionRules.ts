@@ -21,16 +21,17 @@ export interface RuleContext {
 
 export type RuleResult = { ok: true; warning?: string } | { ok: false; reason: string };
 
-const KIND_LABELS: Record<PieceKind, string> = {
-  ai_service: 'AI service',
-  embedding: 'Embedding service',
-  sandbox: 'Sandbox service',
-  silo: 'Silo',
-  skill: 'Skill',
-  mcp: 'MCP server',
-  agent: 'Agent',
-  parser: 'Output parser',
-  middleware: 'Middleware',
+// With the article, so messages read "An AI service" / "A skill".
+const KIND_PHRASES: Record<PieceKind, string> = {
+  ai_service: 'An AI service',
+  embedding: 'An embedding service',
+  sandbox: 'A sandbox service',
+  silo: 'A silo',
+  skill: 'A skill',
+  mcp: 'An MCP server',
+  agent: 'An agent',
+  parser: 'An output parser',
+  middleware: 'A middleware',
 };
 
 const READ_ONLY = "You don't have permission to edit this agent";
@@ -56,7 +57,7 @@ export function wouldCreateToolCycle(
 export function canConnect(ctx: RuleContext): RuleResult {
   if (!ctx.canEdit) return { ok: false, reason: READ_ONLY };
   if (!ctx.port.accepts.includes(ctx.kind)) {
-    return { ok: false, reason: `A ${KIND_LABELS[ctx.kind]} can't be connected to ${ctx.port.label}` };
+    return { ok: false, reason: `${KIND_PHRASES[ctx.kind]} can't be connected to ${ctx.port.label}` };
   }
   if (ctx.kind === 'agent') {
     if (ctx.pieceId === ctx.agentId) return { ok: false, reason: "An agent can't use itself as a tool" };
