@@ -22,8 +22,8 @@ export interface CanvasNodeData extends Record<string, unknown> {
   readonly connectedPortIds?: readonly PortId[];
   /** Piece cards only: the connected piece. */
   readonly piece?: CanvasPiece;
-  /** Piece cards only: label of the port the piece is connected to. */
-  readonly portLabel?: string;
+  /** Piece cards only: labels of the ports the piece feeds, in port order (one card per piece even when it connects to several ports). */
+  readonly portLabels?: readonly string[];
 }
 
 export type CanvasFlowNode = Node<CanvasNodeData>;

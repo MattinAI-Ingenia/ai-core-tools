@@ -25,8 +25,10 @@ export function PieceNode({ data, isConnectable }: NodeProps<CanvasFlowNode>) {
           {piece.name}
         </p>
         <p className={`truncate text-xs ${visual.captionClass}`}>{visual.typeCaption}</p>
-        {data.portLabel && (
-          <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">{data.portLabel}</p>
+        {data.portLabels && data.portLabels.length > 0 && (
+          <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">
+            {data.portLabels.join(', ')}
+          </p>
         )}
       </div>
       <Handle
