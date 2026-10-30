@@ -506,6 +506,14 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   const handleInit: OnInit<CanvasFlowNode, CanvasEdge> = useCallback((instance) => {
     flowRef.current = instance;
   }, []);
+  /** Set by a connect: the next node change (the piece appearing) re-fits the view so it isn't left off screen. */
+  const fitOnNextNodes = useRef(false);
+  useEffect(() => {
+    if (!fitOnNextNodes.current) return;
+    fitOnNextNodes.current = false;
+    // Wait a beat so React Flow has measured the new node before fitting; an earlier fit ignores it.
+    setTimeout(() => void flowRef.current?.fitView({ padding: 0.2, duration: 300 }), 150);
+  }, [nodes]);
 
   const [choice, setChoice] = useState<PendingChoice | null>(null);
   const cancelChoice = useCallback(() => setChoice(null), []);
@@ -665,6 +673,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       ]);
 
       const nodeId = pieceNodeId(piece);
+      fitOnNextNodes.current = true;
       void runSteps(steps)
         .then((saved) => {
           if (saved && layoutRef.current.loose.includes(nodeId)) {
