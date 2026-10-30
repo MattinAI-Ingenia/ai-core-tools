@@ -791,6 +791,21 @@ function AgentFormPage() {
     [formData, marketplaceProfile, snapshot],
   );
 
+  // Every visual -> form switch (toggle, the inspector's "Open full editor" link, browser Back)
+  // reloads, so the form shows what the canvas saved instead of the mount-time snapshot.
+  const previousViewRef = useRef<AgentView>(view);
+  useEffect(() => {
+    const previousView = previousViewRef.current;
+    previousViewRef.current = view;
+    if (previousView !== 'visual' || view !== 'form') return;
+    void (async () => {
+      // A failed reload leaves the form's fields stale, so go back to the canvas instead of offering Save.
+      if (!(await loadAgentData())) {
+        setSearchParams({ view: 'visual' }, { replace: true, state: location.state });
+      }
+    })();
+  }, [view]);
+
   // Keeps location.state (returnTo) so the link back to the list survives the toggle.
   const changeView = (next: AgentView) => {
     setSearchParams(next === 'visual' ? { view: 'visual' } : {}, { state: location.state });
@@ -824,8 +839,7 @@ function AgentFormPage() {
       return;
     }
 
-    // Leaving the canvas always reloads, so the form shows what the backend holds.
-    if (!(await loadAgentData())) return;
+    // The view effect reloads the agent once the form is shown.
     changeView('form');
   };
 

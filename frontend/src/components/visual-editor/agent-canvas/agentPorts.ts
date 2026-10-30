@@ -110,7 +110,8 @@ export function resolveDropPort(type: AgentType, kind: PieceKind): PortId | 'ask
 /**
  * Fields to send for connecting/disconnecting `pieceId` on `port`. Multi ports
  * add/remove (add is idempotent, middlewares append at the end); single ports
- * set the id or null.
+ * set the id, or clear it only while it still holds `pieceId`. A remove for a
+ * piece that is no longer on the port (already replaced) returns no change.
  */
 export function buildPortPatch(
   agent: AgentLinks,
@@ -127,7 +128,8 @@ export function buildPortPatch(
       : current.includes(pieceId) ? [...current] : [...current, pieceId];
     return { [field]: next } as Partial<AgentLinks>;
   }
-  return { [field]: mode === 'add' ? pieceId : null } as Partial<AgentLinks>;
+  if (mode === 'add') return { [field]: pieceId } as Partial<AgentLinks>;
+  return agent[field] === pieceId ? ({ [field]: null } as Partial<AgentLinks>) : {};
 }
 
 /** Every (port, kind, id) currently connected, for drawing edges. */

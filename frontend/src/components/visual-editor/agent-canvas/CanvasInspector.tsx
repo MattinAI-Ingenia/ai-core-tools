@@ -240,6 +240,12 @@ function AgentFields({ agent, agentType, canEdit, onSaveFields }: AgentFieldsPro
   }
 
   function commitText(field: TextField, text: string): void {
+    if (field === 'name' && text.trim() === '') {
+      // A blank name is never saved: drop the draft so the field shows the saved name again.
+      drafts.clear('name');
+      toast.error('Name is required');
+      return;
+    }
     void persist(field, text);
   }
 

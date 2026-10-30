@@ -55,6 +55,13 @@ export type CanvasSelection =
   | { type: 'piece'; piece: CanvasPiece }
   | { type: 'edge'; port: PortId; piece: CanvasPiece };
 
+/** Toast text for a failed canvas save: a 422's first validation message, else the error message or the fallback. */
+function saveErrorMessage(err: unknown, fallback: string): string {
+  // A 422 carries the backend's validation message in `detail`, not in `message`.
+  const validation = err instanceof ApiError && err.status === 422 ? validationDetailMessage(err.detail) : null;
+  return validation ?? errorMessage(err, fallback);
+}
+
 export interface AgentCanvasProps {
   readonly appId: number;
   readonly agentId: number;
@@ -569,9 +576,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
             if (step.toast) toast.success(step.toast);
           });
         } catch (err) {
-          // A 422 carries the backend's validation message in `detail`, not in `message`.
-          const validation = err instanceof ApiError && err.status === 422 ? validationDetailMessage(err.detail) : null;
-          toast.error(validation ?? errorMessage(err, MESSAGES.UPDATE_FAILED(failureLabel)));
+          toast.error(saveErrorMessage(err, MESSAGES.UPDATE_FAILED(failureLabel)));
           saved = false;
           break;
         }
@@ -839,16 +844,17 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
           const port = ports.find((entry) => entry.id === data.port);
           if (!port) continue;
           try {
-            await queue.run(agent.agent_id, async () => {
+            const saved = await queue.run(agent.agent_id, async () => {
               const fresh = await apiService.getAgent(appId, agent.agent_id);
-              await apiService.updateAgent(appId, agent.agent_id, {
-                ...fresh,
-                ...buildPortPatch(fresh, port.id, data.piece.kind, data.piece.id, 'remove'),
-              });
+              const patch = buildPortPatch(fresh, port.id, data.piece.kind, data.piece.id, 'remove');
+              // Nothing to clear: the piece was already replaced or removed on the fresh agent.
+              if (Object.keys(patch).length === 0) return false;
+              await apiService.updateAgent(appId, agent.agent_id, { ...fresh, ...patch });
+              return true;
             });
-            succeeded = true;
+            if (saved) succeeded = true;
           } catch (err) {
-            toast.error(errorMessage(err, MESSAGES.UPDATE_FAILED('connection')));
+            toast.error(saveErrorMessage(err, MESSAGES.UPDATE_FAILED('connection')));
           }
         }
         if (succeeded) toast.success(MESSAGES.UPDATED('connection'));

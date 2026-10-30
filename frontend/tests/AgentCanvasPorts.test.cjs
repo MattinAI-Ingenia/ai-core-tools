@@ -75,6 +75,15 @@ test('clears single-value ports to null on remove', () => {
   });
 });
 
+test('leaves a single-value port alone when the removed piece was already replaced', () => {
+  // The port now holds B (silo 4); a stale remove of A (silo 3) must not wipe B.
+  assert.deepEqual(JSON.parse(JSON.stringify(buildPortPatch({ silo_id: 4 }, 'knowledge', 'silo', 3, 'remove'))), {});
+});
+
+test('leaves a single-value port alone when it is already empty', () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(buildPortPatch({ silo_id: null }, 'knowledge', 'silo', 3, 'remove'))), {});
+});
+
 test('appends middleware ids at the end', () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(buildPortPatch({ middleware_ids: [5, 6] }, 'middlewares', 'middleware', 7, 'add'))),
