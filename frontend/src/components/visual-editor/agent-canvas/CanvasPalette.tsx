@@ -58,6 +58,12 @@ export interface CanvasPaletteProps {
   readonly agentType: AgentType;
   /** False for roles below EDITOR: items are not draggable and the `+` buttons are hidden. */
   readonly canEdit: boolean;
+  /**
+   * True for roles that may create shared resources (ADMINISTRATOR and up): the
+   * `+` of AI services, embedding, sandbox, skills, MCP, output parsers and
+   * middlewares. Silos and agents only need `canEdit`.
+   */
+  readonly canCreateShared: boolean;
   /** Opens the creation flow for a kind (wired by the creation modals). */
   readonly onCreate: (kind: PieceKind) => void;
 }
@@ -119,11 +125,14 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
  * grouped by kind. Items are dragged onto the canvas; the category `+` buttons
  * create new ones. OCR agents only see the categories their ports accept.
  */
-export function CanvasPalette({ pieces, agentType, canEdit, onCreate }: CanvasPaletteProps) {
+export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onCreate }: CanvasPaletteProps) {
   const baseId = useId();
   const [filter, setFilter] = useState('');
   const needle = filter.trim().toLowerCase();
   const ports = portsFor(agentType);
+  /** Silos and agents need EDITOR; the other kinds create shared resources and need ADMINISTRATOR. */
+  const canCreateFor = (kind: PieceKind): boolean =>
+    kind === 'silo' || kind === 'agent' ? canEdit : canCreateShared;
 
   const groups = PALETTE_CATEGORIES.filter((category) => ports.some((port) => port.accepts.includes(category.kind)))
     .map((category) => ({
@@ -173,7 +182,7 @@ export function CanvasPalette({ pieces, agentType, canEdit, onCreate }: CanvasPa
                 >
                   {category.title}
                 </h3>
-                {canEdit && (
+                {canCreateFor(category.kind) && (
                   <button
                     type="button"
                     onClick={() => onCreate(category.kind)}
