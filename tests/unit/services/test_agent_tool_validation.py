@@ -7,6 +7,9 @@ Tests focus on:
   - Non-tool / cross-app tool rejection
   - Direct and indirect tool cycle rejection
   - De-duplication of the selection
+  - Only NEWLY added ids are validated: already-attached ids that went stale (no
+    longer tool agents) are dropped silently, and pre-existing cycles don't block a
+    save that adds nothing new
   - tool_ids exposure on AgentListItemSchema
 """
 
@@ -92,6 +95,81 @@ class TestValidateToolSelection:
         assert result == []
         get_valid.assert_not_called()
         get_edges.assert_not_called()
+
+
+class TestValidateToolSelectionExistingTools:
+    """Only ids that are NEW for the agent are validated; existing ids are tolerated."""
+
+    def test_self_reference_rejected_even_if_already_attached(self, mocker):
+        """Self-reference is always rejected, regardless of the current associations."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_agent_tool_associations',
+                     return_value=[MagicMock(tool_id=1)])
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[1])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        with pytest.raises(ValueError, match="An agent cannot use itself as a tool"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[1])
+
+    def test_existing_stale_non_tool_dropped_new_valid_kept(self, mocker):
+        """An already-attached id that is no longer a tool agent is dropped without error."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_agent_tool_associations',
+                     return_value=[MagicMock(tool_id=2)])
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[3])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        result = AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2, 3])
+
+        assert result == [3]
+
+    def test_existing_cycle_does_not_block_save_adding_nothing_new(self, mocker):
+        """A pre-existing cycle is not re-checked when the selection adds no new id."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_agent_tool_associations',
+                     return_value=[MagicMock(tool_id=2)])
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2])
+        # 1 -> 2 -> 1 is already a cycle in the stored graph.
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={2: [1]})
+
+        result = AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2])
+
+        assert result == [2]
+
+    def test_new_invalid_id_still_rejected(self, mocker):
+        """A NEW id that is not a tool agent of the app raises, even next to existing ids."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_agent_tool_associations',
+                     return_value=[MagicMock(tool_id=2)])
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        with pytest.raises(ValueError, match="Agent 3 is not a tool agent or does not belong to this app"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[2, 3])
+
+    def test_new_id_creating_cycle_still_rejected(self, mocker):
+        """A NEW id whose tool graph leads back to this agent raises, even with existing ids kept."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_agent_tool_associations',
+                     return_value=[MagicMock(tool_id=4)])
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2, 4])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id',
+                     return_value={2: [3], 3: [1], 4: []})
+
+        with pytest.raises(ValueError, match="Adding agent 2 as a tool would create a cycle"):
+            AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[4, 2])
+
+    def test_existing_and_new_kept_in_submitted_order(self, mocker):
+        """Existing valid ids and new valid ids are returned de-duplicated, in submitted order."""
+        db = MagicMock()
+        mocker.patch('services.agent_service.AgentRepository.get_agent_tool_associations',
+                     return_value=[MagicMock(tool_id=4), MagicMock(tool_id=2)])
+        mocker.patch('services.agent_service.AgentRepository.get_valid_tool_ids', return_value=[2, 3, 4])
+        mocker.patch('services.agent_service.AgentRepository.get_tool_edges_by_app_id', return_value={})
+
+        result = AgentService.validate_tool_selection(db, app_id=1, agent_id=1, tool_ids=[4, 3, 2, 4])
+
+        assert result == [4, 3, 2]
 
 
 # ---------------------------------------------------------------------------
