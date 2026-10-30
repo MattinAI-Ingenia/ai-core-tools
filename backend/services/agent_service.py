@@ -105,6 +105,7 @@ class AgentService:
                     else None
                 ),
                 a2a_enabled=bool(_typed_attr(agent, 'a2a_enabled', bool, False)),
+                tool_ids=[assoc.tool_id for assoc in (agent.tool_associations or [])],
                 lifecycle_warnings=ServiceLifecycleService.warnings_for_agent(
                     lifecycle_ctx.agent_refs.get(agent.agent_id), lifecycle_ctx
                 ),
@@ -810,6 +811,42 @@ class AgentService:
         if MiddlewareType.HUMAN_IN_THE_LOOP in seen_types and not has_memory:
             raise ValueError("Human-in-the-loop middlewares require conversation memory to be enabled")
         return ordered_ids
+
+    @staticmethod
+    def validate_tool_selection(db: Session, app_id: int, agent_id: int, tool_ids: list) -> list:
+        """Validate an agent's tool selection and return the de-duplicated ids.
+
+        Raises ValueError when the agent selects itself, a selection id is not a tool
+        agent of the app, or adding the selection would create a tool cycle (e.g. via
+        the agent canvas graph). A new agent (``agent_id=0``) cannot be part of a cycle,
+        so the cycle check is skipped for it.
+        """
+        deduped = list(dict.fromkeys(int(id) for id in tool_ids if id))
+        if not deduped:
+            return []
+        if agent_id in deduped:
+            raise ValueError("An agent cannot use itself as a tool")
+        valid_ids = AgentRepository.get_valid_tool_ids(db, deduped, app_id)
+        for tool_id in deduped:
+            if tool_id not in valid_ids:
+                raise ValueError(f"Agent {tool_id} is not a tool agent or does not belong to this app")
+        if agent_id:
+            # Replace the edited agent's outgoing edges with the requested ids, then
+            # DFS from each requested id: reaching agent_id again means a cycle.
+            edges = AgentRepository.get_tool_edges_by_app_id(db, app_id)
+            edges[agent_id] = list(deduped)
+            for tool_id in deduped:
+                seen = set()
+                stack = [tool_id]
+                while stack:
+                    current = stack.pop()
+                    if current == agent_id:
+                        raise ValueError(f"Adding agent {tool_id} as a tool would create a cycle")
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    stack.extend(edges.get(current, []))
+        return deduped
 
     @staticmethod
     def validate_current_middlewares(db: Session, app_id: int, agent_id: int, has_memory: bool) -> None:
