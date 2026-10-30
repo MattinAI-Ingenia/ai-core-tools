@@ -45,6 +45,7 @@ import { AgentPortNode, type CanvasFlowNode } from './AgentPortNode';
 import { PieceNode } from './PieceNode';
 import { CanvasPalette, PIECE_DRAG_MIME, parsePieceDragPayload, pieceKindPhrase } from './CanvasPalette';
 import { CanvasInspector } from './CanvasInspector';
+import { CreatePieceModal } from './CreatePieceModal';
 import { useAgentCanvasData, type CanvasPiece } from './useAgentCanvasData';
 
 /** What the inspector panel receives when something is selected. */
@@ -492,9 +493,13 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
 
   const [choice, setChoice] = useState<PendingChoice | null>(null);
   const cancelChoice = useCallback(() => setChoice(null), []);
-  // The chooser belongs to the agent it was opened for.
+  /** Palette category whose creation modal is open (set by a «+»). */
+  const [creatingKind, setCreatingKind] = useState<PieceKind | null>(null);
+  const closeCreate = useCallback(() => setCreatingKind(null), []);
+  // The chooser and the creation modal belong to the agent they were opened for.
   useEffect(() => {
     setChoice(null);
+    setCreatingKind(null);
   }, [agentId]);
 
   // The selection belongs to the agent it was made for; the inspector only
@@ -686,6 +691,37 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
     [choice, connectPiece],
   );
 
+  /**
+   * A piece saved from a «+»: refetch so it is in the pieces list, then place
+   * it the way a drop would - connect through its resolved port, ask when
+   * several ports take it, or leave it as a loose card when none does.
+   */
+  const handlePieceCreated = useCallback(
+    async (kind: PieceKind, id: number, name: string): Promise<void> => {
+      setCreatingKind(null);
+      await refetch();
+      // A new agent is never a tool yet, so connecting it through Tools adds is_tool first.
+      const piece: CanvasPiece = kind === 'agent' ? { kind, id, name, isTool: false } : { kind, id, name };
+      const target = resolveDropPort(agentType, kind);
+      if (target === null) {
+        const nodeId = pieceNodeId(piece);
+        updateLayout((current) => ({
+          positions: current.positions,
+          loose: current.loose.includes(nodeId) ? current.loose : [...current.loose, nodeId],
+        }));
+        return;
+      }
+      const ports = portsFor(agentType);
+      if (target === 'ask') {
+        setChoice({ piece, ports: ports.filter((port) => port.accepts.includes(kind)) });
+        return;
+      }
+      const port = ports.find((entry) => entry.id === target);
+      if (port) connectPiece(port, piece);
+    },
+    [agentType, refetch, connectPiece, updateLayout],
+  );
+
   /** True when `point` (flow coordinates) lies on the agent node. */
   const isOverAgent = useCallback(
     (point: { x: number; y: number }): boolean => {
@@ -856,8 +892,7 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
     [canEdit, agent, pieces, connectedNodeIds, isOverAgent, reseatNode, dropOnAgent, updateLayout],
   );
 
-  // Placeholder until the creation modals arrive (Task 9 replaces it).
-  const handleCreate = useCallback(() => toast.info('Coming soon'), []);
+  const handleCreate = useCallback((kind: PieceKind) => setCreatingKind(kind), []);
 
   const handleNodeClick: NodeMouseHandler<CanvasFlowNode> = useCallback(
     (_event, node) => {
@@ -972,6 +1007,14 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
         canEdit={canEdit}
         onSaveFields={saveAgentFields}
       />
+      {creatingKind && (
+        <CreatePieceModal
+          appId={appId}
+          kind={creatingKind}
+          onClose={closeCreate}
+          onCreated={handlePieceCreated}
+        />
+      )}
     </div>
   );
 }
