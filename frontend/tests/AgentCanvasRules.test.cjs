@@ -23,6 +23,7 @@ const { canConnect, canDisconnect, wouldCreateToolCycle } = rules;
 const toolsPort = AGENT_PORTS.find((def) => def.id === 'tools');
 const visionPort = OCR_PORTS.find((def) => def.id === 'vision');
 const modelPort = AGENT_PORTS.find((def) => def.id === 'model');
+const videoPort = AGENT_PORTS.find((def) => def.id === 'video');
 const mediaPort = AGENT_PORTS.find((def) => def.id === 'media_embedding');
 
 const base = {
@@ -78,6 +79,19 @@ test('refuses connecting a retired service', () => {
 test('connects a deprecated service with a warning', () => {
   const result = canConnect({ ...base, port: modelPort, kind: 'ai_service', lifecycleStatus: 'deprecated' });
   assert.deepEqual(plain(result), { ok: true, warning: 'This service is deprecated and will stop working soon' });
+});
+
+test('refuses an AI service without video support on the Video port', () => {
+  const refused = canConnect({ ...base, port: videoPort, kind: 'ai_service', supportsVideo: false });
+  assert.deepEqual(plain(refused), { ok: false, reason: "This AI service doesn't support video" });
+  // An option list without the flag must not unlock the port either.
+  const unknown = canConnect({ ...base, port: videoPort, kind: 'ai_service' });
+  assert.deepEqual(plain(unknown), { ok: false, reason: "This AI service doesn't support video" });
+});
+
+test('connects an AI service with video support on the Video port', () => {
+  const result = canConnect({ ...base, port: videoPort, kind: 'ai_service', supportsVideo: true });
+  assert.deepEqual(plain(result), { ok: true });
 });
 
 test('refuses disconnecting the media embedding of a conversational agent', () => {

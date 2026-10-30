@@ -16,6 +16,8 @@ export interface RuleContext {
   readonly kind: PieceKind;
   readonly pieceId: number;
   readonly lifecycleStatus?: 'active' | 'deprecated' | 'retired';
+  /** AI services only: whether the service can analyse video (absent = unknown = no). */
+  readonly supportsVideo?: boolean;
   readonly toolEdges: Readonly<Record<number, readonly number[]>>; // from getAgents().tool_ids
 }
 
@@ -58,6 +60,9 @@ export function canConnect(ctx: RuleContext): RuleResult {
   if (!ctx.canEdit) return { ok: false, reason: READ_ONLY };
   if (!ctx.port.accepts.includes(ctx.kind)) {
     return { ok: false, reason: `${KIND_PHRASES[ctx.kind]} can't be connected to ${ctx.port.label}` };
+  }
+  if (ctx.port.id === 'video' && ctx.kind === 'ai_service' && ctx.supportsVideo !== true) {
+    return { ok: false, reason: "This AI service doesn't support video" };
   }
   if (ctx.kind === 'agent') {
     if (ctx.pieceId === ctx.agentId) return { ok: false, reason: "An agent can't use itself as a tool" };
