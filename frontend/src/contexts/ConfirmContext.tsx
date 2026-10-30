@@ -42,7 +42,10 @@ export function ConfirmProvider({ children }: ConfirmProviderProps) {
     (options: ConfirmOptions): Promise<boolean> =>
       new Promise<boolean>((resolve) => {
         const previous = pendingRef.current;
-        if (previous) previous.resolve(false);
+        if (previous) {
+          previous.onDismiss?.();
+          previous.resolve(false);
+        }
         setPending({ ...options, resolve });
       }),
     [],
@@ -63,11 +66,10 @@ export function ConfirmProvider({ children }: ConfirmProviderProps) {
   }, []);
 
   const handleDismiss = useCallback(() => {
-    setPending((current) => {
-      current?.onDismiss?.();
-      current?.resolve(false);
-      return null;
-    });
+    const current = pendingRef.current;
+    current?.onDismiss?.();
+    current?.resolve(false);
+    setPending(null);
   }, []);
 
   const value = useMemo<ConfirmContextValue>(() => ({ confirm }), [confirm]);
