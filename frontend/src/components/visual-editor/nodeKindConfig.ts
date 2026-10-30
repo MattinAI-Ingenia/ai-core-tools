@@ -10,8 +10,16 @@ import {
   FileJson,
   type LucideIcon,
 } from 'lucide-react';
-import type { GraphNodeKind } from '../../hooks/useAppGraph';
 import type { PieceKind } from './agent-canvas/agentPorts';
+
+export type GraphNodeKind =
+  | 'agent'
+  | 'service'
+  | 'silo'
+  | 'embedding'
+  | 'skill'
+  | 'mcp'
+  | 'parser';
 
 /**
  * Visual configuration for a single graph node kind: icon, Tailwind accent
