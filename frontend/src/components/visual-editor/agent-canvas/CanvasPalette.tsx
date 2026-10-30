@@ -4,23 +4,11 @@ import { PIECE_VISUALS } from '../nodeKindConfig';
 import { ServiceOptionStatus, serviceStatusId } from '../../ui/ServiceOptionStatus';
 import type { ServiceOptionLike } from '../../../utils/serviceLifecycle';
 import { portsFor, type AgentType, type PieceKind } from './agentPorts';
+import { KIND_PHRASES } from './connectionRules';
 import type { CanvasPiece } from './useAgentCanvasData';
 
 /** Drag payload type for palette items dropped on the canvas (JSON `{kind, id}`). */
 export const PIECE_DRAG_MIME = 'application/x-mattin-piece';
-
-/** Article-aware phrase per kind: "An AI service can't be connected to this agent". */
-const PIECE_KIND_PHRASE: Record<PieceKind, string> = {
-  ai_service: 'An AI service',
-  embedding: 'An embedding service',
-  sandbox: 'A sandbox service',
-  silo: 'A silo',
-  skill: 'A skill',
-  mcp: 'An MCP server',
-  agent: 'An agent',
-  parser: 'An output parser',
-  middleware: 'A middleware',
-};
 
 const MEMORY_ROW_LABEL = 'Memory — coming soon';
 
@@ -44,11 +32,11 @@ const PALETTE_CATEGORIES: readonly PaletteCategory[] = [
 ];
 
 export function pieceKindPhrase(kind: PieceKind): string {
-  return PIECE_KIND_PHRASE[kind];
+  return KIND_PHRASES[kind];
 }
 
 function isPieceKind(value: unknown): value is PieceKind {
-  return typeof value === 'string' && Object.keys(PIECE_KIND_PHRASE).includes(value);
+  return typeof value === 'string' && Object.keys(KIND_PHRASES).includes(value);
 }
 
 /** Reads a palette drag payload; null for anything that is not a `{kind, id}` piece. */

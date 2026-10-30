@@ -490,6 +490,10 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
 
   const [choice, setChoice] = useState<PendingChoice | null>(null);
   const cancelChoice = useCallback(() => setChoice(null), []);
+  // The chooser belongs to the agent it was opened for.
+  useEffect(() => {
+    setChoice(null);
+  }, [agentId]);
 
   /**
    * Removes a node from the live copy so the next sync re-adds it at its
@@ -544,6 +548,10 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
   const connectPiece = useCallback(
     (port: PortDef, piece: CanvasPiece): void => {
       if (!agent) return;
+      if (connected.some((entry) => entry.port === port.id && entry.kind === piece.kind && entry.id === piece.id)) {
+        toast.info(`${piece.name} is already connected`);
+        return;
+      }
       const result = canConnect({
         canEdit,
         agentId: agent.agent_id,
@@ -786,6 +794,8 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
       const payload = parsePieceDragPayload(event.dataTransfer.getData(PIECE_DRAG_MIME));
       if (!canEdit || !agent || !payload) return;
       event.preventDefault();
+      // A new drop replaces any chooser still open from an earlier one.
+      setChoice(null);
       const piece = pieces.find((entry) => entry.kind === payload.kind && entry.id === payload.id);
       const instance = flowRef.current;
       if (!piece || !instance) return;
@@ -797,7 +807,10 @@ export function AgentCanvas({ appId, agentId, canEdit, onSelect }: AgentCanvasPr
       // Dropped elsewhere: the piece stays on the canvas as a loose card. A
       // piece that is already connected is already on the canvas.
       const nodeId = pieceNodeId(piece);
-      if (connectedNodeIds.has(nodeId)) return;
+      if (connectedNodeIds.has(nodeId)) {
+        toast.info(`${piece.name} is already on the canvas`);
+        return;
+      }
       reseatNode(nodeId);
       updateLayout((current) => ({
         positions: { ...current.positions, [nodeId]: point },

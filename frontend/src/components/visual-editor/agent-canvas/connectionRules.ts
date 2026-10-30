@@ -22,7 +22,7 @@ export interface RuleContext {
 export type RuleResult = { ok: true; warning?: string } | { ok: false; reason: string };
 
 // With the article, so messages read "An AI service" / "A skill".
-const KIND_PHRASES: Record<PieceKind, string> = {
+export const KIND_PHRASES: Record<PieceKind, string> = {
   ai_service: 'An AI service',
   embedding: 'An embedding service',
   sandbox: 'A sandbox service',
