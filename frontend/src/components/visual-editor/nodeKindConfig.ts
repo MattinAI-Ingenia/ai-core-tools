@@ -1,5 +1,7 @@
 import {
+  ArrowLeftRight,
   Bot,
+  Container,
   Cpu,
   Database,
   Layers,
@@ -9,6 +11,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { GraphNodeKind } from '../../hooks/useAppGraph';
+import type { PieceKind } from './agent-canvas/agentPorts';
 
 /**
  * Visual configuration for a single graph node kind: icon, Tailwind accent
@@ -113,6 +116,44 @@ export const NODE_KIND_VISUALS: Record<GraphNodeKind, NodeKindVisual> = {
     borderClass: 'border-slate-200 dark:border-slate-700',
     bgClass: 'bg-white dark:bg-gray-800',
     accentHex: '#475569',
+    emphasize: false,
+  },
+};
+
+/**
+ * Per-agent canvas piece visuals, keyed by the ports model's `PieceKind`.
+ * Kinds the app graph also renders reuse the same entry; sandbox services
+ * and middlewares have no graph-node equivalent, so they carry their own
+ * visuals here.
+ */
+export const PIECE_VISUALS: Record<PieceKind, NodeKindVisual> = {
+  ai_service: NODE_KIND_VISUALS.service,
+  embedding: NODE_KIND_VISUALS.embedding,
+  sandbox: {
+    icon: Container,
+    typeCaption: 'Sandbox service',
+    iconClass: 'text-emerald-600 dark:text-emerald-400',
+    captionClass: 'text-emerald-700 dark:text-emerald-400',
+    chipClass: 'bg-emerald-100 dark:bg-emerald-900/40',
+    borderClass: 'border-emerald-200 dark:border-emerald-800',
+    bgClass: 'bg-white dark:bg-gray-800',
+    accentHex: '#059669',
+    emphasize: false,
+  },
+  silo: NODE_KIND_VISUALS.silo,
+  skill: NODE_KIND_VISUALS.skill,
+  mcp: NODE_KIND_VISUALS.mcp,
+  agent: NODE_KIND_VISUALS.agent,
+  parser: NODE_KIND_VISUALS.parser,
+  middleware: {
+    icon: ArrowLeftRight,
+    typeCaption: 'Middleware',
+    iconClass: 'text-orange-600 dark:text-orange-400',
+    captionClass: 'text-orange-700 dark:text-orange-400',
+    chipClass: 'bg-orange-100 dark:bg-orange-900/40',
+    borderClass: 'border-orange-200 dark:border-orange-800',
+    bgClass: 'bg-white dark:bg-gray-800',
+    accentHex: '#ea580c',
     emphasize: false,
   },
 };
