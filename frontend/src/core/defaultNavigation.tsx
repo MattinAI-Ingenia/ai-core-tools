@@ -13,7 +13,6 @@ import {
   Zap,
   Settings,
   Layers,
-  Network,
   Users,
   BarChart2,
   Info,
@@ -71,12 +70,6 @@ export const defaultNavigation: NavigationConfig = {
       path: '/apps/:appId/agents',
       name: 'Agents',
       icon: <Bot size={16} />,
-      section: 'appNavigation'
-    },
-    {
-      path: '/apps/:appId/visual-editor',
-      name: 'Visual editor',
-      icon: <Network size={16} />,
       section: 'appNavigation'
     },
     {
