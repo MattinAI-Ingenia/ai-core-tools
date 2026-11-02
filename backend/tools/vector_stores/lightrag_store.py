@@ -177,8 +177,13 @@ def _source_label_from_metadata(metadata: dict) -> str:
 
 # Matches a chunk id LightRAG derives from an id _lightrag_doc_id returned
 # (f"{doc_id}-chunk-{n}"): resource id and page, straight out of the id
-# instead of re-parsing the human-readable file_path label.
-CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)-p(\d+)-chunk-\d+$")
+# instead of re-parsing the human-readable file_path label. Covers both the
+# old per-page PDF shape ("res7-p12-chunk-037", page in group 2) and the new
+# per-file shape ("res7-chunk-000", with an optional "-p{P}" for PDF chunks —
+# page absent for DOCX/TXT/MD). The chunk index must still be digits ("-chunk-
+# abc" does not match); no end anchor after it so it also matches a "-sNN"
+# hard-split suffix on the chunk id.
+CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)(?:-p(\d+))?-chunk-\d+")
 
 
 def _lightrag_doc_id(metadata: dict, content: str) -> str:
@@ -204,17 +209,43 @@ def _lightrag_doc_id(metadata: dict, content: str) -> str:
 
 # Matches the PARENT doc id (no "-chunk-N" suffix) — see _lightrag_doc_id and
 # CHUNK_ID_RESOURCE_PAGE_RE just above, which matches the CHUNK id instead.
-_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)-p(\d+)$")
+# Covers both the old per-page doc id ("res7-p12") and the new per-file one
+# ("res7").
+_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)(?:-p\d+)?$")
+
+# Trailing "(p. N)" already baked into an old-shape file_path label — used by
+# _page_label to avoid double-appending the page when rebuilding the label.
+_PAGE_SUFFIX_RE = re.compile(r"\s\(p\. \d+\)$")
+
+
+def _page_label(file_path: str, page: Optional[int]) -> str:
+    """Human-readable source label with the page appended, idempotently.
+
+    Returns *file_path* unchanged when there is no page to add, when it
+    already ends in a "(p. N)" suffix (old-shape labels bake the page in
+    already — appending again would double it up), or when there is no real
+    file name to attach a page to (empty, or LightRAG's "unknown_source"
+    sentinel — see _source_label_from_metadata) so the frontend's "Unknown
+    source" fallback (an exact/empty match) still fires instead of showing a
+    bare "(p. N)" or "unknown_source (p. N)".
+    """
+    if page is None or not file_path or file_path == "unknown_source" or _PAGE_SUFFIX_RE.search(file_path):
+        return file_path
+    return f"{file_path} (p. {page})"
 
 
 def _group_chunk_rows(
     rows: list[tuple[str, str, str, str]], per_doc_cap: int = 3,
-) -> dict[str, list[tuple[str, str, int, str]]]:
+) -> dict[str, list[tuple[str, str, Optional[int], str]]]:
     """Group (full_doc_id, file_path, content, chunk_id) rows by resource id.
 
-    Rows whose full_doc_id doesn't match the res{N}-p{N} shape (non-PDF
-    sources, e.g. crawled Domain pages — see _lightrag_doc_id's content-hash
-    fallback) are skipped: there is no resource_id to group them under.
+    Handles both the old per-page doc id shape (full_doc_id "res7-p12", page
+    baked into full_doc_id) and the new per-file shape (full_doc_id "res7",
+    page — if any — read from the chunk id instead, via
+    CHUNK_ID_RESOURCE_PAGE_RE). Rows whose full_doc_id doesn't match either
+    shape (non-PDF sources, e.g. crawled Domain pages — see
+    _lightrag_doc_id's content-hash fallback) are skipped: there is no
+    resource_id to group them under.
 
     per_doc_cap: at most this many snippets per document — the FIRST match
     per document already answers "does it appear here", which is the whole
@@ -222,24 +253,28 @@ def _group_chunk_rows(
 
     file_path travels alongside each snippet (not just the content) because
     Task 3's citation block needs the real "file.pdf p.N" label, not a
-    synthetic one. page travels too — the frontend's "Open PDF at page N"
-    button needs it (see agentTools.py's chunk dicts), and it was otherwise
-    discarded here despite being right there in full_doc_id.
+    synthetic one — rebuilt (idempotently) via _page_label so a new-shape row
+    with a bare file name still gets its page appended. page travels too —
+    the frontend's "Open PDF at page N" button needs it (see agentTools.py's
+    chunk dicts), and is None when the chunk carries no page (new DOCX/TXT/MD
+    shape).
 
     chunk_id is LightRAG's own id for the chunk ("res319-p71-chunk-000"), the
     string the graph's source_id fields use: the playground marks a cited chunk
     and the entities extracted from it by matching it. It is read from the row,
     never rebuilt from the page — a page can hold more than one chunk.
     """
-    grouped: dict[str, list[tuple[str, str, int, str]]] = {}
+    grouped: dict[str, list[tuple[str, str, Optional[int], str]]] = {}
     for full_doc_id, file_path, content, chunk_id in rows:
         match = _FULL_DOC_ID_RESOURCE_RE.match(full_doc_id)
         if not match:
             continue
-        resource_id, page = match.group(1), int(match.group(2))
+        resource_id = match.group(1)
+        chunk_match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
+        page = int(chunk_match.group(2)) if chunk_match and chunk_match.group(2) else None
         snippets = grouped.setdefault(resource_id, [])
         if len(snippets) < per_doc_cap:
-            snippets.append((file_path, content.strip(), page, chunk_id))
+            snippets.append((_page_label(file_path, page), content.strip(), page, chunk_id))
     return grouped
 
 
@@ -1750,7 +1785,9 @@ def _normalize_lightrag_graph(raw_data: dict, name_map: Optional[Dict[str, str]]
         match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
         if match:
             entry["resource_id"] = int(match.group(1))
-            entry["page"] = int(match.group(2))
+            if match.group(2):
+                entry["page"] = int(match.group(2))
+                entry["file_path"] = _page_label(entry["file_path"], entry["page"])
         chunks.append(entry)
 
     return {
@@ -2561,7 +2598,7 @@ class LightRAGStore(VectorStoreInterface):
     def find_chunks_mentioning(
         self, collection_name: str, term: Optional[Union[str, List[str]]],
         doc_filter: Optional[Union[str, int, List[Union[str, int]]]] = None,
-    ) -> tuple[dict[str, list[tuple[str, str, int, str]]], bool]:
+    ) -> tuple[dict[str, list[tuple[str, str, Optional[int], str]]], bool]:
         """Every document whose chunks literally contain *term* — no chunk_top_k,
         no similarity ranking. See _group_chunk_rows for the per-document cap.
 
@@ -2605,11 +2642,12 @@ class LightRAGStore(VectorStoreInterface):
         if doc_ids:
             doc_clauses = []
             for i, doc_id in enumerate(doc_ids):
-                key = f"doc_pattern_{i}"
-                doc_clauses.append(f"full_doc_id LIKE :{key}")
-                params[key] = f"res{doc_id}-p%"
+                exact_key, pattern_key = f"doc_exact_{i}", f"doc_pattern_{i}"
+                doc_clauses.append(f"(full_doc_id = :{exact_key} OR full_doc_id LIKE :{pattern_key})")
+                params[exact_key] = f"res{doc_id}"
+                params[pattern_key] = f"res{doc_id}-p%"
             sql += " AND (" + " OR ".join(doc_clauses) + ")"
-        sql += f" ORDER BY full_doc_id LIMIT {self._COVERAGE_QUERY_ROW_CAP}"
+        sql += f" ORDER BY full_doc_id, chunk_order_index LIMIT {self._COVERAGE_QUERY_ROW_CAP}"
 
         with self.db.engine.connect() as conn:
             rows = conn.execute(text(sql), params).fetchall()

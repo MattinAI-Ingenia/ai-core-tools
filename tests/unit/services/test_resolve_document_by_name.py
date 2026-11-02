@@ -168,6 +168,26 @@ def test_graph_entity_lookup_parses_resource_id_from_source_id():
     assert result == [296]
 
 
+def test_graph_entity_lookup_parses_resource_id_from_mixed_shape_source_id():
+    """source_id can mix the new per-file chunk shape ("res7-chunk-000"), the
+    new PDF-chunk shape with a hard-split suffix ("res7-p12-chunk-037-s01"),
+    and the old per-page shape ("res9-p1-chunk-000") — every shape must
+    resolve to its resource_id."""
+    fake_record = {"source_id": "res7-chunk-000<SEP>res7-p12-chunk-037-s01<SEP>res9-p1-chunk-000"}
+    fake_session = MagicMock()
+    fake_session.run.return_value = [fake_record]
+    fake_driver = MagicMock()
+    fake_driver.session.return_value.__enter__.return_value = fake_session
+
+    with patch(
+        "services.silo_graph_service.SiloGraphService._neo4j_driver",
+        return_value=fake_driver,
+    ):
+        result = SiloService._resolve_via_graph_entities(37, "term")
+
+    assert set(result) == {7, 9}
+
+
 def test_graph_entity_lookup_degrades_to_empty_when_neo4j_unavailable():
     """Best-effort supplement, not a hard dependency — matches
     SiloGraphService's own existing pattern for optional graph access."""

@@ -7,6 +7,7 @@ would open the wrong source. Non-LightRAG docs must pass through untouched.
 from langchain_core.documents import Document
 
 from tools.agentTools import _append_lightrag_citation_sources, _CITATION_INSTRUCTION
+from tools.vector_stores.lightrag_store import _normalize_lightrag_graph
 
 
 def _lightrag_doc(chunks):
@@ -116,6 +117,29 @@ def test_chunk_json_stays_valid_and_graph_context_untouched():
     assert [json.loads(l)["content"] for l in chunk_lines] == ["Protección antihielo ...", "Precaución contra heladas ..."]
     assert '"entity": "Función Anti-Hielo"' in out
     assert not _re.search(r"Reference Document List|reference_id", out)
+
+
+# --- new-shape chunk id produces the same citation output as the old one ----
+# (lightrag-pdf-document-schema step_002: readers accept both id shapes;
+# _normalize_lightrag_graph rebuilds the page label from the chunk id.)
+
+
+def _doc_from_raw_chunk(chunk_id, file_path):
+    raw = {"data": {"chunks": [{"chunk_id": chunk_id, "content": "a", "file_path": file_path}]}}
+    normalized = _normalize_lightrag_graph(raw)
+    return Document(page_content="x", metadata={"lightrag_raw_data": normalized})
+
+
+def test_new_shape_chunk_id_citation_matches_old_shape_citation():
+    new_shape_out = _append_lightrag_citation_sources(
+        "A", [_doc_from_raw_chunk("res7-p12-chunk-037", "m.pdf")],
+    )
+    old_shape_out = _append_lightrag_citation_sources(
+        "A", [_doc_from_raw_chunk("res7-p12-chunk-000", "m.pdf (p. 12)")],
+    )
+
+    assert "[1] (source: m.pdf (p. 12)) a" in new_shape_out
+    assert "[1] (source: m.pdf (p. 12)) a" in old_shape_out
 
 
 def test_non_lightrag_content_is_left_alone():

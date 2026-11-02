@@ -15,8 +15,11 @@ from langchain_core.documents import Document
 from tools.vector_stores.lightrag_store import (
     LightRAGStore,
     LightRAGRetriever,
+    CHUNK_ID_RESOURCE_PAGE_RE,
+    _FULL_DOC_ID_RESOURCE_RE,
     _lightrag_doc_id,
     _normalize_lightrag_graph,
+    _page_label,
 )
 
 # pytest.ini does not enable pytest-asyncio's auto mode, so mark every
@@ -300,3 +303,87 @@ def test_normalize_omits_resource_and_page_for_content_hash_ids():
     chunk = result["data"]["chunks"][0]
     assert "resource_id" not in chunk
     assert "page" not in chunk
+
+
+# ---------------------------------------------------------------------------
+# CHUNK_ID_RESOURCE_PAGE_RE / _FULL_DOC_ID_RESOURCE_RE: accept both the old
+# per-page PDF id shape and the new per-file shape (step_002 of
+# lightrag-pdf-document-schema — no writer changes yet, readers only).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("chunk_id,expected", [
+    ("res7-chunk-000", ("7", None)),            # new DOCX/TXT/MD shape
+    ("res7-p12-chunk-037", ("7", "12")),         # new PDF-chunk shape
+    ("res7-p12-chunk-037-s01", ("7", "12")),     # new PDF shape, hard-split child
+    ("res7-p12-chunk-000", ("7", "12")),         # old per-page PDF shape
+])
+def test_chunk_id_resource_page_re_matches_both_shapes(chunk_id, expected):
+    match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
+    assert match is not None
+    assert (match.group(1), match.group(2)) == expected
+
+
+def test_chunk_id_resource_page_re_does_not_match_non_resource_ids():
+    assert CHUNK_ID_RESOURCE_PAGE_RE.match("doc-abc-chunk-000") is None
+
+
+def test_chunk_id_resource_page_re_requires_a_digit_chunk_index():
+    # "-chunk-" must be followed by digits — a malformed/non-digit index
+    # (never produced by _lightrag_doc_id, but not something to silently
+    # accept either) must not match.
+    assert CHUNK_ID_RESOURCE_PAGE_RE.match("res7-chunk-abc") is None
+
+
+@pytest.mark.parametrize("doc_id", ["res7", "res7-p12"])
+def test_full_doc_id_resource_re_matches_both_shapes(doc_id):
+    assert _FULL_DOC_ID_RESOURCE_RE.match(doc_id) is not None
+
+
+@pytest.mark.parametrize("doc_id", ["doc-abc", "res7-p12-chunk-000"])
+def test_full_doc_id_resource_re_rejects_non_doc_ids(doc_id):
+    assert _FULL_DOC_ID_RESOURCE_RE.match(doc_id) is None
+
+
+@pytest.mark.parametrize("file_path", ["", "unknown_source"])
+def test_page_label_does_not_attach_a_page_to_a_sourceless_file_path(file_path):
+    # No real file name to attach a page to — must stay exactly "" or
+    # "unknown_source" so the frontend's "Unknown source" fallback (an
+    # exact/empty match, see CitationBadge.tsx / LightRAGGraphBubble.tsx)
+    # still fires, instead of showing a bare "(p. 12)" or "unknown_source (p. 12)".
+    assert _page_label(file_path, 12) == file_path
+
+
+# ---------------------------------------------------------------------------
+# _normalize_lightrag_graph: new-shape chunk ids
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_appends_page_to_a_bare_file_name_for_new_shape_pdf_chunk():
+    raw = {"data": {"chunks": [{"chunk_id": "res7-p12-chunk-037", "content": "text", "file_path": "m.pdf"}]}}
+
+    chunk = _normalize_lightrag_graph(raw)["data"]["chunks"][0]
+
+    assert chunk["resource_id"] == 7
+    assert chunk["page"] == 12
+    assert chunk["file_path"] == "m.pdf (p. 12)"
+
+
+def test_normalize_new_docx_shape_has_no_page_and_leaves_file_path_bare():
+    raw = {"data": {"chunks": [{"chunk_id": "res8-chunk-000", "content": "text", "file_path": "d.docx"}]}}
+
+    chunk = _normalize_lightrag_graph(raw)["data"]["chunks"][0]
+
+    assert chunk["resource_id"] == 8
+    assert "page" not in chunk
+    assert chunk["file_path"] == "d.docx"
+
+
+def test_normalize_old_shape_label_already_has_page_suffix_is_not_doubled():
+    raw = {"data": {"chunks": [{"chunk_id": "res61-p5-chunk-000", "content": "text", "file_path": "f.pdf (p. 5)"}]}}
+
+    chunk = _normalize_lightrag_graph(raw)["data"]["chunks"][0]
+
+    assert chunk["resource_id"] == 61
+    assert chunk["page"] == 5
+    assert chunk["file_path"] == "f.pdf (p. 5)"

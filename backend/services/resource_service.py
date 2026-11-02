@@ -1201,12 +1201,14 @@ class ResourceService:
     def _discard_unindexed_after_cancel(repository_id: int) -> int:
         """Delete the resources a cancelled run never indexed. Returns how many.
 
-        Only ``cancelled`` resources with **zero** indexed pages are touched:
+        Only ``cancelled`` resources with **zero** indexed documents are touched:
         those never reached the vector store, so deleting them removes a row and
         a file and nothing else — no orphaned entities, no half-indexed
-        document. A resource that got even one page through is left alone; there
-        is no per-document delete in LightRAG to unwind it with, so silently
-        dropping its row would strand that page in the graph.
+        document. A resource that got even one document through is left alone;
+        there is no per-document delete in LightRAG to unwind it with, so
+        silently dropping its row would strand that document in the graph.
+        Matches both the old per-page id shape (``res{N}-p{P}``, via the LIKE
+        prefix) and the new per-file shape (``res{N}`` exactly).
 
         Best-effort per resource: one failure must not abandon the rest.
         """
@@ -1232,13 +1234,13 @@ class ResourceService:
                 indexed = db.execute(
                     text(
                         "SELECT count(*) FROM lightrag_doc_status "
-                        "WHERE workspace = :ws AND id LIKE :prefix AND status = 'processed'"
+                        "WHERE workspace = :ws AND (id = :exact OR id LIKE :prefix) AND status = 'processed'"
                     ),
-                    {"ws": workspace, "prefix": f"res{resource_id}-p%"},
+                    {"ws": workspace, "exact": f"res{resource_id}", "prefix": f"res{resource_id}-p%"},
                 ).scalar() or 0
                 if indexed:
                     logger.info(
-                        "Keeping cancelled resource %s: %s page(s) already indexed",
+                        "Keeping cancelled resource %s: %s document(s) already indexed",
                         resource_id, indexed,
                     )
                     continue
