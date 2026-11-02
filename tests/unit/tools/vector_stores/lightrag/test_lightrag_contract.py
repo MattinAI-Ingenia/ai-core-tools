@@ -87,7 +87,7 @@ class TestChunkerSignatures:
             assert kw in params, kw
 
     def test_other_importables(self):
-        from lightrag.parser.routing import resolve_chunk_options
+        from lightrag.parser.routing import chunk_strategy_key, resolve_chunk_options
         from lightrag.chunker.recursive_character import normalize_r_separators
         from lightrag.utils_pipeline import build_chunks_dict_from_chunking_result
         from lightrag.utils import sanitize_text_for_encoding
@@ -96,6 +96,11 @@ class TestChunkerSignatures:
         assert callable(normalize_r_separators)
         assert callable(build_chunks_dict_from_chunking_result)
         assert callable(sanitize_text_for_encoding)
+        assert callable(chunk_strategy_key)
+        assert chunk_strategy_key("F") == "fixed_token"
+        assert chunk_strategy_key("R") == "recursive_character"
+        assert chunk_strategy_key("V") == "semantic_vector"
+        assert chunk_strategy_key("P") == "paragraph_semantic"
 
     def test_lightrag_dataclass_fields(self):
         import dataclasses
@@ -331,3 +336,60 @@ class TestLegacyHookEndToEnd:
         assert chunk2 is not None
         assert chunk2.get("llm_cache_list"), "llm_cache_list must be non-empty for the 2nd doc"
         assert llm_calls["n"] == calls_before_second, "the 2nd extraction should be a cache hit"
+
+
+# ---------------------------------------------------------------------------
+# 6. Drift guard: the page-aware hook's per-strategy dispatch
+#    (_resolve_strategy_options) must keep matching LightRAG's OWN explicit
+#    F/R/V/P selector dispatch (pipeline.py's process_single_document). This
+#    fails loudly on a lightrag-hku bump that changes that dispatch instead
+#    of the mirror silently diverging from it.
+# ---------------------------------------------------------------------------
+
+
+class TestPageAwareHookMatchesExplicitDispatch:
+    @pytest.mark.parametrize("option", ["F", "R", "V", "P"])
+    async def test_hook_output_matches_explicit_selector(self, tmp_path, option):
+        from lightrag.parser.routing import resolve_chunk_options
+
+        from tools.vector_stores.lightrag_store import _achunk_page_aware
+
+        text = "Some plain unmarked document text for drift checking. " * 20
+
+        # Subdir names must be unique PER PARAMETRIZED CASE, not just per
+        # test: _make_rag derives the workspace from tmp_path.name, and
+        # lightrag.kg.shared_storage keys pipeline state by workspace in
+        # process-global dicts (see _make_rag's own docstring/comment).
+        dir_a = tmp_path / f"a-{option}"
+        dir_a.mkdir()
+        dir_b = tmp_path / f"b-{option}"
+        dir_b.mkdir()
+
+        # Path A: LightRAG's own explicit F/R/V/P selector (no chunking_func
+        # override — the pre-existing, library-native dispatch path).
+        rag_a, _ = await _make_rag(dir_a, None)
+        chunk_opts = resolve_chunk_options(rag_a.addon_params, process_options=option)
+        await rag_a.apipeline_enqueue_documents(
+            [text], ids=["res1"], file_paths=["f.txt"],
+            process_options=option, chunk_options=chunk_opts,
+        )
+        await rag_a.apipeline_process_enqueue_documents()
+        status_a = await rag_a.doc_status.get_by_id("res1")
+        chunks_a = await rag_a.text_chunks.get_by_ids(status_a["chunks_list"])
+        contents_a = [c["content"] for c in sorted(chunks_a, key=lambda c: c["chunk_order_index"])]
+
+        # Path B: our page-aware legacy hook (no process_options passed —
+        # late-bound closure, same pattern _build_rag itself uses).
+        rag_b = None
+
+        def _hook(tokenizer, content, _split_by_character, _split_by_character_only, _overlap, _size):
+            return _achunk_page_aware(rag_b, option, tokenizer, content)
+
+        rag_b, _ = await _make_rag(dir_b, _hook)
+        await rag_b.apipeline_enqueue_documents([text], ids=["res1"], file_paths=["f.txt"])
+        await rag_b.apipeline_process_enqueue_documents()
+        status_b = await rag_b.doc_status.get_by_id("res1")
+        chunks_b = await rag_b.text_chunks.get_by_ids(status_b["chunks_list"])
+        contents_b = [c["content"] for c in sorted(chunks_b, key=lambda c: c["chunk_order_index"])]
+
+        assert contents_a == contents_b

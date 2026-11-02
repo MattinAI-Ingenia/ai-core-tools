@@ -23,6 +23,7 @@ import threading
 import time
 import tempfile
 import weakref
+from bisect import bisect_right
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from langchain_core.callbacks import (
@@ -90,6 +91,9 @@ _LIGHTRAG_MODES = frozenset({"local", "global", "hybrid", "naive", "mix", "bypas
 # Maps a silo's chunking strategy to LightRAG's native ``process_options``
 # selector char (see lightrag.constants.PROCESS_OPTION_CHUNK_*). Unknown or
 # legacy values (e.g. the old "token_window") fall back to fixed-token "F".
+# Not fed to LightRAG's own selector anymore (see _ainsert) -- every document
+# now goes through the page-aware ``chunking_func`` hook, and this feeds
+# _resolve_strategy_options there instead.
 _CHUNK_STRATEGY_OPTION = {
     "fixed_token": "F",
     "recursive_character": "R",
@@ -173,6 +177,241 @@ def _source_label_from_metadata(metadata: dict) -> str:
     if page is not None:
         label = f"{label} (p. {page})"
     return label
+
+
+# A page marker is a whole line matching ``^<<<page:([1-9]\d*)>>>$`` with
+# exactly one "\n" immediately after it; text counts as page-marked only when
+# it STARTS with such a line (see strip_page_markers). Used to carry PDF page
+# boundaries through a single whole-file chunking call (see
+# _achunk_page_aware) instead of chunking one LightRAG document per page.
+# The digit group is capped at 6 digits (no real PDF has anywhere near
+# 999999 pages) so a pathological page number can never hit Python's
+# int-string conversion limit or risk overflowing the ~255-char chunk-id
+# column once prefixed.
+_PAGE_MARKER_RE = re.compile(r"^<<<page:([1-9][0-9]{0,5})>>>$", re.MULTILINE)
+
+# A line that merely LOOKS like a marker (real page content, not our own
+# join) — neutralised by page_marked_text before marking so it can never be
+# mistaken for a real marker later. Same digit cap as _PAGE_MARKER_RE.
+_PAGE_MARKER_LOOKALIKE_RE = re.compile(r"^([ \t]*)<<<(page:[0-9]{1,6}>>>[ \t]*)$", re.MULTILINE)
+
+
+def page_marked_text(pages) -> str:
+    """Join ``(page_number, cleaned_text)`` pairs into one page-marked string.
+
+    Each page is prefixed with its own ``<<<page:N>>>`` marker line so a
+    single whole-file chunking call can still recover which page a chunk
+    came from (see strip_page_markers / _achunk_page_aware). Any line in a
+    page's own text that merely looks like a marker is neutralised first, so
+    it can never be parsed back as a real one.
+
+    Each page's text is run through LightRAG's own
+    ``sanitize_text_for_encoding`` (strip -> ``html.unescape`` -> strip
+    control chars/surrogates -> strip) BEFORE neutralisation —
+    ``apipeline_enqueue_documents`` applies that same sanitizer to the
+    stored text again later, and without pre-applying it here a lookalike
+    line that doesn't match ``_PAGE_MARKER_LOOKALIKE_RE`` yet (e.g.
+    ``&lt;&lt;&lt;page:999&gt;&gt;&gt;``) could sanitize INTO a real
+    ``<<<page:999>>>`` marker after neutralisation already ran, forging a
+    page boundary.
+
+    ``sanitize_text_for_encoding`` is NOT idempotent — each pass only peels
+    ONE layer of HTML-entity encoding, so a multi-layer-encoded payload
+    (e.g. ``&amp;lt;&amp;lt;&amp;lt;page:999&amp;gt;&amp;gt;&amp;gt;``, or an
+    entity with a control char/surrogate embedded inside it) can still
+    survive one pass unresolved and then forge a marker on LightRAG's LATER
+    second pass. Looping this sanitizer until it stabilises would close that
+    but is O(n^2) on adversarial nested encoding (``&amp;amp;amp;...``).
+    Instead, every ``&`` is re-escaped to ``&amp;`` after this one sanitize
+    pass: by then every control char/surrogate is already gone (the
+    sanitizer removed them), so the only thing LightRAG's later second pass
+    can still do is ``html.unescape`` — and re-escaped ``&amp;`` can only
+    unescape back to a literal ``&``, never regenerate a resolvable entity.
+    This also fixes a content-fidelity side effect of the plain sanitize
+    call: real page text containing a literal HTML entity (e.g.
+    ``&amp;lt;b&amp;gt;``) would otherwise be double-unescaped here instead
+    of being unescaped exactly once by LightRAG itself.
+    """
+    from lightrag.utils import sanitize_text_for_encoding  # noqa: WPS433
+
+    neutralized = (
+        (
+            n,
+            _PAGE_MARKER_LOOKALIKE_RE.sub(
+                r"\1<<\2", sanitize_text_for_encoding(text)
+            ).replace("&", "&amp;"),
+        )
+        for n, text in pages
+    )
+    return "\n\n".join(f"<<<page:{n}>>>\n{text}" for n, text in neutralized)
+
+
+def strip_page_markers(text: str) -> Tuple[str, List[Tuple[int, int]]]:
+    """Remove page markers, returning ``(clean_text, [(offset, page), ...])``.
+
+    ``offset`` is the position in the OUTPUT (marker-stripped) string where
+    that page's text begins. Text that does not START with a marker is
+    returned unchanged with an empty list — a marker-like line appearing
+    later in otherwise-unmarked text is just content, not a real marker
+    sequence, and must not be touched.
+    """
+    if not _PAGE_MARKER_RE.match(text):
+        return text, []
+
+    pieces: List[str] = []
+    starts: List[Tuple[int, int]] = []
+    pos = 0
+    out_len = 0
+    for m in _PAGE_MARKER_RE.finditer(text):
+        pieces.append(text[pos:m.start()])
+        out_len += m.start() - pos
+        end = m.end()
+        if end < len(text) and text[end] == "\n":
+            end += 1
+        starts.append((out_len, int(m.group(1))))
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces), starts
+
+
+def _resolve_strategy_options(rag, option: str) -> Tuple[int, dict]:
+    """Resolve ``(chunk_token_size, kwargs)`` for one chunking strategy letter.
+
+    Mirrors LightRAG's own explicit-selector dispatch (``pipeline.py``'s
+    ``process_single_document``) so this hook uses the library's exact
+    per-strategy option resolution instead of reinventing it.
+    """
+    from lightrag.parser.routing import chunk_strategy_key, resolve_chunk_options  # noqa: WPS433
+
+    strategy_key = chunk_strategy_key(option)
+    chunk_opts = resolve_chunk_options(rag.addon_params, process_options=option)
+    resolved = int(chunk_opts.get("chunk_token_size") or rag.chunk_token_size)
+    opts = dict(chunk_opts.get(strategy_key) or {})
+    size = int(opts.pop("chunk_token_size", resolved))
+    if option == "R" and "separators" in opts:
+        from lightrag.chunker.recursive_character import normalize_r_separators  # noqa: WPS433
+
+        seps = normalize_r_separators(opts["separators"])
+        if seps:
+            opts["separators"] = seps
+        else:
+            opts.pop("separators")
+    return size, opts
+
+
+def _assign_start_pages(chunks: list, clean: str, starts: List[Tuple[int, int]]) -> None:
+    """Set ``chunk["chunk_id"] = f"p{page}-chunk-{order:03d}"`` on every chunk.
+
+    ``starts`` is ``[(offset_in_clean_text, page_number), ...]`` in order (see
+    strip_page_markers). A chunk's page comes from its own ``_source_span``
+    when the chunker emitted one; otherwise from a ``clean.find()`` fallback
+    anchored at the previous chunk's start, so overlapping/out-of-order
+    chunks never walk the page backward. A chunk whose start can't be
+    determined either way carries forward the previous chunk's page.
+    """
+    offsets = [o for o, _ in starts]
+    page = starts[0][1]
+    cursor = 0
+    for order, chunk in enumerate(chunks):
+        start = (chunk.get("_source_span") or {}).get("start")
+        if not isinstance(start, int):
+            # Theoretical O(k * n) ceiling if many consecutive chunks lack
+            # _source_span (k = chunk count, n = len(clean)). Currently
+            # dormant: F always emits spans here, and R/V/P-via-R all emit
+            # spans on lightrag-hku 1.5.6 too — flagged so this isn't
+            # silently reintroduced as a real hot path on a future bump.
+            found = clean.find(chunk.get("content") or "", cursor)
+            if found >= 0:
+                start = found
+        if isinstance(start, int):
+            page = starts[bisect_right(offsets, start) - 1][1]
+            cursor = start
+        chunk["chunk_id"] = f"p{page}-chunk-{order:03d}"
+
+
+async def _achunk_page_aware(rag, option: str, tokenizer, content: str) -> list:
+    """Chunk a whole document with *option*'s strategy, page-aware.
+
+    This is LightRAG's legacy ``chunking_func`` hook (see ``_build_rag``):
+    the whole file's page-marked text is chunked in ONE call per strategy,
+    and each resulting chunk gets a ``p{page}-chunk-{order}`` id when the
+    text was page-marked (``strip_page_markers`` found markers) — unmarked
+    text gets no ``chunk_id`` at all, so the chunker's own natural output is
+    preserved unchanged (today's behavior for non-PDF / non-Resource text).
+
+    The sync chunkers (F/R/P) run inside ``asyncio.to_thread`` since LightRAG
+    invokes this hook directly on the event loop. V is async and needs
+    ``rag.embedding_func`` to run ON the loop, so only the marker-stripping
+    around it is offloaded. ``run_in_chunking_executor`` (the library's own
+    private offload) is deliberately NOT used here: it is a process-wide
+    single-worker (``max_workers=1``) executor with no nested-submission
+    support (see ``lightrag.utils.get_chunking_executor``) — routing through
+    it would serialize chunking for the whole app onto one thread. The
+    library's own ``chunking_func`` docstring documents ``asyncio.to_thread``
+    as the correct extension point for a CPU-bound custom chunker.
+
+    Three deliberate divergences from LightRAG's own explicit-selector
+    dispatch (``pipeline.py``'s ``process_single_document``), which this
+    function otherwise mirrors via ``_resolve_strategy_options``:
+
+    1. V skips ``apply_trusted_sentence_split_regex`` — safe here because
+       ``rag.addon_params`` is read live on every call, not from a
+       per-document snapshot that could go stale (see GHSA-32jh-39m7-8x84,
+       which that helper exists to guard against for the snapshot path).
+    2. P gets no ``blocks_path``/``doc_id`` — raw text has neither, so P
+       always falls back to recursive-character chunking internally. This is
+       a pre-existing limitation of calling these chunkers outside LightRAG's
+       own document-parsing pipeline, not introduced here — P is already
+       disabled as a selectable strategy in the frontend.
+    3. Per-document chunk options are resolved LIVE from the silo's current
+       config at actual-chunking time, not snapshotted at enqueue time (see
+       ``_ainsert``'s docstring for the resulting trade-off).
+    """
+    size, opts = _resolve_strategy_options(rag, option)
+
+    if option == "V":
+        from lightrag.chunker import chunking_by_semantic_vector  # noqa: WPS433
+
+        clean, starts = await asyncio.to_thread(strip_page_markers, content)
+        chunks = await chunking_by_semantic_vector(
+            tokenizer, clean, size, embedding_func=rag.embedding_func, **opts
+        )
+        if starts:
+            await asyncio.to_thread(_assign_start_pages, chunks, clean, starts)
+    else:
+        def _sync_chunk():
+            from lightrag.chunker import (  # noqa: WPS433
+                chunking_by_fixed_token,
+                chunking_by_paragraph_semantic,
+                chunking_by_recursive_character,
+            )
+
+            clean, starts = strip_page_markers(content)
+            if option == "F":
+                result = chunking_by_fixed_token(
+                    tokenizer, clean, size, _emit_source_span=True, **opts
+                )
+            elif option == "R":
+                result = chunking_by_recursive_character(tokenizer, clean, size, **opts)
+            else:  # "P"
+                # No blocks_path/doc_id available from this hook (raw text
+                # has neither) -> chunking_by_paragraph_semantic always falls
+                # back to recursive-character chunking internally. Pre-
+                # existing limitation of calling it outside LightRAG's own
+                # document-parsing pipeline; P is already disabled in the
+                # frontend's strategy picker.
+                result = chunking_by_paragraph_semantic(tokenizer, clean, size, **opts)
+            if starts:
+                _assign_start_pages(result, clean, starts)
+            return result, starts
+
+        chunks, starts = await asyncio.to_thread(_sync_chunk)
+
+    logger.info(
+        "[%s] Page-aware chunking %s: %d chunk(s), %d page marker(s)",
+        getattr(rag, "workspace", None), option, len(chunks), len(starts),
+    )
+    return chunks
 
 
 # Matches a chunk id LightRAG derives from an id _lightrag_doc_id returned
@@ -491,32 +730,37 @@ async def _abest_variant_names(collection_name: str, names) -> Dict[str, str]:
     return await asyncio.to_thread(_best_variant_names, collection_name, list(names))
 
 
-async def _ainsert(rag, texts, file_paths=None, ids=None, process_options="F"):
-    """Insert documents through LightRAG's modern (non-legacy) chunking router.
+async def _ainsert(rag, texts, file_paths=None, ids=None):
+    """Insert documents through LightRAG's legacy ``chunking_func`` hook.
 
-    The plain ``rag.ainsert`` enqueues without a chunking selector, which makes
-    LightRAG fall back to its legacy 6-arg ``chunking_func`` path (logged as
-    ``Chunking F(legacy)``). Enqueuing with ``process_options="F"`` instead
-    selects the fixed-token chunker explicitly, so the new file-chunker contract
-    is used (logged as ``Chunking F``). The chunk size/overlap still come from
-    the silo config via ``addon_params['chunker']``.
+    No ``process_options`` selector is passed to ``apipeline_enqueue_documents``
+    — LightRAG then falls back to its legacy 6-arg ``chunking_func`` path
+    (logged by LightRAG itself as ``Chunking F(legacy)``), which is now used
+    deliberately rather than as a fallback: it is LightRAG's only public
+    extension point where we can both assign per-chunk page-aware
+    ``chunk_id``s AND still dispatch the silo's configured F/R/V/P chunking
+    strategy over the WHOLE file in one call — see ``_build_rag``'s
+    ``_page_aware_chunking`` closure and ``_achunk_page_aware``.
+    ``_achunk_page_aware`` logs its own, more accurate, INFO line since
+    LightRAG's generic "Chunking F(legacy)" line is misleading on its own
+    (it says F regardless of which strategy actually ran).
+
+    Accepted trade-off: before this hook, chunk options were resolved once
+    at enqueue time and snapshotted into ``content_data["chunk_options"]``,
+    so a resumed/retried document re-chunked with the SAME config it was
+    enqueued with. The legacy hook's fixed 6-arg signature has no slot for a
+    per-document snapshot, so ``_achunk_page_aware`` instead re-resolves the
+    silo's chunk config LIVE, at actual-chunking time. If a silo's chunking
+    config changes while documents sit enqueued-but-unprocessed, an
+    in-flight or later-retried document can pick up the new config instead
+    of the one it was enqueued under. Re-adding a snapshot would mean
+    re-adding the selector this step removes, which defeats the point.
     """
-    from lightrag.parser.routing import resolve_chunk_options
-
-    chunk_opts = resolve_chunk_options(
-        rag.addon_params, process_options=process_options
-    )
-    await rag.apipeline_enqueue_documents(
-        texts,
-        ids=ids,
-        file_paths=file_paths,
-        process_options=process_options,
-        chunk_options=chunk_opts,
-    )
+    await rag.apipeline_enqueue_documents(texts, ids=ids, file_paths=file_paths)
     await rag.apipeline_process_enqueue_documents()
 
 
-async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, ids=None, process_options="F"):
+async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, ids=None):
     """Run the insert with optional sub-document progress reporting.
 
     Polls the workspace's doc_status counts every 0.5s while the insert runs.
@@ -537,7 +781,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     of true completions: pipeline_status has no such counter.
     """
     if progress_callback is None:
-        await _ainsert(rag, texts, file_paths=file_paths, ids=ids, process_options=process_options)
+        await _ainsert(rag, texts, file_paths=file_paths, ids=ids)
         return
 
     total = len(texts)
@@ -600,7 +844,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
 
     poll_task = asyncio.create_task(_poll())
     try:
-        await _ainsert(rag, texts, file_paths=file_paths, ids=ids, process_options=process_options)
+        await _ainsert(rag, texts, file_paths=file_paths, ids=ids)
     finally:
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
@@ -608,7 +852,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     await asyncio.to_thread(progress_callback, run_total[0], run_total[0])
 
 
-async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
+async def _aenqueue(rag, texts, file_paths=None, ids=None):
     """Enqueue documents WITHOUT processing them yet (no LLM calls).
 
     Split out of :func:`_ainsert` so a caller can enqueue several resources'
@@ -618,18 +862,7 @@ async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
     across resources instead of each resource being capped by its own page
     count because it ran a whole enqueue+process cycle alone.
     """
-    from lightrag.parser.routing import resolve_chunk_options
-
-    chunk_opts = resolve_chunk_options(
-        rag.addon_params, process_options=process_options
-    )
-    await rag.apipeline_enqueue_documents(
-        texts,
-        ids=ids,
-        file_paths=file_paths,
-        process_options=process_options,
-        chunk_options=chunk_opts,
-    )
+    await rag.apipeline_enqueue_documents(texts, ids=ids, file_paths=file_paths)
 
 
 async def _arequest_lightrag_cancellation(rag) -> None:
@@ -763,7 +996,7 @@ async def _arequest_failed_retry(rag) -> None:
 
 async def _aprocess_enqueued_with_progress(
     rag, doc_ids_by_resource, progress_callback=None, should_cancel=None,
-    retry_failed=False, feed=None, window=3, process_options="F",
+    retry_failed=False, feed=None, window=3,
 ):
     """Run ONE ``apipeline_process_enqueue_documents()`` for everything
     currently enqueued in this workspace, reporting progress PER RESOURCE.
@@ -977,8 +1210,7 @@ async def _aprocess_enqueued_with_progress(
         for attempt in range(FEED_ENQUEUE_MAX_WAIT_S * 2):
             try:
                 await asyncio.wait_for(
-                    _aenqueue(rag, texts, file_paths=file_paths, ids=ids,
-                              process_options=process_options),
+                    _aenqueue(rag, texts, file_paths=file_paths, ids=ids),
                     timeout=FEED_ENQUEUE_CALL_TIMEOUT_S,
                 )
                 return
@@ -2089,6 +2321,23 @@ class LightRAGStore(VectorStoreInterface):
             else config.ENTITY_EXTRACT_MAX_GLEANING
         )
 
+        # Page-aware chunking via LightRAG's legacy chunking_func hook — see
+        # _ainsert / _achunk_page_aware. ``rag`` is late-bound: the closure
+        # captures the variable, not its value now, so by the time LightRAG
+        # actually CALLS this (during indexing) ``rag`` already points at the
+        # instance built two lines below.
+        option = self._chunk_process_option
+
+        def _page_aware_chunking(
+            tokenizer, content, _split_by_character, _split_by_character_only,
+            _overlap, _size,
+        ):
+            # The overlap/size positional args LightRAG passes here are the
+            # stale top-level legacy params — ignored, since
+            # _achunk_page_aware re-resolves per-strategy options itself via
+            # resolve_chunk_options (addon_params['chunker']), not these.
+            return _achunk_page_aware(rag, option, tokenizer, content)
+
         rag = LightRAG(
             working_dir=self._working_dir,
             workspace=collection_name,
@@ -2100,6 +2349,7 @@ class LightRAGStore(VectorStoreInterface):
             kv_storage=storage_cfg["kv_storage"],
             doc_status_storage=storage_cfg["doc_status_storage"],
             entity_extract_max_gleaning=gleaning,
+            chunking_func=_page_aware_chunking,
             **extra_kwargs,
         )
         # Mutate in place (not a constructor kwarg) so LightRAG's own
@@ -2198,7 +2448,7 @@ class LightRAGStore(VectorStoreInterface):
         try:
             self._run_on_collection_loop(
                 collection_name,
-                _ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
+                _ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids),
             )
         finally:
             reset_active_variant_collector(variant_token)
@@ -2268,7 +2518,7 @@ class LightRAGStore(VectorStoreInterface):
         )
         self._run_on_collection_loop(
             collection_name,
-            _aenqueue(rag, texts, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
+            _aenqueue(rag, texts, file_paths=file_paths, ids=ids),
         )
         return doc_ids_by_resource
 
@@ -2360,7 +2610,6 @@ class LightRAGStore(VectorStoreInterface):
                     rag, doc_ids_by_resource, progress_callback,
                     should_cancel=should_cancel, retry_failed=retry_failed,
                     feed=feed, window=window,
-                    process_options=self._chunk_process_option,
                 ),
             )
         finally:
