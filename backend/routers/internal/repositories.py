@@ -408,9 +408,10 @@ async def estimate_upload_resources(
                 "folder_id": folder_id,
             }
 
-            # Estimation is LightRAG-only; feed whole pages/files so the chunk
-            # count reflects LightRAG's own token-based chunking (not the
-            # generic pre-split path used by PGVector/Qdrant).
+            # Estimation is LightRAG-only; LightRAG chunks internally by token
+            # size, so feed it one whole-file Document (PDFs page-marked) —
+            # not the generic pre-split path used by PGVector/Qdrant — so the
+            # chunk count reflects LightRAG's own token-based chunking.
             docs = SiloService.extract_documents_from_file(temp_path, file_ext, base_metadata, split=False)
             for doc in docs:
                 extracted_documents.append({

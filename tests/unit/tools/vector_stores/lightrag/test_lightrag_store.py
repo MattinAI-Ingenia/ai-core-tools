@@ -20,6 +20,7 @@ from tools.vector_stores.lightrag_store import (
     _lightrag_doc_id,
     _normalize_lightrag_graph,
     _page_label,
+    _source_label_from_metadata,
 )
 
 # pytest.ini does not enable pytest-asyncio's auto mode, so mark every
@@ -254,15 +255,45 @@ def test_get_distinct_metadata_values_returns_empty(store):
 
 
 def test_lightrag_doc_id_encodes_resource_and_page():
-    assert _lightrag_doc_id({"resource_id": 61, "page": 5}, "some text") == "res61-p5"
+    doc = Document(page_content="some text", metadata={"resource_id": 61, "page": 5})
+    assert _lightrag_doc_id(doc) == "res61-p5"
 
 
 def test_lightrag_doc_id_falls_back_to_content_hash_without_resource_or_page():
     # Domain/web-crawled content has neither — must still get a valid,
     # LightRAG-shaped id instead of erroring.
-    doc_id = _lightrag_doc_id({}, "crawled page text")
+    doc_id = _lightrag_doc_id(Document(page_content="crawled page text"))
     assert doc_id.startswith("doc-")
     assert not doc_id.startswith("res")
+
+
+def test_lightrag_doc_id_trusts_an_explicitly_set_id():
+    # step_004: only the Resource whole-file extraction sets Document.id —
+    # when it's set, it is trusted directly, regardless of metadata.
+    doc = Document(id="res7", page_content="whole file text", metadata={"resource_id": 999, "page": 3})
+    assert _lightrag_doc_id(doc) == "res7"
+
+
+def test_lightrag_doc_id_resource_id_alone_in_metadata_cannot_fake_a_whole_file_id():
+    # AD-2 guarantee: caller-supplied metadata alone (no real .id set, no
+    # page) must never produce a bare "res{N}" id — only extract_documents_
+    # from_file's whole-file path can do that, by setting .id directly.
+    doc = Document(page_content="some text", metadata={"resource_id": 7})
+    doc_id = _lightrag_doc_id(doc)
+    assert doc_id != "res7"
+    assert doc_id.startswith("doc-")
+
+
+@pytest.mark.parametrize("malformed_id", ["../../etc", "res7; DROP TABLE", "res7-p12", "res"])
+def test_lightrag_doc_id_rejects_a_malformed_explicit_id(malformed_id):
+    # Defence in depth: only a bare "res{N}"-shaped .id is trusted. Anything
+    # else set on .id (not reachable today, but not something to trust
+    # blindly either) falls through to the metadata/hash logic instead of
+    # being used verbatim as the LightRAG doc id.
+    doc = Document(id=malformed_id, page_content="some text")
+    doc_id = _lightrag_doc_id(doc)
+    assert doc_id != malformed_id
+    assert doc_id.startswith("doc-")
 
 
 def test_index_documents_passes_resource_and_page_ids_to_ainsert(store, mock_rag):
@@ -276,6 +307,66 @@ def test_index_documents_passes_resource_and_page_ids_to_ainsert(store, mock_rag
         store.index_documents("silo_1", docs)
 
     assert mock_insert.call_args.kwargs["ids"] == ["res61-p1", "res61-p2"]
+
+
+def test_index_documents_whole_file_document_uses_its_explicit_id(store, mock_rag):
+    # step_004: a single whole-file Document (resource_id folded into .id by
+    # extract_documents_from_file) must be indexed under that exact id.
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [Document(id="res61", page_content="whole file text", metadata={"resource_id": 61, "name": "f.pdf"})]
+    with patch("tools.vector_stores.lightrag_store._ainsert_with_progress", new_callable=AsyncMock) as mock_insert:
+        store.index_documents("silo_1", docs)
+
+    assert mock_insert.call_args.kwargs["ids"] == ["res61"]
+
+
+def test_enqueue_documents_whole_file_document(store, mock_rag):
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [Document(id="res7", page_content="<<<page:1>>>\nx", metadata={"resource_id": 7, "name": "m.pdf"})]
+    with patch("tools.vector_stores.lightrag_store._aenqueue", new_callable=AsyncMock) as mock_enqueue:
+        result = store.enqueue_documents("silo_1", docs)
+
+    assert result == {7: ["res7"]}
+    assert mock_enqueue.call_args.kwargs["file_paths"] == ["m.pdf"]
+    assert mock_enqueue.call_args.kwargs["ids"] == ["res7"]
+
+
+# ---------------------------------------------------------------------------
+# _source_label_from_metadata
+# ---------------------------------------------------------------------------
+
+
+def test_source_label_strips_path_and_keeps_resource_id_out_of_the_label():
+    assert _source_label_from_metadata({"name": "a/b/m.pdf", "resource_id": 7}) == "m.pdf"
+
+
+def test_source_label_appends_page_when_present():
+    assert _source_label_from_metadata({"name": "a/b/m.pdf", "page": 3}) == "m.pdf (p. 3)"
+
+
+# ---------------------------------------------------------------------------
+# NFR-1: caller-supplied metadata alone can never trigger the whole-file
+# res{N} id path — only extract_documents_from_file's Resource extraction can.
+# ---------------------------------------------------------------------------
+
+
+def test_create_documents_for_indexing_never_collapses_chunk_ids():
+    from services.silo_service import SiloService
+
+    # Realistic multi-chunk caller-metadata scenario (e.g. the public
+    # index-file endpoint's payload shape): varied content so chunk
+    # boundaries differ, same shape a public caller would send.
+    paragraph = "The quick brown fox jumps over the lazy dog near the riverbank. "
+    content = "\n\n".join(f"{paragraph}Paragraph number {i}." for i in range(40))
+    docs = SiloService._create_documents_for_indexing(1, [{"content": content, "metadata": {"resource_id": 5}}])
+
+    assert len(docs) > 1
+    ids = [_lightrag_doc_id(doc) for doc in docs]
+    assert all(doc_id.startswith("doc-") for doc_id in ids)
+    assert "res5" not in ids
+    assert len(set(ids)) == len(ids)
 
 
 # ---------------------------------------------------------------------------

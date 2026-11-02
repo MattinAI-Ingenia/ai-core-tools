@@ -159,7 +159,10 @@ def _source_label_from_metadata(metadata: dict) -> str:
     Prefers the original file name and appends the page number when available
     (PDFs carry ``page``). Falls back through other known location keys, and
     finally to LightRAG's own ``"unknown_source"`` sentinel so the UI can detect
-    and label truly source-less chunks consistently.
+    and label truly source-less chunks consistently. A whole-file Resource
+    Document has no ``page`` key in its metadata, so its label is just the bare
+    file name; readers (``_page_label``) rebuild the "(p. N)" suffix from the
+    chunk id instead.
     """
     name = (
         metadata.get("name")
@@ -196,14 +199,19 @@ _PAGE_MARKER_RE = re.compile(r"^<<<page:([1-9][0-9]{0,5})>>>$", re.MULTILINE)
 _PAGE_MARKER_LOOKALIKE_RE = re.compile(r"^([ \t]*)<<<(page:[0-9]{1,6}>>>[ \t]*)$", re.MULTILINE)
 
 
-def page_marked_text(pages) -> str:
-    """Join ``(page_number, cleaned_text)`` pairs into one page-marked string.
+def neutralize_page_text(text: str) -> str:
+    """Sanitize *text* and neutralise any line that merely LOOKS like a
+    ``<<<page:N>>>`` marker, so it can never be parsed back as a real one.
 
-    Each page is prefixed with its own ``<<<page:N>>>`` marker line so a
-    single whole-file chunking call can still recover which page a chunk
-    came from (see strip_page_markers / _achunk_page_aware). Any line in a
-    page's own text that merely looks like a marker is neutralised first, so
-    it can never be parsed back as a real one.
+    Shared by ``page_marked_text`` (per page, before marking) and by any
+    whole-file Document whose content is never run through
+    ``page_marked_text`` but still gets its own ``res{N}`` chunk-id prefix
+    (e.g. a non-PDF Resource upload) — a marker-lookalike line in that
+    content would otherwise be mistaken by ``CHUNK_ID_RESOURCE_PAGE_RE``'s
+    *page-aware* readers for a page boundary that forges a fake page number,
+    an attack surface that DIDN'T exist before those Documents got a
+    ``res{N}``-shaped id (their old ``doc-<hash>`` id never matched that
+    regex in the first place).
 
     Each page's text is run through LightRAG's own
     ``sanitize_text_for_encoding`` (strip -> ``html.unescape`` -> strip
@@ -234,15 +242,21 @@ def page_marked_text(pages) -> str:
     """
     from lightrag.utils import sanitize_text_for_encoding  # noqa: WPS433
 
-    neutralized = (
-        (
-            n,
-            _PAGE_MARKER_LOOKALIKE_RE.sub(
-                r"\1<<\2", sanitize_text_for_encoding(text)
-            ).replace("&", "&amp;"),
-        )
-        for n, text in pages
-    )
+    return _PAGE_MARKER_LOOKALIKE_RE.sub(
+        r"\1<<\2", sanitize_text_for_encoding(text)
+    ).replace("&", "&amp;")
+
+
+def page_marked_text(pages) -> str:
+    """Join ``(page_number, cleaned_text)`` pairs into one page-marked string.
+
+    Each page is prefixed with its own ``<<<page:N>>>`` marker line so a
+    single whole-file chunking call can still recover which page a chunk
+    came from (see strip_page_markers / _achunk_page_aware). Each page's text
+    is neutralised first (see ``neutralize_page_text``) so a line in it that
+    merely looks like a marker can never be parsed back as a real one.
+    """
+    neutralized = ((n, neutralize_page_text(text)) for n, text in pages)
     return "\n\n".join(f"<<<page:{n}>>>\n{text}" for n, text in neutralized)
 
 
@@ -425,25 +439,47 @@ async def _achunk_page_aware(rag, option: str, tokenizer, content: str) -> list:
 CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)(?:-p(\d+))?-chunk-\d+")
 
 
-def _lightrag_doc_id(metadata: dict, content: str) -> str:
-    """Stable LightRAG document id for one page, so a chunk's own id can be
+def _lightrag_doc_id(doc: Document) -> str:
+    """Stable LightRAG document id for *doc*, so a chunk's own id can be
     parsed straight back to (resource_id, page) — see CHUNK_ID_RESOURCE_PAGE_RE
     — instead of guessing from the display-only file_path label.
+
+    ``doc.id`` is set ONLY by the Resource whole-file PDF/DOCX/TXT/MD
+    extraction in ``silo_service.py``'s ``extract_documents_from_file``
+    (split=False path, step_004), always shaped ``res{N}`` — when set AND
+    shaped that way, it is trusted directly and returned as-is. No
+    public/caller metadata can ever set a Document's id this way:
+    ``SiloService._create_documents_for_indexing`` (the path every
+    caller-supplied dict goes through) always rebuilds Documents from those
+    dicts without an ``id`` field. The shape check is defence in depth, not a
+    currently-reachable gap: if a future caller ever passes a Document whose
+    ``.id`` traces back to untrusted input (e.g. round-tripped from a
+    vector-store search result), it can't be smuggled through as a literal
+    LightRAG doc id.
+
+    Falls back to today's per-page logic for everything else, reading from
+    ``doc.metadata``/``doc.page_content`` instead of separate args: a
+    ``resource_id`` + ``page`` pair gives ``res{id}-p{page}`` (legacy shape,
+    only reachable via caller-supplied metadata on split=True ingestion
+    paths — kept unchanged so those existing ids don't change). Anything else
+    (no resource/page — e.g. crawled Domain pages) falls back to LightRAG's
+    own default (content hash).
 
     Content-hash duplicate detection (lightrag/pipeline.py,
     get_existing_doc_by_content_hash) is independent of the id we supply, so
     this changes nothing about resume/dedup behaviour.
-
-    Falls back to LightRAG's own default (content hash) for content with no
-    resource/page — non-PDF sources such as crawled Domain pages.
     """
+    if doc.id and re.fullmatch(r"res\d+", doc.id):
+        return doc.id
+
+    metadata = doc.metadata or {}
     resource_id = metadata.get("resource_id")
     page = metadata.get("page")
     if resource_id is not None and page is not None:
         return f"res{resource_id}-p{page}"
     from lightrag.utils import compute_mdhash_id  # noqa: WPS433
 
-    return compute_mdhash_id(content, prefix="doc-")
+    return compute_mdhash_id(doc.page_content, prefix="doc-")
 
 
 # Matches the PARENT doc id (no "-chunk-N" suffix) — see _lightrag_doc_id and
@@ -533,7 +569,7 @@ def documents_to_lightrag_payload(documents) -> Tuple[List[str], List[str], List
             continue
         texts.append(doc.page_content)
         file_paths.append(_source_label_from_metadata(doc.metadata or {}))
-        ids.append(_lightrag_doc_id(doc.metadata or {}, doc.page_content))
+        ids.append(_lightrag_doc_id(doc))
     return texts, file_paths, ids
 
 
@@ -2423,7 +2459,7 @@ class LightRAGStore(VectorStoreInterface):
                 continue
             texts.append(doc.page_content)
             file_paths.append(_source_label_from_metadata(doc.metadata or {}))
-            ids.append(_lightrag_doc_id(doc.metadata or {}, doc.page_content))
+            ids.append(_lightrag_doc_id(doc))
 
         if not texts:
             logger.debug("No non-empty texts to index; skipping.")
@@ -2500,7 +2536,7 @@ class LightRAGStore(VectorStoreInterface):
         for doc in documents:
             if not doc.page_content:
                 continue
-            doc_id = _lightrag_doc_id(doc.metadata or {}, doc.page_content)
+            doc_id = _lightrag_doc_id(doc)
             texts.append(doc.page_content)
             file_paths.append(_source_label_from_metadata(doc.metadata or {}))
             ids.append(doc_id)

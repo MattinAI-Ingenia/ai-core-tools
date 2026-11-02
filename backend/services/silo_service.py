@@ -1623,8 +1623,12 @@ class SiloService:
             file_extension: File extension (e.g., '.pdf', '.docx', '.txt')
             base_metadata: Metadata dict to attach to each document
             split: When True (default, for PGVector/Qdrant), split into ~1000-char
-                chunks. When False (LightRAG), return one Document per page/file so
-                LightRAG applies its own token-based chunking (``lightrag_chunk_token_size``).
+                chunks. When False (LightRAG), return exactly one Document per file
+                so LightRAG applies its own token-based chunking
+                (``lightrag_chunk_token_size``). PDFs get ``<<<page:N>>>`` marker
+                lines embedded in their content. Resource-linked documents
+                (anything with a ``resource_id`` in base_metadata) get
+                ``id=res{N}`` stamped on that single Document.
         Returns:
             List[Document]: List of Document objects
         """
@@ -1633,6 +1637,12 @@ class SiloService:
 
         if base_metadata is None:
             base_metadata = {}
+
+        whole_file_id = (
+            f"res{base_metadata['resource_id']}"
+            if not split and base_metadata.get("resource_id") is not None
+            else None
+        )
 
         # Determine file type and use appropriate loader
         if file_extension == '.pdf':
@@ -1650,9 +1660,10 @@ class SiloService:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             docs = text_splitter.split_documents(pages)
         else:
-            # LightRAG path: keep one Document per page/file so LightRAG can
-            # chunk by its own configured token size instead of being fed
-            # pre-split text (which would bypass lightrag_chunk_token_size).
+            # LightRAG path: start from one Document per page (PDFs) / per file
+            # (DOCX, TXT, MD) so cleaning/filtering below runs per page. PDFs
+            # are then folded into a single whole-file Document with page
+            # markers further down; non-PDF sources are already one Document.
             docs = pages
 
         # Clean known PDF extraction artifacts (e.g. @@@@, 64/64/64/...) from
@@ -1667,11 +1678,54 @@ class SiloService:
         if filtered:
             logger.debug(f"Filtered {filtered} garbage chunk(s) from {file_path}")
 
+        if not split and file_extension == '.pdf':
+            # Whole-file PDF path: fold the surviving pages into ONE Document
+            # with <<<page:N>>> markers so LightRAG chunks the file once while
+            # still being able to attribute each chunk back to its start page
+            # (see page_marked_text / strip_page_markers). Page numbers are
+            # read from PyMuPDFLoader's own per-Document metadata (0-based, so
+            # +1) BEFORE base_metadata is merged in — a caller-supplied "page"
+            # key (e.g. CSV extra_metadata) must never shadow the real one.
+            # Filtered-out pages just leave gaps in the marker sequence.
+            if not docs:
+                return []
+            from tools.vector_stores.lightrag_store import page_marked_text  # noqa: PLC0415
+            # A whole-file Resource Document carries no "page" key of its own
+            # (see _source_label_from_metadata's docstring) — the real
+            # per-chunk page lives in the chunk id instead. A caller-supplied
+            # "page" in base_metadata must be dropped here too, not just kept
+            # out of the markers: left in, it would bake a stale "(p. N)"
+            # suffix into the citation label that _page_label then never
+            # corrects (it only appends a page when one isn't already there).
+            whole_file_metadata = {k: v for k, v in base_metadata.items() if k != "page"}
+            return [
+                Document(
+                    page_content=page_marked_text((d.metadata["page"] + 1, d.page_content) for d in docs),
+                    metadata=whole_file_metadata,
+                    id=whole_file_id,
+                )
+            ]
+
         for doc in docs:
             doc.metadata.update(base_metadata)
-            # Only add page number if it exists (PDFs have page metadata, DOCX/TXT don't)
+            # Only add page number if it exists (split=True PDFs still carry
+            # per-chunk page metadata; DOCX/TXT/MD never do). split=False PDFs
+            # return earlier above with page markers instead of this loop.
             if "page" in doc.metadata:
                 doc.metadata["page"] = doc.metadata["page"] + 1
+        if whole_file_id and len(docs) == 1:
+            # Exactly one Document resulted (split=False DOCX/TXT/MD always
+            # produce one) — stamp the resource's whole-file id on it. Never
+            # stamp more than one Document with the same id: that would
+            # silently collapse distinct Documents into one LightRAG document.
+            docs[0].id = whole_file_id
+            # This id is "res{N}"-shaped (unlike the old doc-<hash> id), so a
+            # line that merely looks like a <<<page:N>>> marker in the raw
+            # content (plain or HTML-entity-encoded) would otherwise be
+            # mistaken for a real page boundary by the page-aware readers —
+            # neutralise it the same way page_marked_text does for PDFs.
+            from tools.vector_stores.lightrag_store import neutralize_page_text  # noqa: PLC0415
+            docs[0].page_content = neutralize_page_text(docs[0].page_content)
         return docs
 
     @staticmethod
@@ -1831,10 +1885,12 @@ class SiloService:
             if not docs:
                 return 0
             # One unit = one item fed to the vector store: a pre-split chunk for
-            # the other backends, a whole page/file for LightRAG (split=False).
-            # This has to be the same unit the progress callback reports in, or
-            # the bar shows things like "3/14" for a 13-page PDF — LightRAG's
-            # own token-chunking is not observable per page beforehand.
+            # the other backends; LightRAG chunks internally by token size, so
+            # feed it one whole-file Document (PDFs page-marked) instead
+            # (split=False). This has to be the same unit the progress
+            # callback reports in, or the bar shows things like "3/14" for a
+            # 13-page PDF — LightRAG's own token-chunking is not observable
+            # per page beforehand.
             return len(docs)
         except Exception:
             return 0
