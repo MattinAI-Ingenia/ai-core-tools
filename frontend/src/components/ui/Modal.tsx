@@ -7,6 +7,8 @@ interface ModalProps {
   title: string;
   children: ReactNode;
   size?: 'small' | 'medium' | 'large' | 'xlarge';
+  /** Pinned below the scrollable content so action buttons stay reachable. */
+  footer?: ReactNode;
 }
 
 const FOCUSABLE_SELECTORS = [
@@ -18,7 +20,7 @@ const FOCUSABLE_SELECTORS = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-// Open modals, bottom to top. Only the last one handles Esc/Tab; the others are made inert.
+// Open modals, bottom to top. Only the last one handles Esc/Tab; the others are aria-hidden.
 const openModalStack: string[] = [];
 const stackListeners = new Set<() => void>();
 
@@ -37,7 +39,7 @@ function isTopModal(id: string): boolean {
   return openModalStack[openModalStack.length - 1] === id;
 }
 
-function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<ModalProps>) {
+function Modal({ isOpen, onClose, title, children, size = 'large', footer }: Readonly<ModalProps>) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<Element | null>(null);
@@ -46,6 +48,13 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [covered, setCovered] = useState(false);
+  // Position in the open-modal stack. Paint order must follow interaction
+  // order: every modal is `fixed` with no z-index of its own, so the one
+  // later in the DOM wins visually. When DOM order disagrees with the stack
+  // (a modal opened earlier but rendered later in the DOM), the covered
+  // modal paints above the interactive one: the interaction target looks
+  // gone and clicks close the wrong modal.
+  const [depth, setDepth] = useState(0);
 
   const sizeClasses = {
     small: 'max-w-md max-h-96',
@@ -60,9 +69,12 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
     returnFocusRef.current = document.activeElement;
 
     pushModal(titleId);
-    const syncCovered = () => setCovered(openModalStack.length > 0 && !isTopModal(titleId));
-    stackListeners.add(syncCovered);
-    syncCovered();
+    const syncStackPosition = () => {
+      setCovered(openModalStack.length > 0 && !isTopModal(titleId));
+      setDepth(Math.max(openModalStack.indexOf(titleId), 0));
+    };
+    stackListeners.add(syncStackPosition);
+    syncStackPosition();
 
     const panel = panelRef.current;
     if (panel) {
@@ -111,12 +123,12 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
-      stackListeners.delete(syncCovered);
+      stackListeners.delete(syncStackPosition);
       removeModal(titleId);
       const target = returnFocusRef.current;
       if (target instanceof HTMLElement) {
         if (openModalStack.length > 0) {
-          // A lower modal is still open but inert until it re-renders; focus afterwards.
+          // A lower modal is still open but still aria-hidden until it re-renders; focus afterwards.
           requestAnimationFrame(() => target.focus());
         } else {
           target.focus();
@@ -129,9 +141,14 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
 
   return (
     <div
-      className="fixed inset-0 z-50 overflow-y-auto"
+      className="fixed inset-0 overflow-y-auto"
+      style={{ zIndex: 50 + depth }}
+      // aria-hidden only, never `inert`: a covered modal's subtree often holds
+      // the next modal (modals render nested inside their opener), and inert
+      // would make that top modal invisible to hit-testing — its clicks pass
+      // through to the page behind it. Interaction blocking is guaranteed by
+      // the top modal's full-screen overlay at a higher z-index instead.
       aria-hidden={covered ? true : undefined}
-      inert={covered}
     >
       <div
         className="fixed inset-0 bg-black bg-opacity-50 transition-opacity"
@@ -146,9 +163,9 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
           aria-modal="true"
           aria-labelledby={titleId}
           tabIndex={-1}
-          className={`relative bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full overflow-hidden focus:outline-none ${sizeClasses[size]}`}
+          className={`relative bg-white dark:bg-slate-800 rounded-lg shadow-xl w-full overflow-hidden focus:outline-none flex flex-col ${sizeClasses[size]}`}
         >
-          <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-slate-600 bg-gray-50 dark:bg-slate-700 sticky top-0 z-10">
+          <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-slate-600 bg-gray-50 dark:bg-slate-700 shrink-0">
             <h3 id={titleId} className="text-lg font-semibold text-gray-900 dark:text-slate-100">
               {title}
             </h3>
@@ -161,9 +178,15 @@ function Modal({ isOpen, onClose, title, children, size = 'large' }: Readonly<Mo
             </button>
           </div>
 
-          <div className="p-6 overflow-y-auto" style={{ maxHeight: 'calc(80vh - 88px)' }}>
+          <div className="p-6 overflow-y-auto flex-1 min-h-0">
             {children}
           </div>
+
+          {footer && (
+            <div className="flex justify-end gap-3 p-4 border-t border-gray-200 dark:border-slate-600 shrink-0">
+              {footer}
+            </div>
+          )}
         </div>
       </div>
     </div>

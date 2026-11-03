@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Loader2, X } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 import { apiService } from '../../services/api';
+import Modal from '../ui/Modal';
 
 export interface ProposedEntityType {
   name: string;
@@ -120,88 +121,13 @@ export function EntityTypeInferenceModal({
   const error = startError ?? (job?.status === 'failed' ? job.error : null);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
-        <div className="mb-4 flex items-start justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Entity types</h2>
-          <button type="button" onClick={onCancel} aria-label="Close" className="text-gray-400 hover:text-gray-600">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        <p className="mb-4 flex items-start gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>
-            These categories shape the whole graph and <strong>cannot be changed
-            once anything is indexed</strong>. Review them before continuing.
-          </span>
-        </p>
-
-        {error && (
-          <p className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>
-        )}
-
-        {(running || !job) && !error && (
-          <div className="py-8 text-center">
-            <Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin text-gray-400" />
-            <p className="text-sm text-gray-700">{STAGE_LABEL[job?.status ?? 'pending']}</p>
-            {percent !== null && (
-              <>
-                <div className="mx-auto mt-3 h-2 w-64 overflow-hidden rounded-full bg-gray-200">
-                  <div className="h-full bg-yellow-500 transition-all" style={{ width: `${percent}%` }} />
-                </div>
-                <p className="mt-2 text-xs text-gray-500">{job!.done} of {job!.total} documents</p>
-              </>
-            )}
-          </div>
-        )}
-
-        {job?.status === 'done' && job.types && (
-          <>
-            <p className="mb-3 text-sm text-gray-600">
-              {job.types.length} categories proposed
-              {job.sampled ? ` from ${job.sampled} documents` : ''}. Untick the ones
-              you do not want.
-            </p>
-            <ul className="mb-4 space-y-2">
-              {job.types.map((type) => (
-                <li key={type.name} className="rounded-md border border-gray-200 p-3">
-                  <label className="flex cursor-pointer items-start gap-3">
-                    <input
-                      type="checkbox"
-                      className="mt-1"
-                      checked={selected.has(type.name)}
-                      onChange={() => toggle(type.name)}
-                    />
-                    <span className="min-w-0">
-                      <span className="font-medium text-gray-900">{type.name}</span>
-                      <span className="block text-sm text-gray-600">{type.why}</span>
-                      {type.examples.length > 0 && (
-                        <span className="mt-1 block text-xs text-gray-500">
-                          Examples: {type.examples.join(', ')}
-                        </span>
-                      )}
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-
-            <label htmlFor="extra-entity-types" className="mb-1 block text-sm font-medium text-gray-700">
-              Add your own (comma-separated)
-            </label>
-            <input
-              id="extra-entity-types"
-              type="text"
-              value={extra}
-              onChange={(e) => setExtra(e.target.value)}
-              placeholder="Brand, Standard"
-              className="mb-4 w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-yellow-500"
-            />
-          </>
-        )}
-
-        <div className="flex justify-end gap-2 border-t border-gray-200 pt-4">
+    <Modal
+      isOpen
+      onClose={onCancel}
+      title="Entity types"
+      size="medium"
+      footer={
+        <>
           <button
             type="button"
             onClick={onCancel}
@@ -217,8 +143,80 @@ export function EntityTypeInferenceModal({
           >
             Confirm {chosen.length > 0 ? `(${chosen.length})` : ''}
           </button>
+        </>
+      }
+    >
+      <p className="mb-4 flex items-start gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>
+          These categories shape the whole graph and <strong>cannot be changed
+          once anything is indexed</strong>. Review them before continuing.
+        </span>
+      </p>
+
+      {error && (
+        <p className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>
+      )}
+
+      {(running || !job) && !error && (
+        <div className="py-8 text-center">
+          <Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin text-gray-400" />
+          <p className="text-sm text-gray-700">{STAGE_LABEL[job?.status ?? 'pending']}</p>
+          {percent !== null && (
+            <>
+              <div className="mx-auto mt-3 h-2 w-64 overflow-hidden rounded-full bg-gray-200">
+                <div className="h-full bg-yellow-500 transition-all" style={{ width: `${percent}%` }} />
+              </div>
+              <p className="mt-2 text-xs text-gray-500">{job!.done} of {job!.total} documents</p>
+            </>
+          )}
         </div>
-      </div>
-    </div>
+      )}
+
+      {job?.status === 'done' && job.types && (
+        <>
+          <p className="mb-3 text-sm text-gray-600">
+            {job.types.length} categories proposed
+            {job.sampled ? ` from ${job.sampled} documents` : ''}. Untick the ones
+            you do not want.
+          </p>
+          <ul className="mb-4 space-y-2">
+            {job.types.map((type) => (
+              <li key={type.name} className="rounded-md border border-gray-200 p-3">
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={selected.has(type.name)}
+                    onChange={() => toggle(type.name)}
+                  />
+                  <span className="min-w-0">
+                    <span className="font-medium text-gray-900">{type.name}</span>
+                    <span className="block text-sm text-gray-600">{type.why}</span>
+                    {type.examples.length > 0 && (
+                      <span className="mt-1 block text-xs text-gray-500">
+                        Examples: {type.examples.join(', ')}
+                      </span>
+                    )}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+
+          <label htmlFor="extra-entity-types" className="mb-1 block text-sm font-medium text-gray-700">
+            Add your own (comma-separated)
+          </label>
+          <input
+            id="extra-entity-types"
+            type="text"
+            value={extra}
+            onChange={(e) => setExtra(e.target.value)}
+            placeholder="Brand, Standard"
+            className="mb-4 w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-yellow-500"
+          />
+        </>
+      )}
+    </Modal>
   );
 }

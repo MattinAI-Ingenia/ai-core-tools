@@ -62,8 +62,48 @@ export default function CostEstimateModal({
   isOpen, onClose, onConfirm, confirming, confirmingLabel = 'Confirming…', estimate, description, itemsHeading, items, gate,
 }: Readonly<CostEstimateModalProps>) {
   const blocked = !!gate?.required && !gate.done;
+  const footer = (
+    <div className="w-full">
+      <div className="flex justify-end gap-3">
+        <button
+          onClick={onClose}
+          disabled={confirming}
+          className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
+        >
+          Cancel
+        </button>
+        {gate?.required && (
+          <button
+            onClick={gate.onOpen}
+            disabled={confirming}
+            className={`px-4 py-2 rounded-lg transition-colors disabled:opacity-50 ${
+              gate.done
+                ? 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                : 'bg-yellow-500 text-white hover:bg-yellow-600'
+            }`}
+          >
+            {gate.done ? gate.doneLabel : gate.label}
+          </button>
+        )}
+        <button
+          onClick={onConfirm}
+          disabled={confirming || blocked}
+          title={blocked ? gate?.label : undefined}
+          className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
+        >
+          {confirming && <Loader2 className="w-4 h-4 animate-spin" />}
+          {confirming ? confirmingLabel : 'Confirm ingestion'}
+        </button>
+      </div>
+      {blocked && (
+        <p className="mt-2 text-right text-sm text-amber-700">
+          Define the entity types before indexing — they cannot be changed afterwards.
+        </p>
+      )}
+    </div>
+  );
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Confirm LightRAG Ingestion" size="large">
+    <Modal isOpen={isOpen} onClose={onClose} title="Confirm LightRAG Ingestion" size="large" footer={footer}>
       <div className="space-y-5">
         <div>
           <p className="text-gray-700">
@@ -134,45 +174,6 @@ export default function CostEstimateModal({
           ) : (
             <p className="mt-1">
               Estimated cost: <span className="font-medium">Unavailable</span>
-            </p>
-          )}
-        </div>
-
-        <div className="sticky top-0 z-10 -mx-6 bg-white/95 px-6 py-3 backdrop-blur-sm border-y border-gray-200">
-          <div className="flex justify-end gap-3">
-            <button
-              onClick={onClose}
-              disabled={confirming}
-              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            {gate?.required && (
-              <button
-                onClick={gate.onOpen}
-                disabled={confirming}
-                className={`px-4 py-2 rounded-lg transition-colors disabled:opacity-50 ${
-                  gate.done
-                    ? 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    : 'bg-yellow-500 text-white hover:bg-yellow-600'
-                }`}
-              >
-                {gate.done ? gate.doneLabel : gate.label}
-              </button>
-            )}
-            <button
-              onClick={onConfirm}
-              disabled={confirming || blocked}
-              title={blocked ? gate?.label : undefined}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
-            >
-              {confirming && <Loader2 className="w-4 h-4 animate-spin" />}
-              {confirming ? confirmingLabel : 'Confirm ingestion'}
-            </button>
-          </div>
-          {blocked && (
-            <p className="mt-2 text-right text-sm text-amber-700">
-              Define the entity types before indexing — they cannot be changed afterwards.
             </p>
           )}
         </div>
