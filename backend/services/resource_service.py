@@ -6,12 +6,19 @@ from datetime import datetime
 import os
 from services.silo_service import SiloService
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status, UploadFile
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
+
+LIGHTRAG_SILO_BUSY_DETAIL = "This silo is being indexed right now. Please try again when indexing has finished."
+LIGHTRAG_DELETE_FAILED_DETAIL = "The file was kept but may be partly removed from the knowledge graph; please retry."
+LIGHTRAG_DELETE_PARTIAL_DETAIL = (
+    "Removed from the knowledge graph but the file could not be deleted. Please retry."
+)
 
 # How many resources (files) the feeder keeps in flight in a LightRAG ingestion
 # — not pages or documents. Since the document-per-file refactor, a resource
@@ -173,7 +180,9 @@ class ResourceService:
             raise ValueError(f"Failed to move resource: {str(e)}")
 
     @staticmethod
-    def delete_resource(resource_id: int, db: Session, delete_file: bool = True) -> bool:
+    def delete_resource(
+        resource_id: int, db: Session, delete_file: bool = True, delete_from_silo: bool = True
+    ) -> bool:
         """
         Delete a resource (database record and silo indexing, file optional)
 
@@ -186,6 +195,8 @@ class ResourceService:
                 URI was reused by its replacement) — deleting the DB row and
                 vectors is still correct, but removing the file would destroy
                 the replacement's content.
+            delete_from_silo: Whether to remove the resource from its silo's vector store.
+                False when the caller already removed it, e.g. the LightRAG single-file delete.
 
         Returns:
             True if deletion was successful, False if resource not found
@@ -197,8 +208,9 @@ class ResourceService:
 
         try:
             # Delete from silo first
-            SiloService.delete_resource(resource)
-            logger.info(f"Resource {resource_id} deleted from silo")
+            if delete_from_silo:
+                SiloService.delete_resource(resource)
+                logger.info(f"Resource {resource_id} deleted from silo")
 
             # Delete file from disk
             if delete_file:
@@ -215,7 +227,7 @@ class ResourceService:
             return True
 
         except Exception as e:
-            logger.error(f"Error deleting resource {resource_id}: {str(e)}")
+            logger.exception(f"Error deleting resource {resource_id}: {str(e)}")
             ResourceRepository.rollback(db)
             return False
     
@@ -1621,18 +1633,12 @@ class ResourceService:
         # Scoped lookup: 404 unless the resource belongs to this repository.
         resource = ResourceService.get_repository_resource(repository_id, resource_id, db)
 
-        # LightRAG has no real per-file delete (it would need to unwind the doc's
-        # entities/relations from the knowledge graph). Block it up-front so the
-        # file isn't removed from DB/disk while its graph data lingers — deleting
-        # would be a lie. Whole-silo delete is the supported way to purge.
+        # LightRAG: graph data is removed first (under the silo indexing lock); file + row only after.
         silo = getattr(getattr(resource, "repository", None), "silo", None)
         if silo is not None and (silo.vector_db_type or "").upper() == "LIGHTRAG":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="LightRAG silos do not support deleting individual files; "
-                       "delete the whole silo to remove its data.",
-            )
-
+            ResourceService._delete_lightrag_resource(resource, silo.silo_id, db)
+            logger.info(f"Resource {resource_id} deleted successfully")
+            return {"message": "Resource deleted successfully"}
 
         # Use delete_resource method with database session
         success = ResourceService.delete_resource(resource_id, db)
@@ -1645,6 +1651,55 @@ class ResourceService:
         
         logger.info(f"Resource {resource_id} deleted successfully")
         return {"message": "Resource deleted successfully"}
+
+    @staticmethod
+    def _delete_lightrag_resource(resource: Resource, silo_id: int, db: Session) -> None:
+        """Delete one file of a LightRAG silo: graph first, then file + row.
+
+        Raises:
+            HTTPException: 409 if the silo is busy indexing, 500 if the graph delete failed
+                (file and row are kept), 500 (partial) if the graph was cleared but the
+                file/row step failed and the row still exists, 404 if the row is gone.
+            ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
+        """
+        from services import silo_indexing_lock
+
+        lock_conn = silo_indexing_lock.acquire(silo_id)
+        if lock_conn is None:
+            logger.warning("Silo %s is busy indexing; refusing to delete resource %s", silo_id, resource.resource_id)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
+        try:
+            try:
+                outcome = SiloService.delete_lightrag_resource_document(resource)
+            except ServiceRetiredError:
+                raise  # a retry can never succeed; surfaced as 409 SERVICE_RETIRED
+            except Exception:
+                logger.exception("Graph delete of resource %s in silo %s failed", resource.resource_id, silo_id)
+                outcome = "fail"
+            if outcome == "not_allowed":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
+            if outcome not in ("success", "not_found"):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_DELETE_FAILED_DETAIL
+                )
+            # Plain int: delete_resource rolls back on failure, which expires
+            # `resource`; reading its attributes afterwards could raise
+            # ObjectDeletedError if the row was removed concurrently.
+            resource_id = resource.resource_id
+            if not ResourceService.delete_resource(resource_id, db, delete_from_silo=False):
+                if ResourceRepository.get_by_id(db, resource_id) is not None:
+                    logger.error(
+                        "Resource %s removed from graph of silo %s but file/row removal failed; a retry completes it",
+                        resource_id, silo_id,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_DELETE_PARTIAL_DETAIL
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found or could not be deleted"
+                )
+        finally:
+            silo_indexing_lock.release(lock_conn, silo_id)
 
     @staticmethod
     def delete_all_resources_from_repository(repository_id: int, db: Session) -> dict:

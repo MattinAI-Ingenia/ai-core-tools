@@ -2588,6 +2588,39 @@ class SiloService:
             session.close()
 
     @staticmethod
+    def delete_lightrag_resource_document(resource: Resource) -> str:
+        """Strict graph delete for the LightRAG single-file delete only.
+
+        The caller must hold ``silo_indexing_lock``. Unlike the tolerant ``delete_resource`` this
+        never swallows errors.
+
+        Args:
+            resource: Resource whose document is removed from the silo's knowledge graph.
+
+        Returns:
+            The library ``DeletionResult.status`` (success | not_found | not_allowed | fail).
+
+        Raises:
+            ValueError: If the silo has no embedding service.
+        """
+        silo = resource.repository.silo
+        if not silo.embedding_service:
+            raise ValueError(f"Silo {silo.silo_id} has no embedding service")
+        # Also ends the owning session's read transaction before any LightRAG work.
+        store = _get_vector_store(silo)
+        outcome = store.delete_resource_document(COLLECTION_PREFIX + str(silo.silo_id), resource.resource_id)
+        if outcome in ("success", "not_found"):
+            try:
+                from services.metadata_values_cache_service import MetadataValuesCacheService
+                MetadataValuesCacheService.invalidate(silo.silo_id)
+            except Exception as _cache_exc:
+                logger.warning(
+                    "metadata_values_cache: invalidation failed after delete_lightrag_resource_document "
+                    "for silo=%d: %s", silo.silo_id, _cache_exc,
+                )
+        return outcome
+
+    @staticmethod
     def delete_resource(resource: Resource):
         """
         Delete a resource using its silo's embedding service
