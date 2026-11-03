@@ -59,6 +59,35 @@ def _vdb_rows(workspace: str) -> dict:
         session.close()
 
 
+def _teardown(store, patchers) -> None:
+    """Every step always runs, even if an earlier one raises."""
+    try:
+        try:
+            if store is not None:
+                for ws in (TARGET, BYSTANDER):
+                    try:
+                        store.delete_collection(ws)
+                    except Exception:  # noqa: BLE001 — cleanup must never mask the result
+                        pass
+        finally:
+            for ws in (TARGET, BYSTANDER):
+                try:
+                    delete_lightrag_rows(ws)
+                except Exception:  # noqa: BLE001
+                    pass
+    finally:
+        try:
+            if store is not None:
+                for loop in list(store._collection_loops.values()):
+                    loop.close()
+        finally:
+            for patcher in reversed(patchers):
+                try:
+                    patcher.stop()
+                except RuntimeError:  # patcher never started
+                    pass
+
+
 class TestDeleteCollectionPgVector:
     def test_delete_collection_removes_pg_vector_rows(self, test_engine):  # noqa: ARG002
         from tools.vector_stores.lightrag import adapters
@@ -103,19 +132,4 @@ class TestDeleteCollectionPgVector:
             assert not leftover, f"PG-vector rows survived delete_collection: {leftover}"
             assert _vdb_rows(BYSTANDER) == bystander_before
         finally:
-            if store is not None:
-                for ws in (TARGET, BYSTANDER):
-                    try:
-                        store.delete_collection(ws)
-                    except Exception:  # noqa: BLE001 — cleanup must never mask the result
-                        pass
-            for ws in (TARGET, BYSTANDER):
-                delete_lightrag_rows(ws)
-            if store is not None:
-                for loop in list(store._collection_loops.values()):
-                    loop.close()
-            for patcher in reversed(patchers):
-                try:
-                    patcher.stop()
-                except RuntimeError:  # patcher never started
-                    pass
+            _teardown(store, patchers)
