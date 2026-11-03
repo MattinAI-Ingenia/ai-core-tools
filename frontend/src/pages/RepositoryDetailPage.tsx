@@ -1187,7 +1187,7 @@ const RepositoryDetailPage: React.FC = () => {
             }}
             onStopped={(mode, stopped) => {
               // Neither mode ends the run instantly, and they differ in what
-              // survives: pause drops the pages in flight (LightRAG aborts them
+              // survives: pause drops the files in flight (LightRAG aborts them
               // at their next checkpoint) and keeps the untouched files, while
               // cancel does the opposite. Only cancel states a count — removal
               // is the surprise; for pause the strip and the Resume button
@@ -1200,7 +1200,7 @@ const RepositoryDetailPage: React.FC = () => {
               setReindexNotice({
                 type: 'info',
                 text: mode === 'pause'
-                  ? 'Pausing. Pages already in progress are dropped rather than finished.'
+                  ? 'Pausing. Files already in progress are dropped and redone on resume.'
                   : `Cancelling — files already being indexed will finish.${removed}`
                     + ' Nothing already indexed was deleted.',
               });
@@ -1357,7 +1357,7 @@ const RepositoryDetailPage: React.FC = () => {
                                   and the backend counts them together. 'indexing' with no
                                   run is a run that died mid-file; 'cancelled' with real
                                   progress is resumable too — cancel promises to finish what
-                                  started, and a page a race or a restart left behind still
+                                  started, and a file a race or a restart left behind still
                                   needs to. */}
                               {(resource.status === 'pending' || resource.status === 'paused'
                                 || (resource.status === 'cancelled' && !!resource.progress_done)
