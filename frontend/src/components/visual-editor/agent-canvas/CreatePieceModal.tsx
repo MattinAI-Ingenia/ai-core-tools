@@ -21,7 +21,14 @@ export interface CreatePieceModalProps {
   readonly kind: PieceKind;
   readonly onClose: () => void;
   /** Called once the piece is saved. The caller closes the modal and connects the piece. */
-  readonly onCreated: (kind: PieceKind, id: number, name: string, lifecycleStatus?: LifecycleStatus) => void;
+  readonly onCreated: (
+    kind: PieceKind,
+    id: number,
+    name: string,
+    lifecycleStatus?: LifecycleStatus,
+    /** AI services only: whether the created service can analyse video. */
+    supportsVideo?: boolean,
+  ) => void;
 }
 
 interface CreatedPiece {
@@ -29,6 +36,8 @@ interface CreatedPiece {
   readonly name: string;
   /** Services only: the lifecycle status the create response reports. */
   readonly lifecycleStatus?: LifecycleStatus;
+  /** AI services only: whether the created service can analyse video. */
+  readonly supportsVideo?: boolean;
 }
 
 /**
@@ -98,7 +107,7 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
     if (created === undefined) return;
     invalidateSettingsCache();
     const piece = pick(created);
-    onCreated(kind, piece.id, piece.name, piece.lifecycleStatus);
+    onCreated(kind, piece.id, piece.name, piece.lifecycleStatus, piece.supportsVideo);
   }
 
   async function saveService(data: ServiceFormData | SandboxServiceFormData): Promise<void> {
@@ -106,7 +115,12 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
       await save(
         'AI service',
         () => apiService.createAIService(appId, data),
-        (service) => ({ id: service.service_id, name: service.name, lifecycleStatus: service.lifecycle_status }),
+        (service) => ({
+          id: service.service_id,
+          name: service.name,
+          lifecycleStatus: service.lifecycle_status,
+          supportsVideo: service.supports_video,
+        }),
       );
     } else if (kind === 'embedding') {
       await save(

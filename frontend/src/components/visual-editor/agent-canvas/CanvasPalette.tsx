@@ -35,6 +35,11 @@ export function pieceKindPhrase(kind: PieceKind): string {
   return KIND_PHRASES[kind];
 }
 
+/** Lower-case noun per kind, for "Create new …" labels. */
+export const PIECE_SINGULAR: Record<PieceKind, string> = Object.fromEntries(
+  PALETTE_CATEGORIES.map((category) => [category.kind, category.singular]),
+) as Record<PieceKind, string>;
+
 function isPieceKind(value: unknown): value is PieceKind {
   return typeof value === 'string' && Object.keys(KIND_PHRASES).includes(value);
 }
@@ -66,14 +71,17 @@ export interface CanvasPaletteProps {
   readonly canCreateShared: boolean;
   /** Opens the creation flow for a kind (wired by the creation modals). */
   readonly onCreate: (kind: PieceKind) => void;
+  /** Reports the piece a drag starts from the palette; null when the drag ends (drop, cancel or Escape). */
+  readonly onDraggingChange?: (piece: CanvasPiece | null) => void;
 }
 
 interface PaletteItemProps {
   readonly piece: CanvasPiece;
   readonly canEdit: boolean;
+  readonly onDraggingChange?: (piece: CanvasPiece | null) => void;
 }
 
-function PaletteItem({ piece, canEdit }: PaletteItemProps) {
+function PaletteItem({ piece, canEdit, onDraggingChange }: PaletteItemProps) {
   const statusBaseId = useId();
   const visual = PIECE_VISUALS[piece.kind];
   const Icon = visual.icon;
@@ -88,13 +96,18 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
   const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
     event.dataTransfer.setData(PIECE_DRAG_MIME, JSON.stringify({ kind: piece.kind, id: piece.id }));
     event.dataTransfer.effectAllowed = 'copy';
+    onDraggingChange?.(piece);
   };
+
+  // dragend fires however the drag ends, so the drop highlights always clear.
+  const handleDragEnd = () => onDraggingChange?.(null);
 
   return (
     <li>
       <div
         draggable={draggable}
         onDragStart={draggable ? handleDragStart : undefined}
+        onDragEnd={draggable ? handleDragEnd : undefined}
         aria-describedby={describedBy}
         title={isAgentPiece && !piece.isTool ? 'Connecting it turns on Tool agent' : undefined}
         className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 transition-shadow ${visual.borderClass} ${visual.bgClass} ${
@@ -132,7 +145,7 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
  * grouped by kind. Items are dragged onto the canvas; the category `+` buttons
  * create new ones. OCR agents only see the categories their ports accept.
  */
-export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onCreate }: CanvasPaletteProps) {
+export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onCreate, onDraggingChange }: CanvasPaletteProps) {
   const baseId = useId();
   const [filter, setFilter] = useState('');
   /** Whole palette folded into a narrow rail, to give the canvas the room. */
@@ -261,7 +274,12 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
               {open && (
                 <ul id={listId} className="space-y-1">
                   {items.map((piece) => (
-                    <PaletteItem key={`${piece.kind}:${piece.id}`} piece={piece} canEdit={canEdit} />
+                    <PaletteItem
+                      key={`${piece.kind}:${piece.id}`}
+                      piece={piece}
+                      canEdit={canEdit}
+                      onDraggingChange={onDraggingChange}
+                    />
                   ))}
                   {items.length === 0 && (
                     <li className="px-1 py-1 text-xs text-gray-400 dark:text-gray-500">None yet</li>
