@@ -805,8 +805,8 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     retrieved chunks carry a human-readable source instead of "unknown_source".
 
     ``progress_callback`` is called as ``(done, total)`` where both are counted
-    in LightRAG documents (one per page for PDFs) — the same unit, so the
-    caller can render a percentage without mixing it with its own estimates.
+    in LightRAG documents — the same unit, so the caller can render a
+    percentage without mixing it with its own estimates.
 
     ``done`` counts documents that actually **finished**.  The obvious counter,
     ``pipeline_status["cur_batch"]``, is incremented when a document *enters*
@@ -1030,6 +1030,54 @@ async def _arequest_failed_retry(rag) -> None:
         logger.info("[%s] Requested retry of FAILED documents", workspace)
 
 
+def _doc_chunk_progress(workspace: str, doc_ids: List[str]) -> Dict[str, Tuple[int, int]]:
+    """``{doc_id: (chunks_done, chunks_total)}`` for docs that have started chunking.
+
+    ``chunks_total`` is the doc's own ``chunks_count`` (set once LightRAG has
+    split it); ``chunks_done`` counts chunks that have run entity/relation
+    extraction (``llm_cache_list`` populated). A doc with ``chunks_count == 0``
+    (not yet chunked) has no row in the result — callers must treat a missing
+    key as "unknown total", not zero.
+
+    Module-level sync query (like ``_best_variant_names``), always called via
+    ``asyncio.to_thread``; raises on failure — the caller (``_report``) is
+    what makes it best-effort.
+    """
+    if not doc_ids:
+        return {}
+
+    from db.database import SessionLocal  # noqa: WPS433
+    from sqlalchemy import text  # noqa: WPS433
+
+    db = SessionLocal()
+    try:
+        # ponytail: runs every 0.5s over only the currently-open doc ids of a
+        # batch; if a single file ever reaches tens of thousands of chunks,
+        # this may need throttling — not a concern at today's realistic file
+        # sizes.
+        #
+        # Explicit JOIN LATERAL + LEFT JOIN on (workspace, id) — the only
+        # index lightrag_doc_chunks has — instead of a correlated subquery:
+        # that shape leaves Postgres no path except per-id PK lookups driven
+        # from each doc's own bounded chunks_list, so cost scales with
+        # chunks-per-doc, never with every chunk ever ingested into the silo.
+        rows = db.execute(
+            text(
+                "SELECT s.id, s.chunks_count, "
+                "count(c.id) FILTER (WHERE jsonb_array_length(c.llm_cache_list) > 0) AS chunks_done "
+                "FROM lightrag_doc_status s "
+                "JOIN LATERAL jsonb_array_elements_text(s.chunks_list) AS chunk_id ON true "
+                "LEFT JOIN lightrag_doc_chunks c ON c.workspace = s.workspace AND c.id = chunk_id "
+                "WHERE s.workspace = :ws AND s.id = ANY(:ids) AND s.chunks_count > 0 "
+                "GROUP BY s.id, s.chunks_count"
+            ),
+            {"ws": workspace, "ids": list(doc_ids)},
+        ).fetchall()
+        return {row[0]: (row[2], row[1]) for row in rows}
+    finally:
+        db.close()
+
+
 async def _aprocess_enqueued_with_progress(
     rag, doc_ids_by_resource, progress_callback=None, should_cancel=None,
     retry_failed=False, feed=None, window=3,
@@ -1038,13 +1086,22 @@ async def _aprocess_enqueued_with_progress(
     currently enqueued in this workspace, reporting progress PER RESOURCE.
 
     ``doc_ids_by_resource`` maps ``resource_id -> [doc_id, ...]`` for that
-    resource's LightRAG doc ids (``res{resource_id}-p{page}``, see
-    ``_lightrag_doc_id``) — known up front because ids are assigned
+    resource's LightRAG doc ids — ``res{resource_id}`` (one per file; see
+    ``_lightrag_doc_id``) for newly-ingested resources, though an old
+    pre-migration silo may still hold ``res{resource_id}-p{page}`` docs
+    indexed before this unit switch. Known up front because ids are assigned
     deterministically at enqueue time, before any processing happens.
 
     ``progress_callback(resource_id, done, total)`` fires whenever a
-    resource's finished-doc count changes (poll, not push — same 0.5s
-    cadence as ``_ainsert_with_progress``).
+    resource's progress changes (poll, not push — same 0.5s cadence as
+    ``_ainsert_with_progress``). Unlike that function, here ``done``/``total``
+    are counted in CHUNKS, not documents: a resource is now one LightRAG
+    document, so a doc-level 0/1 -> 1/1 jump would no longer show real
+    progress. ``(None, None)`` means "finished but the real chunk count is
+    unknown" (e.g. a content-dedup hit, a doc that failed before it was ever
+    chunked, or the chunk-progress query itself failing) — the caller keeps
+    showing its own estimate in that case. Doc-level completion (used to
+    decide *when* a resource is done) is unaffected by any of this.
 
     ``apipeline_process_enqueue_documents()`` itself drains **everything**
     pending in the workspace, not just what was just enqueued here (see its
@@ -1060,7 +1117,8 @@ async def _aprocess_enqueued_with_progress(
     documents already started finish whole.
 
     Returns ``{resource_id: {"processed": N, "failed": N, "total": N}}`` once
-    the whole batch is drained.
+    the whole batch is drained (still doc-level — unrelated to the chunk-level
+    numbers handed to ``progress_callback``).
     """
     # Mutable: the feeder adds resources to these as it enqueues them.
     doc_ids_by_resource = dict(doc_ids_by_resource)
@@ -1144,6 +1202,77 @@ async def _aprocess_enqueued_with_progress(
     last_done = {rid: -1 for rid in doc_ids_by_resource}
     stop_mode: List[Optional[str]] = [None]
 
+    workspace = getattr(rag, "workspace", None)
+    # Chunk-level reporting layer, parallel to the doc-level bookkeeping
+    # above (last_done/totals/_counts stay exactly doc-level — they still
+    # drive completion and the feeder window). last_reported holds the
+    # (done, total) last sent per resource so _report can skip no-op calls
+    # and stay monotonic; finished_reported marks resources that no longer
+    # need a chunk-progress query (their doc-level work is already done).
+    last_reported: Dict[Any, tuple] = {}
+    finished_reported: set = set()
+    chunk_query_failure_logged = [False]
+
+    async def _report(counts) -> None:
+        """Best-effort chunk-level progress_callback fan-out for *counts*.
+
+        ``counts`` is a doc-level {rid: {"processed", "failed"}} dict, same
+        shape as ``_counts()`` returns — completion is still decided purely
+        from that doc-level state. A chunk-progress query failure must never
+        abort the run: it just means the bar keeps showing the Phase-1
+        estimate instead of a real count.
+        """
+        if progress_callback is None:
+            return
+        open_rids = [rid for rid in counts if rid not in finished_reported]
+        ids = [d for rid in open_rids for d in doc_ids_by_resource[rid]]
+        try:
+            chunk = await asyncio.to_thread(_doc_chunk_progress, workspace, ids) if ids else {}
+        except Exception as exc:
+            # WARNING once per run — this query depends on LightRAG-owned
+            # column names (chunks_list/llm_cache_list/chunks_count); a
+            # schema change there would otherwise degrade the bar to the
+            # Phase-1 estimate silently, forever, at DEBUG level. Only the
+            # first failure needs to be loud; the rest would just spam this
+            # every 0.5s for the remainder of the run.
+            level = logger.warning if not chunk_query_failure_logged[0] else logger.debug
+            chunk_query_failure_logged[0] = True
+            level("[%s] Chunk-progress query failed (best-effort): %s", workspace, exc)
+            chunk = {}
+
+        for rid in open_rids:
+            c = counts[rid]
+            finished = c["processed"] + c["failed"] >= totals[rid]
+            parts = [chunk.get(d) for d in doc_ids_by_resource[rid]]
+            total = sum(t for _, t in parts) if parts and all(parts) else None
+
+            if finished:
+                report = (total, total)
+                finished_reported.add(rid)
+            elif total:
+                done = min(sum(d for d, _ in parts), total - 1)
+                prev = last_reported.get(rid)
+                if prev is not None and prev[1] == total:
+                    done = max(done, prev[0])
+                report = (done, total)
+            else:
+                continue  # total still unknown: leave the Phase-1 estimate showing
+
+            if report != last_reported.get(rid):
+                last_reported[rid] = report
+                try:
+                    await asyncio.to_thread(progress_callback, rid, *report)
+                except Exception:
+                    # One resource's write failing must not blank the final
+                    # per-resource counts for every OTHER resource in the
+                    # batch — _poll's own blanket except already covers this
+                    # during polling, but the one-time final flush has no
+                    # other safety net around it.
+                    logger.warning(
+                        "[%s] progress_callback failed for resource %s (chunk-level)",
+                        workspace, rid, exc_info=True,
+                    )
+
     async def _poll():
         cancel_sent = False
         while True:
@@ -1154,12 +1283,7 @@ async def _aprocess_enqueued_with_progress(
                     done = c["processed"] + c["failed"]
                     if last_done.get(rid, -1) != done:
                         last_done[rid] = done
-                        if progress_callback is not None:
-                            # Offload the (synchronous, DB-writing) callback to
-                            # a worker thread — same reason as should_cancel
-                            # below: a slow/contended write must not stall
-                            # this poll's event loop.
-                            await asyncio.to_thread(progress_callback, rid, done, totals[rid])
+                await _report(counts)
                 # Stop handling rides this same poll: it is already the loop that
                 # runs beside the long apipeline_process_enqueue_documents call,
                 # in the right process for LightRAG's per-process flag. The DB
@@ -1289,7 +1413,7 @@ async def _aprocess_enqueued_with_progress(
             for doc_id, file_path in zip(ids, file_paths):
                 id_to_resource[doc_id] = rid
                 id_to_file_path[doc_id] = file_path
-            logger.info("[%s] Fed resource %s (%d page(s)) into the pipeline",
+            logger.info("[%s] Fed resource %s (%d document(s)) into the pipeline",
                         getattr(rag, "workspace", None), rid, len(ids))
         return True
 
@@ -1326,11 +1450,7 @@ async def _aprocess_enqueued_with_progress(
         )
 
     final_counts = await _counts()
-    if progress_callback is not None:
-        for rid, c in final_counts.items():
-            await asyncio.to_thread(
-                progress_callback, rid, c["processed"] + c["failed"], totals[rid]
-            )
+    await _report(final_counts)
     return {rid: {**c, "total": totals[rid]} for rid, c in final_counts.items()}
 
 

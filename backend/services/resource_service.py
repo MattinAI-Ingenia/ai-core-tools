@@ -479,20 +479,30 @@ class ResourceService:
         return db.query(Resource).filter_by(resource_id=resource_id).first()
 
     @staticmethod
-    def _progress_update_fields(n: int, total: int) -> dict:
+    def _progress_update_fields(n: Optional[int], total: Optional[int],
+                                 estimate: Optional[int] = None) -> dict:
         """The row update for one live progress tick of a LightRAG-batch resource.
 
-        Flips to 'ready' the moment this resource's own pages all reach a
-        terminal LightRAG state (processed or failed — the same test the
-        end-of-batch finalization loop uses), instead of waiting for the
-        whole batch call to return. The sliding window already lets other
-        resources keep working while one is done; without this, the done one
-        just sits at "indexing" for however long the slowest one in the batch
-        takes, and depends on reaching that shared finalization step to ever
-        become 'ready' at all — a batch-wide crash orphans it regardless of
-        it having finished. Re-applying the same rule there afterwards is a
-        harmless no-op for a resource already 'ready'.
+        Flips to 'ready' the moment this resource's own chunks of the file's
+        document all reach a terminal LightRAG state (processed or failed —
+        the same test the end-of-batch finalization loop uses), instead of
+        waiting for the whole batch call to return. The sliding window
+        already lets other resources keep working while one is done; without
+        this, the done one just sits at "indexing" for however long the
+        slowest one in the batch takes, and depends on reaching that shared
+        finalization step to ever become 'ready' at all — a batch-wide crash
+        orphans it regardless of it having finished. Re-applying the same
+        rule there afterwards is a harmless no-op for a resource already
+        'ready'.
+
+        ``total is None`` means the resource finished but its real chunk
+        count could not be determined (content-dedup hit, failed before
+        chunking, or the chunk-progress query itself failed) — fall back to
+        the Phase-1 ``estimate`` (or 1) so the bar shows 100% of something
+        reasonable instead of a null division.
         """
+        if total is None:
+            n = total = estimate or 1
         update = {'progress_done': n, 'progress_total': total}
         if total and n >= total:
             update['status'] = 'ready'
@@ -506,8 +516,9 @@ class ResourceService:
         ``counts`` is the batch call's own return value for this resource — {}
         when the call raised, even for a resource that had already finished:
         the exception wipes the return value, not the DB row. ``row_progress_*``
-        is what ``_on_progress_multi`` wrote live as each page landed, so it
-        survives that exception intact and is what completeness falls back to.
+        is what ``_on_progress_multi`` wrote live as the file's chunks were
+        extracted, so it survives that exception intact and is what
+        completeness falls back to.
 
         A resource that reached 100% lands 'ready' regardless of whether the
         batch call blew up elsewhere — the crash is not this resource's
@@ -741,7 +752,9 @@ class ResourceService:
                             # _progress_update_fields for why this can also
                             # finalize the resource, ahead of the batch's own
                             # end-of-call loop below.
-                            update = ResourceService._progress_update_fields(n, total)
+                            update = ResourceService._progress_update_fields(
+                                n, total, estimate=chunk_counts.get(rid),
+                            )
                             _db_p = _SessionLocal()
                             try:
                                 _db_p.query(ResourceModel).filter_by(resource_id=rid).update(update)
