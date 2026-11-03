@@ -20,6 +20,10 @@ export interface CanvasInspectorProps {
   readonly selection: CanvasSelection | null;
   /** False for roles below EDITOR: every input is disabled. */
   readonly canEdit: boolean;
+  /** True for ADMINISTRATOR and up: the AI service Edit button opens the editor in place. */
+  readonly canCreateShared: boolean;
+  /** Opens the AI service editor for the selected piece (the canvas refetches afterwards). */
+  readonly onEditService: (piece: CanvasPiece) => void;
   readonly onSaveFields: SaveAgentFields;
 }
 
@@ -475,6 +479,10 @@ interface PieceDetailsProps {
   readonly piece: CanvasPiece;
   /** Sentence describing the connection when an edge is selected. */
   readonly connection?: string;
+  /** True for ADMINISTRATOR and up: the AI service Edit button opens the editor in place. */
+  readonly canEditShared: boolean;
+  /** Opens the AI service editor for the selected piece (the canvas refetches afterwards). */
+  readonly onEditService: (piece: CanvasPiece) => void;
 }
 
 /** Read-only details of another agent, shown when an agent piece (or an edge to one) is selected. */
@@ -505,7 +513,7 @@ function AgentPieceInfo({ piece }: { readonly piece: CanvasPiece }) {
   );
 }
 
-function PieceDetails({ appId, piece, connection }: PieceDetailsProps) {
+function PieceDetails({ appId, piece, connection, canEditShared, onEditService }: PieceDetailsProps) {
   const visual = PIECE_VISUALS[piece.kind];
   const Icon = visual.icon;
   return (
@@ -523,24 +531,47 @@ function PieceDetails({ appId, piece, connection }: PieceDetailsProps) {
       </div>
       {connection && <p className="text-sm text-gray-600 dark:text-gray-400">{connection}</p>}
       {piece.kind === 'agent' && <AgentPieceInfo piece={piece} />}
-      <Link to={pieceEditPath(appId, piece)} className={LINK_CLASS}>
-        {piece.kind === 'agent' ? 'Open its canvas' : 'Edit'}
-      </Link>
+      {/* AI services edit in place through their editor; everything else opens its own page. */}
+      {piece.kind === 'ai_service' ? (
+        <button
+          type="button"
+          disabled={!canEditShared}
+          title={canEditShared ? undefined : 'Administrator role required'}
+          onClick={() => onEditService(piece)}
+          className={`${LINK_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
+        >
+          Edit
+        </button>
+      ) : (
+        <Link to={pieceEditPath(appId, piece)} className={LINK_CLASS}>
+          {piece.kind === 'agent' ? 'Open its canvas' : 'Edit'}
+        </Link>
+      )}
     </div>
   );
 }
 
 /**
  * Right-hand inspector of the per-agent canvas. Shows the editor for the
- * current selection: the agent's fields, a piece's name and edit link, or the
- * RAG settings / connection of an edge. Every save goes through `onSaveFields`
- * (the canvas save queue), so field saves never race a connection.
+ * current selection: the agent's fields, a piece's details with its edit
+ * action (page link, or the AI service wizard in place), or the RAG settings /
+ * connection of an edge. Every save goes through `onSaveFields` (the canvas
+ * save queue), so field saves never race a connection.
  */
-export function CanvasInspector({ appId, agent, agentType, selection, canEdit, onSaveFields }: CanvasInspectorProps) {
+export function CanvasInspector({
+  appId,
+  agent,
+  agentType,
+  selection,
+  canEdit,
+  canCreateShared,
+  onEditService,
+  onSaveFields,
+}: CanvasInspectorProps) {
   return (
     <aside
       aria-label="Inspector"
-      className="flex max-h-96 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-80 dark:border-gray-700 dark:bg-gray-800"
+      className="flex max-h-96 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:self-start md:max-h-none md:w-80 dark:border-gray-700 dark:bg-gray-800"
     >
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {selection === null && (
@@ -559,7 +590,14 @@ export function CanvasInspector({ appId, agent, agentType, selection, canEdit, o
           />
         )}
 
-        {selection?.type === 'piece' && <PieceDetails appId={appId} piece={selection.piece} />}
+        {selection?.type === 'piece' && (
+          <PieceDetails
+            appId={appId}
+            piece={selection.piece}
+            canEditShared={canCreateShared}
+            onEditService={onEditService}
+          />
+        )}
 
         {selection?.type === 'edge' && selection.port === 'knowledge' && (
           <div className="space-y-4">
@@ -575,6 +613,8 @@ export function CanvasInspector({ appId, agent, agentType, selection, canEdit, o
             appId={appId}
             piece={selection.piece}
             connection={`Connected to ${portsFor(agentType).find((port) => port.id === selection.port)?.label ?? 'this port'}.${canEdit ? ' Press Delete or Backspace on the canvas to disconnect it.' : ''}`}
+            canEditShared={canCreateShared}
+            onEditService={onEditService}
           />
         )}
       </div>

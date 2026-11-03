@@ -21,7 +21,7 @@ export interface CreatePieceModalProps {
   readonly kind: PieceKind;
   readonly onClose: () => void;
   /** Called once the piece is saved. The caller closes the modal and connects the piece. */
-  readonly onCreated: (
+  readonly onCreated?: (
     kind: PieceKind,
     id: number,
     name: string,
@@ -41,9 +41,10 @@ interface CreatedPiece {
 }
 
 /**
- * Creation modal opened from a palette «+». Reuses the forms and create calls
- * of each piece's own settings page: the service wizard for AI, embedding and
- * sandbox services, and the existing forms for the rest.
+ * Creation modal opened from a palette «+». Reuses the forms and save calls of
+ * each piece's own settings page: the service wizard for AI, embedding and
+ * sandbox services, and the existing forms for the rest. (Editing an AI
+ * service from the canvas opens CompactServiceEditor in AgentCanvas instead.)
  */
 export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<CreatePieceModalProps>) {
   const mutate = useApiMutation();
@@ -107,7 +108,7 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
     if (created === undefined) return;
     invalidateSettingsCache();
     const piece = pick(created);
-    onCreated(kind, piece.id, piece.name, piece.lifecycleStatus, piece.supportsVideo);
+    onCreated?.(kind, piece.id, piece.name, piece.lifecycleStatus, piece.supportsVideo);
   }
 
   async function saveService(data: ServiceFormData | SandboxServiceFormData): Promise<void> {
@@ -139,17 +140,14 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
 
   switch (kind) {
     case 'ai_service':
+      return (
+        <ServiceWizard isOpen kind="ai" scope="app" appId={appId} onClose={onClose} onSave={saveService} />
+      );
+
     case 'embedding':
     case 'sandbox':
       return (
-        <ServiceWizard
-          isOpen
-          kind={kind === 'ai_service' ? 'ai' : kind}
-          scope="app"
-          appId={appId}
-          onClose={onClose}
-          onSave={saveService}
-        />
+        <ServiceWizard isOpen kind={kind} scope="app" appId={appId} onClose={onClose} onSave={saveService} />
       );
 
     case 'silo':
@@ -253,7 +251,7 @@ export function CreatePieceModal({ appId, kind, onClose, onCreated }: Readonly<C
           <AgentQuickCreateForm
             appId={appId}
             mode="modal"
-            onCreated={(agent: Agent) => onCreated(kind, agent.agent_id, agent.name)}
+            onCreated={(agent: Agent) => onCreated?.(kind, agent.agent_id, agent.name)}
             onCancel={onClose}
           />
         </Modal>
