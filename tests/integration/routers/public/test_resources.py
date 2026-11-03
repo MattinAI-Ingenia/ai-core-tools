@@ -380,3 +380,128 @@ class TestErrorLeakage:
             detail = resp.json()["detail"]
             assert "FATAL" not in detail
             assert "pool exhausted" not in detail
+
+
+# ---------------------------------------------------------------------------
+# LightRAG single-file delete (service not mocked; vector store mocked)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def lightrag_resource(db, fake_app, tmp_path):
+    import os
+    from models.embedding_service import EmbeddingService
+    from models.repository import Repository
+    from models.resource import Resource
+    from models.silo import Silo
+
+    emb = EmbeddingService(
+        name="LR Emb", provider="OpenAI", api_key="sk-test-fake",  # pragma: allowlist secret
+        app_id=fake_app.app_id,
+    )
+    db.add(emb)
+    db.flush()
+    silo = Silo(
+        name="LR Silo", description="d", status="active", silo_type="REPO",
+        app_id=fake_app.app_id, vector_db_type="LIGHTRAG", embedding_service_id=emb.service_id,
+    )
+    db.add(silo)
+    db.flush()
+    repo = Repository(
+        name="LR Repo", type="default", status="active", app_id=fake_app.app_id,
+        silo_id=silo.silo_id, create_date=datetime.now(),
+    )
+    db.add(repo)
+    db.flush()
+    res = Resource(
+        name="doc.txt", uri="doc.txt", type=".txt", status="active",
+        repository_id=repo.repository_id, create_date=datetime.now(),
+    )
+    db.add(res)
+    db.flush()
+    folder = tmp_path / str(repo.repository_id)
+    folder.mkdir()
+    path = folder / "doc.txt"
+    path.write_text("hello")
+    with patch("services.resource_service.REPO_BASE_FOLDER", str(tmp_path)):
+        yield repo, res, str(path), silo
+
+
+class TestLightRagDeleteResource:
+    def test_success_removes_file_and_row(
+        self, client, db, fake_app, fake_api_key, lightrag_resource
+    ):
+        import os
+        from models.resource import Resource
+
+        repo, res, path, silo = lightrag_resource
+        rid = res.resource_id
+        store = MagicMock()
+        store.delete_resource_document.return_value = "success"
+        with patch("services.silo_service._get_vector_store", return_value=store):
+            resp = client.delete(
+                resources_url(fake_app.app_id, repo.repository_id, f"/{rid}"),
+                headers=api_headers(fake_api_key.key),
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"message": "Resource deleted successfully"}
+        store.delete_resource_document.assert_called_once_with(f"silo_{silo.silo_id}", rid)
+        db.expire_all()
+        assert db.get(Resource, rid) is None
+        assert not os.path.exists(path)
+
+    def test_other_apps_key_is_rejected(
+        self, client, db, fake_app, lightrag_resource
+    ):
+        import os
+        from models.api_key import APIKey
+        from models.app import App
+        from models.resource import Resource
+        from models.user import User
+
+        repo, res, path, _ = lightrag_resource
+        user = User(email="other@mattin-test.com", name="Other", is_active=True, platform_role="editor")
+        db.add(user)
+        db.flush()
+        other_app = App(name="Other WS", slug="other-ws-fixture", owner_id=user.user_id,
+                        agent_rate_limit=0, max_file_size_mb=10)
+        db.add(other_app)
+        db.flush()
+        key = APIKey(key="other-app-key-for-integration-tests-only",  # pragma: allowlist secret
+                     name="Other", app_id=other_app.app_id, user_id=user.user_id,
+                     is_active=True, created_at=datetime.now())
+        db.add(key)
+        db.flush()
+
+        store = MagicMock()
+        with patch("services.silo_service._get_vector_store", return_value=store):
+            resp = client.delete(
+                resources_url(fake_app.app_id, repo.repository_id, f"/{res.resource_id}"),
+                headers=api_headers(key.key),
+            )
+        assert resp.status_code in (401, 403, 404)
+        store.delete_resource_document.assert_not_called()
+        db.expire_all()
+        assert db.get(Resource, res.resource_id) is not None
+        assert os.path.exists(path)
+
+    def test_retired_service_returns_409(
+        self, client, fake_app, fake_repository, fake_resource, fake_api_key
+    ):
+        from utils.service_lifecycle import ServiceRetiredError
+
+        err = ServiceRetiredError(
+            MagicMock(service_id=1, end_of_service_at=datetime(2020, 1, 1), deprecation_notice=None), "embedding"
+        )
+        with patch(
+            "routers.public.v1.resources.ResourceService.delete_resource_from_repository",
+            side_effect=err,
+        ):
+            resp = client.delete(
+                resources_url(
+                    fake_app.app_id, fake_repository.repository_id, f"/{fake_resource.resource_id}"
+                ),
+                headers=api_headers(fake_api_key.key),
+            )
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "SERVICE_RETIRED"
