@@ -653,11 +653,14 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   const handleInit: OnInit<CanvasFlowNode, CanvasEdge> = useCallback((instance) => {
     flowRef.current = instance;
   }, []);
-  /** Set by a connect: the next node change (the piece appearing) re-fits the view so it isn't left off screen. */
-  const fitOnNextNodes = useRef(false);
+  /** Node id of the piece set by a connect: once that node is on the canvas the view re-fits so it isn't left off screen. */
+  const fitOnNextNodes = useRef<string | null>(null);
   useEffect(() => {
-    if (!fitOnNextNodes.current) return;
-    fitOnNextNodes.current = false;
+    const nodeId = fitOnNextNodes.current;
+    // Not a boolean: clearing drag state on drop also changes `nodes` before
+    // the refetch adds the piece node, so the fit must wait for that node itself.
+    if (!nodeId || !nodes.some((node) => node.id === nodeId)) return;
+    fitOnNextNodes.current = null;
     // Wait a beat so React Flow has measured the new node before fitting; an earlier fit ignores it.
     setTimeout(() => void flowRef.current?.fitView({ padding: 0.2, duration: 300 }), 150);
   }, [nodes]);
@@ -829,7 +832,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       ]);
 
       const nodeId = pieceNodeId(piece);
-      fitOnNextNodes.current = true;
+      fitOnNextNodes.current = nodeId;
       void runSteps(steps)
         .then((saved) => {
           if (saved && layoutRef.current.loose.includes(nodeId)) {
