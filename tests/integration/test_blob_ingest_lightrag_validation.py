@@ -45,8 +45,6 @@ reported here rather than silently downgrading the test to another vector
 store — AC-8 is specifically about LightRAG.
 """
 import asyncio
-import hashlib
-import json
 import os
 import re
 import shutil
@@ -54,7 +52,6 @@ import socket
 import tempfile
 import time
 import unittest.mock as mock
-import urllib.parse
 
 import pytest
 
@@ -77,6 +74,15 @@ from models.silo import Silo
 from models.user import User
 from services.silo_service import SiloService
 
+from tests.integration.lightrag_helpers import (
+    SimpleAiService,
+    SimpleEmbeddingService,
+    delete_lightrag_rows,
+    neo4j_label_count,
+    require_real_lightrag_backend,
+    stub_embedding_func,
+    stub_llm_calls_recorder,
+)
 from tests.integration.blob_ingest_helpers import (
     FakeBlob,
     FakeContainerClient,
@@ -145,99 +151,6 @@ def _write_fact_pdf(path: str, fact_text: str) -> None:
 # Stubs for the two model adapters (no external LLM/embedding API calls)
 # ---------------------------------------------------------------------------
 
-_EMBEDDING_DIM = 256
-_TOKEN_BUCKET_RE = re.compile(r"[a-záéíóúüñ0-9]{3,}")
-_FACT_TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9-]{4,}\b")
-
-
-def _bucket(token: str) -> int:
-    return int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % _EMBEDDING_DIM
-
-
-def _embed_one(text: str):
-    dense = [0.0] * _EMBEDDING_DIM
-    for token in _TOKEN_BUCKET_RE.findall(text.lower()):
-        dense[_bucket(token)] += 1.0
-    norm = sum(d * d for d in dense) ** 0.5 or 1.0
-    return [d / norm for d in dense]
-
-
-def _stub_entities_for(input_text: str) -> dict:
-    """Entity-extraction JSON: one TECHNICAL entity per distinctive token.
-
-    LightRAG parses this with its real ``_process_json_extraction_result`` —
-    the pipeline machinery (chunking, graph upserts, doc-status) runs for real.
-    """
-    names = list(dict.fromkeys(_FACT_TOKEN_RE.findall(input_text)))[:6]
-    entities = [
-        {"name": name, "type": "TECHNICAL",
-         "description": f"{name} aparece mencionado en el documento ingerido."}
-        for name in names
-    ]
-    relationships = [
-        {"source": source, "target": target, "keywords": "ficha técnica",
-         "description": f"{source} y {target} aparecen en el mismo documento."}
-        for source, target in zip(names, names[1:])
-    ]
-    return {"entities": entities, "relationships": relationships}
-
-
-def _stub_llm_calls_recorder():
-    calls = []
-
-    async def fake_llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs):
-        text = f"{system_prompt or ''}\n{prompt}"
-        calls.append(text)
-        if '"high_level_keywords"' in text:
-            # LightRAG's keyword-extraction call: one prompt with the query at
-            # the end (see extract_keywords_only, lightrag/operate.py, 1.5.6).
-            query = (
-                prompt.split("User Query:")[-1].split("---Output")[0]
-                if "User Query:" in prompt else prompt
-            )
-            words = list(dict.fromkeys(
-                re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][\wÁÉÍÓÚÜÑáéíóúüñ-]{3,}", query)
-            ))[:8]
-            return json.dumps({"high_level_keywords": words[:4], "low_level_keywords": words[4:8]})
-        if '"entities"' in text and '"relationships"' in text:
-            # LightRAG's entity-extraction call: the chunk text sits inside the
-            # ---Input Text--- section of the user prompt.
-            input_text = prompt.split("---Input Text---")[-1].split("---Completion")[0]
-            return json.dumps(_stub_entities_for(input_text))
-        # Summary/other calls: plain text is fine.
-        return "OK."
-
-    return fake_llm_model_func, calls
-
-
-def _stub_embedding_func():
-    import threading
-
-    import numpy as np
-
-    calls = []
-
-    async def fake_embed_func(texts):
-        calls.append({
-            "texts": list(texts),
-            # The LightRAG coroutines must run on the collection's DEDICATED
-            # persistent loop thread (commit 6fa7f59a) — record who called us.
-            "thread": threading.current_thread().name,
-        })
-        if not texts:
-            return np.zeros((0, _EMBEDDING_DIM), dtype=np.float32)
-        return np.asarray([_embed_one(t) for t in texts], dtype=np.float32)
-
-    from lightrag.utils import EmbeddingFunc
-
-    return EmbeddingFunc(
-        embedding_dim=_EMBEDDING_DIM,
-        max_token_size=8192,
-        func=fake_embed_func,
-        model_name="stub-hashed-bow",
-    ), calls
-
-
 def _global_dns_stub(host, *args, **kwargs):
     """Resolve the fake blob host to a routable address; everything else (the
     Neo4j hostname included) goes to the REAL resolver — the LightRAG driver
@@ -258,39 +171,7 @@ _real_getaddrinfo = socket.getaddrinfo
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_real_lightrag_backend():
-    import config
-
-    if not getattr(config, "LIGHTRAG_ENABLED", False):
-        pytest.skip(
-            "LIGHTRAG_ENABLED is false in this environment. AC-8 requires real "
-            "LightRAG; set LIGHTRAG_ENABLED=true plus NEO4J_URI/NEO4J_PASSWORD "
-            "to run it (e.g. the backend container)."
-        )
-    for required in ("NEO4J_URI", "NEO4J_PASSWORD"):
-        if not getattr(config, required, None):
-            pytest.skip(f"{required} is not configured; LightRAG cannot be stood up here.")
-
-    parsed = urllib.parse.urlsplit(config.NEO4J_URI)
-    try:
-        with socket.create_connection((parsed.hostname, parsed.port or 7687), timeout=3):
-            pass
-    except OSError as exc:
-        pytest.skip(f"Neo4j at {config.NEO4J_URI} is not reachable ({exc}); AC-8 cannot run here.")
-
-
-def _neo4j_label_count(label: str) -> int:
-    from neo4j import GraphDatabase
-
-    import config
-
-    driver = GraphDatabase.driver(config.NEO4J_URI, auth=(config.NEO4J_USERNAME, config.NEO4J_PASSWORD))
-    try:
-        with driver.session() as session:
-            return session.run(
-                f"MATCH (n:`{label}`) RETURN count(n) AS c"  # noqa: S608 — label from a module constant
-            ).single()["c"]
-    finally:
-        driver.close()
+    require_real_lightrag_backend()
 
 
 # ---------------------------------------------------------------------------
@@ -309,14 +190,14 @@ def lightrag_e2e(request, test_engine):  # noqa: ARG001 — test_engine ensures 
 
     # 1. Workspace guard: refuse to touch a shared backend that already has
     #    this label.
-    if _neo4j_label_count(COLLECTION_NAME) > 0:
+    if neo4j_label_count(COLLECTION_NAME) > 0:
         pytest.skip(
             f"Neo4j already contains workspace label '{COLLECTION_NAME}' — refusing to "
             "run the LightRAG e2e against a shared backend with pre-existing data."
         )
 
-    stub_llm, llm_calls = _stub_llm_calls_recorder()
-    stub_embedding, embedding_calls = _stub_embedding_func()
+    stub_llm, llm_calls = stub_llm_calls_recorder()
+    stub_embedding, embedding_calls = stub_embedding_func()
 
     fake_client = FakeContainerClient()
     repo_base = tempfile.mkdtemp(prefix="lightrag-e2e-repos-")
@@ -444,63 +325,13 @@ def lightrag_e2e(request, test_engine):  # noqa: ARG001 — test_engine ensures 
             for loop in list(cleanup_store._collection_loops.values()):
                 loop.close()
 
-        _delete_lightrag_rows(COLLECTION_NAME)
+        delete_lightrag_rows(COLLECTION_NAME)
         if repository_id is not None:
             _delete_db_rows(repository_id)
         shutil.rmtree(repo_base, ignore_errors=True)
 
         for patcher in reversed(patchers):
             patcher.stop()
-
-
-class SimpleAiService:
-    """Lightest stand-in satisfying LightRAGStore.__init__ for the cleanup run."""
-
-    provider = "Custom"
-    name = "cleanup"
-    description = None
-    api_key = ""  # pragma: allowlist secret
-    endpoint = None
-
-
-class SimpleEmbeddingService:
-    provider = "Custom"
-    name = "cleanup"
-    description = None
-    api_key = ""  # pragma: allowlist secret
-    endpoint = None
-    api_version = None
-
-
-def _delete_lightrag_rows(workspace: str) -> None:
-    """Remove this workspace's rows from every LightRAG PostgreSQL table.
-
-    ``LightRAGStore.delete_collection`` leaves them behind — its
-    ``_cleanup_postgres`` helper targets the JSON-backend table names instead
-    of the real LightRAG PostgreSQL ones (documented bug in
-    docs/dependencies/lightrag.md §8), so the test cleans up after itself.
-    The tables are lowercase (``lightrag_*``, verified against lightrag-hku
-    1.5.6) and their vector variants carry the embedding-model suffix, hence
-    the case-insensitive prefix match.
-    """
-    from sqlalchemy import text
-
-    db = SessionLocal()
-    try:
-        tables = db.execute(
-            text("SELECT tablename FROM pg_tables WHERE tablename ILIKE 'lightrag%'")
-        ).scalars().all()
-        for table in tables:
-            try:
-                db.execute(
-                    text(f'DELETE FROM "{table}" WHERE workspace = :workspace'),  # noqa: S608 — table from the LIGHTRAG% set
-                    {"workspace": workspace},
-                )
-            except Exception:  # noqa: BLE001 — a table without a workspace column
-                continue
-        db.commit()
-    finally:
-        db.close()
 
 
 def _delete_db_rows(repository_id: int) -> None:

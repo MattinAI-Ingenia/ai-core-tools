@@ -222,7 +222,7 @@ def test_delete_collection_closes_the_shared_loop_and_allows_a_rebuild():
 
     with patch.object(LightRAGStore, "_build_rag", build), \
          patch.object(LightRAGStore, "_cleanup_neo4j"), \
-         patch.object(LightRAGStore, "_cleanup_qdrant"), \
+         patch.object(LightRAGStore, "_cleanup_vector_storage"), \
          patch.object(LightRAGStore, "_cleanup_postgres"):
         store = _store()
         store._get_rag_instance("silo_1")

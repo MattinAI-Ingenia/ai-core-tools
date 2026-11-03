@@ -2830,15 +2830,14 @@ class LightRAGStore(VectorStoreInterface):
         logger.info("Deleting LightRAG workspace '%s'", collection_name)
 
         # Best-effort cleanup of the underlying storage backends, BEFORE
-        # dropping the cached instance below: _cleanup_qdrant reuses whatever
-        # rag instance (and dedicated loop) is already cached for this
-        # collection — popping first would force it to build (and leak) a
-        # brand-new one just to immediately tear it down again.
+        # dropping the cached instance below: _cleanup_vector_storage reuses
+        # the rag instance (and dedicated loop) already cached for this
+        # collection. Popping first would force it to build (and leak) a
+        # brand-new one just to tear it down again.
         # LightRAG does not expose a single "drop workspace" API so we reach
         # into each backend directly.
         self._cleanup_neo4j(collection_name)
-        if self.lightrag_vector_db_type == "QDRANT":
-            self._cleanup_qdrant(collection_name)
+        self._cleanup_vector_storage(collection_name)
         self._cleanup_postgres(collection_name)
 
         # Now drop the cached instance and tear down its dedicated loop/thread.
@@ -2877,41 +2876,53 @@ class LightRAGStore(VectorStoreInterface):
         except Exception as exc:
             logger.warning("Neo4j cleanup for '%s' failed: %s", collection_name, exc)
 
-    def _cleanup_qdrant(self, collection_name: str) -> None:
-        """Drop this workspace's points from LightRAG's shared Qdrant collections.
+    def _cleanup_vector_storage(self, collection_name: str) -> None:
+        """Drop this workspace's vectors from LightRAG's vector storage (Qdrant or PGVector).
 
-        There is no per-workspace Qdrant collection to delete by name: LightRAG
-        partitions ONE physical collection per data kind (entities/
-        relationships/chunks) across every workspace via a ``workspace_id``
-        payload field on each point (see ``lightrag.kg.qdrant_impl``). A
-        previous version of this method looked for collections named
-        ``lightrag_{workspace}_*``, which never exist, so it silently deleted
-        nothing while logging success — every deleted repository's vectors
-        leaked forever into the shared collections.
+        Qdrant: LightRAG partitions ONE physical collection per data kind
+        (entities/relationships/chunks) across every workspace via a
+        ``workspace_id`` payload field on each point (see
+        ``lightrag.kg.qdrant_impl``). PGVector: tables are model-suffixed
+        (``lightrag_vdb_*_{suffix}``) and rows carry a ``workspace`` column,
+        so deleting by the base table name misses them.
 
         Uses each vector storage's own ``drop()`` (the library's native,
-        workspace-payload-filtered wipe, including legacy-collection
-        handling) instead of guessing collection names.
+        workspace-scoped wipe) instead of guessing table/collection names.
         """
         try:
             rag = self._get_rag_instance(collection_name)
 
-            async def _drop_all():
+            async def _drop_all() -> bool:
+                all_ok = True
                 for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
                     result = await vdb.drop()
                     if result.get("status") != "success":
+                        all_ok = False
                         logger.warning(
-                            "Qdrant drop for workspace '%s' reported: %s",
-                            collection_name, result.get("message"),
+                            "%s vector drop for workspace '%s' reported: %s",
+                            self.lightrag_vector_db_type, collection_name,
+                            result.get("message"),
                         )
+                return all_ok
 
-            self._run_on_collection_loop(collection_name, _drop_all())
-            logger.info("Cleaned up Qdrant collections for workspace '%s'", collection_name)
+            if self._run_on_collection_loop(collection_name, _drop_all()):
+                logger.info(
+                    "Cleaned up %s vector storage for workspace '%s'",
+                    self.lightrag_vector_db_type, collection_name,
+                )
         except Exception as exc:
-            logger.warning("Qdrant cleanup for '%s' failed: %s", collection_name, exc)
+            logger.error(
+                "%s vector cleanup for workspace '%s' failed: %s; vector rows "
+                "may be retained in lightrag_vdb_* tables / Qdrant",
+                self.lightrag_vector_db_type, collection_name, exc,
+            )
 
     def _cleanup_postgres(self, collection_name: str) -> None:
-        """Remove KV / vector / doc-status rows scoped to *collection_name*.
+        """Remove KV / doc-status rows scoped to *collection_name*.
+
+        Vector rows are dropped beforehand by ``_cleanup_vector_storage``
+        through the library's ``drop()``; the base-name ``lightrag_vdb_*``
+        deletes below are harmless leftovers that normally hit "table absent".
 
         ``self.db`` is ``db.database.Database`` — a thin wrapper exposing only
         ``.engine``/``._async_engine`` (see its docstring: "no module-level
@@ -2928,9 +2939,7 @@ class LightRAGStore(VectorStoreInterface):
         # unquoted DDL, so Postgres folds the identifiers to lower case —
         # we must delete using the lower-cased names (a quoted upper-case
         # name would not match). KV + doc-status live in Postgres for every
-        # LightRAG silo; the vector tables (lightrag_vdb_*) only when
-        # lightrag_vector_db_type=PGVECTOR. Deleting them all is harmless
-        # otherwise. Best-effort — tables might not exist yet.
+        # LightRAG silo. Best-effort — tables might not exist yet.
         try:
             from sqlalchemy import text  # noqa: WPS433
             from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
@@ -2949,8 +2958,18 @@ class LightRAGStore(VectorStoreInterface):
                     )
                     if result.rowcount:
                         deleted[table] = result.rowcount
-            except Exception:
-                pass  # Table may not exist, or this deployment doesn't use it — that's fine.
+            except Exception as exc:
+                orig = getattr(exc, "orig", None)
+                sqlstate = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+                if sqlstate == "42P01":
+                    logger.debug(
+                        "table %s absent, skipped for workspace %s", table, collection_name
+                    )
+                else:
+                    logger.warning(
+                        "PostgreSQL cleanup of table %s for workspace '%s' failed: %s",
+                        table, collection_name, exc,
+                    )
         logger.info(
             "Cleaned up PostgreSQL data for workspace '%s': %s",
             collection_name, deleted or "nothing to delete",

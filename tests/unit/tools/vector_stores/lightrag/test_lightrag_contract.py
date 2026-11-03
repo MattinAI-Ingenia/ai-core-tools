@@ -424,10 +424,14 @@ class TestPerDocumentDelete:
         }
 
     async def test_delete_round_trip(self, tmp_path):
-        rag, _ = await _make_rag(tmp_path, None)
+        async def one_chunk(*args, **kwargs):
+            return [{"content": "alpha beta gamma", "tokens": 3,
+                     "chunk_order_index": 0, "chunk_id": "chunk-000"}]
+
+        rag, _ = await _make_rag(tmp_path, one_chunk)
         await rag.apipeline_enqueue_documents(["alpha beta gamma"], ids=["res7"])
         await rag.apipeline_process_enqueue_documents()
-        assert await rag.doc_status.get_by_id("res7") is not None
+        assert (await rag.doc_status.get_by_id("res7"))["status"] == "processed"
 
         result = await rag.adelete_by_doc_id("res7", delete_llm_cache=True)
         assert result.status == "success"
@@ -435,3 +439,13 @@ class TestPerDocumentDelete:
 
         again = await rag.adelete_by_doc_id("res7", delete_llm_cache=True)
         assert again.status == "not_found"
+
+
+class TestVdbDropContract:
+    """``_cleanup_vector_storage`` relies on every vdb's ``drop()`` returning a status dict."""
+
+    async def test_vdb_drop_returns_success_status(self, tmp_path):
+        rag, _ = await _make_rag(tmp_path, None)
+        for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
+            assert inspect.iscoroutinefunction(vdb.drop)
+            assert (await vdb.drop())["status"] == "success"

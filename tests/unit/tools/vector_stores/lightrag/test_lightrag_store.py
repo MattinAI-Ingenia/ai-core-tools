@@ -156,11 +156,97 @@ def test_delete_collection_removes_cached_instance(store, mock_rag):
     store._rag_instances["silo_1"] = mock_rag
 
     with patch.object(store, "_cleanup_neo4j"), \
-         patch.object(store, "_cleanup_qdrant"), \
+         patch.object(store, "_cleanup_vector_storage"), \
          patch.object(store, "_cleanup_postgres"):
         store.delete_collection("silo_1")
 
     assert "silo_1" not in store._rag_instances
+
+
+def test_delete_collection_pgvector_cleans_vector_storage(store):
+    store.lightrag_vector_db_type = "PGVECTOR"
+
+    with patch.object(store, "_cleanup_neo4j"), \
+         patch.object(store, "_cleanup_vector_storage") as vec, \
+         patch.object(store, "_cleanup_postgres"):
+        store.delete_collection("silo_1")
+
+    vec.assert_called_once_with("silo_1")
+
+
+def _rag_with_vdbs(results):
+    rag = MagicMock()
+    rag.entities_vdb.drop = AsyncMock(return_value=results[0])
+    rag.relationships_vdb.drop = AsyncMock(return_value=results[1])
+    rag.chunks_vdb.drop = AsyncMock(return_value=results[2])
+    return rag
+
+
+def test_cleanup_vector_storage_drops_all_three_vdbs(store):
+    import asyncio
+
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, ok, ok])
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    store._cleanup_vector_storage("silo_1")
+
+    rag.entities_vdb.drop.assert_awaited_once()
+    rag.relationships_vdb.drop.assert_awaited_once()
+    rag.chunks_vdb.drop.assert_awaited_once()
+
+
+def test_cleanup_vector_storage_warns_on_error_status(store, caplog):
+    import asyncio
+
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, {"status": "error", "message": "x"}, ok])
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    with caplog.at_level("WARNING"):
+        store._cleanup_vector_storage("silo_77")
+
+    assert any("silo_77" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_cleanup_vector_storage_logs_error_when_instance_unavailable(store, caplog):
+    store._get_rag_instance = MagicMock(side_effect=RuntimeError("no rag"))
+
+    with caplog.at_level("ERROR"):
+        store._cleanup_vector_storage("silo_55")
+
+    assert any(r.levelname == "ERROR" and "silo_55" in r.getMessage() for r in caplog.records)
+
+
+def _pg_error(pgcode):
+    err = Exception("boom")
+    err.orig = SimpleNamespace(pgcode=pgcode)
+    return err
+
+
+def test_cleanup_postgres_warns_on_unexpected_error(store, caplog):
+    store.db = MagicMock()
+    store.db.engine.begin.return_value.__enter__.return_value.execute.side_effect = _pg_error("57014")
+
+    with caplog.at_level("WARNING"):
+        store._cleanup_postgres("silo_88")
+
+    assert any(
+        r.levelname == "WARNING" and "silo_88" in r.getMessage() and "lightrag_" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_cleanup_postgres_undefined_table_is_not_a_warning(store, caplog):
+    store.db = MagicMock()
+    store.db.engine.begin.return_value.__enter__.return_value.execute.side_effect = _pg_error("42P01")
+
+    with caplog.at_level("WARNING"):
+        store._cleanup_postgres("silo_88")
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 # ---------------------------------------------------------------------------
