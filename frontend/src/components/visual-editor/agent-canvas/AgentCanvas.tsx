@@ -272,7 +272,7 @@ function buildFlowEdges(
 function CanvasLoading() {
   return (
     <div
-      className="flex h-[70vh] w-full min-h-[400px] flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800/50"
+      className="flex h-full w-full min-h-[400px] flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800/50"
       role="status"
       aria-live="polite"
     >
@@ -288,7 +288,7 @@ function CanvasLoading() {
 function CanvasError({ error, onRetry }: { readonly error: string; readonly onRetry: () => void }) {
   return (
     <div
-      className="flex h-[70vh] w-full min-h-[400px] flex-col items-center justify-center gap-3 rounded-xl border border-red-200 bg-red-50 px-6 text-center dark:border-red-800/50 dark:bg-red-900/20"
+      className="flex h-full w-full min-h-[400px] flex-col items-center justify-center gap-3 rounded-xl border border-red-200 bg-red-50 px-6 text-center dark:border-red-800/50 dark:bg-red-900/20"
       role="alert"
       aria-live="assertive"
     >
@@ -980,7 +980,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   if (!agent) return <CanvasLoading />;
 
   return (
-    <div className="flex w-full flex-col gap-3 md:flex-row">
+    <div className="flex w-full flex-col gap-3 md:h-full md:flex-row">
       <CanvasPalette
         pieces={pieces}
         agentType={agentType}
@@ -989,7 +989,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         onCreate={handleCreate}
       />
       <div
-        className="relative h-[70vh] w-full min-h-[400px] min-w-0 flex-1 overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900"
+        className="relative h-[70vh] w-full min-h-[400px] min-w-0 flex-1 md:h-full overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900"
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >

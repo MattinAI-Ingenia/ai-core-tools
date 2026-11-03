@@ -893,7 +893,8 @@ function AgentFormPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
-      <div className="max-w-6xl mx-auto">
+      {/* The visual editor uses the full width; the form keeps the centred column. */}
+      <div className={view === 'visual' ? 'mx-auto' : 'max-w-6xl mx-auto'}>
         {/* Page Header */}
         <div className="flex items-center justify-between mb-8">
           <div>
@@ -960,7 +961,7 @@ function AgentFormPage() {
 
         {/* Agent Form, or the visual editor. The canvas sits outside the <form> so Enter in its inputs cannot submit the agent. */}
         {view === 'visual' ? (
-          <div className="h-[calc(100vh-12rem)] min-h-[32rem]">
+          <div className="h-[calc(100vh-11rem)] min-h-[32rem]">
             <AgentCanvas
               key={`${appId}:${agentId}`}
               appId={Number(appId)}

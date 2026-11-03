@@ -7,6 +7,18 @@ import type { PieceKind } from './agentPorts';
  * system resource (AI service, silo, skill, MCP config, middleware, sandbox
  * service, embedding service or another agent usable as a tool).
  */
+export interface CanvasPieceAgentInfo {
+  /** Raw agent type from the API (`agent`, `ocr_agent`, ...). */
+  readonly type: string;
+  readonly description?: string;
+  /** Name of the agent's AI service, when it has one. */
+  readonly modelName?: string;
+  readonly toolCount: number;
+  readonly requestCount: number;
+  /** ISO date of the agent's last use; null when it was never used. */
+  readonly lastUsedDate: string | null;
+}
+
 export interface CanvasPiece {
   readonly kind: PieceKind;
   readonly id: number;
@@ -15,6 +27,8 @@ export interface CanvasPiece {
   readonly isSystem?: boolean;
   /** Agent pieces only: whether the agent is already usable as a tool. */
   readonly isTool?: boolean;
+  /** Agent pieces only: read-only details for the inspector. */
+  readonly agentInfo?: CanvasPieceAgentInfo;
   /** AI services only: whether the service can analyse video (absent = unknown = no). */
   readonly supportsVideo?: boolean;
 }
@@ -108,7 +122,20 @@ function buildPieces(agent: Agent, agents: Agent[], embeddings: EmbeddingService
   }
   for (const other of agents) {
     if (other.agent_id === editedAgentId) continue;
-    pieces.push({ kind: 'agent', id: other.agent_id, name: other.name, isTool: other.is_tool === true });
+    pieces.push({
+      kind: 'agent',
+      id: other.agent_id,
+      name: other.name,
+      isTool: other.is_tool === true,
+      agentInfo: {
+        type: other.type,
+        description: other.description,
+        modelName: other.ai_service?.name,
+        toolCount: other.tool_ids?.length ?? 0,
+        requestCount: other.request_count,
+        lastUsedDate: other.last_used_date,
+      },
+    });
   }
   for (const embedding of embeddings) {
     pieces.push({
