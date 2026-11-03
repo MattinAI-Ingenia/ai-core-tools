@@ -511,7 +511,7 @@ export function CanvasInspector({ appId, agent, agentType, selection, canEdit, o
   return (
     <aside
       aria-label="Inspector"
-      className="flex max-h-96 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-96 dark:border-gray-700 dark:bg-gray-800"
+      className="flex max-h-96 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-80 dark:border-gray-700 dark:bg-gray-800"
     >
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {selection === null && (

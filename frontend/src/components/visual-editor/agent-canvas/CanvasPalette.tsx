@@ -1,5 +1,5 @@
 import { useId, useState, type DragEvent } from 'react';
-import { Plus, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, PanelLeftClose, PanelLeftOpen, Plus, Search } from 'lucide-react';
 import { PIECE_VISUALS } from '../nodeKindConfig';
 import { ServiceOptionStatus, serviceStatusId } from '../../ui/ServiceOptionStatus';
 import type { ServiceOptionLike } from '../../../utils/serviceLifecycle';
@@ -128,7 +128,19 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
 export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onCreate }: CanvasPaletteProps) {
   const baseId = useId();
   const [filter, setFilter] = useState('');
+  /** Whole palette folded into a narrow rail, to give the canvas the room. */
+  const [railed, setRailed] = useState(false);
+  /** Categories the user folded; a filter always shows matches, so it opens them. */
+  const [foldedKinds, setFoldedKinds] = useState<ReadonlySet<PieceKind>>(() => new Set());
   const needle = filter.trim().toLowerCase();
+  const toggleKind = (kind: PieceKind): void =>
+    setFoldedKinds((current) => {
+      const next = new Set(current);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  const isOpen = (kind: PieceKind): boolean => needle !== '' || !foldedKinds.has(kind);
   const ports = portsFor(agentType);
   /** Silos and agents need EDITOR; the other kinds create shared resources and need ADMINISTRATOR. */
   const canCreateFor = (kind: PieceKind): boolean =>
@@ -145,16 +157,36 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
   const showMemory = agentType === 'agent' && (needle === '' || MEMORY_ROW_LABEL.toLowerCase().includes(needle));
   const noMatches = needle !== '' && groups.length === 0 && !showMemory;
 
+  if (railed) {
+    return (
+      <aside
+        aria-label="Pieces palette"
+        className="flex w-full shrink-0 items-center justify-center rounded-xl border border-gray-200 bg-white p-2 md:w-12 dark:border-gray-700 dark:bg-gray-800"
+      >
+        <button
+          type="button"
+          onClick={() => setRailed(false)}
+          aria-expanded={false}
+          aria-label="Expand pieces palette"
+          title="Expand pieces palette"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-gray-300 dark:hover:bg-gray-700"
+        >
+          <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside
       aria-label="Pieces palette"
-      className="flex max-h-72 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-64 dark:border-gray-700 dark:bg-gray-800"
+      className="flex max-h-72 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-56 dark:border-gray-700 dark:bg-gray-800"
     >
-      <div className="border-b border-gray-200 p-2 dark:border-gray-700">
+      <div className="flex items-center gap-1 border-b border-gray-200 p-2 dark:border-gray-700">
         <label htmlFor={`${baseId}-filter`} className="sr-only">
           Filter pieces
         </label>
-        <div className="relative">
+        <div className="relative min-w-0 flex-1">
           <Search
             className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400 dark:text-gray-500"
             aria-hidden="true"
@@ -168,19 +200,42 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
             className="w-full rounded-lg border border-gray-300 bg-white py-1.5 pl-7 pr-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500"
           />
         </div>
+        <button
+          type="button"
+          onClick={() => setRailed(true)}
+          aria-expanded={true}
+          aria-label="Collapse pieces palette"
+          title="Collapse pieces palette"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-gray-400 dark:hover:bg-gray-700"
+        >
+          <PanelLeftClose className="h-4 w-4" aria-hidden="true" />
+        </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {groups.map(({ category, items }) => {
           const headingId = `${baseId}-${category.kind}`;
+          const listId = `${baseId}-${category.kind}-list`;
+          const open = isOpen(category.kind);
           return (
             <section key={category.kind} aria-labelledby={headingId} className="mb-3">
               <div className="flex items-center justify-between gap-2 px-1 pb-1">
-                <h3
-                  id={headingId}
-                  className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400"
-                >
-                  {category.title}
+                <h3 id={headingId} className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => toggleKind(category.kind)}
+                    aria-expanded={open}
+                    aria-controls={listId}
+                    className="flex w-full items-center gap-1 rounded-md py-0.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500 transition-colors hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-gray-400 dark:hover:text-gray-200"
+                  >
+                    {open ? (
+                      <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    )}
+                    <span className="truncate">{category.title}</span>
+                    <span className="font-normal normal-case text-gray-400 dark:text-gray-500">{items.length}</span>
+                  </button>
                 </h3>
                 {canCreateFor(category.kind) && (
                   <button
@@ -194,14 +249,16 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
                   </button>
                 )}
               </div>
-              <ul className="space-y-1">
-                {items.map((piece) => (
-                  <PaletteItem key={`${piece.kind}:${piece.id}`} piece={piece} canEdit={canEdit} />
-                ))}
-                {items.length === 0 && (
-                  <li className="px-1 py-1 text-xs text-gray-400 dark:text-gray-500">None yet</li>
-                )}
-              </ul>
+              {open && (
+                <ul id={listId} className="space-y-1">
+                  {items.map((piece) => (
+                    <PaletteItem key={`${piece.kind}:${piece.id}`} piece={piece} canEdit={canEdit} />
+                  ))}
+                  {items.length === 0 && (
+                    <li className="px-1 py-1 text-xs text-gray-400 dark:text-gray-500">None yet</li>
+                  )}
+                </ul>
+              )}
             </section>
           );
         })}
