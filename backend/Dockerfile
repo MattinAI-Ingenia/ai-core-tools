@@ -199,4 +199,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # Docker puede extenderse a 100.64.0.0/10 en algunas instalaciones, o el CIDR
 # de pods de tu clúster K8s — fija UVICORN_FORWARDED_ALLOW_IPS explícitamente
 # a ese rango (o al CIDR real del Service/Ingress que hace de proxy).
-CMD ["sh", "-c", "cd / && python -m alembic upgrade head && cd /aict_backend && exec python -m uvicorn main:app --host=0.0.0.0 --port=8000 --workers \"${UVICORN_WORKERS:-2}\" --limit-concurrency \"${UVICORN_LIMIT_CONCURRENCY:-100}\" --timeout-graceful-shutdown \"${UVICORN_GRACEFUL_SHUTDOWN_SECONDS:-20}\" --proxy-headers --forwarded-allow-ips \"${UVICORN_FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}\""]
+CMD ["sh", "-c", "cd / && python -m alembic upgrade head && cd /aict_backend && exec python -m uvicorn_worker_telemetry main:app --host=0.0.0.0 --port=8000 --workers \"${UVICORN_WORKERS:-2}\" --limit-concurrency \"${UVICORN_LIMIT_CONCURRENCY:-100}\" --timeout-graceful-shutdown \"${UVICORN_GRACEFUL_SHUTDOWN_SECONDS:-20}\" --proxy-headers --forwarded-allow-ips \"${UVICORN_FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}\""]
