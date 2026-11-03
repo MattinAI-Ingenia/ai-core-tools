@@ -138,13 +138,89 @@ def test_index_documents_domain_crawl_pages_still_get_content_hash_ids(store, mo
 # ---------------------------------------------------------------------------
 
 
-def test_delete_documents_is_noop(store, mock_rag):
-    # delete_documents is a deliberate no-op (per-document graph deletion unsupported)
+def test_delete_documents_is_noop(store, mock_rag, caplog):
+    # AC-9: delete_documents never touches the graph, whatever the filter
     store._get_rag_instance = MagicMock(return_value=mock_rag)
 
-    store.delete_documents("silo_1", ["doc1", "doc2"])
+    ids_list = [
+        {"resource_id": {"$eq": 42}},
+        ["doc1", "doc2"],
+        {"url": {"$eq": "https://x"}},
+        {"media_id": {"$eq": 3}},
+    ]
+    for ids in ids_list:
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            store.delete_documents("silo_1", ids)
+        assert any(r.levelname == "WARNING" for r in caplog.records)
 
     mock_rag.adelete_by_doc_id.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["success", "not_found", "not_allowed", "fail"])
+@pytest.mark.parametrize("llm_cache", [True, False])
+def test_delete_resource_document_passes_through(
+    store, mock_rag, monkeypatch, caplog, status, llm_cache
+):
+    import asyncio
+
+    import config
+
+    monkeypatch.setattr(config, "LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE", llm_cache)
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+    mock_rag.adelete_by_doc_id = AsyncMock(
+        return_value=SimpleNamespace(status=status, status_code=418, message="SECRET-MSG")
+    )
+
+    with patch.object(
+        store, "_run_on_collection_loop",
+        side_effect=lambda name, coro: asyncio.run(coro),
+    ) as run, caplog.at_level("WARNING"):
+        assert store.delete_resource_document("silo_7", 42) == status
+
+    mock_rag.adelete_by_doc_id.assert_awaited_once_with("res42", delete_llm_cache=llm_cache)
+    assert run.call_args.args[0] == "silo_7"
+    warned = any(r.levelname == "WARNING" for r in caplog.records)
+    assert warned == (status in ("not_allowed", "fail"))
+    assert "SECRET-MSG" not in caplog.text
+    if warned:
+        warning = next(r for r in caplog.records if r.levelname == "WARNING")
+        assert "418" in warning.getMessage()
+
+
+def test_delete_resource_document_times_out(store, mock_rag, monkeypatch):
+    import asyncio
+
+    import tools.vector_stores.lightrag_store as mod
+
+    cancelled = []
+
+    async def _hang(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(mod, "LIGHTRAG_DOC_DELETE_TIMEOUT_S", 0.05)
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+    mock_rag.adelete_by_doc_id = _hang
+
+    with patch.object(
+        store, "_run_on_collection_loop",
+        side_effect=lambda name, coro: asyncio.run(coro),
+    ), pytest.raises(asyncio.TimeoutError):
+        store.delete_resource_document("silo_7", 42)
+
+    # The cancel ran (and finished) before the method returned.
+    assert cancelled
+
+
+def test_delete_resource_document_propagates_rag_errors(store):
+    store._get_rag_instance = MagicMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        store.delete_resource_document("silo_7", 42)
 
 
 # ---------------------------------------------------------------------------

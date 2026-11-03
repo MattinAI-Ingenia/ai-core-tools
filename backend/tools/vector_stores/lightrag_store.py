@@ -71,6 +71,10 @@ logging.getLogger("lightrag").addFilter(_DropUnconfiguredRoleLog())
 # outlast that; failing loudly afterwards beats feeding nothing in silence.
 FEED_ENQUEUE_MAX_WAIT_S = 300
 
+# Upper bound for one adelete_by_doc_id call. Covers entity-rebuild LLM
+# summary calls (LLM workers time out at 120/240s).
+LIGHTRAG_DOC_DELETE_TIMEOUT_S = 600.0
+
 # How long a SINGLE enqueue call may take before it is treated as hung.
 # _aenqueue does no LLM work (just a doc_status/storage write, normally
 # sub-second), so this is far below the LLM worker timeouts (120s/240s,
@@ -2786,21 +2790,70 @@ class LightRAGStore(VectorStoreInterface):
         )
         return result
 
+    def delete_resource_document(self, collection_name: str, resource_id: int) -> str:
+        """Delete LightRAG document ``res{resource_id}`` from *collection_name*'s workspace.
+
+        ONLY the single-file delete calls this. The caller holds
+        ``silo_indexing_lock``, which covers resource upload/index/resume/
+        reindex and the single-file delete; media-chunk and multi-content
+        indexing do NOT take it (known gap). Every other delete path goes
+        through the no-op ``delete_documents`` and leaves the graph alone.
+        Returns ``DeletionResult.status``
+        (``success | not_found | not_allowed | fail``). Exceptions propagate
+        (the caller treats them as failure), including ``TimeoutError`` once the delete
+        body exceeds ``LIGHTRAG_DOC_DELETE_TIMEOUT_S``; a retry is idempotent.
+        """
+        import config  # noqa: WPS433
+
+        doc_id = f"res{int(resource_id)}"
+        delete_llm_cache = config.LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE
+        rag = self._get_rag_instance(collection_name)
+        t_start = time.perf_counter()
+
+        # Timeout lives inside the coroutine so cancellation runs on the
+        # collection loop and completes before this method returns.
+        # ponytail: wait_for bounds the delete body only. If the library's
+        # finally hands off to a pending-ingress drain (another in-process
+        # writer on this workspace), that drain runs uncancelled and this call
+        # waits for it; a hung socket in the cancellation cleanup can also
+        # outlive the timeout. Upgrade path: lock-gate media/multi-content
+        # writers. Do NOT add an outer .run(timeout=...): it would release
+        # silo_indexing_lock while the loop is still writing.
+        async def _delete():
+            return await asyncio.wait_for(
+                rag.adelete_by_doc_id(doc_id, delete_llm_cache=delete_llm_cache),
+                timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S,
+            )
+
+        result = self._run_on_collection_loop(collection_name, _delete())
+        logger.info(
+            "LightRAG delete of '%s' in workspace '%s': status=%s "
+            "status_code=%s delete_llm_cache=%s (%.1fs)",
+            doc_id, collection_name, result.status, result.status_code,
+            delete_llm_cache, time.perf_counter() - t_start,
+        )
+        if result.status in ("not_allowed", "fail"):
+            logger.warning(
+                "LightRAG delete of '%s' in workspace '%s' returned %s "
+                "(status_code=%s)",
+                doc_id, collection_name, result.status, result.status_code,
+            )
+        return result.status
+
     def delete_documents(
         self,
         collection_name: str,
         ids,
         embedding_service=None,
     ) -> None:
-        # ponytail: no-op by design. Per-document delete in LightRAG means
-        # unwinding the doc's entities/relations from the knowledge graph, which
-        # is not supported yet. Whole-silo teardown still works via
-        # delete_collection(). Upgrade path: wire adelete_by_doc_id + graph
-        # entity/relation cleanup (followup #2).
+        # ponytail: no-op by design. Generic per-filter graph delete is
+        # intentionally not supported: out-of-scope callers run without the
+        # cross-worker silo lock. The single-file delete uses
+        # delete_resource_document(); whole-silo purge uses delete_collection().
         logger.warning(
-            "LightRAGStore.delete_documents is a no-op (per-document graph "
-            "deletion unsupported); data retained for workspace '%s'. Delete the "
-            "whole silo to purge.",
+            "LightRAGStore.delete_documents is a no-op (graph data is not "
+            "removed by filter/id deletes); data retained for workspace '%s'. "
+            "Use the single-file delete or delete the whole silo to purge.",
             collection_name,
         )
 
@@ -2812,10 +2865,9 @@ class LightRAGStore(VectorStoreInterface):
         embedding_service=None,
     ) -> None:
         # ponytail: no-op — LightRAG deletes by doc_id, not metadata filter, so
-        # it can't run the index-then-swap stale-chunk purge. Re-inserting the
-        # same content is idempotent (doc_id = content hash), so reindex still
-        # refreshes; orphaned chunks from removed content are the known ceiling.
-        # Upgrade path: map resource_id -> doc_ids and delete_by_doc_id (followup #2/#3).
+        # it can't run the index-then-swap stale-chunk purge. Reindex for
+        # LightRAG is a known gap: stale chunks are not purged, and LightRAG's
+        # name/id dedup rejects re-enqueuing res{N}. Follow-up.
         logger.warning(
             "LightRAGStore.delete_documents_excluding is a no-op (metadata-filter "
             "deletion unsupported); stale chunks not purged for workspace '%s'.",
