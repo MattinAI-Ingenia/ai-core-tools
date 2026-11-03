@@ -25,7 +25,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { AlertTriangle, Loader2, Plus, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiService, ApiError, type Agent } from '../../../services/api';
+import { apiService, ApiError, type AIService, type Agent } from '../../../services/api';
 import { MESSAGES, errorMessage, validationDetailMessage } from '../../../constants/messages';
 import { PIECE_VISUALS } from '../nodeKindConfig';
 import {
@@ -47,7 +47,10 @@ import { CanvasPalette, PIECE_DRAG_MIME, parsePieceDragPayload, PIECE_SINGULAR, 
 import { piecesForPort, type PortPickerEntry } from './portPicker';
 import { CanvasInspector } from './CanvasInspector';
 import { CreatePieceModal } from './CreatePieceModal';
-import type { LifecycleStatus } from '../../../types/services';
+import CompactServiceEditor from '../../services/CompactServiceEditor';
+import { useServicesManager } from '../../../hooks/useServicesManager';
+import { useSettingsCache } from '../../../contexts/SettingsCacheContext';
+import type { LifecycleStatus, SandboxServiceFormData, ServiceFormData } from '../../../types/services';
 import { useAgentCanvasData, type CanvasPiece } from './useAgentCanvasData';
 
 /** What the inspector panel receives when something is selected. */
@@ -186,6 +189,7 @@ export function buildFlowNodes(
         ports: ports.filter((port) => !port.secondary),
         secondaryPorts: ports.filter((port) => port.secondary),
         connectedPortIds: activePortIds,
+        isTool: agent.is_tool === true,
         canEdit,
         draggingKind,
         draggingSupportsVideo,
@@ -702,14 +706,56 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
    */
   const [creating, setCreating] = useState<{ readonly kind: PieceKind; readonly port?: PortDef } | null>(null);
   const closeCreate = useCallback(() => setCreating(null), []);
+  /** AI service editing reuses the same manager (api, cache, toasts, save) the settings page uses, so an edit behaves identically in both. */
+  const settingsCache = useSettingsCache();
+  const servicesApi = {
+    getAll: (id: number) => apiService.getAIServices(id),
+    getOne: (id: number, sid: number) => apiService.getAIService(id, sid),
+    create: (id: number, data: any) => apiService.createAIService(id, data),
+    update: (id: number, sid: number, data: any) => apiService.updateAIService(id, sid, data),
+    delete: (id: number, sid: number) => apiService.deleteAIService(id, sid),
+  };
+  const servicesCache = {
+    get: (id: string) => settingsCache.getAIServices(id),
+    set: (id: string, data: AIService[]) => settingsCache.setAIServices(id, data),
+    invalidate: (id: string) => settingsCache.invalidateAIServices(id),
+  };
+  const {
+    services,
+    isModalOpen,
+    editingService,
+    handleEdit,
+    handleSave,
+    handleClose,
+    setIsModalOpen,
+    setEditingService,
+  } = useServicesManager<AIService>(String(appId), servicesApi, servicesCache, { entity: 'AI service' });
+  /** Opens the AI service editor for a canvas piece; the manager loads the full service detail first. */
+  const handleEditService = useCallback(
+    (piece: CanvasPiece) => {
+      if (piece.kind !== 'ai_service') return;
+      void handleEdit(piece.id);
+    },
+    [handleEdit],
+  );
+  /** A service edit saved: the manager closed the editor, the canvas reloads its pieces. */
+  const handleSaveService = useCallback(
+    async (data: ServiceFormData | SandboxServiceFormData): Promise<void> => {
+      await handleSave(data);
+      void refetch();
+    },
+    [handleSave, refetch],
+  );
   /** Port row whose «+» popover is open, anchored at container-relative coordinates. */
   const [picker, setPicker] = useState<{ readonly port: PortDef; readonly x: number; readonly y: number } | null>(
     null,
   );
-  // The chooser, the picker and the creation modal belong to the agent they were opened for.
+  // The chooser, the picker, the creation and the edit modals belong to the agent they were opened for.
   useEffect(() => {
     setChoice(null);
     setCreating(null);
+    setIsModalOpen(false);
+    setEditingService(null);
     setPicker(null);
     setDraggingPiece(null);
   }, [agentId]);
@@ -1354,6 +1400,8 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         agentType={agentType}
         selection={resolvedSelection}
         canEdit={canEdit}
+        canCreateShared={canCreateShared}
+        onEditService={handleEditService}
         onSaveFields={saveAgentFields}
       />
       {creating && (
@@ -1364,6 +1412,18 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
           onCreated={(kind, id, name, lifecycleStatus, supportsVideo) =>
             void handlePieceCreated(kind, id, name, lifecycleStatus, supportsVideo, creating.port)
           }
+        />
+      )}
+      {isModalOpen && editingService && (
+        <CompactServiceEditor
+          isOpen
+          kind="ai"
+          scope="app"
+          appId={appId}
+          service={editingService}
+          existingNames={services.map((s) => s.name)}
+          onClose={handleClose}
+          onSave={handleSaveService}
         />
       )}
     </div>

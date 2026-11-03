@@ -20,6 +20,8 @@ export interface CanvasNodeData extends Record<string, unknown> {
   readonly secondaryPorts?: readonly PortDef[];
   /** Ports that currently have a connection (pending ones included); their rows always render. */
   readonly connectedPortIds?: readonly PortId[];
+  /** Agent body only: whether the edited agent is usable as a tool (shows the Tool badge). */
+  readonly isTool?: boolean;
   /** Agent body only: whether the current user may edit (drives the per-port «+» buttons). */
   readonly canEdit?: boolean;
   /** Agent body only: piece kind currently being dragged toward the canvas, if any. */
@@ -113,6 +115,7 @@ export function AgentPortNode({ data, isConnectable }: NodeProps<CanvasFlowNode>
   const ports = data.ports ?? [];
   const secondary = data.secondaryPorts ?? [];
   const connected = new Set(data.connectedPortIds ?? []);
+  const isTool = data.isTool === true;
   const canEdit = data.canEdit === true;
   const draggingKind = data.draggingKind ?? null;
   const draggingSupportsVideo = data.draggingSupportsVideo === true;
@@ -140,12 +143,21 @@ export function AgentPortNode({ data, isConnectable }: NodeProps<CanvasFlowNode>
           <Icon className={`h-5 w-5 ${visual.iconClass}`} aria-hidden="true" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100" title={data.label}>
+          {/* Keep the name clear of the absolute Tool badge on the top-right corner. */}
+          <p
+            className={`truncate text-sm font-semibold text-gray-900 dark:text-gray-100 ${isTool ? 'pr-12' : ''}`}
+            title={data.label}
+          >
             {data.label}
           </p>
           <p className={`truncate text-xs ${visual.captionClass}`}>{data.typeCaption ?? visual.typeCaption}</p>
         </div>
       </div>
+      {isTool && (
+        <span className="absolute right-2 top-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">
+          Tool
+        </span>
+      )}
 
       {/* Full-bleed rows so the port handles sit on the card's left border. */}
       <div className="-mx-3 mt-2 space-y-0.5 border-t border-gray-100 px-3 pt-2 dark:border-gray-800">
