@@ -158,7 +158,7 @@ function dragPointerPoint(event: MouseEvent | TouchEvent): { x: number; y: numbe
  * Loose pieces (on the canvas but unconnected) sit in a column to the right.
  * Positions saved in localStorage (from an earlier drag) override the default.
  */
-function buildFlowNodes(
+export function buildFlowNodes(
   agent: Agent,
   agentType: AgentType,
   connected: ReadonlyArray<{ port: PortId; kind: PieceKind; id: number }>,
@@ -225,7 +225,9 @@ function buildFlowNodes(
         savedPositions[entry.nodeId] ??
         { x: PIECE_COLUMN_X, y: (index - (deduped.length - 1) / 2) * PIECE_ROW_HEIGHT },
       data: { label: entry.piece.name, piece: entry.piece, portLabels: entry.portLabels },
-      deletable: false,
+      // Deletable only to disconnect: handleBeforeDelete maps the card to its
+      // agent edges and never returns it as a removed node.
+      deletable: canEdit,
       connectable: canEdit,
     });
   });
@@ -282,6 +284,33 @@ function buildFlowEdges(
     edges.push(makeCanvasEdge({ port: entry.port, piece, targetId: agentNodeId }));
   }
   return edges;
+}
+
+/**
+ * Edges a Delete gesture must consider: the ones React Flow collected plus,
+ * for every selected connected piece card, each edge that card holds to the
+ * agent (React Flow's default path collects those too; the card's delete
+ * must not depend on it). Deduped by edge id; loose cards hold no edges and
+ * the agent body is never collected as a piece.
+ */
+export function deleteCandidateEdges(
+  candidateNodes: CanvasFlowNode[],
+  candidateEdges: CanvasEdge[],
+  edges: CanvasEdge[],
+  agentNodeId: string,
+  looseNodeIds: readonly string[],
+): CanvasEdge[] {
+  const connectedPieces = new Set(
+    candidateNodes
+      .filter((node) => node.type === 'piece' && !looseNodeIds.includes(node.id))
+      .map((node) => node.id),
+  );
+  if (connectedPieces.size === 0) return candidateEdges;
+  const byId = new Map(candidateEdges.map((edge) => [edge.id, edge]));
+  for (const edge of edges) {
+    if (connectedPieces.has(edge.source) && edge.target === agentNodeId) byId.set(edge.id, edge);
+  }
+  return [...byId.values()];
 }
 
 function CanvasLoading() {
@@ -1029,9 +1058,13 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   const handleBeforeDelete: OnBeforeDelete<CanvasFlowNode, CanvasEdge> = useCallback(
     async ({ nodes: candidateNodes, edges: candidateEdges }) => {
       const ports = agent ? portsFor(agentType) : [];
+      // A connected piece card must delete exactly like its connection line:
+      // every edge it holds to the agent joins the candidates (deduped), so
+      // the same checks and save path apply.
+      const candidates = deleteCandidateEdges(candidateNodes, candidateEdges, edges, agentNodeId, looseNodeIds);
       const allowed: CanvasEdge[] = [];
       const blockedReasons = new Set<string>();
-      for (const edge of candidateEdges) {
+      for (const edge of candidates) {
         // A pending (not yet saved) edge must not be disconnected: on a
         // single-valued port the remove patch would null the field and wipe
         // the connection that is already there. It disappears on its own
@@ -1053,7 +1086,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         : [];
       return { nodes: looseNodes, edges: allowed };
     },
-    [agent, agentType, canEdit, looseNodeIds],
+    [agent, agentType, canEdit, looseNodeIds, edges, agentNodeId],
   );
 
   const handleNodesDelete: OnNodesDelete<CanvasFlowNode> = useCallback(
