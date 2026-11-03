@@ -83,6 +83,7 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
     ? [{ service_id: piece.id, name: piece.name, lifecycle_status: piece.lifecycleStatus }]
     : [];
   const describedBy = serviceStatusId(statusOptions, piece.id, statusBaseId);
+  const isAgentPiece = piece.kind === 'agent';
 
   const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
     event.dataTransfer.setData(PIECE_DRAG_MIME, JSON.stringify({ kind: piece.kind, id: piece.id }));
@@ -95,6 +96,7 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
         draggable={draggable}
         onDragStart={draggable ? handleDragStart : undefined}
         aria-describedby={describedBy}
+        title={isAgentPiece && !piece.isTool ? 'Connecting it turns on Tool agent' : undefined}
         className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 transition-shadow ${visual.borderClass} ${visual.bgClass} ${
           draggable ? 'cursor-grab hover:shadow-sm active:cursor-grabbing' : 'cursor-not-allowed opacity-60'
         }`}
@@ -110,6 +112,11 @@ function PaletteItem({ piece, canEdit }: PaletteItemProps) {
             {piece.isSystem && (
               <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-200">
                 System
+              </span>
+            )}
+            {isAgentPiece && piece.isTool && (
+              <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">
+                Tool
               </span>
             )}
           </p>
@@ -154,6 +161,8 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
       ),
     }))
     .filter(({ items }) => needle === '' || items.length > 0);
+  // Empty categories sink to the end (stable sort keeps the category order inside each group).
+  const orderedGroups = [...groups].sort((a, b) => (a.items.length === 0 ? 1 : 0) - (b.items.length === 0 ? 1 : 0));
   const showMemory = agentType === 'agent' && (needle === '' || MEMORY_ROW_LABEL.toLowerCase().includes(needle));
   const noMatches = needle !== '' && groups.length === 0 && !showMemory;
 
@@ -213,7 +222,7 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
-        {groups.map(({ category, items }) => {
+        {orderedGroups.map(({ category, items }) => {
           const headingId = `${baseId}-${category.kind}`;
           const listId = `${baseId}-${category.kind}-list`;
           const open = isOpen(category.kind);

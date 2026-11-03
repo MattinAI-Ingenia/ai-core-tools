@@ -477,6 +477,34 @@ interface PieceDetailsProps {
   readonly connection?: string;
 }
 
+/** Read-only details of another agent, shown when an agent piece (or an edge to one) is selected. */
+function AgentPieceInfo({ piece }: { readonly piece: CanvasPiece }) {
+  const info = piece.agentInfo;
+  if (!info) return null;
+  const lastUsed = info.lastUsedDate ? new Date(info.lastUsedDate).toLocaleString() : 'Never';
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="text-gray-600 dark:text-gray-400">
+        Type: <span className="font-medium text-gray-900 dark:text-gray-100">{info.type === 'ocr_agent' ? 'OCR agent' : 'Agent'}</span>
+      </p>
+      <p className={info.description ? 'text-gray-600 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}>
+        {info.description ?? 'No description'}
+      </p>
+      <p className="text-gray-600 dark:text-gray-400">
+        Model: <span className="font-medium text-gray-900 dark:text-gray-100">{info.modelName ?? 'No model'}</span>
+      </p>
+      <p className="text-gray-600 dark:text-gray-400">
+        Tool agent: <span className="font-medium text-gray-900 dark:text-gray-100">{piece.isTool ? 'Yes' : 'No'}</span>
+      </p>
+      <p className="text-gray-600 dark:text-gray-400">Uses {info.toolCount === 1 ? '1 tool' : `${info.toolCount} tools`}</p>
+      <p className="text-gray-600 dark:text-gray-400">
+        Requests: <span className="font-medium text-gray-900 dark:text-gray-100">{info.requestCount}</span> · Last used:{' '}
+        <span className="font-medium text-gray-900 dark:text-gray-100">{lastUsed}</span>
+      </p>
+    </div>
+  );
+}
+
 function PieceDetails({ appId, piece, connection }: PieceDetailsProps) {
   const visual = PIECE_VISUALS[piece.kind];
   const Icon = visual.icon;
@@ -494,6 +522,7 @@ function PieceDetails({ appId, piece, connection }: PieceDetailsProps) {
         </div>
       </div>
       {connection && <p className="text-sm text-gray-600 dark:text-gray-400">{connection}</p>}
+      {piece.kind === 'agent' && <AgentPieceInfo piece={piece} />}
       <Link to={pieceEditPath(appId, piece)} className={LINK_CLASS}>
         {piece.kind === 'agent' ? 'Open its canvas' : 'Edit'}
       </Link>
