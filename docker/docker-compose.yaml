@@ -124,6 +124,8 @@ services:
       # Send the extraction JSON schema as response_format so the server
       # constrains decoding. false = prompt-only JSON (LightRAG's own mode).
       LIGHTRAG_EXTRACT_GUIDED_JSON: ${LIGHTRAG_EXTRACT_GUIDED_JSON:-true}
+      # Single-file delete also purges that document's LLM-cache entries; false keeps them.
+      LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE: ${LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE:-true}
       # LightRAG query budget. Same import-time dataclass-default mechanism as
       # the concurrency vars above. Defaults match lightrag 1.5.6's own.
       CHUNK_TOP_K: ${CHUNK_TOP_K:-20}                     # text chunks reaching the context

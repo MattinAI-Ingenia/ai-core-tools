@@ -72,7 +72,8 @@ alternativo + KV + doc-status). Ver §8.
 | `ENTITY_EXTRACT_MAX_GLEANING` | `0` | `backend/config.py` |
 | `LIGHTRAG_EXTRACT_MAX_TOKENS` | sin tope | tope de salida del rol `extract` (ver 9.1.3) |
 | `LIGHTRAG_EXTRACT_GUIDED_JSON` | `true` | manda el esquema como `response_format` (ver 9.1.3) |
-| `MAX_PARALLEL_INSERT` | `3` | documentos (= páginas) en paralelo; leída por LightRAG al importar |
+| `LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE` | `true` | el borrado de un fichero también borra sus entradas de la caché LLM (ver §5 "Borrado"); cualquier valor distinto de `true` = `false`, y entonces el texto extraído del fichero borrado permanece en `lightrag_llm_cache` hasta borrar el silo entero (a tener en cuenta en retención/derecho de supresión); el valor seguro es `true` |
+| `MAX_PARALLEL_INSERT` | `3` | documentos (= ficheros) en paralelo; leída por LightRAG al importar |
 | `MAX_ASYNC_LLM` | `4` | llamadas LLM concurrentes por rol; leída por LightRAG al importar |
 | `EMBEDDING_FUNC_MAX_ASYNC` | `8` | llamadas de embedding concurrentes |
 | `SQLALCHEMY_DATABASE_URI` | — | usado como `config.DATABASE_URL` para PG KV/doc-status (`storage_config.py`) |
@@ -236,13 +237,83 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
   recorta al sub-dict de la estrategia seleccionada por `process_options` y
   devuelve una copia profunda independiente.
 
-**Borrado**: `delete_documents` y `delete_documents_excluding` son **no-ops
-deliberados** (`lightrag_store.py`, marcados `ponytail:`) — LightRAG no
-soporta borrado per-documento del grafo. Reindexar es idempotente (doc_id =
-hash de contenido); los chunks huérfanos son el techo conocido. El borrado real
-es a nivel de silo: `delete_collection` (`lightrag_store.py`) limpia Neo4j,
-Qdrant y PostgreSQL directamente (helpers `_cleanup_neo4j/_cleanup_qdrant/
-_cleanup_postgres`, `lightrag_store.py`).
+**Borrado**: hay dos niveles.
+
+- **Un fichero** (`DELETE /internal/apps/{app_id}/repositories/{repository_id}/resources/{resource_id}`
+  y `DELETE /public/v1/app/{app_id}/resources/{repo_id}/{resource_id}`):
+  `ResourceService._delete_lightrag_resource` (`resource_service.py`) toma
+  `silo_indexing_lock` y llama a `LightRAGStore.delete_resource_document`
+  (`lightrag_store.py`), que ejecuta `adelete_by_doc_id("res{N}",
+  delete_llm_cache=LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE)` en el loop de la
+  colección, acotado por `LIGHTRAG_DOC_DELETE_TIMEOUT_S` (600 s). Solo con
+  estado `success`/`not_found` se borran el fichero y la fila `Resource`.
+  Respuestas:
+
+  | Situación | HTTP |
+  |---|---|
+  | Silo ocupado (lock tomado, o la librería responde `not_allowed`) | 409 `This silo is being indexed right now…` |
+  | Servicio retirado | 409 `SERVICE_RETIRED` |
+  | Fallo del grafo (o `TimeoutError`): el fichero y la fila se conservan, el grafo puede quedar parcialmente borrado y un reintento lo completa | 500 `The file was kept but may be partly removed from the knowledge graph; please retry.` |
+  | Grafo limpio pero falla borrar fichero/fila (la fila sigue) | 500 `Removed from the knowledge graph but the file could not be deleted. Please retry.` |
+  | La fila ya no existe | 404 |
+
+  Reintentar es idempotente. La UI muestra el botón Delete por fichero en
+  repositorios LightRAG (Reindex y Delete All siguen ocultos; "delete all"
+  responde 409) y el error aparece en línea en el modal.
+- **Resto de rutas** (carpeta, borrar por metadata, documentos del silo,
+  SharePoint, dominio, media, supersede de Azure, cancel-discard):
+  `delete_documents` y `delete_documents_excluding` siguen siendo **no-ops
+  deliberados** (`lightrag_store.py`, marcados `ponytail:`); el grafo no se toca.
+  Reindexar para LightRAG sigue fuera de alcance (los chunks huérfanos son el
+  techo conocido).
+- **Silo/repositorio entero**: `delete_collection` (`lightrag_store.py`) limpia
+  Neo4j (`_cleanup_neo4j`), los vectores con el `drop()` de la propia librería
+  para Qdrant y PGVector (`_cleanup_vector_storage`) y KV/doc-status en
+  PostgreSQL (`_cleanup_postgres`, que registra los fallos como WARNING).
+
+**Límites conocidos del borrado por fichero**:
+- Solo se borran documentos con id `res{N}`. Los documentos legacy por página
+  (`res{N}-p{P}`) **no** se eliminan; esta funcionalidad no incluye migración.
+- La indexación de media-chunks y multi-content no toma `silo_indexing_lock`,
+  así que una escritura concurrente de otro worker no queda serializada.
+- Estados permanentes de la librería (requieren recuperación) salen como
+  409/500 "retry".
+- La construcción en frío del `rag` queda fuera del timeout de 600 s.
+- Un servicio de embeddings ausente o retirado bloquea el borrado (409
+  `SERVICE_RETIRED` o 500). Lo mismo ocurre con cualquier LLM de rol del silo
+  (extract/keyword/vlm) retirado, porque el borrado construye el `rag`
+  (`_get_rag_instance` -> `create_llm_from_service` -> `ensure_service_active`);
+  un worker que ya tiene el `rag` en caché puede seguir borrando hasta
+  reiniciarse. Workaround: poner temporalmente `end_of_service_at` a `null`
+  explícito en el servicio, borrar el fichero y restaurar la fecha; o borrar el
+  silo entero. Esto se aparta de la regla de la plataforma de que borrar/limpiar
+  nunca se bloquea por fin de servicio (pendiente como follow-up).
+- Con `LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE=false` el texto extraído del
+  fichero borrado queda en `lightrag_llm_cache` hasta borrar el silo entero
+  (retención/supresión); el default `true` es el seguro.
+
+**Diagnóstico** (logger del backend; el de LightRAG es `lightrag`):
+
+| Caso | Log a buscar |
+|---|---|
+| Borrado correcto | INFO `LightRAG delete of 'res{N}' in workspace 'silo_{id}': status=… status_code=… delete_llm_cache=… (Ns)` |
+| 409 por la librería | WARNING `LightRAG delete of 'res{N}' in workspace 'silo_{id}' returned not_allowed (status_code=…)` (igual con `fail`) |
+| 500 fallo del grafo | ERROR `Graph delete of resource N in silo S failed` con traceback |
+| 500 grafo limpio, falla fichero/fila | ERROR `Resource N removed from graph of silo S but file/row removal failed; a retry completes it`; la causa es el traceback previo `Error deleting resource N`: revisar permisos de escritura y disco bajo `REPO_BASE_FOLDER/<repository_id>/` |
+| Borrado de silo: vectores | ERROR `… vector cleanup for workspace 'silo_N' failed: …; vector rows may be retained in lightrag_vdb_* tables / Qdrant`. Limpieza manual: `DELETE FROM lightrag_vdb_{entity,relation,chunks}_<sufijo> WHERE workspace='silo_N'` (una sentencia por tabla) o delete-by-filter en Qdrant sobre `workspace_id` |
+| Borrado de silo: KV/doc-status | WARNING `PostgreSQL cleanup of table … for workspace 'silo_N' failed: …` |
+
+- **500 que se repite**: mirar la fila `lightrag_doc_status` con id `res{N}` y
+  las líneas del logger `lightrag` de ese momento.
+- **409 que persiste**: una ejecución colgada mantiene `silo_indexing_lock`
+  (§13.8); reiniciar el backend lo libera.
+- **Despliegue durante un borrado**: lo mata (graceful shutdown de 20 s,
+  `UVICORN_GRACEFUL_SHUTDOWN_SECONDS`, frente a hasta 600 s de timeout). El
+  fichero y la fila se conservan y el grafo puede quedar parcialmente borrado:
+  volver a borrar.
+- **Timeout de proxy (502/504)**: no detiene el borrado en el servidor.
+  Recargar la lista antes de reintentar; un reintento mientras tanto devuelve
+  409.
 
 ### 5.1 Rodaje del feeder (ventana deslizante)
 
@@ -646,31 +717,25 @@ hay fuga entre silos (`silo_graph_service.py`).
   `LIGHTRAG_FULL_RELATIONS`, `LIGHTRAG_ENTITY_CHUNKS`, `LIGHTRAG_RELATION_CHUNKS`,
   `LIGHTRAG_LLM_CACHE`, `LIGHTRAG_VDB_CHUNKS`, `LIGHTRAG_VDB_ENTITY`,
   `LIGHTRAG_VDB_RELATION`, `LIGHTRAG_DOC_STATUS`.
-- Qdrant: colecciones con prefijo `lightrag_{workspace}_` (limpieza en
-  `_cleanup_qdrant`, `lightrag_store.py`).
+- Qdrant: **no** hay colecciones por workspace. LightRAG usa una colección
+  física compartida por tipo de dato (entidades/relaciones/chunks) y reparte los
+  workspaces con un campo de payload `workspace_id` en cada punto.
+- PGVector: las tablas vectoriales llevan sufijo de modelo
+  (`lightrag_vdb_*_<sufijo>`) y una columna `workspace`; borrar por el nombre
+  base no las encuentra.
 
-> 🐞 **BUG CONFIRMADO — `_cleanup_postgres` no limpia nada.** El helper
-> `_cleanup_postgres` (`lightrag_store.py`) borra de tablas
-> `kv_store_full_docs`, `kv_store_text_chunks`, `kv_store_full_entities`,
-> `kv_store_full_relations`, `kv_store_llm_response_cache` y `doc_status`. Esos
-> nombres son los del backend **JSON** de LightRAG (ficheros `kv_store_*.json`),
-> **no** los del backend PostgreSQL, cuyas tablas son `LIGHTRAG_*` /
-> `LIGHTRAG_DOC_STATUS` (confirmado en `NAMESPACE_TABLE_MAP`,
-> `kg/postgres_impl.py`). El `DELETE` va envuelto en `try/except pass`
-> (líneas 816-822), así que **falla en silencio** contra tablas inexistentes y
-> retiene todas las filas del silo en Postgres al borrar el silo. El mismo
-> desajuste afecta a `count_documents` (`lightrag_store.py`), que
-> consulta `SELECT COUNT(*) FROM "doc_status"` → siempre devuelve 0.
-> **Impacto**: al borrar un silo LightRAG, el grafo Neo4j y las colecciones
-> Qdrant sí se limpian, pero las filas de `LIGHTRAG_DOC_FULL`,
-> `LIGHTRAG_DOC_CHUNKS`, `LIGHTRAG_*_ENTITIES/RELATIONS`, `LIGHTRAG_LLM_CACHE` y
-> `LIGHTRAG_DOC_STATUS` quedan **huérfanas para siempre**. (Nota: KV y doc-status
-> viven SIEMPRE en Postgres, sea cual sea el backend vectorial, así que el bug
-> aplica a todo silo LightRAG.)
-> **Fix**: usar `namespace_to_table_name` de LightRAG (o mapear a los nombres
-> `LIGHTRAG_*`) en `_cleanup_postgres` y `count_documents`. No verificable con
-> datos en vivo hoy: aún no hay ningún silo LightRAG con tablas creadas en la DB
-> (`SELECT ... WHERE tablename LIKE 'lightrag%'` devuelve vacío).
+**Limpieza al borrar un silo** (estado actual): los vectores se eliminan con el
+`drop()` de cada vector storage de la librería, acotado al workspace
+(`_cleanup_vector_storage`, `lightrag_store.py`), tanto en Qdrant como en
+PGVector. KV y doc-status viven SIEMPRE en Postgres, sea cual sea el backend
+vectorial, y `_cleanup_postgres` los borra usando los nombres reales
+`LIGHTRAG_*` de `NAMESPACE_TABLE_MAP` en minúsculas (el DDL de la librería no
+lleva comillas, así que Postgres los pliega). Las tablas ausentes (`42P01`) se
+omiten; cualquier otro fallo se registra como WARNING en vez de tragarse.
+Histórico: antes `_cleanup_postgres` apuntaba a los nombres del backend JSON
+(`kv_store_*`) y fallaba en silencio, y el borrado por nombre base dejaba las
+filas `lightrag_vdb_*_<sufijo>` huérfanas (reproducido y corregido con
+`drop()`). `count_documents` ya consulta `lightrag_doc_status`.
 
 ---
 
@@ -946,7 +1011,7 @@ concurrencia, bajar `UVICORN_WORKERS`, `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` o subir
 | Extracción de entidades | `extract_entities` (`lightrag/operate.py`, contenedor) |
 | Queries (`only_need_context`) | `LightRAGRetriever` (`lightrag_store.py`) |
 | Storage backends | `build_storage_config` (`storage_config.py`) |
-| Bug `_cleanup_postgres` | `_cleanup_postgres` (`lightrag_store.py`) vs `NAMESPACE_TABLE_MAP` (`kg/postgres_impl.py`) |
+| Borrado de ficheros y limpieza de silo | `LightRAGStore.delete_resource_document`, `_cleanup_vector_storage`, `_cleanup_postgres` (`lightrag_store.py`); tablas en `NAMESPACE_TABLE_MAP` (`kg/postgres_impl.py`) |
 | LLM por rol | `build_role_llm_configs` (`adapters.py`) |
 | Embeddings | `build_embedding_func` (`adapters.py`) |
 | Grafo por silo | `SiloGraphService.get_silo_graph` (`silo_graph_service.py`) |
@@ -1344,6 +1409,9 @@ página de un chunk de PDF que ya viene con el shape nuevo — el número de
 página y la etiqueta de procedencia se pierden para esos documentos, aunque
 el contenido se siga recuperando.
 
+- El borrado por fichero no tiene migración: el rollback es seguro. El borrado
+  por fichero vuelve a responder 409 y el borrado de silos PGVector vuelve a
+  dejar filas `lightrag_vdb_*_<sufijo>`.
 - **No hacer rollback mientras haya una ingestión en vuelo** — comprobar
   `is_indexing` primero (§13.8).
 - **No usar "cancel" en la versión antigua del código contra trabajo

@@ -148,6 +148,14 @@ QDRANT_URL=http://localhost:6333
 # QDRANT_API_KEY=...  # For Qdrant Cloud
 ```
 
+### LightRAG
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE` | No | `true` | Deleting a single file from a LightRAG repository also removes that document's LLM-cache entries. Any value other than `true` (case-insensitive) means `false`: the cache is kept, so re-uploading the same file re-extracts for free, but the text extracted from the deleted file stays in `lightrag_llm_cache` until the whole silo is deleted (retention/erasure consideration); the default `true` is the safe one |
+
+The other LightRAG variables are listed in [LightRAG integration, section 3.1](../dependencies/lightrag.md).
+
 ### Entra ID (OIDC)
 
 | Variable | Required | Default | Description |
