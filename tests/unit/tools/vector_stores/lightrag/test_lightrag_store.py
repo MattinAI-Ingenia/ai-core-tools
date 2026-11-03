@@ -114,6 +114,25 @@ def test_index_documents_skips_blank_content(store, mock_rag):
     mock_rag.ainsert.assert_not_called()
 
 
+def test_index_documents_domain_crawl_pages_still_get_content_hash_ids(store, mock_rag):
+    # AC-35 (NFR-1): Domain/URL crawl Documents (no resource_id, no .id set)
+    # are completely untouched by this spec — they must keep getting
+    # doc-<hash> ids, exactly like before the whole-file PDF refactor.
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [
+        Document(page_content="crawled page one", metadata={"url": "https://example.com/a", "domain_id": 1}),
+        Document(page_content="crawled page two", metadata={"url": "https://example.com/b", "domain_id": 1}),
+    ]
+    with patch("tools.vector_stores.lightrag_store._ainsert_with_progress", new_callable=AsyncMock) as mock_insert:
+        store.index_documents("silo_1", docs)
+
+    ids = mock_insert.call_args.kwargs["ids"]
+    assert len(ids) == 2
+    assert all(doc_id.startswith("doc-") for doc_id in ids)
+    assert len(set(ids)) == 2
+
+
 # ---------------------------------------------------------------------------
 # delete_documents
 # ---------------------------------------------------------------------------
@@ -367,6 +386,35 @@ def test_create_documents_for_indexing_never_collapses_chunk_ids():
     assert all(doc_id.startswith("doc-") for doc_id in ids)
     assert "res5" not in ids
     assert len(set(ids)) == len(ids)
+
+
+def test_create_documents_for_indexing_single_chunk_resource_id_without_page_gets_a_hash_id():
+    # AC-35: the public index-file shape — a single caller-supplied dict with
+    # resource_id and no "page" key — must never produce the whole-file
+    # "res{N}" id; only extract_documents_from_file's own Resource extraction
+    # (which sets Document.id directly) can do that.
+    from services.silo_service import SiloService
+
+    docs = SiloService._create_documents_for_indexing(1, [{"content": "short content", "metadata": {"resource_id": 5}}])
+
+    assert len(docs) == 1
+    doc_id = _lightrag_doc_id(docs[0])
+    assert doc_id.startswith("doc-")
+    assert doc_id != "res5"
+
+
+def test_create_documents_for_indexing_single_chunk_resource_id_and_page_keeps_legacy_shape():
+    # AC-35: today's legacy per-page shape (res{N}-p{P}) must still work
+    # through the public-API-metadata path when the caller supplies both
+    # resource_id and page (step_002's backward-compat guarantee).
+    from services.silo_service import SiloService
+
+    docs = SiloService._create_documents_for_indexing(
+        1, [{"content": "short content", "metadata": {"resource_id": 5, "page": 2}}],
+    )
+
+    assert len(docs) == 1
+    assert _lightrag_doc_id(docs[0]) == "res5-p2"
 
 
 # ---------------------------------------------------------------------------

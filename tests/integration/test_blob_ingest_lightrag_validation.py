@@ -555,9 +555,14 @@ def _search(silo_id: int, query: str, mode: str = "naive", limit: int = 8):
 
 
 def _chunk_resource_id(chunk_metadata: dict):
-    """Parse ``res<resource_id>-p<page>-chunk-<n>`` — LightRAG's chunk ids are
-    built by this repo from Resource metadata (FR-6 provenance)."""
-    match = re.match(r"^res(\d+)-p\d+-chunk-\d+$", (chunk_metadata or {}).get("chunk_id", ""))
+    """Parse ``res<resource_id>[-p<page>]-chunk-<n>`` — LightRAG's chunk ids are
+    built by this repo from Resource metadata (FR-6 provenance). Uses the same
+    regex the readers use in production (lightrag-pdf-document-schema step_002)
+    so this test accepts both the new whole-file shape (no page, or a page
+    recorded only on the chunk) and the old per-page shape."""
+    from tools.vector_stores.lightrag_store import CHUNK_ID_RESOURCE_PAGE_RE
+
+    match = CHUNK_ID_RESOURCE_PAGE_RE.match((chunk_metadata or {}).get("chunk_id", ""))
     return int(match.group(1)) if match else None
 
 
