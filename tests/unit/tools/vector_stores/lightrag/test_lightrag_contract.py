@@ -393,3 +393,45 @@ class TestPageAwareHookMatchesExplicitDispatch:
         contents_b = [c["content"] for c in sorted(chunks_b, key=lambda c: c["chunk_order_index"])]
 
         assert contents_a == contents_b
+
+
+# ---------------------------------------------------------------------------
+# 7. Per-document delete (single-file delete relies on this)
+# ---------------------------------------------------------------------------
+
+
+class TestPerDocumentDelete:
+    def test_adelete_by_doc_id_signature(self):
+        from lightrag import LightRAG
+
+        assert inspect.iscoroutinefunction(LightRAG.adelete_by_doc_id)
+        params = inspect.signature(LightRAG.adelete_by_doc_id).parameters
+        assert list(params)[:3] == ["self", "doc_id", "delete_llm_cache"]
+        assert params["delete_llm_cache"].default is False
+
+    def test_deletion_result_status_values(self):
+        import dataclasses
+        import typing
+
+        from lightrag.base import DeletionResult
+
+        assert dataclasses.is_dataclass(DeletionResult)
+        names = {f.name for f in dataclasses.fields(DeletionResult)}
+        assert {"status", "doc_id", "message", "status_code"} <= names
+        status_type = typing.get_type_hints(DeletionResult)["status"]
+        assert set(typing.get_args(status_type)) == {
+            "success", "not_found", "not_allowed", "fail",
+        }
+
+    async def test_delete_round_trip(self, tmp_path):
+        rag, _ = await _make_rag(tmp_path, None)
+        await rag.apipeline_enqueue_documents(["alpha beta gamma"], ids=["res7"])
+        await rag.apipeline_process_enqueue_documents()
+        assert await rag.doc_status.get_by_id("res7") is not None
+
+        result = await rag.adelete_by_doc_id("res7", delete_llm_cache=True)
+        assert result.status == "success"
+        assert await rag.doc_status.get_by_id("res7") is None
+
+        again = await rag.adelete_by_doc_id("res7", delete_llm_cache=True)
+        assert again.status == "not_found"
