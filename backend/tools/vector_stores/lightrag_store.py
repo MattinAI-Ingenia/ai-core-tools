@@ -65,10 +65,13 @@ class _DropUnconfiguredRoleLog(logging.Filter):
 # Installed once at import; LightRAG's logger is the module-level "lightrag".
 logging.getLogger("lightrag").addFilter(_DropUnconfiguredRoleLog())
 
-# How long the feeder waits out a pipeline reservation before giving up. A
-# manual retry drain is bounded by the work it retries, so this only needs to
-# outlast that; failing loudly afterwards beats feeding nothing in silence.
-FEED_ENQUEUE_MAX_WAIT_S = 300
+# (no constant) — the feeder waits out pipeline fences for as long as they
+# last. A resume's manual-retry request freezes ingress until the pipeline
+# drains to idle: that is the WHOLE first pass, which on this corpus runs
+# ~45 min. The fence is guaranteed to clear when the pass exits (LightRAG
+# clears it in the run's finally), so waiting is always bounded by the pass;
+# a fixed cap here instead killed the feeder mid-run and stranded every
+# resource the primed window hadn't reached.
 
 # How long a SINGLE enqueue call may take before it is treated as hung.
 # _aenqueue does no LLM work (just a doc_status/storage write, normally
@@ -927,19 +930,23 @@ async def _aprocess_enqueued_with_progress(
         await _arequest_failed_retry(rag)
 
     async def _aenqueue_with_backpressure(rid, texts, file_paths, ids) -> None:
-        """Enqueue one resource, waiting out LightRAG's reservation conflicts.
+        """Enqueue one resource, waiting out LightRAG's ingress fences.
 
-        A manual retry request (published by ``retry_failed`` on a resume)
-        drains the pipeline exclusively, and enqueuing during that window
-        raises ``PipelineReservationConflictError`` — "wait for it to finish
-        before retrying", which is exactly what this does. Without it the
-        feeder dies on the first conflict and the run silently indexes only
-        the resources it had primed (seen live: 28 of 67 chunks, three
-        resources never fed).
+        A resume publishes a manual-retry request that freezes ingress
+        (``manual_freeze_requested``) until the pipeline drains to idle — i.e.
+        for the whole first pass, ~45 min on this corpus. LightRAG refuses
+        enqueues with ``PipelineReservationConflictError`` for that window by
+        design (plain busy does NOT block: the running pass picks up new docs
+        from its mailbox), so the only correct behavior is to wait the fence
+        out. A 300s cap here killed the feeder twice on 2026-11-03: the run
+        "finished" after draining the primed window and left every remaining
+        resource pending. The fence always clears when the draining pass
+        exits, so the wait is bounded by that pass's lifetime.
         """
         from lightrag.exceptions import PipelineReservationConflictError  # noqa: WPS433
 
-        for attempt in range(FEED_ENQUEUE_MAX_WAIT_S * 2):
+        conflicts = 0
+        while True:
             try:
                 await asyncio.wait_for(
                     _aenqueue(rag, texts, file_paths=file_paths, ids=ids,
@@ -948,10 +955,12 @@ async def _aprocess_enqueued_with_progress(
                 )
                 return
             except PipelineReservationConflictError:
-                if attempt == 0:
+                conflicts += 1
+                if conflicts == 1 or conflicts % 120 == 0:  # first, then every ~60 s
                     logger.info(
-                        "[%s] Pipeline busy draining a manual retry; holding resource %s",
-                        getattr(rag, "workspace", None), rid,
+                        "[%s] Pipeline fence holds ingress (manual retry drain); "
+                        "holding resource %s (%d s so far)",
+                        getattr(rag, "workspace", None), rid, conflicts // 2,
                     )
                 await asyncio.sleep(0.5)
             except asyncio.TimeoutError:
@@ -967,10 +976,6 @@ async def _aprocess_enqueued_with_progress(
                     "connection (see FEED_ENQUEUE_CALL_TIMEOUT_S). Restarting "
                     "the run gets a fresh connection pool."
                 )
-        raise TimeoutError(
-            f"Could not enqueue resource {rid} within {FEED_ENQUEUE_MAX_WAIT_S}s: "
-            "the pipeline stayed reserved the whole time"
-        )
 
     async def _enqueue_next() -> bool:
         """Pull one resource from *feed* and enqueue it. False when exhausted."""
