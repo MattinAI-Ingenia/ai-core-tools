@@ -785,7 +785,8 @@ async def delete_resource(
     logger.info(f"Delete resource endpoint called - app_id: {app_id}, repository_id: {repository_id}, resource_id: {resource_id}, user_id: {user_id}")
     
     # Use ResourceService to handle the business logic
-    result = ResourceService.delete_resource_from_repository(
+    result = await asyncio.to_thread(
+        ResourceService.delete_resource_from_repository,
         app_id=app_id,
         repository_id=repository_id,
         resource_id=resource_id,

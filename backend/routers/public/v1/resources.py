@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import FileResponse
 from typing import List, Optional, Annotated
@@ -22,6 +24,7 @@ from .auth import (
 from db.database import get_db
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -125,7 +128,8 @@ async def delete_resource(
     validate_resource_ownership(db, resource_id, repo_id)
 
     try:
-        ResourceService.delete_resource_from_repository(
+        await asyncio.to_thread(
+            ResourceService.delete_resource_from_repository,
             app_id=app_id,
             repository_id=repo_id,
             resource_id=resource_id,
@@ -133,7 +137,7 @@ async def delete_resource(
         )
         logger.info(f"Resource {resource_id} deleted via public API")
         return MessageResponseSchema(message="Resource deleted successfully")
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error deleting resource: {str(e)}")
