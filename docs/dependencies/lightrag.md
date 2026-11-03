@@ -667,20 +667,29 @@ desplegable de `extract_service`/`keywords_service` muestra estas
 recomendaciones directamente en el formulario — componente
 `LightRAGModelHints` (`frontend/src/components/forms/LightRAGModelHints.tsx`,
 usado desde `SiloForm.tsx` y `RepositoryFormPage.tsx`), fila "Open-source" de
-cada rol. Este benchmark es la evidencia que respalda esas dos filas
-concretas; el resto de filas (OpenAI, Anthropic, Mistral, Google) no se ha
+cada rol. La fila Open-source de `keyword` está respaldada por este benchmark;
+la de `extract` (Qwen3.6-35B-A3B) lo está por el A/B de corpus completo del
+silo 54 (ver el informe enlazado en la recomendación de abajo). El resto de
+filas (OpenAI, Anthropic, Mistral, Google) no se ha
 verificado con este mismo método.
 
 Recomendación resultante, en producción vía `LIGHTRAG_EXTRACT_MODEL` /
 `LIGHTRAG_KEYWORD_MODEL` (o el `AIService` del silo correspondiente):
 
-- **`extract`**: **Qwen3-30B-A3B-Instruct** — el más exhaustivo de los
-  probados sobre las 61 chunks del corpus, sin diferencias de exactitud
-  factual frente a alternativas cloud. Requiere `--json` (ver 9.1.2) sin
-  excepción — en modo delimitado es directamente inutilizable. Tiene
-  variación real entre pasadas idénticas (mismo prompt, `temperature=0`);
-  no tratar sus totales como una cifra fija si se usa para dimensionar un
-  SLA de indexación.
+- **`extract`**: **Qwen3.6-35B-A3B** — actualizado 2026-10-30 tras reindexar el
+  corpus DOMUSA completo (33 docs, 1.600 páginas) con este modelo: throughput
+  de indexación 3.709 tok/s agregados (2,2× la corrida anterior) y, en el A/B
+  contra el índice anterior con los mismos 63 IDs del set UC y la misma
+  síntesis, recall macro 0,981 vs 0,953/0,965 y latencia de consulta 60s vs
+  88-127s, sin regresiones sistemáticas
+  ([informe](../../benchmark/informes/es/informe_eval_silo54_qwen36idx_20261030.md)).
+  Sustituye a **Qwen3-30B-A3B-Instruct**, ganador del benchmark de 61 chunks,
+  que queda como referencia metodológica del benchmark (no como pick de
+  producción). Sigue aplicándose lo aprendido con aquel: requiere `--json`
+  (ver 9.1.2) sin excepción — en modo delimitado es directamente inutilizable
+  — y tiene variación real entre pasadas idénticas (mismo prompt,
+  `temperature=0`); no tratar sus totales como una cifra fija si se usa para
+  dimensionar un SLA de indexación.
 - **`keyword`**: **Qwen3-4B-Instruct** — único modelo sin ningún defecto en
   el benchmark de 7 preguntas (frente a la alucinación puntual de
   Qwen3-30B-A3B y la verbosidad sistemática de gpt-5.4-nano), con respuestas

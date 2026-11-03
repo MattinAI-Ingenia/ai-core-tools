@@ -1,7 +1,9 @@
 import { Lightbulb } from 'lucide-react';
 import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 
-// Latest recommended models per provider, per role. Reviewed 2026-09-14.
+// Latest recommended models per provider, per role. Reviewed 2026-09-14;
+// extract Open-source pick re-reviewed 2026-10-30 after the full-corpus A/B
+// on silo 54 — see docs/dependencies/lightrag.md#911-recomendación-de-modelos-por-rol.
 // ponytail: update inline as providers ship.
 // Open-source picks are backed by a real extraction/keyword benchmark on
 // this repo's own LightRAG prompts — see
@@ -20,13 +22,16 @@ const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>>
     // GPT-5 mini) on purpose: it's the only cloud model here with REAL
     // measured extraction quality on this repo's own corpus (see
     // docs/testing/lightrag_extraction_benchmark_corpus.md — 48.1% non-hub
-    // relationships, on par with the winning Qwen3-30B-A3B pick). A cheaper
+    // relationships, on par with the benchmark-winning Qwen3-30B-A3B pick).
+    // The production open-source pick below is now Qwen3.6-35B-A3B: it
+    // supersedes Qwen3-30B-A3B after the silo-54 corpus A/B (better recall
+    // and 2.2x indexing throughput — see lightrag.md §9.1.1). A cheaper
     // untested sibling is a real quality risk, not just a price change.
     { provider: 'OpenAI', model: 'GPT-5.4 mini' },
     { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
     { provider: 'Mistral', model: 'Mistral Small 4' },
     { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
-    { provider: 'Open-source', model: 'Qwen3-30B-A3B-Instruct' },
+    { provider: 'Open-source', model: 'Qwen3.6-35B-A3B' },
   ],
   keywords: [
     { provider: 'OpenAI', model: 'GPT-5.4 nano' },

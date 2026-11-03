@@ -1,5 +1,12 @@
 # Benchmark de extracción de entidades LightRAG — corpus DOMUSA TEKNIK (4 manuales completos)
 
+> **Actualización 2026-10-30:** el pick de producción para `extract` ya no es el
+> ganador de este benchmark (Qwen3-30B-A3B-Instruct) sino **Qwen3.6-35B-A3B**,
+> validado con un A/B de corpus completo (silo 54) — ver
+> [`docs/dependencies/lightrag.md` §9.1.1](../dependencies/lightrag.md#911-recomendación-de-modelos-por-rol)
+> y [`benchmark/informes/es/informe_eval_silo54_qwen36idx_20261030.md`](../../benchmark/informes/es/informe_eval_silo54_qwen36idx_20261030.md).
+> Este documento se conserva como registro metodológico.
+
 Comparativa de calidad/latencia entre modelos cloud (OpenAI) y open-source
 autoalojados (Qwen3-30B-A3B-Instruct, Mistral-Small-3.2-24B-Instruct, ambos
 vía vLLM) en los dos roles de LLM que usa LightRAG en este repo:
