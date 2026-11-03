@@ -114,6 +114,13 @@ LIGHTRAG_EXTRACT_GUIDED_JSON: bool = (
     os.getenv('LIGHTRAG_EXTRACT_GUIDED_JSON', 'true').lower() == 'true'
 )
 
+# Single-file delete of a LightRAG document also removes that document's
+# entries from the LLM cache (adelete_by_doc_id(delete_llm_cache=...)).
+# false keeps them, so re-uploading the same file re-extracts for free.
+LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE: bool = (
+    os.getenv('LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE', 'true').lower() == 'true'
+)
+
 # ---------------------------------------------------------------------------
 # Sandbox provider configuration (IT-2)
 # ---------------------------------------------------------------------------
