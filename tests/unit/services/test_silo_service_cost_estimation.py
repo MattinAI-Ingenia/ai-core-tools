@@ -226,6 +226,22 @@ def test_estimate_cost_per_doc_with_overlap():
     assert result["chunk_token_size"] == 1200
 
 
+def test_estimate_cost_ignores_page_markers():
+    """Page markers embedded in a PDF's whole-file content must not inflate the estimate."""
+    silo = _make_lightrag_silo(chunk_size=1200)
+    db = MagicMock()
+
+    marked = [{"content": "<<<page:1>>>\nabc\n\n<<<page:2>>>\ndef"}]
+    plain = [{"content": "abc\n\ndef"}]
+
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
+        marked_result = SiloService.estimate_indexing_cost(1, marked, db)
+        plain_result = SiloService.estimate_indexing_cost(1, plain, db)
+
+    assert marked_result["total_chunks"] == plain_result["total_chunks"]
+    assert marked_result["estimated_input_tokens"] == plain_result["estimated_input_tokens"]
+
+
 def test_estimate_cost_empty_documents():
     silo = _make_lightrag_silo()
     db = MagicMock()

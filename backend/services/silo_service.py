@@ -1884,13 +1884,27 @@ class SiloService:
             )
             if not docs:
                 return 0
-            # One unit = one item fed to the vector store: a pre-split chunk for
-            # the other backends; LightRAG chunks internally by token size, so
-            # feed it one whole-file Document (PDFs page-marked) instead
-            # (split=False). This has to be the same unit the progress
-            # callback reports in, or the bar shows things like "3/14" for a
-            # 13-page PDF — LightRAG's own token-chunking is not observable
-            # per page beforehand.
+            # One unit = one chunk that will be fed to the vector store: for
+            # LightRAG that's an estimated token-window chunk count (it chunks
+            # internally, so we feed it one whole-file Document, PDFs
+            # page-marked, via split=False); for the other backends it's a
+            # pre-split chunk (len(docs)).
+            if is_lightrag:
+                from tools.vector_stores.lightrag_store import strip_page_markers  # noqa: PLC0415
+                size = silo.lightrag_chunk_token_size or 1200
+                overlap = (
+                    silo.lightrag_chunk_overlap_token_size
+                    if silo.lightrag_chunk_overlap_token_size is not None
+                    else 100
+                )
+                # ponytail: estimate only — ignores strategy P's own 2000-token
+                # default, V's semantic splitting, and any CHUNK_* env var
+                # overrides; the real count is corrected once LightRAG actually
+                # chunks the file (step_006's per-chunk progress callback).
+                return sum(
+                    _chunks_from_tokens(_count_tokens(strip_page_markers(d.page_content)[0]), size, overlap)
+                    for d in docs
+                )
             return len(docs)
         except Exception:
             return 0
@@ -3376,12 +3390,17 @@ class SiloService:
             raise ValueError("Silo has no embedding service configured")
 
         chunk_token_size = silo.lightrag_chunk_token_size or 1200
+        # Pre-existing fallback, deliberately left as-is (0, not LightRAG's own
+        # 100 default like count_resource_chunks uses) — out of scope for this
+        # step; don't unify the two without a separate, deliberate change.
         chunk_overlap_token_size = silo.lightrag_chunk_overlap_token_size or 0
+
+        from tools.vector_stores.lightrag_store import strip_page_markers  # noqa: PLC0415
 
         num_chunks = 0
         total_content_tokens = 0
         for doc in documents:
-            doc_tokens = _count_tokens(doc.get('content', ''))
+            doc_tokens = _count_tokens(strip_page_markers(doc.get('content', ''))[0])
             total_content_tokens += doc_tokens
             num_chunks += _chunks_from_tokens(doc_tokens, chunk_token_size, chunk_overlap_token_size)
 
