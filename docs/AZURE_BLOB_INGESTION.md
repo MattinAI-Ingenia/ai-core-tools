@@ -202,9 +202,9 @@ stubbed so it runs offline:
   LightRAG.
 - A retrieval query whose answer exists in exactly one document returns a
   chunk containing that document's fact, whose chunk id parses back to the
-  ingested `Resource` (`res{id}-p{page}-chunk{n}`) and whose source label is
-  the blob's staged filename — the provenance chain from FR-6 survives into
-  LightRAG's own storage.
+  ingested `Resource` (`res{id}-p{page}-chunk-{n}` for a PDF, `res{id}-chunk-{n}`
+  for other formats) and whose source label is the blob's staged filename —
+  the provenance chain from FR-6 survives into LightRAG's own storage.
 - Indexing and querying both run on the collection's single persistent event
   loop thread (the concurrency fix from commit `6fa7f59a`).
 - A no-op re-run skips everything without disturbing what is indexed.

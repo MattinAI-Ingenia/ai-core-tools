@@ -13,15 +13,21 @@ from fastapi import HTTPException, status, UploadFile
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
 
-# How many resources the feeder keeps in flight in a LightRAG ingestion.
-# Sized against MAX_PARALLEL_INSERT (48 here): documents in this corpus average
-# 38 pages, so 3 resources are ~114 pages — comfortably more than the pool can
-# run at once, which is all it takes to keep it full. Raising it does not add
-# throughput, it only makes a 'cancel' finish more documents before stopping.
+# How many resources (files) the feeder keeps in flight in a LightRAG ingestion
+# — not pages or documents. Since the document-per-file refactor, a resource
+# is ONE LightRAG document; within it, LightRAG extracts up to MAX_ASYNC_LLM
+# chunks concurrently, so a single large PDF can fill that pool on its own
+# while many small files might not fill it at all. Real document-level
+# parallelism is min(this window, MAX_PARALLEL_INSERT): for many small files
+# raising this window DOES add real throughput (each file only uses a few of
+# its MAX_ASYNC_LLM slots); for a few large files MAX_ASYNC_LLM is the real
+# lever instead. It also makes a 'cancel' finish more files before stopping.
+# Deployment-specific, found by experimentation — see
+# docs/dependencies/lightrag.md sec. "Rodaje del feeder" for the tuning rule.
 INGESTION_FEED_WINDOW = int(os.getenv('INGESTION_FEED_WINDOW', '3'))
 
 # Seconds a batch must run before its ETA is published. Below this the estimate
-# is dominated by pages LightRAG skips by dedup, so it is worse than no answer.
+# is dominated by files LightRAG skips by dedup, so it is worse than no answer.
 ETA_WARMUP_SECONDS = 30
 
 def _is_transient_llm_failure(exc: BaseException) -> bool:

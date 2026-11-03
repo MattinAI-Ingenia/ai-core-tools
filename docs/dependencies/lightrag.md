@@ -246,6 +246,15 @@ _cleanup_postgres`, `lightrag_store.py`).
 
 ### 5.1 Rodaje del feeder (ventana deslizante)
 
+> **Contexto histórico**: el análisis y las cifras de esta sección (154
+> páginas, 15 minutos, s/chunk por ventana) se midieron el 2026-08-27, bajo el
+> esquema antiguo de un documento LightRAG por página. Desde el refactor de
+> documento-por-fichero (§13), un recurso es un único documento LightRAG, no
+> N páginas — el mecanismo de ventana deslizante en sí no cambia, pero
+> "página" en esta sección significa "documento LightRAG bajo el esquema
+> antiguo", no la unidad actual. Ver "Ajuste tras el refactor" al final de
+> esta sección para la guía de tuning vigente.
+
 `INGESTION_FEED_WINDOW` (`resource_service.py`, `_feed`) mantiene N
 **recursos** en vuelo a la vez, no N páginas. Un recurso no libera su hueco
 hasta estar **terminado entero** — aunque tenga 90 páginas y
@@ -279,18 +288,53 @@ siguiente indexación, mantenerlo; si no, la causa está en otro sitio y subir
 la ventana no es la palanca correcta. Tratar este valor como algo a ajustar
 por despliegue, no como una constante ya cerrada.
 
+**Ajuste tras el refactor de documento-por-fichero.** Como un recurso es ahora
+UN documento LightRAG, el paralelismo real a nivel de documento es
+`min(INGESTION_FEED_WINDOW, MAX_PARALLEL_INSERT)` — con los defaults de
+`.env.example` (`MAX_PARALLEL_INSERT=48`, `INGESTION_FEED_WINDOW=8`), solo 8
+de los 48 huecos de `MAX_PARALLEL_INSERT` se usan nunca, salvo que se suba la
+ventana. La afirmación anterior de que subir la ventana "no da más
+rendimiento" **ya no es cierta en general**: para un corpus de muchos
+ficheros PEQUEÑOS, cada fichero solo ocupa unos pocos de sus `MAX_ASYNC_LLM`
+huecos de extracción (pocos chunks por fichero), así que más ficheros en
+vuelo SÍ añade paralelismo real; para un corpus de pocos ficheros GRANDES, el
+cuello de botella sigue siendo `MAX_ASYNC_LLM` dentro de cada fichero, no la
+ventana.
+
+Regla práctica:
+- **Muchos ficheros pequeños**: subir `INGESTION_FEED_WINDOW` hacia,
+  aproximadamente, `MAX_ASYNC_LLM ÷ chunks medios por fichero`, y mantener
+  `MAX_PARALLEL_INSERT >= INGESTION_FEED_WINDOW` (todo lo que exceda la
+  ventana queda sin usar).
+- **Pocos ficheros grandes**: la palanca real es `MAX_ASYNC_LLM`, no la
+  ventana.
+- En ambos casos, la señal práctica de ajuste sigue siendo la misma de
+  siempre: mirar el log del servidor de inferencia (`Waiting: 0`, uso de KV
+  cache de la GPU) y subir mientras haya margen — ver el comentario de
+  `MAX_PARALLEL_INSERT` en `.env.example`.
+
 ### 5.2 Filas `failed` en `doc_status` que no son fallos
 
 Un `SELECT status, count(*) FROM lightrag_doc_status` suele dar cientos de filas
-`failed` en un silo sano. Antes de concluir que faltan páginas, mirar el
+`failed` en un silo sano. Antes de concluir que falta contenido, mirar el
 `error_msg`: casi todas son rechazos de dedup que LightRAG deja escritos como
-filas propias, con id `dup-<hash>`, mientras la página original está
+filas propias, con id `dup-<hash>`, mientras el documento original está
 `processed`.
+
+> **Desde el esquema por-fichero (§13): la unidad del dedup es ahora el
+> FICHERO, no la página.** El mecanismo SQL de abajo no cambia — sigue siendo
+> `apipeline_enqueue_documents` comparando contenido/nombre — pero antes un
+> texto repetido (p. ej. una página de boilerplate idéntica en varios
+> manuales) generaba una fila `dup-*` por CADA página repetida; ahora, al ser
+> cada fichero un único documento, genera como mucho una fila `dup-*` por
+> fichero entero. Las observaciones concretas de esta sección (2026-10-01) se
+> tomaron bajo el esquema antiguo, un documento LightRAG por página — quedan
+> como referencia histórica de cómo leer `error_msg`, no como cifras vigentes.
 
 | `error_msg` | Qué es | ¿Falta contenido? |
 |---|---|---|
-| `File name already exists. Original doc_id: …, Status: processed` | Reindexar un recurso vuelve a encolar páginas que ya estaban. Cada reindexado deja una fila más por página. | No |
-| `Identical content already exists under another filename. Original doc_id: …` | La página es idéntica, palabra por palabra, a una página de **otro** documento. LightRAG la indexa una sola vez, atribuida al original. | Para el documento duplicado, sí |
+| `File name already exists. Original doc_id: …, Status: processed` | Reindexar un recurso vuelve a encolar documentos que ya estaban. Cada reindexado deja una fila más (antes, una por página; ahora, una por fichero). | No |
+| `Identical content already exists under another filename. Original doc_id: …` | El documento (antes, una página; ahora, el fichero entero) es idéntico, palabra por palabra, a otro **ya indexado**. LightRAG lo indexa una sola vez, atribuido al original. | Para el documento duplicado, sí |
 
 Consulta para separar los fallos reales:
 
@@ -299,18 +343,19 @@ SELECT count(*) FROM lightrag_doc_status
 WHERE workspace = 'silo_<id>' AND status = 'failed' AND id NOT LIKE 'dup-%';
 ```
 
-Si da 0, ninguna página falló de verdad.
+Si da 0, nada falló de verdad.
 
-**El segundo caso afecta a la recuperación.** Los chunks de la página
-duplicada solo existen con el `file_path` del original. Por eso:
+**El segundo caso afecta a la recuperación.** Los chunks del documento
+duplicado solo existen con el `file_path` del original. Por eso:
 
 - `list_documents_mentioning` (la herramienta de cobertura) nunca devuelve el
-  documento duplicado para un término que solo aparece en esas páginas.
+  documento duplicado para un término que solo aparece en él.
 - Una pregunta cuyo `docs_esperados` incluye el documento duplicado pierde
   `doc_recall` sin que el agente lo haya hecho mal.
 
 Observado el 2026-10-01 en los silos EN de DOMUSA (`silo_39`
-`test_new_embedding_en` y `silo_47` `test_new_dedup_en`):
+`test_new_embedding_en` y `silo_47` `test_new_dedup_en`), bajo el esquema
+por-página anterior a este refactor:
 
 - **Fallos reales:** 0 en los dos silos. Las 33 fuentes tienen páginas procesadas en ambos.
 - **Rechazos por nombre:** 545 en `silo_39` y 592 en `silo_47` (más reindexados).
@@ -326,7 +371,7 @@ Observado el 2026-10-01 en los silos EN de DOMUSA (`silo_39`
   página duplicada antes de contar el documento ausente como fallo.
 
 Posible mejora, sin hacer: añadir al `file_path` algo propio del recurso para
-que dos manuales con páginas iguales no colisionen. A cambio se pierde el ahorro
+que dos manuales con contenido igual no colisionen. A cambio se pierde el ahorro
 de no indexar dos veces el mismo texto.
 
 ---
@@ -926,22 +971,28 @@ no puede responder sobre ello:
 - **PDF escaneados**: sin capa de texto la extracción no devuelve nada que indexar
   (caso EN-UC4-1 del benchmark). No se ha probado el rol `vlm` como vía de OCR.
 
-### 12.2 Una lista de figuras o una sección que se corta entre páginas
+### 12.2 Una lista de figuras o una sección que se corta entre páginas — RESUELTO
 
-Cada página del PDF se indexa como un documento propio (`res{id}-p{n}`) y, con
-`chunk_size` 2000, casi nunca se divide: en el silo 37, 1.600 páginas → 1.600
-chunks. El `chunk_overlap` solo actúa **dentro** de una página, así que **subirlo
-no hace nada** contra esto: nunca cruza el borde de página.
+**Historial** (válido para silos aún no reindexados con el esquema por-fichero
+de §13, o indexados antes de él): cada página del PDF se indexaba como un
+documento LightRAG propio (`res{id}-p{n}`) y, con `chunk_size` 2000, casi
+nunca se dividía: en el silo 37, 1.600 páginas → 1.600 chunks. El
+`chunk_overlap` solo actuaba **dentro** de una página, así que subirlo no
+hacía nada contra esto: nunca cruzaba el borde de página. Efecto observado: si
+el título de la última figura de una sección caía arriba de la página
+siguiente, pegado a otra sección (DSAT000120 p.167: «Dual Clima 19R/19RT»
+seguido de «12.4 Comprobación de cantidad de refrigerante»), la búsqueda
+semántica no la asociaba a la sección anterior y el agente se dejaba ese
+elemento.
 
-Efecto: si el título de la última figura de una sección cae arriba de la página
-siguiente, pegado a otra sección (DSAT000120 p.167: «Dual Clima 19R/19RT» seguido
-de «12.4 Comprobación de cantidad de refrigerante»), la búsqueda semántica no la
-asocia a la sección anterior y el agente se deja ese elemento.
-
-Arreglo posible, **no hecho** (exige reindexar los 33 documentos): anteponer a cada
-chunk el título de la sección vigente (p. ej. «12.3 Curvas de prestaciones»). Es
-más general y barato que meter la cola de la página anterior; conviene hacerlo
-si se reindexa por otro motivo.
+**Estado actual**: desde el refactor de documento-por-fichero (§13), un PDF es
+UN único documento LightRAG y el chunker ve el texto completo con marcadores
+de página (§13.4); un chunk puede cruzar la frontera de página con
+normalidad, igual que cualquier otro tramo del texto. La cita que recibe el
+agente usa la página donde EMPIEZA el chunk (`p{P}` en
+`res{N}-p{P}-chunk-NNN`), no un corte forzado por página. Sigue pendiente de
+reindexar en los silos que todavía tengan el esquema antiguo — ver
+"Migración" en §13.8.
 
 ### 12.3 La búsqueda literal exige las palabras de la página
 
@@ -976,6 +1027,359 @@ una herramienta que devuelva «la primera página de cada documento» (la más c
 `doc=`, son 33 llamadas). La recuperación por pasajes está pensada para localizar
 contenido, no para auditar. Mismo tipo que §12.4: se contesta con una herramienta o
 un script de revisión, no con el agente. Sin cambio previsto.
+
+---
+
+## 13. Esquema de almacenamiento (un documento por fichero)
+
+Desde el refactor `lightrag-pdf-document-schema`, un fichero de Resource
+genera **un único documento LightRAG por fichero**, no uno por página. Cambia
+el shape de los ids de documento/chunk, cómo se reconstruye la etiqueta de
+página y cómo se mide el progreso; el resto del pipeline (§5) no cambia.
+
+### 13.1 Id de documento
+
+`extract_documents_from_file` (`silo_service.py`, ruta `split=False`) devuelve
+EXACTAMENTE un `Document` por fichero, cualquiera que sea su extensión. Para
+un fichero ligado a un `Resource`, ese `Document` lleva `id=res{N}` grabado en
+el momento de la extracción (`Document.id`, desde
+`base_metadata['resource_id']`). `_lightrag_doc_id` (`lightrag_store.py`)
+confía en ese id **solo** si tiene la forma exacta `res\d+` — ningún metadato
+suministrado por un caller puede llegar a producir ese id:
+`SiloService._create_documents_for_indexing` reconstruye siempre los
+`Document`s desde dicts sin campo `id`, así que esta vía nunca es alcanzable
+con datos no confiables (la comprobación de forma es defensa en profundidad,
+no un hueco explotable hoy).
+
+### 13.2 Formas de id de chunk
+
+LightRAG deriva el id de cada chunk prefijando el id de documento:
+`{doc_id}-chunk-{NNN}` (y `-sNN` si el chunker nativo tuvo que volver a partir
+el chunk por tamaño — "hard split"). Según el origen del fichero:
+
+| Origen | Id de documento | Id de chunk |
+|---|---|---|
+| PDF (Resource) | `res{N}` | `res{N}-p{P}-chunk-NNN[-sNN]` — `P` es la página donde EMPIEZA el chunk (un chunk puede cruzar páginas, ver §13.4) |
+| DOCX/TXT/MD (Resource) | `res{N}` | `res{N}-chunk-NNN` (sin página) |
+| No-Resource (p. ej. scraping de `Domain`) | hash de contenido (`compute_mdhash_id`, LightRAG) | `doc-<hash>-chunk-NNN` |
+| Legacy, aún posible | `res{N}-p{P}` (un documento por página) | `res{N}-p{P}-chunk-NNN` |
+
+El shape "legacy" **no ha desaparecido**: sigue produciéndose cuando el
+metadato de un caller trae a la vez `resource_id` **y** `page` en una ingesta
+`split=True` (algunas rutas de API pública/SharePoint/media del playground lo
+hacen así) — comportamiento sin cambios, documentado aquí para que no se
+confunda con un bug. `_lightrag_doc_id` (`lightrag_store.py`) resuelve ese
+caso a `res{id}-p{page}` igual que siempre lo hizo.
+
+### 13.3 Marcadores de página (`<<<page:N>>>`)
+
+Un PDF extraído como `Document` único lleva el texto de cada página unido con
+una línea marcador propia, generada por `page_marked_text` (`lightrag_store.py`):
+una línea completa `<<<page:N>>>` seguida de exactamente un `\n`. Solo cuenta
+como texto paginado el que EMPIEZA por un marcador (`strip_page_markers`,
+`lightrag_store.py`) — un marcador-lookalike en mitad de otro texto nunca se
+trata como frontera de página real.
+
+Cada página se neutraliza con `neutralize_page_text` (`lightrag_store.py`)
+antes de unirse, para que una línea del propio documento que SE PAREZCA a un
+marcador no pueda confundirse luego con uno real — incluye el re-escapado de
+`&` tras el sanitizado de LightRAG, que cierra una vía de forjado por
+doble-decodificación de entidades HTML (detalle completo en el docstring de
+`neutralize_page_text`). Los ficheros no-PDF (DOCX/TXT/MD) también pasan por
+`neutralize_page_text` aunque no lleven marcadores de página, porque también
+reciben un id `res{N}` y por tanto son alcanzables por los mismos lectores
+basados en regex.
+
+### 13.4 Chunking consciente de página (`chunking_func`)
+
+`_achunk_page_aware` (`lightrag_store.py`), instalado como el `chunking_func`
+legacy de LightRAG en `_build_rag`, corre la estrategia de chunking del silo
+(`F`=fixed-token, `R`=recursive-character, `V`=semantic-vector,
+`P`=paragraph-semantic, resueltas vía `_resolve_strategy_options`,
+`lightrag_store.py`) **una sola vez sobre el fichero entero** (ya sin
+marcadores, extraídos previamente con `strip_page_markers`), y después
+atribuye cada chunk resultante a una página **bisecando** sobre los offsets de
+marcador (`bisect_right`, `lightrag_store.py`). El selector explícito de
+estrategia de chunking que ya tenía LightRAG (la ruta `process_options`/
+`resolve_chunk_options` de §5) sigue existiendo para elegir QUÉ estrategia
+usar, pero la función de chunking en sí —texto marcado o no— pasa siempre por
+este hook.
+
+Consecuencia directa: un chunk **puede cruzar una frontera de página**, igual
+que cruzaría cualquier otro punto intermedio del texto — ya no hay un tope
+duro de "nunca dos páginas en el mismo chunk" como en el esquema por-página
+anterior (§12.2, resuelto). La página que se reporta en el chunk id es la de
+INICIO del chunk, no todas las que toca.
+
+LightRAG sigue logueando su propia línea genérica `"Chunking F(legacy)"`
+(siempre, cualquiera que sea la estrategia real — es el log nativo del hook
+legacy); el repo añade encima su propia línea, más precisa:
+`"[workspace] Page-aware chunking <opción>: N chunk(s), M page marker(s)"`
+(`_achunk_page_aware`, `lightrag_store.py`). Para saber qué estrategia corrió
+de verdad, mirar esta segunda línea, no la de LightRAG.
+
+### 13.5 Reconstrucción de la etiqueta "(p. N)"
+
+La etiqueta legible que ve el usuario (`fichero.pdf (p. 12)`) ya no viaja en
+el metadato del `Document` — un documento de un solo fichero no tiene un
+`page` fijo que adjuntarle (`_source_label_from_metadata`,
+`lightrag_store.py`). En su lugar se reconstruye EN LECTURA, a partir del id
+del chunk, con `_page_label` (`lightrag_store.py`): toma el nombre base y, si
+hay página, le añade `(p. N)` — de forma idempotente (una etiqueta antigua que
+ya terminaba en `(p. N)` no se duplica). Los lectores que antes leían
+`metadata["page"]` ahora extraen la página del propio chunk id vía
+`CHUNK_ID_RESOURCE_PAGE_RE` (`lightrag_store.py`).
+
+### 13.6 Progreso por chunks
+
+La barra de progreso de indexación cuenta CHUNKS, no documentos/páginas (antes
+un recurso de 90 páginas saltaba de 0 a 100% en un solo paso al terminar su
+único documento LightRAG). `_doc_chunk_progress` (`lightrag_store.py`) lee,
+por cada documento abierto, su `chunks_count` (total, fijado por LightRAG en
+cuanto trocea el fichero) y cuenta cuántos de esos chunks ya tienen
+`llm_cache_list` no vacío (extracción de entidades/relaciones ya ejecutada)
+como numerador. Un documento con `chunks_count == 0` (aún no troceado) no
+aparece en el resultado — los callers deben tratar la ausencia como "total
+desconocido", nunca como cero. Es una query sync aparte (siempre vía
+`asyncio.to_thread`) que propaga cualquier fallo; quien la llama
+(`_aprocess_enqueued_with_progress` / `_report`) es quien la trata como
+best-effort y degrada a la estimación por-fichero si falla. El progreso se
+recorta para no mostrar el 100% hasta que el documento esté realmente en
+estado terminal.
+
+**Observabilidad**: un fallo de esta query (p. ej. un futuro bump de
+`lightrag-hku` que renombre `chunks_list`/`llm_cache_list`/`chunks_count`)
+loguea `"[workspace] Chunk-progress query failed (best-effort): ..."` como
+WARNING una vez por corrida (el resto de repeticiones cae a DEBUG para no
+inundar el log cada 0.5s) — `_aprocess_enqueued_with_progress`
+(`lightrag_store.py`). Es el canario de que la barra ha degradado, en
+silencio y para siempre, a la estimación por-fichero; una alerta sobre esa
+línea es la señal más temprana de que esta query dejó de funcionar.
+
+### 13.7 Compatibilidad hacia atrás
+
+Todos los lectores que tocan ids de documento/chunk aceptan las DOS formas
+(antigua por-página y nueva por-fichero) a la vez: `_lightrag_doc_id`,
+`CHUNK_ID_RESOURCE_PAGE_RE`, `_FULL_DOC_ID_RESOURCE_RE`, `_page_label`,
+`_group_chunk_rows` y los filtros SQL de `find_chunks_mentioning` (todos en
+`lightrag_store.py`) reconocen `res{N}-p{P}(-chunk-...)` y
+`res{N}(-chunk-...)` indistintamente. Un silo con documentos antiguos y
+nuevos mezclados (ver migración abajo) funciona sin degradar ninguna
+funcionalidad de lectura.
+
+### 13.8 Migración
+
+**La migración es OPCIONAL.** Un silo con documentos del esquema antiguo
+sigue funcionando tal cual, sin ninguna acción: §13.7 ya garantiza que todos
+los lectores entienden ambos shapes a la vez. Migrar solo aporta un beneficio
+concreto — que los PDFs reindexados dejen de tener el límite de "nunca cruza
+una página" en el chunking (§12.2, resuelto) — nada se rompe si no se migra.
+
+#### Comprobar si hay una indexación en vuelo
+
+Antes de tocar nada: `GET /internal/apps/{app}/repositories/{id}/ingestion-status`
+→ `is_indexing` (`backend/routers/internal/repositories.py`), respaldado por
+el advisory lock del silo — es `true` solo mientras una corrida está REALMENTE
+viva, no solo porque queden filas sin terminar. Complementario a nivel de
+fila: `resource.status IN ('pending', 'indexing', 'paused')` sobre los
+recursos del repositorio.
+
+> `is_indexing` solo cubre a quien TOMA `silo_indexing_lock`: la ingestión de
+> Resources, el reindexado de un único fichero y la ingesta de Azure Blob
+> (`routers/internal/silos.py`, `resource_service.py`,
+> `azure_blob_ingest_service.py`). **No** cubre los tasks de Media, el
+> scraping de `Domain` ni la ingesta pública `index-file`, que escriben al
+> mismo workspace del silo sin tomar ese lock — `is_indexing: false` no
+> garantiza que nada esté escribiendo en el silo ahora mismo si cualquiera de
+> esas otras vías puede estar activa.
+
+#### Camino NO destructivo (solo para silos 100% Resource): vaciar el silo sin perder Repository/ficheros
+
+```
+DELETE /public/v1/app/{app}/silos/{id}/docs/delete/all
+```
+
+(`backend/routers/public/v1/silos.py` → `SiloService.delete_all_docs_in_collection`,
+que llama a `delete_collection` del store — §5, "Borrado"). Limpia Neo4j,
+Qdrant y PostgreSQL del workspace `silo_{id}` **entero** — TODO lo que viva en
+ese workspace, no solo los documentos de `Resource`: los chunks de `Media`
+(`SiloService.index_media_chunk` escribe en la misma colección del silo), el
+contenido metido por la ruta pública `index-file` y los chunks de `Domain`
+también desaparecen. Es "no destructivo" únicamente respecto al `Silo`, el
+`Repository` y los ficheros subidos (que sí sobreviven, a diferencia de
+borrar el Repository o el Silo enteros — ver "Qué SÍ se pierde" más abajo):
+**solo es seguro lanzarlo contra un silo cuyo contenido sea enteramente
+ficheros de `Resource`** — contra un silo con Media/Domain/`index-file`
+mezclado, borra ese contenido exactamente igual que borrar el Silo entero.
+**Solo existe como endpoint de la API pública — no hay botón equivalente en
+la UI interna.**
+
+> ⚠️ Esta ruta **no toma el `silo_indexing_lock`** del silo
+> (`services/silo_service.py`, el mismo lock que usa la indexación) — nada le
+> impide correr en paralelo con una ingestión activa, lo que dejaría el
+> workspace a medio vaciar sobre trabajo en curso. Confirmar `is_indexing:
+> false` primero y no lanzarlo si alguien puede arrancar una ingestión a la
+> vez (p. ej. bloquear la ventana de mantenimiento).
+
+Después de vaciar, hay que **reindexar cada `Resource`** para que vuelva a
+haber contenido:
+
+- **Repos pequeños (unas pocas decenas de ficheros)**: uno a uno,
+  `POST /internal/apps/{app}/silos/{id}/resources/{resource_id}/reindex`
+  (`backend/routers/internal/silos.py`) — síncrono, un fichero cada vez.
+- **Repos grandes**: poner `resource.status = 'pending'` en las filas
+  afectadas y pulsar "Resume indexing" en la UI (usa el alimentador con
+  ventana deslizante, la barra de progreso y pausa de siempre, §5.1/§13.6).
+  **`resource_service.py` confirma que `resume_indexing` solo recoge filas en
+  `pending/error/indexing` + `STOP_STATUSES` (`paused`, `cancelled`) — NO
+  `ready`** (`backend/services/resource_service.py`), así que un simple
+  "Resume" sobre recursos ya `ready` no hace nada: hace falta resetear su
+  `status` a `pending` primero, a mano (no hay endpoint para esto). El
+  modelo usa `__tablename__ = 'Resource'` (con mayúscula — Postgres es
+  sensible a mayúsculas en identificadores entrecomillados, así que el
+  nombre va entre comillas dobles):
+  ```sql
+  UPDATE "Resource" SET status = 'pending'
+  WHERE repository_id = :id AND status = 'ready';
+  ```
+  **Verificar este paso en staging antes de darlo por un procedimiento
+  cerrado** — no se ha probado en vivo contra una tabla real de producción.
+
+#### Qué SÍ se pierde si en vez de esto se borra el Repository o el Silo
+
+Borrar el `Repository` elimina también los ficheros subidos
+(`repository_service.py`, `RepositoryService.delete_repository`: borra cada
+fichero físico y la carpeta del repositorio antes de borrar las filas).
+Borrar el `Silo` elimina además sus `Media` (migraciones de vídeo/audio, `ON
+DELETE CASCADE`) y sus ficheros (`SiloService.delete_silo` →
+`remove_silo_media_files`, `services/silo_service.py`). Contenido que **no**
+se puede volver a alimentar después de un borrado así:
+
+- **Media** ya indexada: el fichero se borra en cuanto termina de indexarse
+  (comportamiento documentado del pipeline de vídeo/audio) — no queda nada
+  que resubir.
+- Contenido metido por la ruta pública `index-file` sin pasar por un
+  `Resource`: no se conserva como `Resource`, así que no hay de dónde
+  reextraerlo.
+- Rastreos de `Domain` (scraping): exigirían un recrawl completo.
+
+**Ninguno de estos tres tipos de contenido usa el shape `res{N}` nuevo** (su
+id sigue siendo `doc-<hash>`, §13.2) — vaciar/borrar para "migrarlos" no
+aporta nada y los pierde para siempre, ya sea con `delete/all` o borrando el
+Silo/Repository entero: ambos caminos destruyen exactamente el mismo
+contenido no-Resource (ver el aviso de la sección anterior). **Un silo con
+Domain/Media/`index-file` mezclado con ficheros de Resource no tiene un
+camino de migración seguro con las herramientas de hoy** — ni vaciarlo ni
+borrarlo. Si de verdad se quiere el chunking nuevo para ESE silo, la única
+opción sin pérdida es la ruta de Silo/Repository paralelo del apartado de
+coste/tiempo de inactividad, más abajo: indexar los ficheros de Resource ahí
+con el esquema nuevo y dejar el Domain/Media/`index-file` original donde
+está. Si no, recordar que migrar es opcional (arriba): lo más seguro es
+simplemente no tocar ese silo.
+
+#### Pausar, cancelar o desplegar en mitad de una ingestión
+
+**Preferir dejar terminar las ingestiones en curso** antes de desplegar este
+cambio, en vez de pausar o cancelar. Un despliegue (reinicio del proceso)
+interrumpe cualquier ingestión activa por sí solo — esto es un hecho a tener
+en cuenta, no un procedimiento nuevo: el hilo en background que la llevaba
+muere con el proceso anterior.
+
+1. **"Cancel" borra datos.** `_discard_unindexed_after_cancel`
+   (`backend/services/resource_service.py`) borra fila **y fichero** de
+   cualquier recurso cancelado que no llegara a indexar ni un documento. Solo
+   usar `cancel` si se acepta perder (y tener que resubir) esos ficheros
+   concretos; no es una operación inocua.
+2. **Cualquier recurso no-`ready` con páginas antiguas ya indexadas puede
+   duplicarse al reanudarlo tras el despliegue** — no solo el caso de
+   "pausar antes del despliegue". Las mismas filas quedan expuestas por una
+   vía más común: al arrancar, `reset_stuck_resources`
+   (`backend/startup_tasks.py`) pasa a `error` cualquier recurso que
+   estuviera `indexing`/`pending` cuando el proceso anterior murió — y el
+   propio botón "Resume" de la UI invita a reanudar justo esos recursos
+   `error` (`resume_indexing` los recoge, ver arriba). Un PDF interrumpido A
+   MITAD, por cualquiera de las dos vías (pausa manual o reinicio del
+   despliegue), deja páginas ya indexadas como documentos `res{N}-p{P}`
+   (shape viejo); reanudarlo ya con el código nuevo desplegado hace que el
+   resto del fichero entre por la vía nueva y genere, además, un documento
+   `res{N}` separado para el fichero entero — el mismo caso "reindexar un
+   único fichero antiguo lo duplica" (§13.2), disparado automáticamente por
+   el propio resume.
+
+   **Tras desplegar, no reanudar (ni reindexar) ningún recurso que no esté
+   `ready` y que ya tenga páginas antiguas procesadas** — comprobarlo antes
+   de pulsar "Resume":
+   ```sql
+   SELECT * FROM lightrag_doc_status
+   WHERE workspace = 'silo_<id>' AND id LIKE 'res<N>-p%' AND status = 'processed';
+   ```
+   Si devuelve filas para ese recurso, mejor cancelarlo (asumiendo la
+   pérdida del punto 1) o dejarlo tal cual hasta decidir cómo migrarlo a
+   mano, en vez de reanudarlo sin más.
+
+La frase "mezclar ambos shapes en el mismo silo no es dañino" (§13.7) se
+refiere a recursos DISTINTOS conviviendo con shapes distintos, no a este caso
+de un mismo recurso cruzando la frontera pausa/interrupción→despliegue→resume,
+que sí produce una duplicación real.
+
+#### Coste y tiempo de inactividad de un reindexado completo
+
+Antes de vaciar/reindexar un silo entero, `POST
+/internal/apps/{app}/silos/{id}/estimate-indexing` da una estimación de
+coste/tamaño (§5, "Pipeline de inserción"). Los
+agentes que usan ese silo devuelven recuperación vacía o parcial mientras
+dura el reindexado — para un corpus grande puede ser horas. Para migrar sin
+tiempo de inactividad: montar un Repository/Silo paralelo, indexarlo con el
+esquema nuevo, y apuntar los agentes a él cuando esté listo (a cambio de
+volver a subir los ficheros).
+
+### 13.9 Rollback
+
+Volver a una versión del backend anterior a este refactor sigue funcionando
+para los documentos nuevos (`res{N}`) **con recuperación**, pero con
+**citas/procedencia degradadas**: el código antiguo lee página con
+`CHUNK_ID_RESOURCE_PAGE_RE` asumiendo el shape `res{N}-p{P}-chunk-NNN`, y no
+reconoce `res{N}-chunk-NNN` (DOCX/TXT/MD) ni interpreta correctamente la
+página de un chunk de PDF que ya viene con el shape nuevo — el número de
+página y la etiqueta de procedencia se pierden para esos documentos, aunque
+el contenido se siga recuperando.
+
+- **No hacer rollback mientras haya una ingestión en vuelo** — comprobar
+  `is_indexing` primero (§13.8).
+- **No usar "cancel" en la versión antigua del código contra trabajo
+  pendiente que ya se generó como `res{N}` nuevo**: el guard de descarte de
+  la versión antigua solo reconoce `LIKE 'res{N}-p%'` (el shape viejo), así
+  que un documento `res{N}` ya indexado no coincide con ese patrón y el
+  recuento de "documentos indexados" de ese recurso le sale 0 — el guard
+  antiguo lo trata como si nunca se hubiera indexado nada. Consecuencia
+  concreta, no solo un huérfano en el grafo: **borra la fila del `Resource` y
+  su fichero subido** (su criterio para "nunca indexado" es "bórralo"),
+  mientras el contenido que SÍ llegó a indexarse (el documento `res{N}`
+  completo, con sus entidades/relaciones) se queda para siempre en
+  Neo4j/Qdrant/Postgres sin ninguna fila que lo referencie ni ningún
+  mecanismo que lo limpie.
+
+### 13.10 Limitaciones conocidas
+
+- **Dedup dentro del mismo lote** (pre-existente, sin relación con este
+  refactor, **no corregido aquí**): el dedup-por-nombre interno de LightRAG
+  probablemente descarta todo chunk salvo el primero que comparta etiqueta en
+  las rutas de ingesta LightRAG con `split=True` (index-file público,
+  SharePoint, media del playground) — un problema aparte, fuera de alcance.
+- Un payload `split=True` con página en el metadato (la vía legacy de §13.2)
+  sigue produciendo etiquetas `nombre (p. N)`, no nombres pelados — es el
+  comportamiento existente y sin cambios de esa vía concreta, no una
+  regresión de este refactor.
+- **Reindexar un único fichero antiguo sin recrear/vaciar el silo (§13.8)
+  probablemente solo duplica de verdad para PDFs.** Antes de este refactor,
+  un DOCX/TXT/MD ya tenía id `doc-<hash>` y una etiqueta de fichero pelada —
+  la MISMA etiqueta que tendría el nuevo documento `res{N}` de ese mismo
+  fichero. El dedup-por-nombre de LightRAG (§5.2, fila "File name already
+  exists") plausiblemente rechaza el reindexado como una fila `dup-*`
+  fallida en vez de crear un duplicado real — **no verificado en vivo**. Si
+  se confirma en staging, tratarlo como: PDF → duplica el fichero;
+  DOCX/TXT/MD → probablemente no-op silencioso (rechazado por dedup). Hasta
+  verificarlo, no dar la duplicación por garantizada en formatos no-PDF.
 
 ---
 

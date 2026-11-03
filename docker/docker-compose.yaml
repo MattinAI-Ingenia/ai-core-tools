@@ -98,15 +98,22 @@ services:
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j}
       # LightRAG indexing concurrency. Read by lightrag as dataclass field
       # defaults at import time, so they must be set here (container env), not
-      # in Python. Defaults below match lightrag 1.5.5rc1's own defaults, so
+      # in Python. Defaults below match lightrag 1.5.6's own defaults, so
       # leaving them unset changes nothing.
-      MAX_PARALLEL_INSERT: ${MAX_PARALLEL_INSERT:-3}      # documents (= PDF pages) at once
+      MAX_PARALLEL_INSERT: ${MAX_PARALLEL_INSERT:-3}      # LightRAG documents at once (one document = one file, not one page)
       MAX_ASYNC_LLM: ${MAX_ASYNC_LLM:-4}                  # concurrent LLM calls per role
       EMBEDDING_FUNC_MAX_ASYNC: ${EMBEDDING_FUNC_MAX_ASYNC:-8}
-      # Files the feeder keeps in flight. Not a throughput knob (3 average files
-      # already exceed MAX_PARALLEL_INSERT in pages): it sets how many files
-      # "Cancel" finishes before stopping, since cancel means "add nothing new,
-      # finish what started".
+      # Files the feeder keeps in flight. Real document-level parallelism is
+      # min(INGESTION_FEED_WINDOW, MAX_PARALLEL_INSERT) -- raising the window
+      # DOES add throughput for many small files (each one only uses a few of
+      # its MAX_ASYNC_LLM extraction slots, so more files in flight means more
+      # real parallelism); for a few large files MAX_ASYNC_LLM itself is the
+      # real lever, not this window. Keep MAX_PARALLEL_INSERT >= this value,
+      # anything above it goes unused. It also sets how many files "Cancel"
+      # finishes before stopping, since cancel means "add nothing new, finish
+      # what started". Deployment-specific, found by experimentation -- see
+      # docs/dependencies/lightrag.md sec. "Rodaje del feeder" for the tuning
+      # rule of thumb.
       INGESTION_FEED_WINDOW: ${INGESTION_FEED_WINDOW:-3}
       # Per-LLM-call ceiling. Also how long a hung socket (laptop suspend,
       # LLM host gone) takes to surface as a failure and abort the batch.
