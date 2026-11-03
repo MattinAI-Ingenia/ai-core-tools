@@ -179,6 +179,8 @@ const RepositoryDetailPage: React.FC = () => {
   const [resourceToDelete, setResourceToDelete] = useState<Resource | null>(null);
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
   const [deletingAll, setDeletingAll] = useState(false);
+  const [deletingResource, setDeletingResource] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [resourceToMove, setResourceToMove] = useState<Resource | null>(null);
   const [moveToFolderId, setMoveToFolderId] = useState<number | null>(null);
@@ -818,6 +820,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const handleDeleteResource = (resource: Resource) => {
     setResourceToDelete(resource);
+    setDeleteError(null);
     setShowDeleteModal(true);
   };
 
@@ -849,8 +852,10 @@ const RepositoryDetailPage: React.FC = () => {
   };
 
   const confirmDeleteResource = async () => {
-    if (!resourceToDelete) return;
+    if (!resourceToDelete || deletingResource) return;
 
+    setDeletingResource(true);
+    setDeleteError(null);
     try {
       await apiService.deleteResource(Number.parseInt(appId!), Number.parseInt(repositoryId!), resourceToDelete.resource_id);
       await loadRepository(); // Reload to update the list
@@ -858,7 +863,9 @@ const RepositoryDetailPage: React.FC = () => {
       setResourceToDelete(null);
     } catch (err) {
       console.error('Error deleting resource:', err);
-      setError('Failed to delete file');
+      setDeleteError(err instanceof Error && err.message ? err.message : 'Failed to delete file');
+    } finally {
+      setDeletingResource(false);
     }
   };
 
@@ -1438,9 +1445,11 @@ const RepositoryDetailPage: React.FC = () => {
                               <RefreshCw className={`w-4 h-4 ${reindexingId === resource.resource_id ? 'animate-spin' : ''}`} />
                             </button>
                           )}
-                          {canEdit && !isLightRAG && (
+                          {canEdit && (
                             <button
                               onClick={() => handleDeleteResource(resource)}
+                              title="Delete this file"
+                              aria-label={`Delete ${resource.name}`}
                               className="p-2 text-gray-400 hover:text-red-600"
                             >
                               <Trash2 className="w-4 h-4" />
@@ -1553,30 +1562,44 @@ const RepositoryDetailPage: React.FC = () => {
       <Modal
         isOpen={showDeleteModal}
         onClose={() => {
+          if (deletingResource) return;
           setShowDeleteModal(false);
           setResourceToDelete(null);
+          setDeleteError(null);
         }}
         title="Delete File"
       >
         <div className="p-6">
-          <p className="text-gray-700 mb-6">
+          <p className="text-gray-700 dark:text-slate-200 mb-6">
             Are you sure you want to delete "{resourceToDelete?.name}"? This action cannot be undone.
           </p>
+          <p role="status" className="sr-only">{deletingResource ? 'Deleting file…' : ''}</p>
+          {deleteError && (
+            <div
+              role="alert"
+              className="mb-6 text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 dark:text-red-300 dark:bg-red-950/40 dark:border-red-800"
+            >
+              {deleteError}
+            </div>
+          )}
           <div className="flex justify-end gap-3">
             <button
               onClick={() => {
                 setShowDeleteModal(false);
                 setResourceToDelete(null);
+                setDeleteError(null);
               }}
-              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+              disabled={deletingResource}
+              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 dark:bg-slate-600 dark:text-slate-100 dark:hover:bg-slate-500 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Cancel
             </button>
             <button
               onClick={confirmDeleteResource}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+              disabled={deletingResource}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Delete
+              {deletingResource ? 'Deleting…' : 'Delete'}
             </button>
           </div>
         </div>
