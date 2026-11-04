@@ -227,9 +227,12 @@ export function buildFlowNodes(
       nodes.push({
         id: entry.nodeId,
         type: 'piece',
-        position:
-          savedPositions[entry.nodeId] ??
-          { x, y: (index - (group.length - 1) / 2) * PIECE_ROW_HEIGHT },
+        position: {
+          x,
+          // x is forced to the column matching the fed side so saved layouts
+          // (localStorage) can't leave secondary pieces left of the agent.
+          y: savedPositions[entry.nodeId]?.y ?? (index - (group.length - 1) / 2) * PIECE_ROW_HEIGHT,
+        },
         data: { label: entry.piece.name, piece: entry.piece, portLabels: entry.portLabels },
         // Deletable only to disconnect: handleBeforeDelete maps the card to its
         // agent edges and never returns it as a removed node.

@@ -41,10 +41,10 @@ test('exposes the agent and OCR port catalogs in canvas order', () => {
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(portsFor('ocr_agent').map((def) => def.label))), ['Vision', 'Text', 'Output']);
   assert.deepEqual(JSON.parse(JSON.stringify(AGENT_PORTS.filter((def) => def.secondary).map((def) => def.id))), [
+    'tools',
+    'output',
     'middlewares',
     'sandbox',
-    'transcription',
-    'video',
     'media_embedding',
   ]);
 });

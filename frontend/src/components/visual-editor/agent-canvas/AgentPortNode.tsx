@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { NODE_KIND_VISUALS } from '../nodeKindConfig';
+import { NODE_KIND_VISUALS, PIECE_VISUALS } from '../nodeKindConfig';
 import type { PieceKind, PortDef } from './agentPorts';
 import type { CanvasPiece } from './useAgentCanvasData';
 
@@ -47,6 +47,14 @@ function PortRow({
   readonly acceptsDrag: boolean;
 }) {
   const isRight = side === 'right';
+  const isTools = port.id === 'tools';
+  // The bullet is painted with the accent color(s) of the piece kinds it takes,
+  // so users can match a piece to its port at a glance. Tools is deliberately
+  // ink black (near-white in dark mode) per user preference.
+  const background =
+    port.accepts.length === 1
+      ? PIECE_VISUALS[port.accepts[0]].accentHex
+      : `linear-gradient(135deg, ${port.accepts.map((kind) => PIECE_VISUALS[kind].accentHex).join(', ')})`;
   const label = (
     <div className={`min-w-0 flex-1 ${isRight ? 'mr-4 text-right' : 'ml-4'}`}>
       <span className="block truncate text-xs text-gray-600 dark:text-gray-300" title={port.label}>
@@ -70,7 +78,10 @@ function PortRow({
         position={isRight ? Position.Right : Position.Left}
         id={port.id}
         isConnectable={isConnectable}
-        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 !bg-indigo-400 dark:!bg-indigo-500"
+        className={`!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 ${
+          isTools ? '!bg-gray-900 dark:!bg-gray-100' : ''
+        }`}
+        style={isTools ? undefined : { background }}
       />
       {label}
     </div>
