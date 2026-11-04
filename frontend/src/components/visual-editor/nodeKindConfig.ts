@@ -68,7 +68,8 @@ export const NODE_KIND_VISUALS: Record<GraphNodeKind, NodeKindVisual> = {
     chipClass: 'bg-blue-100 dark:bg-blue-900/40',
     borderClass: 'border-blue-200 dark:border-blue-800',
     bgClass: 'bg-white dark:bg-gray-800',
-    accentHex: '#2563eb',
+    // Deep navy: must read clearly apart from the agent's indigo bullet.
+    accentHex: '#1e40af',
     emphasize: false,
   },
   silo: {
@@ -87,8 +88,10 @@ export const NODE_KIND_VISUALS: Record<GraphNodeKind, NodeKindVisual> = {
     typeCaption: 'Embedding',
     iconClass: 'text-cyan-600 dark:text-cyan-400',
     captionClass: 'text-cyan-700 dark:text-cyan-400',
-    chipClass: 'bg-cyan-100 dark:bg-cyan-900/40',
-    borderClass: 'border-cyan-200 dark:border-cyan-800',
+    // Stronger cyan than the sibling cards: the embedding bullet/edge are the
+    // same hue and the pale card read as "colorless" next to them.
+    chipClass: 'bg-cyan-200 dark:bg-cyan-900/60',
+    borderClass: 'border-cyan-300 dark:border-cyan-600',
     bgClass: 'bg-white dark:bg-gray-800',
     accentHex: '#0891b2',
     emphasize: false,

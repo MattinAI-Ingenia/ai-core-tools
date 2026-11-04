@@ -39,14 +39,16 @@ export function PieceNode({ data, isConnectable }: NodeProps<CanvasFlowNode>) {
         position={Position.Right}
         id="right"
         isConnectable={isConnectable}
-        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 !bg-gray-400 dark:!bg-gray-500"
+        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900"
+        style={{ background: visual.accentHex }}
       />
       <Handle
         type="source"
         position={Position.Left}
         id="left"
         isConnectable={isConnectable}
-        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 !bg-gray-400 dark:!bg-gray-500"
+        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900"
+        style={{ background: visual.accentHex }}
       />
     </div>
   );
