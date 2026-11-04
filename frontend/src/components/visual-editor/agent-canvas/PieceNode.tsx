@@ -4,8 +4,10 @@ import type { CanvasFlowNode } from './AgentPortNode';
 
 /**
  * A connected piece (AI service, silo, skill, MCP config, agent tool, ...)
- * around the agent body, with the single source handle new connections are
- * dragged from. Same card look as the old editor's entity cards.
+ * around the agent body, with a source handle on each side so the edge
+ * leaves the card from the side facing the agent port it connects to
+ * (right for primary ports, left for secondary ones). Same card look as the
+ * old editor's entity cards.
  */
 export function PieceNode({ data, isConnectable }: NodeProps<CanvasFlowNode>) {
   const piece = data.piece;
@@ -21,7 +23,7 @@ export function PieceNode({ data, isConnectable }: NodeProps<CanvasFlowNode>) {
         <Icon className={`h-4 w-4 ${visual.iconClass}`} aria-hidden="true" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100" title={piece.name}>
+        <p className="truncate text-sm font-medium text-gray-900 group-hover:whitespace-normal group-hover:break-words dark:text-gray-100" title={piece.name}>
           {piece.name}
         </p>
         <p className={`truncate text-xs ${visual.captionClass}`}>{visual.typeCaption}</p>
@@ -35,6 +37,14 @@ export function PieceNode({ data, isConnectable }: NodeProps<CanvasFlowNode>) {
       <Handle
         type="source"
         position={Position.Right}
+        id="right"
+        isConnectable={isConnectable}
+        className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 !bg-gray-400 dark:!bg-gray-500"
+      />
+      <Handle
+        type="source"
+        position={Position.Left}
+        id="left"
         isConnectable={isConnectable}
         className="!h-2.5 !w-2.5 !rounded-full !border-2 !border-white dark:!border-gray-900 !bg-gray-400 dark:!bg-gray-500"
       />

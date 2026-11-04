@@ -96,7 +96,7 @@ function SiloFormPage() {
   }
 
   function handleCancel() {
-    navigate(`/apps/${appId}/silos`);
+    navigate(returnTo || `/apps/${appId}/silos`);
   }
 
   if (loading) {

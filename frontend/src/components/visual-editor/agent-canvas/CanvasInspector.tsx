@@ -1,9 +1,11 @@
-import { useId, useMemo, useRef, useState, type FocusEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type FocusEvent } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
+import { Pencil } from 'lucide-react';
 import RagConfigSection, { type RagConfigValue, type RagFixedFilter } from '../../forms/RagConfigSection';
 import type { SearchFilterMetadataField } from '../../playground/SearchFilters';
-import type { Agent } from '../../../services/api';
+import { apiService, type Agent, type DataStructure, type Silo } from '../../../services/api';
+import type { MCPConfig, Middleware } from '../../../core/types';
 import { PIECE_VISUALS } from '../nodeKindConfig';
 import { portsFor, type AgentType } from './agentPorts';
 import type { CanvasSelection } from './AgentCanvas';
@@ -24,6 +26,10 @@ export interface CanvasInspectorProps {
   readonly canCreateShared: boolean;
   /** Opens the AI service editor for the selected piece (the canvas refetches afterwards). */
   readonly onEditService: (piece: CanvasPiece) => void;
+  /** Opens the overlay editor for the selected piece (skill, MCP, middleware, services, parser). */
+  readonly onEditPiece: (piece: CanvasPiece) => void;
+  /** Desktop width of the panel, driven by the canvas's resize divider. */
+  readonly style?: CSSProperties;
   readonly onSaveFields: SaveAgentFields;
 }
 
@@ -92,28 +98,16 @@ function cleanFilters(filters: readonly RagFixedFilter[]): Array<Omit<RagFixedFi
     .map(({ _key: _ignored, ...rest }) => rest);
 }
 
-/** Route of a piece's own editor page (an agent opens its canvas view). */
-function pieceEditPath(appId: number, piece: CanvasPiece): string {
+/** Route of a piece's own editor page; null for the kinds edited in the overlay instead. */
+function pieceEditPath(appId: number, piece: CanvasPiece): string | null {
   const base = `/apps/${appId}`;
   switch (piece.kind) {
     case 'agent':
       return `${base}/agents/${piece.id}?view=visual`;
     case 'silo':
       return `${base}/silos/${piece.id}`;
-    case 'ai_service':
-      return `${base}/settings/ai-services`;
-    case 'embedding':
-      return `${base}/settings/embedding-services`;
-    case 'skill':
-      return `${base}/skills`;
-    case 'mcp':
-      return `${base}/settings/mcp-configs`;
-    case 'parser':
-      return `${base}/settings/data-structures`;
-    case 'sandbox':
-      return `${base}/settings/sandbox-services`;
-    case 'middleware':
-      return `${base}/middlewares`;
+    default:
+      return null;
   }
 }
 
@@ -474,78 +468,243 @@ function KnowledgeSettings({ agent, canEdit, onSaveFields }: KnowledgeSettingsPr
   );
 }
 
+interface PieceInfoRow {
+  readonly label: string;
+  readonly value: string;
+}
+
+interface PieceInfo {
+  readonly rows: readonly PieceInfoRow[];
+  readonly description?: string;
+}
+
+const NO_PIECE_INFO: PieceInfo = { rows: [] };
+
+/** `summarization` → "Summarization", `human_in_the_loop` → "Human in the loop". */
+function prettyWords(value: string): string {
+  return value.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/** The agent piece's read-only facts; they already ride along in the canvas payload. */
+function agentPieceInfo(piece: CanvasPiece): PieceInfo {
+  const info = piece.agentInfo;
+  if (!info) return NO_PIECE_INFO;
+  return {
+    rows: [
+      { label: 'Type', value: info.type === 'ocr_agent' ? 'OCR agent' : 'Agent' },
+      { label: 'Model', value: info.modelName ?? 'No model' },
+      { label: 'Tool agent', value: piece.isTool ? 'Yes' : 'No' },
+      { label: 'Tools', value: String(info.toolCount) },
+      { label: 'Requests', value: String(info.requestCount) },
+      { label: 'Last used', value: info.lastUsedDate ? new Date(info.lastUsedDate).toLocaleString() : 'Never' },
+    ],
+    description: info.description,
+  };
+}
+
+/**
+ * The most relevant read-only facts per piece kind, fetched from the piece's
+ * own detail endpoint (the agent piece carries its own). Refetches whenever
+ * the canvas data reloads, so it never shows a stale name or status.
+ */
+function usePieceInfo(appId: number, piece: CanvasPiece): PieceInfo {
+  const [info, setInfo] = useState<PieceInfo>(NO_PIECE_INFO);
+  useEffect(() => {
+    if (piece.kind === 'agent') {
+      setInfo(agentPieceInfo(piece));
+      return;
+    }
+    let cancelled = false;
+    setInfo(NO_PIECE_INFO);
+    (async () => {
+      let next: PieceInfo;
+      switch (piece.kind) {
+        case 'ai_service': {
+          const service = await apiService.getAIService(appId, piece.id);
+          next = {
+            rows: [
+              { label: 'Model', value: service.model_name || '—' },
+              { label: 'Provider', value: service.provider || '—' },
+              { label: 'Video', value: service.supports_video ? 'Supported' : 'Not supported' },
+            ],
+          };
+          break;
+        }
+        case 'embedding': {
+          const service = await apiService.getEmbeddingService(appId, piece.id);
+          next = {
+            rows: [
+              { label: 'Model', value: service.model_name || '—' },
+              { label: 'Provider', value: service.provider || '—' },
+            ],
+          };
+          break;
+        }
+        case 'sandbox': {
+          const service = (await apiService.getSandboxService(appId, piece.id)) as { provider?: string };
+          next = { rows: [{ label: 'Provider', value: service.provider || '—' }] };
+          break;
+        }
+        case 'silo': {
+          const silo: Silo = await apiService.getSilo(appId, piece.id);
+          next = {
+            rows: [
+              { label: 'Vector DB', value: silo.vector_db_type || '—' },
+              { label: 'Documents', value: String(silo.docs_count) },
+            ],
+            description: silo.description,
+          };
+          break;
+        }
+        case 'skill': {
+          const skill = await apiService.getSkill(appId, piece.id);
+          next = { rows: [], description: skill.description };
+          break;
+        }
+        case 'mcp': {
+          const config: MCPConfig = await apiService.getMCPConfig(appId, piece.id);
+          next = {
+            rows: [{ label: 'Transport', value: config.transport_type || '—' }],
+            description: config.description,
+          };
+          break;
+        }
+        case 'parser': {
+          const parser: DataStructure = await apiService.getOutputParser(appId, piece.id);
+          next = {
+            rows: [{ label: 'Fields', value: String(parser.fields?.length ?? parser.field_count ?? 0) }],
+            description: parser.description,
+          };
+          break;
+        }
+        case 'middleware': {
+          const middleware: Middleware = await apiService.getMiddleware(appId, piece.id);
+          next = {
+            rows: [{ label: 'Type', value: middleware.middleware_type ? prettyWords(middleware.middleware_type) : '—' }],
+            description: middleware.description,
+          };
+          break;
+        }
+        default:
+          return;
+      }
+      if (cancelled) return;
+      setInfo(next);
+    })().catch(() => {
+      // A failed detail fetch leaves the piece's name and type on their own.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, piece]);
+  return info;
+}
+
+const INFO_LABEL_CLASS = 'shrink-0 text-[11px] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500';
+const INFO_VALUE_CLASS = 'min-w-0 truncate text-xs font-medium text-gray-900 group-hover:whitespace-normal group-hover:break-words dark:text-gray-100';
+const EDIT_BLOB_CLASS =
+  'inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-indigo-600 shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-600 dark:bg-gray-800 dark:text-indigo-300 dark:hover:border-indigo-500 dark:hover:bg-indigo-900/40';
+
+function EditBlob(props: { readonly disabled?: boolean; readonly onClick?: () => void; readonly label?: string; readonly to?: string; readonly state?: Record<string, string> }) {
+  const { disabled, onClick, label = 'Edit', to, state } = props;
+  if (to) {
+    return (
+      <Link to={to} state={state} className={EDIT_BLOB_CLASS}>
+        <Pencil className="h-3 w-3" aria-hidden="true" />
+        {label}
+      </Link>
+    );
+  }
+  return (
+    <button type="button" disabled={disabled} title={disabled ? 'Administrator role required' : undefined} onClick={onClick} className={EDIT_BLOB_CLASS}>
+      <Pencil className="h-3 w-3" aria-hidden="true" />
+      {label}
+    </button>
+  );
+}
+
 interface PieceDetailsProps {
   readonly appId: number;
   readonly piece: CanvasPiece;
   /** Sentence describing the connection when an edge is selected. */
   readonly connection?: string;
-  /** True for ADMINISTRATOR and up: the AI service Edit button opens the editor in place. */
+  /** True for ADMINISTRATOR and up: the wizard kinds' Edit button opens the overlay editor. */
   readonly canEditShared: boolean;
   /** Opens the AI service editor for the selected piece (the canvas refetches afterwards). */
   readonly onEditService: (piece: CanvasPiece) => void;
+  /** Opens the overlay editor for the selected piece (skill, MCP, middleware, services, parser). */
+  readonly onEditPiece: (piece: CanvasPiece) => void;
 }
 
-/** Read-only details of another agent, shown when an agent piece (or an edge to one) is selected. */
-function AgentPieceInfo({ piece }: { readonly piece: CanvasPiece }) {
-  const info = piece.agentInfo;
-  if (!info) return null;
-  const lastUsed = info.lastUsedDate ? new Date(info.lastUsedDate).toLocaleString() : 'Never';
-  return (
-    <div className="space-y-2 text-sm">
-      <p className="text-gray-600 dark:text-gray-400">
-        Type: <span className="font-medium text-gray-900 dark:text-gray-100">{info.type === 'ocr_agent' ? 'OCR agent' : 'Agent'}</span>
-      </p>
-      <p className={info.description ? 'text-gray-600 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'}>
-        {info.description ?? 'No description'}
-      </p>
-      <p className="text-gray-600 dark:text-gray-400">
-        Model: <span className="font-medium text-gray-900 dark:text-gray-100">{info.modelName ?? 'No model'}</span>
-      </p>
-      <p className="text-gray-600 dark:text-gray-400">
-        Tool agent: <span className="font-medium text-gray-900 dark:text-gray-100">{piece.isTool ? 'Yes' : 'No'}</span>
-      </p>
-      <p className="text-gray-600 dark:text-gray-400">Uses {info.toolCount === 1 ? '1 tool' : `${info.toolCount} tools`}</p>
-      <p className="text-gray-600 dark:text-gray-400">
-        Requests: <span className="font-medium text-gray-900 dark:text-gray-100">{info.requestCount}</span> · Last used:{' '}
-        <span className="font-medium text-gray-900 dark:text-gray-100">{lastUsed}</span>
-      </p>
-    </div>
-  );
-}
-
-function PieceDetails({ appId, piece, connection, canEditShared, onEditService }: PieceDetailsProps) {
+function PieceDetails({ appId, piece, connection, canEditShared, onEditService, onEditPiece }: PieceDetailsProps) {
   const visual = PIECE_VISUALS[piece.kind];
   const Icon = visual.icon;
+  const location = useLocation();
+  const info = usePieceInfo(appId, piece);
+  const path = pieceEditPath(appId, piece);
+  const isSilo = piece.kind === 'silo';
+  const isAgent = piece.kind === 'agent';
+  // Wizard kinds are shared resources and need ADMINISTRATOR; silos and agents open their own page.
+  const disabled = !isSilo && !isAgent && !canEditShared;
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
+      <div className="group flex items-center gap-3">
         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${visual.chipClass}`}>
           <Icon className={`h-4 w-4 ${visual.iconClass}`} aria-hidden="true" />
         </div>
-        <div className="min-w-0">
-          <p className={`text-xs font-medium ${visual.captionClass}`}>{visual.typeCaption}</p>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <p className={`text-xs font-medium ${visual.captionClass}`}>{visual.typeCaption}</p>
+            {piece.isSystem && (
+              <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-200">
+                System
+              </span>
+            )}
+            {piece.isTool && (
+              <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">
+                Tool
+              </span>
+            )}
+          </div>
           <h3 className="truncate text-base font-semibold text-gray-900 dark:text-gray-100" title={piece.name}>
             {piece.name}
           </h3>
         </div>
       </div>
-      {connection && <p className="text-sm text-gray-600 dark:text-gray-400">{connection}</p>}
-      {piece.kind === 'agent' && <AgentPieceInfo piece={piece} />}
-      {/* AI services edit in place through their editor; everything else opens its own page. */}
-      {piece.kind === 'ai_service' ? (
-        <button
-          type="button"
-          disabled={!canEditShared}
-          title={canEditShared ? undefined : 'Administrator role required'}
-          onClick={() => onEditService(piece)}
-          className={`${LINK_CLASS} disabled:cursor-not-allowed disabled:opacity-60`}
-        >
-          Edit
-        </button>
+      {connection && <p className="text-xs italic text-gray-500 dark:text-gray-400">{connection}</p>}
+
+      {(info.rows.length > 0 || info.description) && (
+        <div className="space-y-2.5 rounded-lg border border-gray-100 bg-gray-50/60 p-3 dark:border-gray-700/60 dark:bg-gray-900/40">
+          {info.rows.map((row) => (
+            <div key={row.label} className="group flex items-baseline justify-between gap-3">
+              <span className={INFO_LABEL_CLASS}>{row.label}</span>
+              <span className={INFO_VALUE_CLASS} title={row.value}>
+                {row.value}
+              </span>
+            </div>
+          ))}
+          {info.description && (
+            <div className="min-w-0">
+              <p className={INFO_LABEL_CLASS}>Description</p>
+              <p className="mt-0.5 whitespace-pre-line text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+                {info.description}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* AI services edit in place through their editor; the wizard kinds open the overlay; silos and agents open their own page. */}
+      {isAgent || isSilo ? (
+        <EditBlob
+          to={path ?? undefined}
+          state={isSilo ? { returnTo: `${location.pathname}${location.search}` } : undefined}
+        />
+      ) : piece.kind === 'ai_service' ? (
+        <EditBlob disabled={!canEditShared} onClick={() => onEditService(piece)} />
       ) : (
-        <Link to={pieceEditPath(appId, piece)} className={LINK_CLASS}>
-          {piece.kind === 'agent' ? 'Open its canvas' : 'Edit'}
-        </Link>
+        <EditBlob disabled={disabled} onClick={() => onEditPiece(piece)} />
       )}
     </div>
   );
@@ -553,10 +712,11 @@ function PieceDetails({ appId, piece, connection, canEditShared, onEditService }
 
 /**
  * Right-hand inspector of the per-agent canvas. Shows the editor for the
- * current selection: the agent's fields, a piece's details with its edit
- * action (page link, or the AI service wizard in place), or the RAG settings /
- * connection of an edge. Every save goes through `onSaveFields` (the canvas
- * save queue), so field saves never race a connection.
+ * current selection: the agent's fields, a piece's read-only details with its
+ * edit action (the AI service editor in place, the wizard overlay, or the
+ * piece's own page), or the RAG settings / connection of an edge. Every save
+ * goes through `onSaveFields` (the canvas save queue), so field saves never
+ * race a connection.
  */
 export function CanvasInspector({
   appId,
@@ -566,12 +726,15 @@ export function CanvasInspector({
   canEdit,
   canCreateShared,
   onEditService,
+  onEditPiece,
+  style,
   onSaveFields,
 }: CanvasInspectorProps) {
   return (
     <aside
       aria-label="Inspector"
-      className="flex max-h-96 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:self-start md:max-h-none md:w-80 dark:border-gray-700 dark:bg-gray-800"
+      style={style}
+      className="flex max-h-96 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:self-start md:max-h-none md:w-[var(--inspector-w)] dark:border-gray-700 dark:bg-gray-800"
     >
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {selection === null && (
@@ -596,6 +759,7 @@ export function CanvasInspector({
             piece={selection.piece}
             canEditShared={canCreateShared}
             onEditService={onEditService}
+            onEditPiece={onEditPiece}
           />
         )}
 
@@ -615,6 +779,7 @@ export function CanvasInspector({
             connection={`Connected to ${portsFor(agentType).find((port) => port.id === selection.port)?.label ?? 'this port'}.${canEdit ? ' Press Delete or Backspace on the canvas to disconnect it.' : ''}`}
             canEditShared={canCreateShared}
             onEditService={onEditService}
+            onEditPiece={onEditPiece}
           />
         )}
       </div>

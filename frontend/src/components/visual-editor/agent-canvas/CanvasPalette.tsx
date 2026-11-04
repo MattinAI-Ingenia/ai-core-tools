@@ -1,4 +1,4 @@
-import { useId, useState, type DragEvent } from 'react';
+import { useId, useState, type CSSProperties, type DragEvent } from 'react';
 import { ChevronDown, ChevronRight, PanelLeftClose, PanelLeftOpen, Plus, Search } from 'lucide-react';
 import { PIECE_VISUALS } from '../nodeKindConfig';
 import { ServiceOptionStatus, serviceStatusId } from '../../ui/ServiceOptionStatus';
@@ -69,8 +69,14 @@ export interface CanvasPaletteProps {
    * middlewares. Silos and agents only need `canEdit`.
    */
   readonly canCreateShared: boolean;
+  /** Desktop width of the panel, driven by the canvas's resize divider. */
+  readonly style?: CSSProperties;
+  /** Node id (`${kind}:${id}`) of the piece selected in the inspector, or null. */
+  readonly selectedPieceId?: string | null;
   /** Opens the creation flow for a kind (wired by the creation modals). */
   readonly onCreate: (kind: PieceKind) => void;
+  /** Selects a piece for the inspector; clicking an item shows its details on the right. */
+  readonly onSelectPiece?: (piece: CanvasPiece) => void;
   /** Reports the piece a drag starts from the palette; null when the drag ends (drop, cancel or Escape). */
   readonly onDraggingChange?: (piece: CanvasPiece | null) => void;
 }
@@ -78,10 +84,12 @@ export interface CanvasPaletteProps {
 interface PaletteItemProps {
   readonly piece: CanvasPiece;
   readonly canEdit: boolean;
+  readonly selected: boolean;
+  readonly onSelect?: (piece: CanvasPiece) => void;
   readonly onDraggingChange?: (piece: CanvasPiece | null) => void;
 }
 
-function PaletteItem({ piece, canEdit, onDraggingChange }: PaletteItemProps) {
+function PaletteItem({ piece, canEdit, selected, onSelect, onDraggingChange }: PaletteItemProps) {
   const statusBaseId = useId();
   const visual = PIECE_VISUALS[piece.kind];
   const Icon = visual.icon;
@@ -108,10 +116,26 @@ function PaletteItem({ piece, canEdit, onDraggingChange }: PaletteItemProps) {
         draggable={draggable}
         onDragStart={draggable ? handleDragStart : undefined}
         onDragEnd={draggable ? handleDragEnd : undefined}
+        onClick={onSelect ? () => onSelect(piece) : undefined}
+        role={onSelect ? 'button' : undefined}
+        tabIndex={onSelect ? 0 : undefined}
+        onKeyDown={
+          onSelect
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onSelect(piece);
+                }
+              }
+            : undefined
+        }
         aria-describedby={describedBy}
+        aria-pressed={onSelect ? selected : undefined}
         title={isAgentPiece && !piece.isTool ? 'Connecting it turns on Tool agent' : undefined}
-        className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 transition-shadow ${visual.borderClass} ${visual.bgClass} ${
-          draggable ? 'cursor-grab hover:shadow-sm active:cursor-grabbing' : 'cursor-not-allowed opacity-60'
+        className={`group flex items-start gap-2 rounded-lg border px-2 py-1.5 transition-shadow ${
+          selected ? 'ring-2 ring-indigo-400' : ''
+        } ${visual.borderClass} ${visual.bgClass} ${
+          draggable ? 'cursor-grab hover:shadow-sm active:cursor-grabbing' : onSelect ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
         }`}
       >
         <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${visual.chipClass}`}>
@@ -119,7 +143,7 @@ function PaletteItem({ piece, canEdit, onDraggingChange }: PaletteItemProps) {
         </div>
         <div className="min-w-0 flex-1">
           <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-gray-900 dark:text-gray-100">
-            <span className="truncate" title={piece.name}>
+            <span className="truncate group-hover:whitespace-normal group-hover:break-words" title={piece.name}>
               {piece.name}
             </span>
             {piece.isSystem && (
@@ -145,7 +169,17 @@ function PaletteItem({ piece, canEdit, onDraggingChange }: PaletteItemProps) {
  * grouped by kind. Items are dragged onto the canvas; the category `+` buttons
  * create new ones. OCR agents only see the categories their ports accept.
  */
-export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onCreate, onDraggingChange }: CanvasPaletteProps) {
+export function CanvasPalette({
+  pieces,
+  agentType,
+  canEdit,
+  canCreateShared,
+  style,
+  selectedPieceId,
+  onCreate,
+  onSelectPiece,
+  onDraggingChange,
+}: CanvasPaletteProps) {
   const baseId = useId();
   const [filter, setFilter] = useState('');
   /** Whole palette folded into a narrow rail, to give the canvas the room. */
@@ -165,6 +199,8 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
   /** Silos and agents need EDITOR; the other kinds create shared resources and need ADMINISTRATOR. */
   const canCreateFor = (kind: PieceKind): boolean =>
     kind === 'silo' || kind === 'agent' ? canEdit : canCreateShared;
+  const selectedKind = selectedPieceId?.slice(0, selectedPieceId.indexOf(':')) ?? null;
+  const selectedId = selectedPieceId ? Number.parseInt(selectedPieceId.slice(selectedPieceId.indexOf(':') + 1), 10) : null;
 
   const groups = PALETTE_CATEGORIES.filter((category) => ports.some((port) => port.accepts.includes(category.kind)))
     .map((category) => ({
@@ -202,7 +238,8 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
   return (
     <aside
       aria-label="Pieces palette"
-      className="flex max-h-72 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-56 dark:border-gray-700 dark:bg-gray-800"
+      style={style}
+      className="flex max-h-72 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white md:max-h-none md:w-[var(--palette-w)] dark:border-gray-700 dark:bg-gray-800"
     >
       <div className="flex items-center gap-1 border-b border-gray-200 p-2 dark:border-gray-700">
         <label htmlFor={`${baseId}-filter`} className="sr-only">
@@ -278,6 +315,8 @@ export function CanvasPalette({ pieces, agentType, canEdit, canCreateShared, onC
                       key={`${piece.kind}:${piece.id}`}
                       piece={piece}
                       canEdit={canEdit}
+                      selected={piece.kind === selectedKind && piece.id === selectedId}
+                      onSelect={onSelectPiece}
                       onDraggingChange={onDraggingChange}
                     />
                   ))}

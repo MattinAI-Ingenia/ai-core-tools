@@ -39,7 +39,7 @@ const pieces = [
 const connected = [{ port: 'model', kind: 'ai_service', id: 5 }];
 
 function buildNodes(canEdit, looseNodeIds) {
-  return canvas.buildFlowNodes(agent, 'agent', connected, pieces, ['model'], {}, canEdit, looseNodeIds, null, false, () => {});
+  return canvas.buildFlowNodes(agent, 'agent', connected, pieces, {}, canEdit, looseNodeIds, null, false);
 }
 
 test('connected piece cards are deletable to disconnect; loose cards stay deletable; the agent never is', () => {
