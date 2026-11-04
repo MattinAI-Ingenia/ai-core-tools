@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { toast } from 'sonner';
-import { Bot, FileText, ArrowUp, ArrowDownToLine, Gamepad2, AlertTriangle, Pencil, Trash2, CalendarClock, Workflow } from 'lucide-react';
+import { Bot, FileText, ArrowUp, ArrowDownToLine, Gamepad2, AlertTriangle, Pencil, Trash2, CalendarClock } from 'lucide-react';
 import { apiService } from '../services/api';
 import ActionDropdown from '../components/ui/ActionDropdown';
 import Alert from '../components/ui/Alert';
@@ -107,11 +107,8 @@ function AgentsPage() {
     navigate(`/apps/${appId}/agents/new`);
   };
 
+  // Editing an agent opens the visual editor directly; the form is one toggle away.
   const handleEditAgent = (agentId: number) => {
-    navigate(`/apps/${appId}/agents/${agentId}`);
-  };
-
-  const handleVisualEditor = (agentId: number) => {
     navigate(`/apps/${appId}/agents/${agentId}?view=visual`);
   };
 
@@ -462,12 +459,6 @@ function AgentsPage() {
                       label: 'Export',
                       onClick: () => handleExportClick(agent),
                       icon: <ArrowDownToLine className="w-4 h-4" />,
-                      variant: 'primary' as const
-                    },
-                    {
-                      label: 'Visual editor',
-                      onClick: () => handleVisualEditor(agent.agent_id),
-                      icon: <Workflow className="w-4 h-4" />,
                       variant: 'primary' as const
                     },
                     {

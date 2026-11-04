@@ -8,8 +8,9 @@ export interface AgentQuickCreateFormProps {
   readonly appId: number;
   /**
    * Called after the agent is saved. `next` is the page's choice in page mode
-   * ('form' = open the full form, 'visual' = open the visual editor); modal
+   * ('visual' = open the visual editor, 'form' = open the full form); modal
    * mode always reports 'visual' because the canvas connects the new agent.
+   * The visual editor is the default in page mode (primary button and Enter).
    */
   readonly onCreated: (agent: Agent, next: 'form' | 'visual') => void;
   readonly onCancel: () => void;
@@ -71,8 +72,8 @@ function AgentQuickCreateForm({ appId, onCreated, onCancel, mode }: Readonly<Age
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    // Enter submits: in page mode the first submit button is "Continue in form".
-    void save(mode === 'page' ? 'form' : 'visual');
+    // Enter submits: in page mode the primary action is the visual editor (modal mode always opens the canvas).
+    void save('visual');
   };
 
   const isOcr = type === 'ocr_agent';
@@ -163,18 +164,18 @@ function AgentQuickCreateForm({ appId, onCreated, onCancel, mode }: Readonly<Age
           <>
             <button
               type="button"
-              onClick={() => void save('visual')}
+              onClick={() => void save('form')}
               disabled={submitting}
               className="rounded-lg border border-blue-600 px-4 py-2 text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-500 dark:text-blue-300 dark:hover:bg-blue-900/30"
             >
-              Continue in visual editor
+              Continue in form
             </button>
             <button
               type="submit"
               disabled={submitting}
               className="rounded-lg bg-blue-600 px-4 py-2 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {submitting ? 'Saving...' : 'Continue in form'}
+              {submitting ? 'Saving...' : 'Continue in visual editor'}
             </button>
           </>
         ) : (

@@ -785,8 +785,8 @@ function AgentFormPage() {
   };
 
   const isNewAgent = Number.parseInt(agentId || '0') === 0;
-  // The visual editor needs a saved agent, so a new agent always shows the form.
-  const view: AgentView = !isNewAgent && searchParams.get('view') === 'visual' ? 'visual' : 'form';
+  // The visual editor is the default (and needs a saved agent, so a new agent always shows the form).
+  const view: AgentView = !isNewAgent && searchParams.get('view') !== 'form' ? 'visual' : 'form';
   const isDirty = useMemo(
     () => snapshot !== null && serializeEditorState(formData, marketplaceProfile) !== snapshot,
     [formData, marketplaceProfile, snapshot],
@@ -808,8 +808,9 @@ function AgentFormPage() {
   }, [view]);
 
   // Keeps location.state (returnTo) so the link back to the list survives the toggle.
+  // `form` must be explicit now that visual is the default when the param is absent.
   const changeView = (next: AgentView) => {
-    setSearchParams(next === 'visual' ? { view: 'visual' } : {}, { state: location.state });
+    setSearchParams(next === 'form' ? { view: 'form' } : {}, { state: location.state });
   };
 
   // Canvas saves don't reload the form, so refresh only what the header shows

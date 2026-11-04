@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentType, type DragEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ComponentType, type DragEvent, type PointerEvent } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -23,7 +23,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { AlertTriangle, Loader2, Plus, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiService, ApiError, type AIService, type Agent } from '../../../services/api';
 import { MESSAGES, errorMessage, validationDetailMessage } from '../../../constants/messages';
@@ -43,10 +43,10 @@ import { layoutKey, loadLayout, saveLayout, type CanvasLayout, type StorageLike 
 import { createSaveQueue, planConnect, type SaveStep } from './savePlan';
 import { AgentPortNode, type CanvasFlowNode } from './AgentPortNode';
 import { PieceNode } from './PieceNode';
-import { CanvasPalette, PIECE_DRAG_MIME, parsePieceDragPayload, PIECE_SINGULAR, pieceKindPhrase } from './CanvasPalette';
-import { piecesForPort, type PortPickerEntry } from './portPicker';
+import { CanvasPalette, PIECE_DRAG_MIME, parsePieceDragPayload, pieceKindPhrase } from './CanvasPalette';
 import { CanvasInspector } from './CanvasInspector';
 import { CreatePieceModal } from './CreatePieceModal';
+import { EditPieceModal } from './EditPieceModal';
 import CompactServiceEditor from '../../services/CompactServiceEditor';
 import { useServicesManager } from '../../../hooks/useServicesManager';
 import { useSettingsCache } from '../../../contexts/SettingsCacheContext';
@@ -119,10 +119,12 @@ const NODE_TYPES: Record<string, ComponentType<NodeProps<CanvasFlowNode>>> = {
   piece: PieceNode,
 };
 
-/** Column of connected pieces to the left of the agent, where all port handles sit. */
+/** Column of pieces connected to primary ports (the agent's left border). */
 const PIECE_COLUMN_X = -320;
-/** Default column for loose pieces (no saved position), to the right of the agent. */
-const LOOSE_COLUMN_X = 320;
+/** Column of pieces connected to secondary ports (the agent's right border). */
+const SECONDARY_COLUMN_X = 420;
+/** Default column for loose pieces (no saved position), to the right of both columns. */
+const LOOSE_COLUMN_X = 640;
 const PIECE_ROW_HEIGHT = 90;
 
 /** localStorage access itself can throw (blocked storage); the canvas works without it. */
@@ -166,13 +168,11 @@ export function buildFlowNodes(
   agentType: AgentType,
   connected: ReadonlyArray<{ port: PortId; kind: PieceKind; id: number }>,
   pieces: readonly CanvasPiece[],
-  activePortIds: readonly PortId[],
   savedPositions: Readonly<Record<string, { x: number; y: number }>>,
   canEdit: boolean,
   looseNodeIds: readonly string[],
   draggingKind: PieceKind | null,
   draggingSupportsVideo: boolean,
-  onOpenPortPicker: (port: PortDef, row: DOMRect) => void,
 ): CanvasFlowNode[] {
   const ports = portsFor(agentType);
   const portOrder = new Map(ports.map((port, index) => [port.id, index]));
@@ -188,12 +188,9 @@ export function buildFlowNodes(
         typeCaption: agentType === 'ocr_agent' ? 'OCR agent' : 'Agent',
         ports: ports.filter((port) => !port.secondary),
         secondaryPorts: ports.filter((port) => port.secondary),
-        connectedPortIds: activePortIds,
         isTool: agent.is_tool === true,
-        canEdit,
         draggingKind,
         draggingSupportsVideo,
-        onOpenPortPicker,
       },
       // Nodes are never deletable here: resources are managed from their own pages.
       deletable: false,
@@ -206,35 +203,42 @@ export function buildFlowNodes(
   );
   // One card per piece even when it feeds several ports (e.g. one AI service
   // on Model and Transcription); the port labels aggregate in port order.
-  const deduped: Array<{ nodeId: string; piece: CanvasPiece; portLabels: string[] }> = [];
+  const portById = new Map(ports.map((port) => [port.id, port]));
+  const deduped: Array<{ nodeId: string; piece: CanvasPiece; portLabels: string[]; primaryFed: boolean }> = [];
   const dedupeIndex = new Map<string, number>();
   for (const entry of ordered) {
     const piece = byPieceId.get(`${entry.kind}:${entry.id}`);
     if (!piece) continue;
     const nodeId = `${entry.kind}:${entry.id}`;
     const label = ports[portOrder.get(entry.port) ?? 0].label;
+    // The card sits on the side of the ports it feeds (primary wins when both).
+    const primaryFed = portById.get(entry.port)?.secondary !== true;
     const seenAt = dedupeIndex.get(nodeId);
     if (seenAt !== undefined) {
       deduped[seenAt].portLabels.push(label);
+      deduped[seenAt].primaryFed ||= primaryFed;
       continue;
     }
     dedupeIndex.set(nodeId, deduped.length);
-    deduped.push({ nodeId, piece, portLabels: [label] });
+    deduped.push({ nodeId, piece, portLabels: [label], primaryFed });
   }
-  deduped.forEach((entry, index) => {
-    nodes.push({
-      id: entry.nodeId,
-      type: 'piece',
-      position:
-        savedPositions[entry.nodeId] ??
-        { x: PIECE_COLUMN_X, y: (index - (deduped.length - 1) / 2) * PIECE_ROW_HEIGHT },
-      data: { label: entry.piece.name, piece: entry.piece, portLabels: entry.portLabels },
-      // Deletable only to disconnect: handleBeforeDelete maps the card to its
-      // agent edges and never returns it as a removed node.
-      deletable: canEdit,
-      connectable: canEdit,
+  const placeGroup = (group: typeof deduped, x: number) =>
+    group.forEach((entry, index) => {
+      nodes.push({
+        id: entry.nodeId,
+        type: 'piece',
+        position:
+          savedPositions[entry.nodeId] ??
+          { x, y: (index - (group.length - 1) / 2) * PIECE_ROW_HEIGHT },
+        data: { label: entry.piece.name, piece: entry.piece, portLabels: entry.portLabels },
+        // Deletable only to disconnect: handleBeforeDelete maps the card to its
+        // agent edges and never returns it as a removed node.
+        deletable: canEdit,
+        connectable: canEdit,
+      });
     });
-  });
+  placeGroup(deduped.filter((entry) => entry.primaryFed), PIECE_COLUMN_X);
+  placeGroup(deduped.filter((entry) => !entry.primaryFed), SECONDARY_COLUMN_X);
   looseNodeIds.forEach((nodeId, index) => {
     const piece = byPieceId.get(nodeId);
     if (!piece) return;
@@ -255,6 +259,8 @@ function makeCanvasEdge(args: {
   port: PortId;
   piece: CanvasPiece;
   targetId: string;
+  /** Side of the piece card the edge leaves from: the one facing the port. */
+  sourceHandle: string;
   id?: string;
   pending?: boolean;
 }): CanvasEdge {
@@ -263,6 +269,7 @@ function makeCanvasEdge(args: {
     id: args.id ?? `${args.port}:${args.piece.kind}:${args.piece.id}`,
     source: `${args.piece.kind}:${args.piece.id}`,
     target: args.targetId,
+    sourceHandle: args.sourceHandle,
     targetHandle: args.port,
     type: 'default',
     deletable: true,
@@ -277,6 +284,7 @@ function makeCanvasEdge(args: {
 
 function buildFlowEdges(
   agentNodeId: string,
+  agentType: AgentType,
   connected: ReadonlyArray<{ port: PortId; kind: PieceKind; id: number }>,
   pieces: readonly CanvasPiece[],
 ): CanvasEdge[] {
@@ -285,7 +293,11 @@ function buildFlowEdges(
   for (const entry of connected) {
     const piece = byPieceId.get(`${entry.kind}:${entry.id}`);
     if (!piece) continue;
-    edges.push(makeCanvasEdge({ port: entry.port, piece, targetId: agentNodeId }));
+    // The edge leaves the card from the side facing its port's column.
+    const sourceHandle = portsFor(agentType).find((port) => port.id === entry.port)?.secondary
+      ? 'left'
+      : 'right';
+    edges.push(makeCanvasEdge({ port: entry.port, piece, targetId: agentNodeId, sourceHandle }));
   }
   return edges;
 }
@@ -414,99 +426,24 @@ function PortChooser({ name, ports, onPick, onCancel }: PortChooserProps) {
   );
 }
 
-interface PortPickerProps {
-  readonly port: PortDef;
-  /** Existing pieces the port accepts, already filtered by `piecesForPort`. */
-  readonly entries: readonly PortPickerEntry[];
-  /** Accepted kinds the user may create here (the palette's role rules). */
-  readonly createKinds: readonly PieceKind[];
-  /** Container-relative position of the row's «+». */
-  readonly x: number;
-  readonly y: number;
-  readonly onPick: (piece: CanvasPiece) => void;
-  readonly onCreate: (kind: PieceKind) => void;
-  readonly onClose: () => void;
-}
-
-/**
- * Small popover anchored to a port row's «+»: connect one of the pieces the
- * port accepts, or start creating one. Escape or a click outside closes it,
- * and focus moves to the first pickable entry.
- */
-function PortPicker({ port, entries, createKinds, x, y, onPick, onCreate, onClose }: PortPickerProps) {
-  const headingId = useId();
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // Disabled (retired) entries cannot take focus; the first pickable one does.
-    containerRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
-  }, []);
-
-  useEffect(() => {
-    const handlePointerDown = (event: MouseEvent) => {
-      if (event.target instanceof Node && containerRef.current?.contains(event.target)) return;
-      onClose();
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [onClose]);
-
+/** Draggable vertical strip next to a side panel: dragging it resizes that panel (desktop only). */
+function PanelDivider(props: {
+  readonly label: string;
+  readonly onStart: (event: PointerEvent<HTMLDivElement>) => void;
+  readonly onMove: (event: PointerEvent<HTMLDivElement>) => void;
+  readonly onEnd: () => void;
+}) {
   return (
     <div
-      ref={containerRef}
-      role="dialog"
-      aria-labelledby={headingId}
-      style={{ left: x, top: y }}
-      className="absolute z-20 w-56 rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-700 dark:bg-gray-800"
-    >
-      <p id={headingId} className="px-1 pb-1 text-sm font-medium text-gray-900 dark:text-gray-100">
-        Connect to {port.label}:
-      </p>
-      <div className="flex max-h-60 flex-col gap-0.5 overflow-y-auto">
-        {entries.map((entry) => (
-          <button
-            key={`${entry.piece.kind}:${entry.piece.id}`}
-            type="button"
-            disabled={entry.disabled}
-            title={entry.disabled ? 'This service is retired' : undefined}
-            onClick={() => onPick(entry.piece)}
-            className="flex min-w-0 items-center justify-between gap-2 rounded-lg px-2 py-1 text-left text-sm text-gray-800 transition-colors hover:bg-indigo-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-60 dark:text-gray-100 dark:hover:bg-indigo-900/30"
-          >
-            <span className="min-w-0 truncate" title={entry.piece.name}>
-              {entry.piece.name}
-            </span>
-            {entry.disabled && (
-              <span className="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/40 dark:text-red-200">
-                Retired
-              </span>
-            )}
-          </button>
-        ))}
-        {createKinds.map((kind) => (
-          <button
-            key={`create:${kind}`}
-            type="button"
-            onClick={() => onCreate(kind)}
-            className="flex items-center gap-2 rounded-lg px-2 py-1 text-left text-sm font-medium text-indigo-700 transition-colors hover:bg-indigo-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-indigo-300 dark:hover:bg-indigo-900/30"
-          >
-            <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            Create new {PIECE_SINGULAR[kind]}
-          </button>
-        ))}
-        {entries.length === 0 && createKinds.length === 0 && (
-          <p className="px-2 py-1 text-xs text-gray-500 dark:text-gray-400">
-            Everything this port accepts is already connected.
-          </p>
-        )}
-      </div>
-    </div>
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={props.label}
+      onPointerDown={props.onStart}
+      onPointerMove={props.onMove}
+      onPointerUp={props.onEnd}
+      onLostPointerCapture={props.onEnd}
+      className="hidden w-1 shrink-0 cursor-ew-resize touch-none select-none self-stretch rounded-full bg-transparent transition-colors hover:bg-indigo-300 md:block dark:hover:bg-indigo-600"
+    />
   );
 }
 
@@ -578,14 +515,6 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   /** Gesture token for pending-edge ids, so one gesture's cleanup can't cross into another's. */
   const pendingSeq = useRef(0);
 
-  // Ports with a pending connection also render their handle, so the dashed
-  // optimistic edge has somewhere to land until the refetch resolves.
-  const activePortIds = useMemo(() => {
-    const ids = new Set<PortId>(connected.map((entry) => entry.port));
-    for (const edge of pendingEdges) if (edge.data) ids.add(edge.data.port);
-    return [...ids];
-  }, [connected, pendingEdges]);
-
   /** Piece being dragged toward the canvas (palette or a loose card), for the port drop highlights. */
   const [draggingPiece, setDraggingPiece] = useState<CanvasPiece | null>(null);
   const draggingKind = draggingPiece?.kind ?? null;
@@ -593,18 +522,28 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
-  /** Opens the port's piece picker, anchored to the row's «+» and clamped inside the canvas. */
-  const openPortPicker = useCallback((port: PortDef, row: DOMRect) => {
-    const bounds = canvasRef.current?.getBoundingClientRect();
-    if (!bounds) return;
-    setChoice(null);
-    const width = 232;
-    const height = 272;
-    setPicker({
-      port,
-      x: Math.min(Math.max(row.left - bounds.left + 8, 8), bounds.width - width),
-      y: Math.min(Math.max(row.top - bounds.top, 8), bounds.height - height),
-    });
+  // Desktop widths of the two side panels; the thin dividers next to them drag-resize them.
+  const [paletteWidth, setPaletteWidth] = useState(224);
+  const [inspectorWidth, setInspectorWidth] = useState(320);
+  const panelDrag = useRef<null | { readonly side: 'palette' | 'inspector'; readonly startX: number; readonly start: number }>(null);
+  const startPanelResize = useCallback(
+    (side: 'palette' | 'inspector') => (event: PointerEvent<HTMLDivElement>) => {
+      panelDrag.current = { side, startX: event.clientX, start: side === 'palette' ? paletteWidth : inspectorWidth };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [paletteWidth, inspectorWidth],
+  );
+  const movePanelResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const drag = panelDrag.current;
+    if (!drag) return;
+    const delta = drag.side === 'palette' ? event.clientX - drag.startX : drag.startX - event.clientX;
+    const min = drag.side === 'palette' ? 180 : 280;
+    const max = drag.side === 'palette' ? 420 : 560;
+    const next = Math.min(max, Math.max(min, drag.start + delta));
+    (drag.side === 'palette' ? setPaletteWidth : setInspectorWidth)(next);
+  }, []);
+  const endPanelResize = useCallback(() => {
+    panelDrag.current = null;
   }, []);
 
   const flowNodes = useMemo(
@@ -615,13 +554,11 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
             agentType,
             connected,
             pieces,
-            activePortIds,
             layout.positions,
             canEdit,
             looseNodeIds,
             draggingKind,
             draggingSupportsVideo,
-            openPortPicker,
           )
         : [],
     [
@@ -629,19 +566,17 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       agentType,
       connected,
       pieces,
-      activePortIds,
       layout.positions,
       canEdit,
       looseNodeIds,
       draggingKind,
       draggingSupportsVideo,
-      openPortPicker,
     ],
   );
 
   const flowEdges = useMemo(
-    () => (agent ? buildFlowEdges(agentNodeId, connected, pieces) : []),
-    [agent, agentNodeId, connected, pieces],
+    () => (agent ? buildFlowEdges(agentNodeId, agentType, connected, pieces) : []),
+    [agent, agentNodeId, agentType, connected, pieces],
   );
 
   // Local, draggable copies of the adapted nodes/edges - same pattern as the
@@ -706,6 +641,8 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
    */
   const [creating, setCreating] = useState<{ readonly kind: PieceKind; readonly port?: PortDef } | null>(null);
   const closeCreate = useCallback(() => setCreating(null), []);
+  /** Piece being edited in the overlay wizard (skill, MCP, middleware, services, output parser). */
+  const [editingPiece, setEditingPiece] = useState<CanvasPiece | null>(null);
   /** AI service editing reuses the same manager (api, cache, toasts, save) the settings page uses, so an edit behaves identically in both. */
   const settingsCache = useSettingsCache();
   const servicesApi = {
@@ -747,16 +684,13 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
     [handleSave, refetch],
   );
   /** Port row whose «+» popover is open, anchored at container-relative coordinates. */
-  const [picker, setPicker] = useState<{ readonly port: PortDef; readonly x: number; readonly y: number } | null>(
-    null,
-  );
-  // The chooser, the picker, the creation and the edit modals belong to the agent they were opened for.
+  // The chooser, the creation, the edit modals and the selection belong to the agent they were opened for.
   useEffect(() => {
     setChoice(null);
     setCreating(null);
     setIsModalOpen(false);
     setEditingService(null);
-    setPicker(null);
+    setEditingPiece(null);
     setDraggingPiece(null);
   }, [agentId]);
 
@@ -782,6 +716,15 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
     );
     return stillConnected ? { type: 'edge', port: selected.port, piece } : null;
   }, [selectionState, agentId, agent, pieces, connected]);
+
+  /** Node id of the selected piece (piece or edge selection), so the palette can highlight it. */
+  const selectedPieceId = useMemo(
+    () =>
+      resolvedSelection && resolvedSelection.type !== 'agent'
+        ? `${resolvedSelection.piece.kind}:${resolvedSelection.piece.id}`
+        : null,
+    [resolvedSelection],
+  );
 
   /**
    * Removes a node from the live copy so the next sync re-adds it at its
@@ -903,7 +846,14 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       const pendingId = `pending:${port.id}:${piece.kind}:${piece.id}:${pendingSeq.current}`;
       setPendingEdges((current) => [
         ...current,
-        makeCanvasEdge({ port: port.id, piece, targetId: agentNodeId, id: pendingId, pending: true }),
+        makeCanvasEdge({
+          port: port.id,
+          piece,
+          targetId: agentNodeId,
+          sourceHandle: port.secondary ? 'left' : 'right',
+          id: pendingId,
+          pending: true,
+        }),
       ]);
 
       const nodeId = pieceNodeId(piece);
@@ -943,7 +893,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       // dropped on Transcription/Video explicitly; nudge when either is empty.
       const toastSuffix =
         target === 'model' && piece.kind === 'ai_service' && !connected.some((entry) => entry.port === 'transcription' || entry.port === 'video')
-          ? ' — to use it for transcription or video, drop it on that port or use its +'
+          ? ' — to use it for transcription or video, drop it on that port'
           : undefined;
       connectPiece(port, piece, toastSuffix);
     },
@@ -1073,7 +1023,13 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       });
       if (droppedOnAgent || rowPort) reseatNode(draggedNode.id);
       if (rowPort && piece) {
-        connectPiece(rowPort, piece);
+        // A port row that doesn't take the piece falls back to the body drop
+        // (single-possible-port pieces snap to that port instead of erroring).
+        if (rowPort.accepts.includes(piece.kind)) {
+          connectPiece(rowPort, piece);
+        } else {
+          dropOnAgent(piece);
+        }
         return;
       }
       if (droppedOnAgent && piece) dropOnAgent(piece);
@@ -1089,16 +1045,22 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       const fromAgent = connection.source === agentNodeId;
       const pieceNode = toAgent ? connection.source : fromAgent ? connection.target : null;
       const rawPortId = toAgent ? connection.targetHandle : fromAgent ? connection.sourceHandle : null;
-      if (!pieceNode || typeof rawPortId !== 'string') return;
+      if (!pieceNode) return;
       const parsed = parsePieceNodeId(pieceNode);
       const piece = parsed
         ? pieces.find((entry) => entry.kind === parsed.kind && entry.id === parsed.id)
         : undefined;
+      if (!parsed || !piece) return;
       const port = portsFor(agentType).find((entry) => entry.id === (rawPortId as PortId));
-      if (!parsed || !piece || !port) return;
-      connectPiece(port, piece);
+      if (port && port.accepts.includes(piece.kind)) {
+        connectPiece(port, piece);
+        return;
+      }
+      // No handle (dropped on the body) or an incompatible one: resolve like a
+      // body drop, so single-possible-port pieces still snap to their port.
+      dropOnAgent(piece);
     },
-    [agent, agentNodeId, agentType, pieces, connectPiece],
+    [agent, agentNodeId, agentType, pieces, connectPiece, dropOnAgent],
   );
 
   const handleBeforeDelete: OnBeforeDelete<CanvasFlowNode, CanvasEdge> = useCallback(
@@ -1195,19 +1157,19 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
       const payload = parsePieceDragPayload(event.dataTransfer.getData(PIECE_DRAG_MIME));
       if (!canEdit || !agent || !payload) return;
       event.preventDefault();
-      // A new drop replaces any chooser or picker still open from an earlier gesture.
+      // A new drop replaces any chooser still open from an earlier gesture.
       setChoice(null);
-      setPicker(null);
       setDraggingPiece(null);
       const piece = pieces.find((entry) => entry.kind === payload.kind && entry.id === payload.id);
       const instance = flowRef.current;
       if (!piece || !instance) return;
-      // A drop on a specific port row connects there; the agent body falls
-      // back to the default port or the chooser, anything else stays loose.
+      // A drop on a specific port row connects there — but only when that port
+      // takes the piece; anything else falls through to the body drop, where
+      // single-possible-port pieces snap to their port instead of erroring.
       const portId = portRowAtPoint(event.clientX, event.clientY);
       if (portId) {
         const port = portsFor(agentType).find((entry) => entry.id === portId);
-        if (port) {
+        if (port && piece && port.accepts.includes(piece.kind)) {
           connectPiece(port, piece);
           return;
         }
@@ -1234,39 +1196,6 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   );
 
   const handleCreate = useCallback((kind: PieceKind) => setCreating({ kind }), []);
-
-  const closePicker = useCallback(() => setPicker(null), []);
-
-  const handlePickerPick = useCallback(
-    (piece: CanvasPiece) => {
-      if (!picker) return;
-      setPicker(null);
-      connectPiece(picker.port, piece);
-    },
-    [picker, connectPiece],
-  );
-
-  const handlePickerCreate = useCallback(
-    (kind: PieceKind) => {
-      if (!picker) return;
-      setCreating({ kind, port: picker.port });
-      setPicker(null);
-    },
-    [picker],
-  );
-
-  const pickerEntries = useMemo(
-    () => (picker ? piecesForPort(picker.port, pieces, connected) : []),
-    [picker, pieces, connected],
-  );
-  /** One "Create new …" per accepted kind, with the palette's role rules. */
-  const pickerCreateKinds = useMemo(
-    () =>
-      picker
-        ? picker.port.accepts.filter((kind) => kind === 'silo' || kind === 'agent' || canCreateShared)
-        : [],
-    [picker, canCreateShared],
-  );
 
   const handleNodeClick: NodeMouseHandler<CanvasFlowNode> = useCallback(
     (_event, node) => {
@@ -1319,12 +1248,21 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
   return (
     <div className="flex w-full flex-col gap-3 md:h-full md:flex-row">
       <CanvasPalette
+        style={{ '--palette-w': `${paletteWidth}px` } as CSSProperties}
         pieces={pieces}
         agentType={agentType}
         canEdit={canEdit}
         canCreateShared={canCreateShared}
+        selectedPieceId={selectedPieceId}
         onCreate={handleCreate}
+        onSelectPiece={(piece) => selectCanvas({ type: 'piece', piece })}
         onDraggingChange={setDraggingPiece}
+      />
+      <PanelDivider
+        label="Resize pieces palette"
+        onStart={startPanelResize('palette')}
+        onMove={movePanelResize}
+        onEnd={endPanelResize}
       />
       <div
         ref={canvasRef}
@@ -1381,20 +1319,15 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
             onCancel={cancelChoice}
           />
         )}
-        {picker && (
-          <PortPicker
-            port={picker.port}
-            x={picker.x}
-            y={picker.y}
-            entries={pickerEntries}
-            createKinds={pickerCreateKinds}
-            onPick={handlePickerPick}
-            onCreate={handlePickerCreate}
-            onClose={closePicker}
-          />
-        )}
       </div>
+      <PanelDivider
+        label="Resize inspector"
+        onStart={startPanelResize('inspector')}
+        onMove={movePanelResize}
+        onEnd={endPanelResize}
+      />
       <CanvasInspector
+        style={{ '--inspector-w': `${inspectorWidth}px` } as CSSProperties}
         appId={appId}
         agent={agent}
         agentType={agentType}
@@ -1402,6 +1335,7 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
         canEdit={canEdit}
         canCreateShared={canCreateShared}
         onEditService={handleEditService}
+        onEditPiece={setEditingPiece}
         onSaveFields={saveAgentFields}
       />
       {creating && (
@@ -1412,6 +1346,17 @@ export function AgentCanvas({ appId, agentId, canEdit, canCreateShared = false, 
           onCreated={(kind, id, name, lifecycleStatus, supportsVideo) =>
             void handlePieceCreated(kind, id, name, lifecycleStatus, supportsVideo, creating.port)
           }
+        />
+      )}
+      {editingPiece && (
+        <EditPieceModal
+          appId={appId}
+          piece={editingPiece}
+          onClose={() => setEditingPiece(null)}
+          onSaved={() => {
+            setEditingPiece(null);
+            void refetch();
+          }}
         />
       )}
       {isModalOpen && editingService && (
