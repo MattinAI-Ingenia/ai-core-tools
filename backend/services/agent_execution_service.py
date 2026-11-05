@@ -5,6 +5,8 @@ import ast
 import base64
 import mimetypes
 import contextvars
+import base64
+import mimetypes
 import functools
 import json
 import posixpath
@@ -1792,9 +1794,11 @@ class AgentExecutionService:
         files = files or []
         image_files = [f for f in files if _is_image_upload(f)]
         files = [f for f in files if f not in image_files]
+        # One snapshot for both the image check and the evaluation (it raises 409 for a missing/retired service).
+        snapshot = SystemOneEvaluator.snapshot(agent)
         images: List[str] = []
         if image_files:
-            endpoint = SystemOneEvaluator.snapshot(agent).endpoint
+            endpoint = snapshot.endpoint
             if not system_one_client.supports_images(endpoint.provider, endpoint.model):
                 raise HTTPException(
                     status_code=400,
@@ -1808,9 +1812,13 @@ class AgentExecutionService:
                 if mime not in system_one_client.IMAGE_MIME_TYPES:
                     raise HTTPException(status_code=400, detail=f"Only PNG and JPEG images are supported ({f.filename})")
                 images.append(f"data:{mime};base64,{base64.b64encode(await f.read()).decode()}")
-        processed = await self._process_files_for_agent(files, agent) if files else []
-        readable = {p["filename"] for p in processed}
-        unreadable = [f.filename for f in files if f.filename not in readable]
+        # One file at a time: a failure is told apart by file, not by name (two uploads can share one).
+        processed, unreadable = [], []
+        for f in files:
+            result = await self._process_files_for_agent([f], agent)
+            processed.extend(result)
+            if not result:
+                unreadable.append(f.filename)
         if unreadable:
             raise HTTPException(status_code=400, detail=f"Could not read text from: {', '.join(unreadable)}")
         # Read fine but nothing in it (a scanned PDF has no text layer): say so, or the rest of the input would be
@@ -1823,7 +1831,6 @@ class AgentExecutionService:
                 detail=f"No extractable text in: {', '.join(empty)}",
             )
 
-        snapshot = SystemOneEvaluator.snapshot(agent)
         # The evaluation can wait for a slot (up to 20 s) and for the server: do it without holding a pooled database
         # connection, or a burst of requests pins the whole pool and their own authentication cannot get one.
         db.commit()      # nothing is pending (only reads so far); this hands the connection back to the pool

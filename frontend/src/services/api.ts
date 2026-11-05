@@ -88,19 +88,15 @@ export interface SystemSkillWriteData {
   is_enabled?: boolean | null;
 }
 
-/** Rate-limit usage snapshot for a single app (also the per-item shape returned by getUsageStats()). */
-export interface UsageStats {
+/** Current rate-limit usage snapshot for one active agent. */
+export interface AgentRateLimitUsage {
+  agent_id: number;
   usage_percentage: number;
-  stress_level: 'low' | 'moderate' | 'high' | 'critical' | 'unlimited';
   current_usage: number;
   limit: number;
   remaining: number;
   reset_in_seconds: number;
   is_over_limit: boolean;
-}
-
-export interface AppUsageStat extends UsageStats {
-  app_id: number;
 }
 
 export interface App {
@@ -126,7 +122,6 @@ export interface App {
   silo_count: number;
   collaborator_count: number;
   onboarding_dismissed?: boolean;
-  usage_stats?: UsageStats;
 }
 
 /** RAG retrieval-time filter applied on top of an agent's fixed silo. Mirrors RagConfigSection's RagFixedFilter shape. */
@@ -165,6 +160,7 @@ export interface Agent {
   skill_ids?: number[];
   middleware_ids?: number[];
   created_at: string;
+  last_used_date: string | null;
   request_count: number;
   marketplace_visibility?: MarketplaceVisibility;
   a2a_enabled?: boolean;
@@ -972,11 +968,7 @@ class ApiService {
     });
   }
 
-  async getUsageStats(): Promise<AppUsageStat[]> {
-    return this.request('/internal/usage-stats/');
-  }
-
-  async getAppUsageStats(appId: number): Promise<UsageStats> {
+  async getAppAgentUsageStats(appId: number): Promise<AgentRateLimitUsage[]> {
     return this.request(`/internal/usage-stats/${appId}`);
   }
 
@@ -1578,8 +1570,10 @@ class ApiService {
     });
   }
 
-  /** Reachability and token check for the services table (read-only, never spends tokens). */
-  async getSystemOneServiceStatus(appId: number, serviceId: number): Promise<{ status: 'success' | 'error'; message: string; verifiable: boolean }> {
+  /** Reachability, token check and published limits (read-only, viewers too, never spends tokens). */
+  async getSystemOneServiceStatus(
+    appId: number, serviceId: number,
+  ): Promise<Pick<SystemOneConnectionResult, 'status' | 'message' | 'limits'> & { verifiable: boolean }> {
     return this.request(`/internal/apps/${appId}/system-one-services/${serviceId}/status`);
   }
 

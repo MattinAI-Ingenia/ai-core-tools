@@ -16,7 +16,7 @@ System One is a **decision model**: it reads a text and answers a fixed list of 
 | **System One agent** | An agent type (like OCR agents) that requires exactly one System One service and a fixed list of questions. Created from **Agents → Create Agent → System One Agent**. |
 | **Question** | One thing to decide about the text. Three types: yes/no (`noul`), pick one option (`choice`), rate on an ordered scale (`score`). |
 
-A System One agent has no LLM, memory, prompt, RAG, MCP or skills. Each evaluation is independent: there is no conversation.
+A System One agent has no LLM, memory, prompt, RAG, MCP or skills. Each evaluation is independent: there is no conversation. Because it does not chat, it is not offered where a chat is: the chat endpoints, MCP servers, A2A, scheduled tasks, the OpenAI-compatible API and the marketplace (publishing one is refused).
 
 ---
 
@@ -36,11 +36,15 @@ A System One server accepts a limited number of simultaneous requests (Nimble: 4
 
 The test (steps 2 and 3) reads the server's `max_concurrent_requests` and prefills the cap with it. A cap **above that limit cannot be saved**, because it could never be used.
 
-If the database cannot be reached, the call goes ahead without the global limit (the process-local cap still applies): System One does not depend on it. The client also retries `429`, `502`, `503`, `529` up to three times, honoring `Retry-After`, and a changed value applies to new calls without a restart. A service saved before this behaviour had its cap read as *per process*; it now means the total, which is more conservative.
+If the database cannot be reached, the call goes ahead without the global limit (the process-local cap still applies): System One does not depend on it. The client also retries `429`, `502`, `503`, `529` (up to three attempts in total), honoring `Retry-After`, and a changed value applies to new calls without a restart. A service saved before this behaviour had its cap read as *per process*; it now means the total, which is more conservative.
 
 ### Deleting a service
 
 A service can be deleted even if agents use it, like an AI service. The agents are **not** deleted: they keep their questions but cannot run (evaluating them answers `409`, and as a tool they tell the calling LLM that their service is gone) until you choose another service in their settings. The UI warns before deleting and says how many agents are affected.
+
+### End of service
+
+Like AI, embedding and sandbox services, a System One service can have a planned **end of service** date and a deprecation notice (set them in the service wizard). Before the date the service is shown as deprecated and agents using it show a warning; from that date it is **retired**: its agents cannot evaluate (`409 SERVICE_RETIRED`; used as a tool, the calling agent's turn fails with the same `409`, like any agent tool whose service is retired), and it can no longer be chosen for an agent that did not already have it. Test connection, copy and delete keep working. The same rule applies to the agent's summarization LLM: a retired AI service cannot be newly chosen, and an agent that already has one truncates long texts instead of summarizing them (with a warning in the log). Export/import carries the date and notice.
 
 ## Defining questions
 

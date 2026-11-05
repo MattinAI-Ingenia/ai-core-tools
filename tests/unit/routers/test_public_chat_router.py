@@ -7,7 +7,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from routers.public.v1 import chat as chat_module
@@ -21,7 +21,9 @@ from routers.public.v1.auth import create_api_key_user_context
 def _patch_auth(mocker):
     mocker.patch.object(chat_module, "validate_api_key_for_app", return_value=None)
     mocker.patch.object(
-        chat_module, "validate_agent_ownership", return_value=MagicMock()
+        chat_module,
+        "validate_agent_ownership",
+        return_value=MagicMock(app=MagicMock(agent_rate_limit=0)),
     )
 
 
@@ -129,6 +131,7 @@ class TestCallAgent:
         _patch_auth(mocker)
         _mock_process_files(mocker)
         svc = _mock_execution_service(mocker)
+        response = Response()
 
         result = await chat_module.call_agent(
             request=_FakeRequest(),
@@ -141,9 +144,11 @@ class TestCallAgent:
             conversation_id=None,
             api_key="key",
             db=MagicMock(),
+            response=response,
         )
         assert result.response == "Hello!"
         assert result.conversation_id == 42
+        assert response.headers["X-RateLimit-Limit"] == "0"
 
     @pytest.mark.asyncio
     async def test_agent_ownership_validated(self, mocker):
@@ -156,7 +161,8 @@ class TestCallAgent:
 
         with pytest.raises(HTTPException) as exc_info:
             await chat_module.call_agent(
-                request=_FakeRequest(), app_id=1, agent_id=999, message="hi", files=[],
+                request=_FakeRequest(), response=Response(),
+                app_id=1, agent_id=999, message="hi", files=[],
                 file_references=None, search_params=None,
                 conversation_id=None, api_key="key", db=MagicMock(),
             )
@@ -173,7 +179,8 @@ class TestCallAgent:
 
         with pytest.raises(HTTPException) as exc_info:
             await chat_module.call_agent(
-                request=_FakeRequest(), app_id=1, agent_id=1, message="hi", files=[],
+                request=_FakeRequest(), response=Response(),
+                app_id=1, agent_id=1, message="hi", files=[],
                 file_references=None, search_params=None,
                 conversation_id=None, api_key="key", db=MagicMock(),
             )
@@ -203,7 +210,7 @@ class TestCallAgent:
 
         response = await asyncio.wait_for(
             chat_module.call_agent(
-                request=_FakeRequest(disconnected=True), app_id=1, agent_id=1,
+                request=_FakeRequest(disconnected=True), response=Response(), app_id=1, agent_id=1,
                 message="hi", files=[], file_references=None, search_params=None,
                 conversation_id=None, api_key="key", db=MagicMock(),
             ),
@@ -226,7 +233,7 @@ class TestCallAgent:
         svc.execute_agent_chat_with_file_refs = AsyncMock(side_effect=_slow_execution)
 
         result = await chat_module.call_agent(
-            request=_FakeRequest(disconnected=False), app_id=1, agent_id=1,
+            request=_FakeRequest(disconnected=False), response=Response(), app_id=1, agent_id=1,
             message="hi", files=[], file_references=None, search_params=None,
             conversation_id=None, api_key="key", db=MagicMock(),
         )
@@ -245,6 +252,7 @@ class TestCallAgentStream:
         _mock_streaming_service(mocker)
 
         result = await chat_module.call_agent_stream(
+            response=Response(),
             app_id=1, agent_id=1, message="Hello", files=[],
             file_references=None, search_params=None,
             conversation_id=None, api_key="key", db=MagicMock(),
@@ -263,6 +271,7 @@ class TestCallAgentStream:
 
         with pytest.raises(HTTPException) as exc_info:
             await chat_module.call_agent_stream(
+                response=Response(),
                 app_id=1, agent_id=999, message="hi", files=[],
                 file_references=None, search_params=None,
                 conversation_id=None, api_key="key", db=MagicMock(),

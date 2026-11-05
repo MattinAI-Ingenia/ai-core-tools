@@ -149,7 +149,6 @@ class AgentExportService(BaseExportService):
             middleware_names=[
                 assoc.middleware.name for assoc in (agent.middleware_associations or []) if assoc.middleware
             ],
-            is_tool=bool(agent.is_tool),
             has_memory=agent.has_memory,
             skill_router_enabled=getattr(agent, 'skill_router_enabled', False) or False,
             memory_max_messages=agent.memory_max_messages,
@@ -157,6 +156,7 @@ class AgentExportService(BaseExportService):
             memory_summarize_threshold=agent.memory_summarize_threshold,
             temperature=agent.temperature,
             lightrag_query_mode=agent.lightrag_query_mode,
+            is_tool=bool(agent.is_tool),
             # OCR-specific fields
             vision_service_name=vision_service_name,
             vision_system_prompt=vision_system_prompt,

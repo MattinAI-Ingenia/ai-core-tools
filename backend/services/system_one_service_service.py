@@ -13,9 +13,11 @@ from schemas.system_one_service_schemas import (
     SystemOneServiceDetailSchema,
     SystemOneServiceListItemSchema,
 )
+from services.service_lifecycle_service import ServiceLifecycleService
 from tools import system_one_client
 from utils.logger import get_logger
 from utils.secret_utils import is_masked_key, mask_api_key
+from utils.service_lifecycle import SERVICE_KIND_SYSTEM_ONE, compute_lifecycle_status, to_utc
 
 logger = get_logger(__name__)
 
@@ -40,7 +42,7 @@ def _read_extra(raw: Optional[str]) -> Dict[str, Any]:
 
 
 def max_concurrency_of(service: SystemOneService) -> int:
-    """Per-process cap stored in ``extra_config`` (1 when missing or broken)."""
+    """Concurrency cap stored in ``extra_config`` (global, for the whole backend; 1 when missing or broken)."""
     value = _read_extra(service.extra_config).get("max_concurrency")
     return value if isinstance(value, int) and value >= 1 else 1
 
@@ -54,7 +56,18 @@ def provider_of(service: SystemOneService) -> str:
 class SystemOneServiceService:
 
     @staticmethod
-    def _to_list_item(service: SystemOneService, agent_count: int = 0) -> SystemOneServiceListItemSchema:
+    def _lifecycle_fields(service: SystemOneService, warning_days: int) -> Dict[str, Any]:
+        """End-of-service fields of a read schema, with the status computed now."""
+        return {
+            "end_of_service_at": to_utc(service.end_of_service_at),
+            "deprecation_notice": service.deprecation_notice,
+            "lifecycle_status": compute_lifecycle_status(service.end_of_service_at, warning_days).value,
+        }
+
+    @staticmethod
+    def _to_list_item(
+        service: SystemOneService, agent_count: int = 0, *, warning_days: int
+    ) -> SystemOneServiceListItemSchema:
         return SystemOneServiceListItemSchema(
             agent_count=agent_count,
             service_id=service.service_id,
@@ -65,10 +78,11 @@ class SystemOneServiceService:
             model=service.description or "",
             max_concurrency=max_concurrency_of(service),
             created_at=service.create_date,
+            **SystemOneServiceService._lifecycle_fields(service, warning_days),
         )
 
     @staticmethod
-    def _to_detail(service: SystemOneService) -> SystemOneServiceDetailSchema:
+    def _to_detail(service: SystemOneService, *, warning_days: int) -> SystemOneServiceDetailSchema:
         return SystemOneServiceDetailSchema(
             service_id=service.service_id,
             name=service.name,
@@ -79,12 +93,15 @@ class SystemOneServiceService:
             model=service.description or "",
             max_concurrency=max_concurrency_of(service),
             created_at=service.create_date,
+            **SystemOneServiceService._lifecycle_fields(service, warning_days),
         )
 
     @staticmethod
     def get_system_one_services_by_app_id(db: Session, app_id: int) -> List[SystemOneServiceListItemSchema]:
+        warning_days = ServiceLifecycleService.warning_days(db)
         return [
-            SystemOneServiceService._to_list_item(s, len(SystemOneServiceRepository.get_agents_using(db, s.service_id)))
+            SystemOneServiceService._to_list_item(
+                s, len(SystemOneServiceRepository.get_agents_using(db, s.service_id)), warning_days=warning_days)
             for s in SystemOneServiceRepository.get_by_app_id(db, app_id)
         ]
 
@@ -94,11 +111,14 @@ class SystemOneServiceService:
             return SystemOneServiceDetailSchema(service_id=0, name="", endpoint="", api_key="", model="",
                                                 max_concurrency=1)
         service = SystemOneServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
-        return SystemOneServiceService._to_detail(service) if service else None
+        if not service:
+            return None
+        return SystemOneServiceService._to_detail(service, warning_days=ServiceLifecycleService.warning_days(db))
 
     @staticmethod
     def create_or_update_system_one_service(
-        db: Session, app_id: int, service_id: int, data: CreateUpdateSystemOneServiceSchema
+        db: Session, app_id: int, service_id: int, data: CreateUpdateSystemOneServiceSchema,
+        actor_id: Optional[int] = None,
     ) -> Optional[SystemOneServiceDetailSchema]:
         # No private-address blocking on purpose: a self-hosted server normally sits on a private network.
         # Only the scheme/host are checked; only administrators can reach this code.
@@ -124,14 +144,19 @@ class SystemOneServiceService:
             raise ValueError("The URL changed: type the token again (or clear it) so it is not sent to a new server")
         if not is_masked_key(token):
             service.api_key = token or None
-        concurrency = data.max_concurrency or system_one_client.default_max_concurrency(None)
+        # default_max_concurrency(None) is 1: the shared server cap is suggested by the probe, never assumed here.
+        concurrency = data.max_concurrency or 1
         service.extra_config = json.dumps({"max_concurrency": concurrency, "provider": data.provider})
+        ServiceLifecycleService.apply_lifecycle_fields(service, SERVICE_KIND_SYSTEM_ONE, data, actor_id)
 
         if service_id == 0:
             service = SystemOneServiceRepository.create(db, service)
+            if service.end_of_service_at is not None:
+                ServiceLifecycleService.log_change(
+                    service, SERVICE_KIND_SYSTEM_ONE, None, service.end_of_service_at, actor_id)
         else:
             service = SystemOneServiceRepository.update(db, service)
-        return SystemOneServiceService._to_detail(service)
+        return SystemOneServiceService._to_detail(service, warning_days=ServiceLifecycleService.warning_days(db))
 
     @staticmethod
     def copy_system_one_service(db: Session, app_id: int, service_id: int) -> Optional[SystemOneServiceDetailSchema]:
@@ -144,6 +169,7 @@ class SystemOneServiceService:
         while new_name in existing:
             new_name = f"{base_name} Copy {counter}"
             counter += 1
+        # end_of_service_at / deprecation_notice stay unset on purpose: a copy is a fresh service, not a retired one.
         copy = SystemOneService(
             app_id=app_id,
             name=new_name,
@@ -153,7 +179,8 @@ class SystemOneServiceService:
             extra_config=service.extra_config,
             create_date=datetime.now(),
         )
-        return SystemOneServiceService._to_detail(SystemOneServiceRepository.create(db, copy))
+        created = SystemOneServiceRepository.create(db, copy)
+        return SystemOneServiceService._to_detail(created, warning_days=ServiceLifecycleService.warning_days(db))
 
     @staticmethod
     def _agents_using(db: Session, service_id: int) -> List[Dict[str, Any]]:
@@ -213,7 +240,8 @@ class SystemOneServiceService:
 
     @staticmethod
     async def test_connection_with_config(
-        db: Session, app_id: int, config: Dict[str, Any], service_id: Optional[int] = None
+        db: Session, app_id: int, config: Dict[str, Any], service_id: Optional[int] = None,
+        live_call: bool = True,
     ) -> Dict[str, Any]:
         """Probe the server with the form's values (nothing is saved).
 
@@ -229,6 +257,7 @@ class SystemOneServiceService:
             api_key = (stored.api_key if same else None) or ""
         try:
             return await SystemOneServiceService._verify(endpoint, api_key, (config.get("model") or "").strip(),
+                                                         live_call=live_call,
                                                          provider=config.get("provider") or system_one_client.PROVIDER_SYSTEM_ONE)
         except ValueError as exc:
             return _failure(str(exc))
@@ -238,8 +267,8 @@ class SystemOneServiceService:
         service = SystemOneServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
         if not service:
             return None
-        try:
-            return await SystemOneServiceService._verify(service.endpoint or "", service.api_key or "", service.description or "",
-                                                         live_call=live_call, provider=provider_of(service))
-        except ValueError as exc:
-            return _failure(str(exc))
+        return await SystemOneServiceService.test_connection_with_config(
+            db, app_id,
+            {"endpoint": service.endpoint or "", "api_key": service.api_key or "",
+             "model": service.description or "", "provider": provider_of(service)},
+            service_id=service_id, live_call=live_call)

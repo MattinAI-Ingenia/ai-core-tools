@@ -1,10 +1,12 @@
+import type { ServiceLifecycleFields } from './services';
+
 // System One: connections, question definitions and evaluation results.
 // Text; images only for the models that take them (see `supports_images`).
 
 export type SystemOneProvider = 'system_one' | 'openai_decisions';
 
 
-export interface SystemOneService {
+export interface SystemOneService extends Partial<ServiceLifecycleFields> {
   service_id: number;
   name: string;
   endpoint: string;
@@ -31,6 +33,9 @@ export interface SystemOneServicePayload {
   api_key: string;
   model: string;
   max_concurrency: number | null;
+  /** ISO datetime (00:00 UTC of the picked day) or null to clear. Omitted = keep on update. */
+  end_of_service_at?: string | null;
+  deprecation_notice?: string | null;
 }
 
 export interface SystemOneConnectionResult {
@@ -44,8 +49,6 @@ export interface SystemOneConnectionResult {
   limits: Record<string, number> | null;
   /** The server's own limit (the cap is the total, shared by all backend processes); null when it did not report its limits. */
   suggested_max_concurrency?: number | null;
-  /** True when the server cannot list models and the check was one real, tiny call with the chosen model. */
-  checked_with_call?: boolean;
 }
 
 // ----------------------------------------------------------------- questions
