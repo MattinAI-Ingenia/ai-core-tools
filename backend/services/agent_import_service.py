@@ -890,6 +890,7 @@ class AgentImportService:
                 if export_data.agent.middleware_names:
                     self._attach_middlewares(existing_agent, middleware_ids, warnings)
                 self.session.commit()
+                self._sync_lightrag_router_skill(existing_agent, app_id)
                 warnings.append(
                     "Existing agent configuration updated. "
                     "Conversation history preserved."
@@ -1011,6 +1012,7 @@ class AgentImportService:
         if middleware_ids:
             self._attach_middlewares(new_agent, middleware_ids, warnings)
         self.session.commit()
+        self._sync_lightrag_router_skill(new_agent, app_id)
 
         return ImportSummarySchema(
             component_type=ComponentType.AGENT,
@@ -1050,6 +1052,20 @@ class AgentImportService:
         )
         warnings.extend(middleware_warnings)
         return ids
+
+    def _sync_lightrag_router_skill(self, agent: Agent, app_id: int) -> None:
+        """Attach (or detach) the LightRAG Query Router skill, as the agent form does.
+
+        Skills are not exported, so without this a 'skill-routed' agent imports with no router.
+        """
+        from services.agent_service import AgentService
+
+        agent_service = AgentService()
+        if agent.lightrag_query_mode == "skill-routed":
+            skill = agent_service.ensure_lightrag_router_skill(self.session, app_id)
+            agent_service.attach_skill_to_agent(self.session, agent.agent_id, skill.skill_id)
+        else:
+            agent_service.cleanup_lightrag_router_skill(self.session, app_id, agent.agent_id)
 
     def _attach_middlewares(self, agent: Agent, middleware_ids: List[int], warnings: List[str]) -> None:
         """Attach middlewares, skipping those the agent cannot take (repeated type, approval without memory)."""

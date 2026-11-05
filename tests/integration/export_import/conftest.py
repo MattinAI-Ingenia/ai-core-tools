@@ -93,7 +93,8 @@ def engine(test_db_url):
         for table in Base.metadata.tables.values():
             for column in table.columns:
                 typ = column.type
-                if isinstance(typ, _sa.Enum) and not typ.create_type:
+                # Only postgresql.ENUM has create_type; a generic sa.Enum is created by create_all.
+                if isinstance(typ, _sa.Enum) and not getattr(typ, "create_type", True):
                     labels = ", ".join(f"'{label}'" for label in typ.enums)
                     try:
                         conn.exec_driver_sql(f"CREATE TYPE {typ.name} AS ENUM ({labels})")

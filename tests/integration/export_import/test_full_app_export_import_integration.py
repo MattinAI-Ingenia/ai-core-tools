@@ -792,3 +792,79 @@ class TestAgentA2AExportImportIntegration:
                 db_session.commit()
             db_session.delete(ocr_agent)
             db_session.commit()
+
+
+@pytest.mark.integration
+class TestLightRAGExportImportIntegration:
+    """LightRAG silo config and the skill-routed router skill survive a full-app round trip."""
+
+    def test_lightrag_silo_and_router_skill_round_trip(self, db_session: Session, test_app: App):
+        from models.agent import AgentSkill
+        from schemas.export_schemas import (
+            ExportAgentSchema, ExportAIServiceSchema, ExportEmbeddingServiceSchema,
+            ExportMetadataSchema, ExportSiloSchema,
+        )
+        from services.agent_service import LIGHTRAG_ROUTER_SKILL_NAME
+
+        def llm(name):
+            return ExportAIServiceSchema(name=name, provider="OpenAI", model_name=name)
+
+        export_data = AppExportFileSchema(
+            metadata=ExportMetadataSchema(),
+            app={"name": "LightRAG round trip"},
+            ai_services=[llm("extract-llm"), llm("keywords-llm"), llm("agent-llm")],
+            embedding_services=[
+                ExportEmbeddingServiceSchema(name="emb", provider="OpenAI", model_name="emb")
+            ],
+            silos=[ExportSiloSchema(
+                name="kb", type="CUSTOM", vector_db_type="LIGHTRAG", embedding_service_name="emb",
+                extract_service_name="extract-llm", keywords_service_name="keywords-llm",
+                vlm_service_name="missing-llm",  # not in the file -> warning, NULL
+                lightrag_vector_db_type="PGVECTOR", lightrag_chunk_token_size=512,
+                lightrag_language="Spanish", lightrag_entity_types_mode="manual",
+            )],
+            agents=[ExportAgentSchema(
+                name="router agent", service_name="agent-llm", silo_name="kb",
+                has_memory=False, lightrag_query_mode="skill-routed",
+            )],
+        )
+
+        summary = FullAppImportService(db_session).import_full_app(
+            export_data=export_data, user_id=test_app.owner_id,
+            conflict_mode=ConflictMode.FAIL, new_name=f"LightRAG RT {datetime.now().timestamp()}",
+        )
+        imported_app = db_session.get(App, summary.app_id)
+        try:
+            assert not summary.total_errors
+            assert any("missing-llm" in w for w in summary.total_warnings)
+            silo = db_session.query(Silo).filter(Silo.app_id == summary.app_id).one()
+            assert silo.extract_service.name == "extract-llm"
+            assert silo.indexing_service_id == silo.extract_service_id
+            assert silo.keywords_service.name == "keywords-llm"
+            assert silo.vlm_service_id is None
+            assert (silo.lightrag_vector_db_type, silo.lightrag_chunk_token_size) == ("PGVECTOR", 512)
+            assert (silo.lightrag_language, silo.lightrag_entity_types_mode) == ("Spanish", "manual")
+
+            agent = db_session.query(Agent).filter(Agent.app_id == summary.app_id).one()
+            skill_names = [
+                link.skill.name
+                for link in db_session.query(AgentSkill).filter(AgentSkill.agent_id == agent.agent_id)
+            ]
+            assert skill_names == [LIGHTRAG_ROUTER_SKILL_NAME]
+
+            # And back out: the export carries the same names and config.
+            exported = FullAppExportService(db_session).export_full_app(
+                summary.app_id, user_id=test_app.owner_id
+            )
+            out = exported.silos[0]
+            assert (out.extract_service_name, out.keywords_service_name) == ("extract-llm", "keywords-llm")
+            assert (out.lightrag_chunk_token_size, out.lightrag_language) == (512, "Spanish")
+        finally:
+            if imported_app:
+                from models.skill import Skill
+
+                for agent in db_session.query(Agent).filter(Agent.app_id == summary.app_id):
+                    db_session.query(AgentSkill).filter(AgentSkill.agent_id == agent.agent_id).delete()
+                db_session.query(Skill).filter(Skill.app_id == summary.app_id).delete()
+                _delete_app(db_session, imported_app)
+                db_session.commit()

@@ -5,9 +5,10 @@ from datetime import datetime
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from models.silo import Silo
+from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
 from models.output_parser import OutputParser
-from schemas.export_schemas import SiloExportFileSchema
+from schemas.export_schemas import LIGHTRAG_SILO_FIELDS, SiloExportFileSchema
 from schemas.import_schemas import (
     ConflictMode,
     ValidateImportResponseSchema,
@@ -19,7 +20,9 @@ from services.embedding_service_import_service import EmbeddingServiceImportServ
 from services.output_parser_import_service import OutputParserImportService
 from repositories.silo_repository import SiloRepository
 import logging
-from utils.service_lifecycle import SERVICE_KIND_EMBEDDING, RetiredServiceAssignmentError, ensure_assignable
+from utils.service_lifecycle import (
+    SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, RetiredServiceAssignmentError, ensure_assignable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,44 @@ class SiloImportService:
                 )
                 return service
         return None
+
+    def _resolve_role_services(self, export_silo, app_id: int, warnings: list) -> dict:
+        """LightRAG role AI services by exported name -> {column: service_id}.
+
+        The app's own service first, then a system one (app_id NULL); a full-app import
+        always lands in a new app, so its services keep their exported names.
+        Missing -> warning + NULL.
+        """
+        ids = {}
+        for column, name in (
+            ("extract_service_id", export_silo.extract_service_name),
+            ("keywords_service_id", export_silo.keywords_service_name),
+            ("vlm_service_id", export_silo.vlm_service_name),
+        ):
+            if not name:
+                continue
+            for scope in (AIService.app_id == app_id, AIService.app_id.is_(None)):
+                service = (
+                    self.session.query(AIService)
+                    .filter(AIService.name == name, scope)
+                    .order_by(AIService.service_id)
+                    .first()
+                )
+                if service is not None:
+                    break
+            if service is None:
+                warnings.append(
+                    f"AI service '{name}' not found: set the silo's {column.removesuffix('_id')} manually"
+                )
+                continue
+            try:
+                ensure_assignable(service, None, column, SERVICE_KIND_AI)
+            except RetiredServiceAssignmentError as exc:
+                raise ValueError(str(exc)) from exc
+            ids[column] = service.service_id
+        if "extract_service_id" in ids:
+            ids["indexing_service_id"] = ids["extract_service_id"]  # legacy alias, kept in sync
+        return ids
 
     def get_by_name_and_app(self, name: str, app_id: int) -> Optional[Silo]:
         """Get Silo by name and app ID.
@@ -395,8 +436,16 @@ class SiloImportService:
                     next_steps=[],
                 )
 
-        # Create new silo (empty, no vectors)
+        # Create new silo (empty, no vectors). LightRAG config only on create: it is
+        # immutable once indexed, so OVERRIDE above leaves it alone.
+        create_warnings = []
+        lightrag_config = {  # None keeps the model default
+            field: value for field in LIGHTRAG_SILO_FIELDS
+            if (value := getattr(export_data.silo, field)) is not None
+        }
+        lightrag_config.update(self._resolve_role_services(export_data.silo, app_id, create_warnings))
         new_silo = Silo(
+            **lightrag_config,
             app_id=app_id,
             name=final_name,
             silo_type=export_data.silo.type,  # Map type -> silo_type
@@ -425,7 +474,7 @@ class SiloImportService:
             created=True,
             conflict_detected=existing_silo is not None,
             dependencies_created=dependencies_created,
-            warnings=[],
+            warnings=create_warnings,
             next_steps=[
                 "Upload documents to the silo to generate vector embeddings",
                 "Configure embedding service API key if not already set",

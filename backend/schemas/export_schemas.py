@@ -117,7 +117,32 @@ class ExportSiloSchema(BaseModel):
     metadata_definition_name: Optional[str] = None  # Reference to OutputParser
     fixed_metadata: bool = False
     description: Optional[str] = None
+    # LightRAG (vector_db_type == 'LIGHTRAG'); role services by name. All optional so
+    # older export files keep importing.
+    extract_service_name: Optional[str] = None
+    keywords_service_name: Optional[str] = None
+    vlm_service_name: Optional[str] = None
+    lightrag_vector_db_type: Optional[str] = None
+    lightrag_chunk_strategy: Optional[str] = None
+    lightrag_chunk_token_size: Optional[int] = None
+    lightrag_chunk_overlap_token_size: Optional[int] = None
+    lightrag_language: Optional[str] = None
+    lightrag_entity_extract_max_gleaning: Optional[int] = None
+    lightrag_max_source_ids_per_entity: Optional[int] = None
+    lightrag_max_source_ids_per_relation: Optional[int] = None
+    lightrag_entity_types: Optional[str] = None
+    lightrag_entity_types_mode: Optional[str] = None
+    source_label_fields: Optional[str] = None
     # Exclude: vectors, embeddings (heavy data), collection_name (auto-generated)
+
+
+# Silo columns copied verbatim between Silo and ExportSiloSchema (same names).
+LIGHTRAG_SILO_FIELDS = (
+    "lightrag_vector_db_type", "lightrag_chunk_strategy", "lightrag_chunk_token_size",
+    "lightrag_chunk_overlap_token_size", "lightrag_language", "lightrag_entity_extract_max_gleaning",
+    "lightrag_max_source_ids_per_entity", "lightrag_max_source_ids_per_relation",
+    "lightrag_entity_types", "lightrag_entity_types_mode", "source_label_fields",
+)
 
 
 # ==================== DOMAIN ====================
