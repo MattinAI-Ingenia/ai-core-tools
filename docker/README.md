@@ -447,7 +447,7 @@ Cuando el cliente tenga dominio interno y abra el 443:
      IP real (y entonces aplica el punto anterior sobre
      `CADDY_TRUSTED_PROXIES`).
    - **URL pública**: con TLS, `A2A_PUBLIC_BASE_URL` (o, si está vacía,
-     `FRONTEND_URL`) debe ser la URL `https://` pública real
+     `AICT_PUBLIC_URL`) debe ser la URL `https://` pública real
      (`https://mattinai.cliente.local`), no `http://localhost` — de lo
      contrario las tarjetas A2A y las URLs de fichero firmadas apuntan al
      esquema/host equivocado.
