@@ -670,8 +670,24 @@ usado desde `SiloForm.tsx` y `RepositoryFormPage.tsx`), fila "Open-source" de
 cada rol. La fila Open-source de `keyword` está respaldada por este benchmark;
 la de `extract` (Qwen3.6-35B-A3B) lo está por el A/B de corpus completo del
 silo 54 (ver el informe enlazado en la recomendación de abajo). El resto de
-filas (OpenAI, Anthropic, Mistral, Google) no se ha
-verificado con este mismo método.
+filas (Anthropic, Mistral, Google) no se ha verificado con este mismo método.
+
+La fila OpenAI es **GPT-6 Luna** para `extract` y `keyword` (2026-11-05),
+con una prueba pequeña sobre texto genérico (Wikipedia, `compare_extraction.py`
+con el esquema JSON de producción + indexación real de 14 chunks):
+
+- `extract`: frente a gpt-5.4-mini en los mismos chunks, más entidades y
+  relaciones (45/42 frente a 37/34), coherentes y sin truncados, a ~1/7 del
+  coste por chunk; ~2× más lento. Es de razonamiento: sus tokens de
+  razonamiento se cobran como salida (~3.500 tokens de salida por llamada
+  medidos; es el valor que usa la estimación de coste de indexación).
+- `keyword`: sin el defecto de gpt-5.4-mini (dejó vacías las low-level
+  keywords en 1 de 3 preguntas) ni la verbosidad de gpt-5.4-nano.
+- gpt-4.1-nano ya está deprecado en la API (404).
+- Al usarlo como LLM de agente (con tools), el servicio de OpenAI **no debe
+  llevar endpoint**: sin endpoint se usa la Responses API; con
+  `https://api.openai.com/v1` explícito va por chat completions y los modelos
+  de razonamiento rechazan las tools (400).
 
 Recomendación resultante, en producción vía `LIGHTRAG_EXTRACT_MODEL` /
 `LIGHTRAG_KEYWORD_MODEL` (o el `AIService` del silo correspondiente):

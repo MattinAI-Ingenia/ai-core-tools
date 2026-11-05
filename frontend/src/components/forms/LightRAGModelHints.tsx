@@ -10,7 +10,7 @@ import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 // docs/testing/lightrag_extraction_benchmark_corpus.md and
 // docs/dependencies/lightrag.md#911-recomendación-de-modelos-por-rol.
 // The cloud-provider rows are NOT benchmarked the same way — no measured
-// quality data exists for them except gpt-5.4-mini (see its own comment
+// quality data exists for them except the OpenAI ones (see their comments
 // below). Don't swap any of these for a cheaper sibling on price alone
 // (checked against this app's live PricingCatalog on 2026-09-14) without
 // first checking whether it has any real quality data backing it — a price
@@ -18,23 +18,26 @@ import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 // `extract`, which needs reliable structured JSON output.
 const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>> = {
   extract: [
-    // GPT-5.4 mini is kept over cheaper same-generation siblings (e.g.
-    // GPT-5 mini) on purpose: it's the only cloud model here with REAL
-    // measured extraction quality on this repo's own corpus (see
-    // docs/testing/lightrag_extraction_benchmark_corpus.md — 48.1% non-hub
-    // relationships, on par with the benchmark-winning Qwen3-30B-A3B pick).
+    // GPT-6 Luna replaces GPT-5.4 mini (2026-11-05): side by side on the same
+    // chunks with the production JSON schema it extracted more (45/42 vs 37/34
+    // entities/relations, coherent, nothing truncated) at ~1/7 of the cost per
+    // chunk; slower (~2x), which doesn't matter for indexing. Small sample — see
+    // lightrag.md §9.1.1. Reasoning model: its reasoning tokens are billed as
+    // output (~3,500 out/call measured, used by the indexing cost estimate).
     // The production open-source pick below is now Qwen3.6-35B-A3B: it
     // supersedes Qwen3-30B-A3B after the silo-54 corpus A/B (better recall
     // and 2.2x indexing throughput — see lightrag.md §9.1.1). A cheaper
     // untested sibling is a real quality risk, not just a price change.
-    { provider: 'OpenAI', model: 'GPT-5.4 mini' },
+    { provider: 'OpenAI', model: 'GPT-6 Luna' },
     { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
     { provider: 'Mistral', model: 'Mistral Small 4' },
     { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },
     { provider: 'Open-source', model: 'Qwen3.6-35B-A3B' },
   ],
   keywords: [
-    { provider: 'OpenAI', model: 'GPT-5.4 nano' },
+    // GPT-6 Luna over GPT-5.4 nano (verbose/redundant keywords in the benchmark)
+    // and GPT-5.4 mini (left low-level keywords empty on 1 of 3 test questions).
+    { provider: 'OpenAI', model: 'GPT-6 Luna' },
     { provider: 'Anthropic', model: 'Claude Haiku 4.5' },
     { provider: 'Mistral', model: 'Ministral 3-3B' },
     { provider: 'Google', model: 'Gemini 3.1 Flash-Lite' },

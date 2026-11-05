@@ -65,11 +65,11 @@ def test_estimate_cost_basic_calculation():
     assert result["chunk_token_size"] == 1200
     assert result["estimated_llm_calls"] == 1           # chunks * (1 + 0 gleaning)
     assert result["estimated_embedding_calls"] == 1     # chunks * 1
-    # 1 call * (avg_chunk_tokens 1200 + 3800 overhead) = 5000
-    assert result["estimated_input_tokens"] == 5000
+    # 1 call * (avg_chunk_tokens 1200 + 1700 overhead) = 2900
+    assert result["estimated_input_tokens"] == 2900
     assert result["estimated_output_tokens"] == 2000    # 1 call * 2000 avg
-    # chunk embeddings (content 1200) + graph embeddings (≈ output 2000) = 3200
-    assert result["estimated_embedding_tokens"] == 3200
+    # chunk embeddings (content 1200) + graph embeddings (0.7 * output 2000) = 2600
+    assert result["estimated_embedding_tokens"] == 2600
     assert result["warnings"] == []
 
 
@@ -253,8 +253,8 @@ def test_estimate_cost_with_gleaning():
     # 2 chunks * (1 + 2 gleaning) = 6 calls
     assert result["estimated_llm_calls"] == 6
     assert result["estimated_embedding_calls"] == 2
-    # 6 calls * (avg_chunk_tokens 650 + 3800 overhead) = 26700 input tokens
-    assert result["estimated_input_tokens"] == 26700
+    # 6 calls * (avg_chunk_tokens 650 + 1700 overhead) = 14100 input tokens
+    assert result["estimated_input_tokens"] == 14100
     assert result["warnings"] == []
 
 # ---------------------------------------------------------------------------
@@ -306,9 +306,9 @@ def test_self_hosted_embedding_still_charges_for_llm(monkeypatch):
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
         result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 4800}], db)
 
-    # input 5000 * 1.0 + output (1000..3000) * 2.0, embeddings counted as 0.
-    assert result["estimated_cost_min"] == round((5000 * 1.0 + 1000 * 2.0) / 1_000_000, 4)
-    assert result["estimated_cost_max"] == round((5000 * 1.0 + 3000 * 2.0) / 1_000_000, 4)
+    # input 2900 * 1.0 + output (1000..3000) * 2.0, embeddings counted as 0.
+    assert result["estimated_cost_min"] == round((2900 * 1.0 + 1000 * 2.0) / 1_000_000, 4)
+    assert result["estimated_cost_max"] == round((2900 * 1.0 + 3000 * 2.0) / 1_000_000, 4)
     assert result["warnings"] == []
 
 
@@ -331,7 +331,7 @@ def test_both_self_hosted_reports_unavailable(monkeypatch):
     assert result["estimated_cost_max"] is None
     assert any("self-hosted" in w for w in result["warnings"]), result["warnings"]
     # Token counts are still reported — only the money is unknown.
-    assert result["estimated_embedding_tokens"] == 3200
+    assert result["estimated_embedding_tokens"] == 2600
 
 
 def test_unpriced_cloud_model_stays_unavailable(monkeypatch):
@@ -459,3 +459,16 @@ class TestTimeEstimateEndToEnd:
         small = self._estimate("Qwen3-4B-Instruct", "Custom")
         big = self._estimate("Qwen3-30B-A3B-Instruct", "Custom")
         assert small["estimated_indexing_time_max"] < big["estimated_indexing_time_max"]
+
+
+def test_measured_model_uses_its_own_output_per_call():
+    """gpt-6-luna has measured output/call (reasoning included); unknown models keep the default."""
+    db = MagicMock()
+    documents = [{"content": "x" * 4800}]  # 1 chunk
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=_make_lightrag_silo(model_name="gpt-6-luna")):
+        luna = SiloService.estimate_indexing_cost(1, documents, db)
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=_make_lightrag_silo(model_name="some-model")):
+        other = SiloService.estimate_indexing_cost(1, documents, db)
+
+    assert luna["estimated_output_tokens"] == 3500
+    assert other["estimated_output_tokens"] == 2000
