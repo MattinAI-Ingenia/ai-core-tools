@@ -18,10 +18,16 @@ class OpenAIPricingProvider(PricingProvider):
     def provider_name(self) -> str:
         return "openai"
 
-    # Public list prices (USD per 1M tokens) as of August 2026
-    # Source: https://platform.openai.com/docs/pricing
+    # Public list prices (USD per 1M tokens, Standard tier, <=272K context) as of November 2026
+    # Source: https://developers.openai.com/api/docs/pricing
     _LLM_PRICES = {
-        # GPT-5.6 series
+        # GPT-6 / 6.1 series
+        "gpt-6-astra":      (10.00,   50.00),
+        "gpt-6-sol":        (2.00,    10.00),
+        "gpt-6-luna":       (0.10,     0.50),
+        "gpt-6.1-sol":      (2.00,    10.00),
+        "gpt-6.1-terra":    (1.00,     5.00),
+        # GPT-5.6 series (gpt-5.6-sol list price; $4.00/$20.00 promo until 2026-11-30)
         "gpt-5.6-sol":      (5.00,    30.00),
         "gpt-5.6-terra":    (2.00,    12.00),
         "gpt-5.6-luna":     (0.20,     1.20),
