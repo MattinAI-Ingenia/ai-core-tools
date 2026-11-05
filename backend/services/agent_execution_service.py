@@ -492,6 +492,24 @@ class _LazySandboxProvider:
         return self._provider.skills_root(resolved, *args, **kwargs)
 
 
+def _final_answer_message(messages: list) -> Any:
+    """Message whose content is the turn's answer, or None if there is none.
+
+    Never the prompt, and never a ToolMessage that does not close the turn: if the
+    model's last message came back empty, walking back to an earlier ToolMessage
+    would hand the raw retrieval dump to the user as the answer. A trailing
+    ToolMessage is a legitimate answer (return_direct tools).
+    """
+    ends_on_tool = bool(messages) and getattr(messages[-1], "type", None) == "tool"
+    for msg in reversed(messages):
+        kind = getattr(msg, "type", None)
+        if kind in ("human", "system") or (kind == "tool" and not ends_on_tool):
+            continue
+        if getattr(msg, "content", None):
+            return msg
+    return None
+
+
 def _skill_bootstrap_budget_seconds() -> int:
     """Return the wall-clock budget (seconds) allotted to a skill bootstrap/re-activation.
 
@@ -2667,20 +2685,19 @@ class AgentExecutionService:
             
             # Extract the response from the result messages
             if isinstance(result, dict) and "messages" in result and result["messages"] is not None:
-                # Get the last AI message
                 messages = result["messages"]
-                for msg in reversed(messages):
-                    if hasattr(msg, 'content') and msg.content:
-                        content = msg.content
-                        if isinstance(content, str):
-                            return content
-                        if isinstance(content, list):
-                            return self._extract_content_blocks(content, working_dir)
+                msg = _final_answer_message(messages)
+                if msg is not None:
+                    content = msg.content
+                    if isinstance(content, str):
                         return content
-                # Fallback: return the last message content
-                if messages:
-                    return str(messages[-1].content) if hasattr(messages[-1], 'content') else str(messages[-1])
-            
+                    if isinstance(content, list):
+                        return self._extract_content_blocks(content, working_dir)
+                    return content
+                logger.warning("Agent turn ended without answer text (last message type=%s)",
+                               getattr(messages[-1], "type", None) if messages else None)
+                return ""
+
             # If result is a string, return it directly
             if isinstance(result, str):
                 return result
