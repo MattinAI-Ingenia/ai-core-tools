@@ -1,0 +1,136 @@
+{
+  "metadata": {
+    "export_version": "1.0.0",
+    "export_date": "2026-11-05T00:00:00",
+    "exported_by": null,
+    "source_app_id": null
+  },
+  "app": {
+    "name": "LightRAG Demo",
+    "agent_rate_limit": null,
+    "enable_langsmith": false
+  },
+  "ai_services": [
+    {
+      "name": "LightRAG Extract",
+      "api_key": null,
+      "provider": "OpenAI",
+      "model_name": "gpt-6-luna",
+      "endpoint": null,
+      "description": "Rol extract del silo LightRAG: extrae entidades y relaciones al indexar.",
+      "api_version": null
+    },
+    {
+      "name": "LightRAG Keywords",
+      "api_key": null,
+      "provider": "OpenAI",
+      "model_name": "gpt-6-luna",
+      "endpoint": null,
+      "description": "Rol keywords del silo LightRAG: saca las palabras clave de cada pregunta.",
+      "api_version": null
+    },
+    {
+      "name": "LightRAG Query",
+      "api_key": null,
+      "provider": "OpenAI",
+      "model_name": "gpt-6.1-terra",
+      "endpoint": null,
+      "description": "Rol query: es el LLM del agente, que redacta la respuesta a partir del contexto que recupera LightRAG.",
+      "api_version": null
+    }
+  ],
+  "embedding_services": [
+    {
+      "name": "OpenAI Embeddings",
+      "api_key": null,
+      "provider": "OpenAI",
+      "model_name": "text-embedding-3-small",
+      "endpoint": null,
+      "description": "Embeddings del silo LightRAG.",
+      "api_version": null
+    }
+  ],
+  "system_one_services": [
+    {
+      "name": "OpenAI Decisions",
+      "api_key": null,
+      "endpoint": "https://api.openai.com",
+      "model_name": "gpt-6-luna",
+      "max_concurrency": 4,
+      "provider": "openai_decisions"
+    }
+  ],
+  "output_parsers": [],
+  "mcp_configs": [],
+  "silos": [
+    {
+      "name": "LightRAG Knowledge Base",
+      "type": "CUSTOM",
+      "vector_db_type": "LIGHTRAG",
+      "embedding_service_name": "OpenAI Embeddings",
+      "metadata_definition_name": null,
+      "fixed_metadata": false,
+      "description": "Silo LightRAG (grafo + vectores).",
+      "extract_service_name": "LightRAG Extract",
+      "keywords_service_name": "LightRAG Keywords",
+      "lightrag_vector_db_type": "QDRANT",
+      "lightrag_language": "Spanish"
+    }
+  ],
+  "repositories": [
+    {
+      "name": "Documentos",
+      "type": "files",
+      "silo_name": "LightRAG Knowledge Base"
+    }
+  ],
+  "domains": [],
+  "middlewares": [],
+  "agents": [
+    {
+      "name": "LightRAG Agent",
+      "description": "Agente RAG sobre el silo LightRAG; elige el modo de consulta por pregunta (skill LightRAG Query Router).",
+      "system_prompt": "Eres un asistente que responde solo con la informacion de los documentos recuperados. Si la respuesta no esta en el contexto, dilo. Cita el documento de origen.",
+      "prompt_template": "{question}",
+      "service_name": "LightRAG Query",
+      "silo_name": "LightRAG Knowledge Base",
+      "output_parser_name": null,
+      "agent_tool_refs": [],
+      "agent_mcp_refs": [],
+      "has_memory": false,
+      "lightrag_query_mode": "skill-routed"
+    },
+    {
+      "name": "Clasificador de consultas",
+      "description": "Agente System One (OpenAI Decisions, gpt-6-luna): clasifica una consulta con preguntas cerradas y probabilidades, sin generar texto.",
+      "type": "system_one_agent",
+      "system_one_service_name": "OpenAI Decisions",
+      "questions": [
+        {
+          "key": "en_ambito",
+          "type": "noul",
+          "instructions": "¿La consulta trata sobre climatización, calefacción o bombas de calor?",
+          "threshold": 0.5
+        },
+        {
+          "key": "tipo",
+          "type": "choice",
+          "instructions": "¿Qué tipo de consulta es?",
+          "criteria": [
+            {"key": "averia", "description": "Fallo, error o mal funcionamiento"},
+            {"key": "instalacion", "description": "Montaje, puesta en marcha o dimensionado"},
+            {"key": "eficiencia", "description": "Consumo, rendimiento o ahorro"},
+            {"key": "otro", "description": "Cualquier otra cosa"}
+          ]
+        },
+        {
+          "key": "urgencia",
+          "type": "score",
+          "instructions": "¿Con qué urgencia hay que atenderla?",
+          "criteria": ["Baja", "Media", "Alta"],
+          "color_start": "green"
+        }
+      ]
+    }
+  ]
+}

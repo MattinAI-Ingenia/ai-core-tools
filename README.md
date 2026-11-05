@@ -3,359 +3,204 @@
 [![License: AGPL 3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=lks-ot-i-plus-d_mattin-ai&metric=alert_status&token=c319b34cc5a95f63cb61e299c00557054b459bb1)](https://sonarcloud.io/summary/new_code?id=lks-ot-i-plus-d_mattin-ai)
 
-Mattin AI is a comprehensive AI toolbox that provides a wide range of artificial intelligence capabilities and tools. This project offers various AI functionalities including:
-
-- Large Language Models (LLMs) integration and management
-- Retrieval-Augmented Generation (RAG) systems
-- Semantic search capabilities
-- Vector database management
-- AI agents and automation
-- And more...
-
-The project aims to simplify the integration and use of AI technologies, providing a unified platform for various AI-powered solutions.
-
-## Features
-
-- **LLM Integration**: Easy access and management of various Large Language Models
-- **RAG Systems**: Implementation of Retrieval-Augmented Generation for enhanced AI responses
-- **Semantic Search**: Advanced search capabilities using semantic understanding
-- **Vector Databases**: Efficient storage and retrieval of vector embeddings
-- **AI Agents**: Framework for building and deploying AI agents
-- **Modular Architecture**: Easy to extend and customize for specific needs
+Mattin AI is an AI toolbox: LLM management, RAG (vector search and, with LightRAG, a
+knowledge graph), semantic search and AI agents. FastAPI backend, React frontend,
+PostgreSQL/pgvector, Qdrant and Neo4j, all behind Caddy on a single port.
 
 ---
 
-## Quick Start
+## Quick start (Docker)
 
-### Prerequisites
+You need Docker 20.10+ with Compose v2, the host ports 80 and 5434 free, and an API key
+of an LLM provider (the demo app uses OpenAI).
 
-- **For Docker**: Docker 20.10+ and Docker Compose v2+
-- **For local development**: Python 3.11+, Node.js 18+, PostgreSQL with pgvector
+### 1. Clone
 
-### 1. Clone the Repository
+LightRAG lives in the `lightrag` branch of this repository (upstream `develop` does not
+have it). The clone URL is behind the green **Code** button of the page you are reading:
 
 ```bash
-git clone https://github.com/lksnext-ai-lab/ai-core-tools.git
+git clone -b lightrag <clone-url-of-this-repository>
 cd ai-core-tools
 ```
 
----
+### 2. Configure
 
-## Option 1: Docker Compose (Recommended)
-
-The fastest way to get started. Everything is served from the same origin via
-Caddy — no CORS, no port juggling. Two ways to obtain the images:
-
-- **Pull from GHCR** (fast, no source code needed) — for client servers and demos
-- **Build locally** (includes your code changes) — for development
+From the repo root:
 
 ```bash
-# 1. Copy environment template into the repo-root .env
-#    (docker/.env is a symlink to it — never run this from inside docker/,
-#     the copy would follow the link and overwrite the root file)
 cp .env.example .env
-
-# 2. Edit .env — fill in the required values (see "Configure your .env" below)
-
-cd docker
-
-# 3a. Pull prebuilt images (recommended)
-docker compose pull backend frontend
-docker compose up -d
-
-#     — OR —
-
-# 3b. Build from source (for dev with local changes)
-docker compose up -d --build
-
-# 4. Wait ~30 seconds and access:
-#    - App:      http://localhost/
-#    - API Docs: http://localhost/docs/internal
+ln -s ../.env docker/.env
 ```
 
-### Configure your `.env`
+Compose reads `docker/.env`; the link keeps a single file to edit. Without symlink
+support, skip the `ln` and add `--env-file ../.env` to every `docker compose` command.
 
-After `cp .env.example .env`, you only need to change the fields that do not have a working default or that block startup:
+Edit `.env`. Real values go only in this copy, never in `.env.example`. Required:
 
-| Variable | Required | What to put | Notes |
-|----------|----------|-------------|-------|
-| `DATABASE_PASSWORD` | Yes | A strong random password | Compose will fail if it is empty |
-| `SECRET_KEY` | Yes | Generate one with `python -c "import secrets; print(secrets.token_hex(32))"` | Used to sign sessions/JWTs |
-| `FRONTEND_URL` | Only outside local Docker | `http://<server-ip-or-domain>` | In local Docker, `http://localhost` from `.env.example` already works |
+| Variable | Put | Why |
+|----------|-----|-----|
+| `DATABASE_PASSWORD` | a random password | Compose fails if empty |
+| `SECRET_KEY` | `python -c "import secrets; print(secrets.token_hex(32))"` | signs sessions |
+| `NEO4J_PASSWORD` | a random password, **not** `neo4j` | Neo4j 5 refuses its default; Compose fails if empty |
+| `AICT_OMNIADMINS` | your email | gets an admin account on first start (step 4) |
 
-If you set `AICT_LOGIN=OIDC`, you must also fill `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `VITE_OIDC_ENABLED=true`, `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, and `VITE_OIDC_REDIRECT_URI`.
+Random passwords: `python -c "import secrets; print(secrets.token_urlsafe(24))"`.
+Everything else has a working default. To serve from another host, set
+`AICT_PUBLIC_URL=http://<server-ip-or-domain>`.
 
-### First login in `AICT_LOGIN=FAKE`
+### 3. Start
 
-The default Docker setup uses `AICT_LOGIN=FAKE`. In that mode, the login email must already exist in the `User` table before you can sign in.
+```bash
+cd docker
+docker compose up -d --build
+```
 
-1. Start the stack with `docker compose up -d` or `docker compose up -d --build`.
-2. Create the first user inside the running backend container:
+The first build takes several minutes. Then open http://localhost/ (API docs:
+http://localhost/docs/internal).
+
+> On `lightrag` the images must be built locally, as above: the ones published in GHCR
+> come from `develop`, which has no LightRAG, and there is no `lightrag` tag. Do not use
+> `docker compose pull`.
+
+### 4. First login, users and admins
+
+Accounts are local (`AICT_LOGIN=LOCAL`: email + password stored by the app). Run the
+commands from `docker/`.
+
+The first admin: on first start the backend creates an admin account for each email in
+`AICT_OMNIADMINS` and prints a one-time set-password link in its log:
+
+```bash
+docker compose logs backend | grep -A5 "omniadmin_bootstrap: NEW"
+```
+
+Open the link (`.../set-password?token=...`), choose a password and log in. The link
+expires after 48 hours and is printed only once; if you miss it, set the password
+directly:
 
 ```bash
 docker compose exec backend python -m utils.seed_dev_users --yes \
-  --users "you@company.com:Your Name"
+  --users "<email>:<name>:<password>"
 ```
 
-3. Give that user write permissions. New users default to the `viewer` platform
-   role, and **viewers can log in but cannot create or modify** apps, agents,
-   silos or any other resource (every write returns `403 Viewer role cannot
-   create or modify resources`). Pick one option:
+More users and admins, as an admin in **Admin → Users**:
 
-   - **Make them an omniadmin** (simplest for your own admin account): add the
-     email to `AICT_OMNIADMINS` in `.env` and re-run `docker compose up -d`.
-     Omniadmins have full access and skip the step below.
-   - **Promote from the UI**: log in as an omniadmin and go to
-     **Admin → Users**, then set the role to **Editor**.
-   - **Promote via SQL**:
+- **Create user**: enter email and name; the app shows a one-time set-password link to
+  send to that person. The same page issues a new link if it expires.
+- **Roles**: `viewer` (the default: can log in, but every write returns `403`), `editor`
+  (can create and modify) and `admin`. Change them on that page.
+- **Another admin**: add the email to `AICT_OMNIADMINS` and run `docker compose up -d`
+  (the account is created at startup), or set the `admin` role on that page.
 
-     ```bash
-     docker compose exec postgres psql -U mattin -d mattin_ai -c \
-       "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
-     ```
+### 5. Try LightRAG
 
-4. Log in with that email from the UI.
-5. Create your first App, or import `scripts/demo-app.json`.
+LightRAG keeps a knowledge graph (in Neo4j) next to the vectors of a silo, which helps
+with multi-hop questions. It is on by default (`LIGHTRAG_ENABLED=true`). Reference:
+[docs/dependencies/lightrag.md](docs/dependencies/lightrag.md) (in Spanish).
 
-If you prefer to define the initial user in the `.env`, uncomment and fill
-`AICT_DEV_SEED_USERS`, then run:
+Import the demo: **Apps → Import App → `scripts/lightrag-demo-app.json`**, and enter your
+OpenAI API key for each service when asked. It creates:
+
+- AI services `LightRAG Extract` and `LightRAG Keywords` (`gpt-6-luna`: build the graph
+  while indexing, and read each question) and `LightRAG Query` (`gpt-6.1-terra`: the
+  agent's LLM, writes the answer), plus an embedding service (`text-embedding-3-small`);
+- the silo `LightRAG Knowledge Base` and an empty repository `Documentos`;
+- the agent `LightRAG Agent` (no memory; picks the query mode for each question), and,
+  optionally, a System One agent with its service (needs an API key with access to the
+  Decisions API; delete both if you do not need them).
+
+Upload your documents to `Documentos` (a dialog shows the estimated cost and time
+first), wait for the indexing and chat with `LightRAG Agent` in its playground.
+
+Before importing, know that:
+
+- The language the graph is extracted in (`lightrag_language`, `Spanish` in the demo), the
+  chunking and the extract and embedding services cannot be changed once the silo exists.
+  Edit the JSON first if your documents are in another language.
+- OpenAI services must have an empty **Endpoint** (the JSON does). With an explicit
+  `https://api.openai.com/v1`, reasoning models such as `gpt-6-*` reject tools on that
+  route and the agent fails.
+- By hand: create the AI and embedding services, a silo of type *LightRAG* (it needs an
+  extract service and an embedding service) and an agent with that silo and the query
+  mode `skill-routed`.
+
+More: `scripts/demo-app.json` is a demo with 6 agents (RAG, structured output, MCP, OCR)
+without LightRAG; import it the same way. See
+[App Export and Import](docs/guides/app-export-import.md#demo-app).
+
+### Everyday commands
+
+From `docker/`:
 
 ```bash
-docker compose exec backend python -m utils.seed_dev_users --yes
-```
-
-### What `LIGHTRAG_ENABLED` does
-
-`LIGHTRAG_ENABLED=true` enables the LightRAG integration in the backend. This means silos can use graph-augmented retrieval backed by Neo4j in addition to the configured vector store.
-
-Set `LIGHTRAG_ENABLED=false` if you do not want to use LightRAG. Neo4j is still started by the Docker stack, but the backend will not expose or use the LightRAG functionality.
-
-Published images: `ghcr.io/lksnext-ai-lab/mattinai-{backend,frontend}`. See
-[docker/README.md](docker/README.md) for deployment details, primary login, and
-the path to HTTPS.
-
-### Try the Demo App
-
-A pre-built demo workspace is available at `scripts/demo-app.json`. Import it to get a fully configured workspace with 6 agents, RAG, structured output, MCP integration, OCR, and more — no manual setup required.
-
-From the UI: **Apps → Import App → select `demo-app.json` → provide your API keys → Import**.
-
-See [App Export and Import — Demo App](docs/guides/app-export-import.md#demo-app) for details.
-
-### Docker Commands
-
-All commands run from the `docker/` directory.
-
-```bash
-# View logs in real-time
-docker compose logs -f
-
-# View logs for a specific service
-docker compose logs -f backend
-
-# Stop services
-docker compose down
-
-# Rebuild images (after code changes)
-docker compose up -d --build
-
-# Remove everything (including database data)
-docker compose down -v
+docker compose logs -f backend    # logs (omit the service for all of them)
+docker compose down               # stop
+docker compose up -d --build      # rebuild after changing code
+docker compose down -v            # remove everything, including database data
 ```
 
 ---
 
-## Option 2: Local Development (Without Docker)
+## Local development (without Docker)
 
-For active development on the source code.
-
-### 1. Database Setup
-
-You need PostgreSQL with the pgvector extension:
+Needs Python 3.11+, Node.js 18+ and PostgreSQL with the pgvector extension.
 
 ```bash
-# Option A: Only PostgreSQL with Docker
-docker run -d --name mattin-postgres \
-  -e POSTGRES_DB=mattin_ai \
-  -e POSTGRES_USER=mattin \
-  -e POSTGRES_PASSWORD=mattin_secure_2024 \
-  -p 5432:5432 \
-  pgvector/pgvector:pg17
-
-# Enable the pgvector extension in that database
+# 1. PostgreSQL with pgvector (or your own, with the extension enabled)
+docker run -d --name mattin-postgres -e POSTGRES_DB=mattin_ai -e POSTGRES_USER=mattin \
+  -e POSTGRES_PASSWORD=<password> -p 5432:5432 pgvector/pgvector:pg17
 docker exec -it mattin-postgres psql -U mattin -d mattin_ai -c \
   "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# Option B: PostgreSQL installed locally
-# Make sure to install and enable the pgvector extension in your target database
+# 2. Backend, from the repo root
+python -m venv venv
+source venv/bin/activate          # Windows: .\venv\Scripts\activate
+pip install poetry && poetry install
+cp .env.example .env              # the same root file Docker uses
 ```
 
-### 2. Backend (FastAPI)
+In `.env`, set `DATABASE_PASSWORD` and uncomment the block "Desarrollo local SIN Docker"
+(`DATABASE_HOST`, `DATABASE_PORT`, `SQLALCHEMY_DATABASE_URI`), with port 5432 and your
+password. Alembic reads the `DATABASE_*` variables, the backend `SQLALCHEMY_DATABASE_URI`;
+the backend does not boot without it.
 
 ```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate environment (Windows)
-.\venv\Scripts\activate
-
-# Activate environment (Linux/Mac)
-source venv/bin/activate
-
-# Install Poetry
-pip install poetry
-
-# Install dependencies with Poetry (from project root)
-poetry install
-
-# Configure environment variables — the repo-root .env, the same file Docker uses
-# (python-dotenv resolves to it from any directory in the repo; a backend/.env
-# would never be read when running from the project root)
-cp .env.example .env
-# Edit .env:
-#   - set SQLALCHEMY_DATABASE_URI to your local database (the Docker stack ignores
-#     this value: docker-compose.yaml hardcodes the container-side one)
-#   - AICT_LOGIN=LOCAL for admin-provisioned email+password, or OIDC to test Entra
-# Example:
-# SQLALCHEMY_DATABASE_URI=postgresql://mattin:mattin_secure_2024@localhost:5434/mattin_ai
-
-# Run migrations
 alembic upgrade head
-
-# Seed a local dev user (run from the backend/ directory)
-cd backend
-python -m utils.seed_dev_users --yes --users "you@company.com:Your Name"
-cd ..
-
-# Give that user write permissions
-# If you are using the Docker Postgres from Option A:
+(cd backend && python -m utils.seed_dev_users --yes --users "<email>:<name>:<password>")
 docker exec -it mattin-postgres psql -U mattin -d mattin_ai -c \
-  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
-
-# If you are using a locally installed Postgres from Option B:
-psql postgresql://mattin:mattin_secure_2024@localhost:5432/mattin_ai -c \
-  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = 'you@company.com';"
-
-# Start server
+  "UPDATE \"User\" SET platform_role = 'editor' WHERE email = '<email>';"   # or psql <your URI>
 uvicorn backend.main:app --reload --port 8000
 ```
 
-Without the `SQLALCHEMY_DATABASE_URI`, the backend will not boot. Without the seeded `User` row, the FAKE login flow cannot authenticate. Without
-`platform_role='editor'`, the user can log in but cannot create or modify
-resources.
-
-### 3. Frontend (React)
+Without the seeded password the user cannot log in with `AICT_LOGIN=LOCAL`, and without
+the `editor` role they cannot create or modify anything. The frontend is separate:
 
 ```bash
-# In another terminal
 cd frontend
-
-# Install dependencies
 npm install
-
-# Configure environment variables
-cp .env.example .env
+cp .env.example .env      # VITE_API_BASE_URL=http://localhost:8000, VITE_OIDC_ENABLED=false
+npm run dev               # http://localhost:5173
 ```
 
-Edit `frontend/.env` with the following configuration for local development:
-
-```env
-# API Configuration
-VITE_API_BASE_URL=http://localhost:8000
-
-# Authentication - disable OIDC for local development
-VITE_OIDC_ENABLED=false
-
-# IMPORTANT: If using OIDC in local development, change the redirect URI
-# Docker uses port 3000, local development uses port 5173
-VITE_OIDC_REDIRECT_URI=http://localhost:5173/auth/success
-```
-
-> **Note**: When running without Docker, the frontend runs on port 5173 (Vite default), so `VITE_OIDC_REDIRECT_URI` must be updated accordingly if you enable OIDC authentication.
-
-```bash
-# Start development server
-npm run dev
-```
-
-The frontend will be available at http://localhost:5173
+With OIDC in local development, set `VITE_OIDC_REDIRECT_URI=http://localhost:5173/auth/success`.
 
 ---
 
 ## Configuration
 
-This repository contains multiple `.env.example` files. They are not for the same execution mode:
+- Backend (Docker and local) reads one file: `.env` at the repo root, from
+  `.env.example`. The React dev server reads `frontend/.env`, from
+  `frontend/.env.example`.
+- A variable reaches a container only if `docker/docker-compose.yaml` lists it under that
+  service's `environment:`; adding it to `.env` alone is not enough.
+- The compose file fixes the container topology (database host and port), so `localhost`
+  values in `.env` for local development cannot leak into containers.
+- AI providers (OpenAI, Anthropic, Azure OpenAI, Mistral AI, Ollama) are configured as AI
+  services in the web UI.
 
-| Scenario | Template to copy | Resulting file | Used by |
-|----------|------------------|----------------|---------|
-| Docker Compose | `.env.example` | `.env` (repo root) | `cd docker && docker compose ...` |
-| Local backend | `.env.example` | `.env` (repo root) | `uvicorn backend.main:app --reload` |
-| Local frontend | `frontend/.env.example` | `frontend/.env` | `cd frontend && npm run dev` |
-
-**Docker reads the repo-root `.env`.** `docker/.env` is a symlink to `../.env`, so
-there is a single file to maintain. Two consequences:
-
-- Copy the single template from the repo root: `cp .env.example .env`.
-- A variable only reaches a container if `docker-compose.yaml` declares it under
-  that service's `environment:`. Adding it to `.env` alone is not enough — this
-  silently swallowed `UVICORN_WORKERS` until it was wired up.
-
-There is a single template, `.env.example`, covering both.
-
-### Required Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `DATABASE_PASSWORD` | PostgreSQL password used by the Docker stack | `change-me-please` |
-| `SECRET_KEY` | Session/JWT signing secret | `hex-string-generated-with-secrets.token_hex(32)` |
-
-For local Docker, `FRONTEND_URL`, `AICT_LOGIN`, and `LIGHTRAG_ENABLED` already come with working defaults in `.env.example`. Change them only if your deployment needs something different.
-
-For local development without Docker, the FastAPI app reads the **same repo-root
-`.env`** (`load_dotenv()` walks up from the working directory), so there is one
-backend configuration file for both modes. Only the React app has its own,
-`frontend/.env`, because Vite loads it from `frontend/`. Note that the container-side topology
-(`DATABASE_HOST`, `DATABASE_PORT`, `SQLALCHEMY_DATABASE_URI`) is hardcoded in
-`docker-compose.yaml`, so a `localhost` value in the root `.env` cannot leak into
-a container.
-
-### Environment-Specific Variables
-
-| Variable | Docker | Local |
-|----------|--------|-------|
-| `DATABASE_HOST` | (not needed) | `localhost` |
-| `FRONTEND_URL` | `http://localhost` by default | (not used) |
-| `VITE_API_BASE_URL` | relative same-origin via Caddy | `http://localhost:8000` |
-
-For Docker, `AICT_OMNIADMINS` does not create users by itself. In `FAKE` mode you must seed or insert the login user into `User` first, and ensure the user has `platform_role='editor'` if they need to create or modify resources.
-
-### AI Service Configuration
-
-The platform supports multiple AI providers:
-
-- OpenAI (GPT models)
-- Anthropic (Claude models)
-- Azure OpenAI
-- Mistral AI
-- Ollama (local models)
-
-Configure these through the web interface or environment variables.
-
----
-
-## Authentication Modes
-
-### Development Mode (AICT_LOGIN=FAKE)
-
-- Simple email login
-- Ideal for testing and development
-- No additional configuration required
-- Email must exist in the database
-
-### Production Mode (AICT_LOGIN=OIDC)
-
-- Authentication with Microsoft Entra ID (Azure AD)
-- Requires configuration:
+To use Microsoft Entra ID instead of local accounts, set `AICT_LOGIN=OIDC` and
+`VITE_OIDC_REDIRECT_URI` (see `.env.example`), plus:
 
 ```env
 AICT_LOGIN=OIDC
@@ -367,60 +212,29 @@ VITE_OIDC_AUTHORITY=https://login.microsoftonline.com/{tenant-id}/v2.0
 VITE_OIDC_CLIENT_ID=your-client-id
 ```
 
----
+## Services and ports
 
-## Services and Ports
-
-| Service | Docker (Caddy, single port) | Local |
-|---------|------------------------------|-------|
+| Service | Docker (through Caddy) | Local |
+|---------|------------------------|-------|
 | Frontend | http://localhost/ | http://localhost:5173 |
-| Backend (API) | http://localhost/ (same origin via Caddy) | http://localhost:8000 |
-| PostgreSQL | internal network only — not published to the host | localhost:5432 |
-| API Docs | http://localhost/docs/internal | http://localhost:8000/docs/internal |
+| Backend (API) | http://localhost/ (same origin) | http://localhost:8000 |
+| API docs | http://localhost/docs/internal | http://localhost:8000/docs/internal |
+| PostgreSQL | localhost:5434 (published for development) | localhost:5432 |
 
-> In Docker, only Caddy's port (80 by default, configurable via `HTTP_PORT`) is exposed to the host. Backend, frontend, PostgreSQL, Qdrant and Neo4j stay on the internal Docker network.
-
----
-
-## Architecture
-
-The project consists of several main components:
-
-- **Backend**: FastAPI-based REST API with Python
-- **Frontend**: React-based web interface with TypeScript
-- **Database**: PostgreSQL with pgvector for vector storage
-- **AI Services**: Modular integration with various LLM providers
-
----
+Caddy's port (80, set with `HTTP_PORT`) is the only one meant for outside access. Backend,
+frontend, Qdrant and Neo4j stay on the internal Docker network.
 
 ## Troubleshooting
 
-### Frontend doesn't load
-
-1. Verify the backend is running
-2. Check browser console (F12)
-3. Ensure `VITE_API_BASE_URL` points to the correct backend
-
-### Database connection error
-
-1. Verify PostgreSQL is running
-2. Check credentials in `.env`
-3. For Docker, wait ~30 seconds for PostgreSQL to fully start
-
-### API keys don't work
-
-1. Verify you edited the right file: the repo-root `.env` for both Docker (`docker/.env` is a symlink to it) and the local backend; `frontend/.env` for the React dev server (see the table in [Configuration](#configuration))
-2. Reload after changing it: `docker compose up -d` for Docker (a plain `restart` does not pick up new env values), or restart `uvicorn` locally
-3. Check that the key has no extra spaces or quotes
-
-### Clean and start fresh (Docker)
-
-```bash
-cd docker
-docker compose down -v
-docker compose build --no-cache
-docker compose up -d
-```
+- `required variable ... is missing a value` from `docker compose`: fill that variable in
+  `.env` and check that `docker/.env` is the link to `../.env` (step 2).
+- The `neo4j` container keeps restarting: `NEO4J_PASSWORD` must be set and not `neo4j`.
+- "port is already allocated": free 80 and 5434, or change `HTTP_PORT` (and set
+  `AICT_PUBLIC_URL` to match, e.g. `http://localhost:8080`).
+- The page does not load or the database refuses connections: wait about 30 seconds after
+  starting, then check `docker compose ps` and `docker compose logs -f backend`.
+- You changed `.env` and nothing happens: run `docker compose up -d` (a plain `restart`
+  does not reload it) and check that keys have no extra spaces or quotes.
 
 ---
 
@@ -437,8 +251,8 @@ We welcome contributions! Please see our [Contributing Guidelines](docs/README.m
 ## Documentation
 
 - [Full Documentation](docs/README.md)
-- [API Documentation](docs/API.md)
-- [Deployment Guide](docs/DEPLOYMENT.md)
+- [Internal API](docs/api/internal-api.md) and [public API](docs/api/public-api.md)
+- [Deployment guide](docker/README.md) (in Spanish)
 
 ## License
 

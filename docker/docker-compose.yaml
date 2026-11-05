@@ -95,7 +95,7 @@ services:
       LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-true}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}
       # LightRAG indexing concurrency. Read by lightrag as dataclass field
       # defaults at import time, so they must be set here (container env), not
       # in Python. Defaults below match lightrag 1.5.5rc1's own defaults, so
@@ -451,7 +451,7 @@ services:
   neo4j:
     image: neo4j:5-community
     environment:
-      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-neo4j}"
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}"
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
     volumes:
