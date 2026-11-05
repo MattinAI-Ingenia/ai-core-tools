@@ -200,7 +200,7 @@ LANGSMITH_PROJECT=mattin-ai-production
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FRONTEND_URL` | No | `http://localhost:5173` | Frontend URL (for CORS, redirects) |
+| `FRONTEND_URL` | No | `http://localhost:5173` | Frontend URL (for CORS, redirects) With Docker Compose do not set it: the compose file derives it from `AICT_PUBLIC_URL` (root `.env`) |
 | `AICT_MODE` | No | `SELF-HOSTED` | Deployment mode |
 | `REPO_BASE_FOLDER` | No | `./data/repositories` | File repository storage path |
 | `TMP_BASE_FOLDER` | No | `./data/tmp` | Temporary files path |

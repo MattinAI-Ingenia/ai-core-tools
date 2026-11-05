@@ -132,13 +132,13 @@ services:
       LIGHTRAG_RERANK_MODEL: ${LIGHTRAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       LIGHTRAG_RERANK_API_KEY: ${LIGHTRAG_RERANK_API_KEY:-}
 
-      # Agent turns and human approvals (see docker/.env.example)
+      # Agent turns and human approvals (see .env.example)
       AICT_AGENT_RUN_TIMEOUT_SECONDS: ${AICT_AGENT_RUN_TIMEOUT_SECONDS:-600}
       HITL_MAX_APPROVAL_TTL_SECONDS: ${HITL_MAX_APPROVAL_TTL_SECONDS:-604800}
       HITL_EXPIRY_SWEEP_SECONDS: ${HITL_EXPIRY_SWEEP_SECONDS:-60}
 
       # ----------------------------------------------------------------------
-      # Pool de procesos uvicorn (ver docker/.env.example para la explicación
+      # Pool de procesos uvicorn (ver .env.example para la explicación
       # completa de cada una; backend/Dockerfile las consume en el CMD).
       # These were previously documented-only (.env.example) but never
       # actually reached the container — docker-compose.yaml has no
@@ -168,7 +168,7 @@ services:
       UVICORN_FORWARDED_ALLOW_IPS: ${UVICORN_FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
 
       # ----------------------------------------------------------------------
-      # A2A (Agent2Agent protocol) server — ver docker/.env.example para la
+      # A2A (Agent2Agent protocol) server — ver .env.example para la
       # tabla completa con comentarios; fuente de verdad del código (y de
       # estos mismos defaults, que la reflejan, no al revés):
       # backend/utils/a2a_config.py (AD-15), backend/services/rate_limit_service.py
@@ -220,7 +220,7 @@ services:
       # was removed and is no longer a valid provider name.
       SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-opensandbox}
       SANDBOX_ALLOWED_PROVIDERS: ${SANDBOX_ALLOWED_PROVIDERS:-opensandbox,daytona,e2b}
-      # See docker/.env.example for the SSRF trade-off this controls — the
+      # See .env.example for the SSRF trade-off this controls — the
       # "Test Connection" probe and the save-time endpoint check both refuse
       # loopback/link-local/private targets by default, which also blocks
       # OPENSANDBOX_DOMAIN below when it's an internal Docker service name.
@@ -432,7 +432,7 @@ services:
       # (space-separated), only needed if this Caddy instance is itself
       # behind another proxy/load balancer — NOT the default single-host
       # deployment. See docker/Caddyfile's top comment and
-      # docker/.env.example for the full write-up. Empty by default, which
+      # .env.example for the full write-up. Empty by default, which
       # keeps Caddy's default behaviour (replace client X-Forwarded-For with
       # the real peer address) — verified with `caddy validate` to parse
       # identically to omitting the directive.

@@ -155,7 +155,7 @@ To bump the pin:
 
 ## Environment variables
 
-Almost all variables are read in exactly one place, `backend/utils/a2a_config.py`, and are documented with the same defaults in `docker/.env.example`. For those, every value is optional and a malformed one falls back to its default with a startup warning rather than failing to start. Three variables are the exception, read directly where they're used instead of through `a2a_config.py`; a malformed or non-positive value in any of them also falls back to its default:
+Almost all variables are read in exactly one place, `backend/utils/a2a_config.py`, and are documented with the same defaults in `.env.example`. For those, every value is optional and a malformed one falls back to its default with a startup warning rather than failing to start. Three variables are the exception, read directly where they're used instead of through `a2a_config.py`; a malformed or non-positive value in any of them also falls back to its default:
 
 - `A2A_FILE_URL_MAX_TTL_SECONDS` — read **per call** in `backend/utils/security.py` (`_max_ttl_seconds`), so a change takes effect without a restart.
 - `A2A_DISCOVERY_MAX_TRACKED_KEYS` and `A2A_DISCOVERY_OVERFLOW_MULTIPLIER` — read once, **at import time**, in `backend/services/rate_limit_service.py:21-34`. They size the per-IP key-namespace limiter's tracked-key cap and its shared overflow bucket's budget multiplier, used by both the A2A discovery limiter and the A2A RPC pre-auth limiter (and by nothing else). A malformed value is logged as a warning at startup.
@@ -198,7 +198,7 @@ Almost all variables are read in exactly one place, `backend/utils/a2a_config.py
 
 ¹ Not read through `a2a_config.py` — see the exceptions listed above the table.
 
-Deployment-related variables (`UVICORN_*`, `CADDY_TRUSTED_PROXIES`, `ALEMBIC_LOCK_TIMEOUT`, ...) are covered in [Operations / deployment runbook](#operations--deployment-runbook) below and documented in `docker/.env.example`.
+Deployment-related variables (`UVICORN_*`, `CADDY_TRUSTED_PROXIES`, `ALEMBIC_LOCK_TIMEOUT`, ...) are covered in [Operations / deployment runbook](#operations--deployment-runbook) below and documented in `.env.example`.
 
 ## Manual conformance (a2a-tck)
 

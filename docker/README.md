@@ -427,7 +427,7 @@ Cuando el cliente tenga dominio interno y abra el 443:
    despliegue detrás de otro proxy/balanceador o con TLS):
    - **Proxies de confianza**: si este Caddy queda él mismo detrás de otro
      proxy/LB (no el caso de arriba, donde Caddy termina el TLS), fija
-     `CADDY_TRUSTED_PROXIES` a la CIDR de ese LB (ver `docker/.env.example`;
+     `CADDY_TRUSTED_PROXIES` a la CIDR de ese LB (ver `.env.example`;
      si esa CIDR es pública, añádela también a `UVICORN_FORWARDED_ALLOW_IPS`,
      el LB debe sobrescribir `X-Forwarded-For` y nunca uses `0.0.0.0/0`)
      para que Caddy confíe en SU `X-Forwarded-For` en vez de sobrescribirlo
@@ -455,7 +455,7 @@ Cuando el cliente tenga dominio interno y abra el 443:
      (backend/Dockerfile, RB-15), sube también `stop_grace_period` del
      servicio `backend` en el compose por encima de ese valor (más margen
      para `close_runtime` y el resto del lifespan) — ver el comentario junto
-     a esa variable en `docker/.env.example` y `docker-compose.yaml`.
+     a esa variable en `.env.example` y `docker-compose.yaml`.
 
 ## Utilities aisladas
 

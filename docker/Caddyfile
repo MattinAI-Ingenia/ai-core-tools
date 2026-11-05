@@ -22,7 +22,7 @@
 	# the LB's own address. Otherwise every client behind that LB would share
 	# one X-Forwarded-For value (the LB's IP) and therefore one rate-limit
 	# bucket (A2A discovery limiter, login throttle, etc.) — see
-	# docker/.env.example for the full write-up, including the IPv6 caveat and
+	# .env.example for the full write-up, including the IPv6 caveat and
 	# why A2A_PUBLIC_BASE_URL/FRONTEND_URL must be the https:// public URL in
 	# that case. Leave unset for the default single-host deployment.
 	servers {

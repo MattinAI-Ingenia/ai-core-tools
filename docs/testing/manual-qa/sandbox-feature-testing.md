@@ -81,7 +81,7 @@ immediately instead of configuring agents by hand.
    - If it fails with `"Invalid or disallowed endpoint"`: this is the new
      SSRF guard working as intended for a self-hosted internal hostname.
      Set `SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE=true` in `docker/.env` and
-     restart the backend (see `docker/.env.example` for the explanation of
+     restart the backend (see `.env.example` for the explanation of
      this trade-off), then retry.
 3. Open `QA - Sandbox Code Interpreter` and `QA - Sandbox + Memory` in the
    Agent form, check **Code Interpreter**, and pick the Sandbox Service you
