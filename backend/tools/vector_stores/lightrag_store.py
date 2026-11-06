@@ -2180,13 +2180,17 @@ class LightRAGStore(VectorStoreInterface):
         totals["duration_seconds"] = round(duration, 3)
 
         logger.info(
-            "Successfully indexed %d texts into workspace '%s' "
-            "in %.1fs (%d tokens, %d LLM calls)",
+            "Successfully indexed %d texts into workspace '%s' in %.1fs "
+            "(LLM %d tokens: %d input + %d output, %d calls; embeddings %d tokens, %d calls)",
             len(texts),
             collection_name,
             duration,
             totals["total_tokens"],
+            totals["prompt_tokens"],
+            totals["completion_tokens"],
             totals["llm_calls"],
+            totals["embedding_tokens"],
+            totals["embedding_calls"],
         )
         return totals
 
@@ -2344,8 +2348,11 @@ class LightRAGStore(VectorStoreInterface):
         result["_usage"] = usage
 
         logger.info(
-            "Processed enqueued batch in workspace '%s' in %.1fs (%d tokens, %d LLM calls)",
-            collection_name, duration, usage["total_tokens"], usage["llm_calls"],
+            "Processed enqueued batch in workspace '%s' in %.1fs "
+            "(LLM %d tokens: %d input + %d output, %d calls; embeddings %d tokens, %d calls)",
+            collection_name, duration, usage["total_tokens"], usage["prompt_tokens"],
+            usage["completion_tokens"], usage["llm_calls"],
+            usage["embedding_tokens"], usage["embedding_calls"],
         )
         return result
 
