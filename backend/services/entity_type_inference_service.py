@@ -429,7 +429,14 @@ class EntityTypeInferenceService:
                 },
             },
         )
-        text = (getattr(response, "content", None) or str(response)).strip()
+        content = getattr(response, "content", None) or str(response)
+        if isinstance(content, list):
+            # Some providers (Responses API) return content as a list of parts.
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        text = content.strip()
         if text.startswith("```"):
             text = text.split("```")[1].removeprefix("json").strip()
         return json.loads(text).get("types", [])

@@ -49,3 +49,17 @@ def test_run_removes_staging_dir_when_the_job_fails(tmp_path):
     assert not staging.exists()
     status = EntityTypeInferenceService.status("job-1", sessionmaker(bind=engine)())
     assert status["status"] == "failed"
+
+
+def test_ask_reads_content_returned_as_parts():
+    """Some providers return message content as a list of parts, not a string."""
+    from types import SimpleNamespace
+
+    payload = '{"types": [{"name": "Equipo", "why": "x", "examples": ["a", "b"]}]}'
+
+    class FakeLLM:
+        def invoke(self, prompt, **kwargs):
+            return SimpleNamespace(content=[{"type": "text", "text": payload}])
+
+    types = EntityTypeInferenceService._ask(FakeLLM(), "prompt")
+    assert types == [{"name": "Equipo", "why": "x", "examples": ["a", "b"]}]
