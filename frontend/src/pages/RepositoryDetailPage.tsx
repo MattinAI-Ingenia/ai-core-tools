@@ -1563,6 +1563,7 @@ const RepositoryDetailPage: React.FC = () => {
         <EntityTypeInferenceModal
           appId={Number.parseInt(appId!)}
           siloId={repository.silo_id}
+          files={pendingUploadFiles}
           onConfirm={applyInferredEntityTypes}
           onCancel={() => setShowEntityTypesModal(false)}
         />

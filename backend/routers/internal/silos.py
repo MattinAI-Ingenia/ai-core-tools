@@ -1,10 +1,13 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request, Body, UploadFile, File, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request, Body, UploadFile, File, Form, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Annotated, Optional
 from lks_idprovider import AuthContext
 from sqlalchemy.orm import Session
 import asyncio
 import json
+import os
+import shutil
+import tempfile
 import time
 import asyncio
 
@@ -902,6 +905,61 @@ async def infer_entity_types(
     background_tasks.add_task(
         EntityTypeInferenceService.run, job_id, silo_id, body.ai_service_id, SessionLocal(),
         body.import_job_id,
+    )
+    return {"job_id": job_id, "status": "pending"}
+
+
+@silos_router.post("/{silo_id}/lightrag/infer-entity-types/upload", status_code=status.HTTP_202_ACCEPTED)
+async def infer_entity_types_upload(
+    app_id: int,
+    silo_id: int,
+    background_tasks: BackgroundTasks,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("editor"))],
+    files: Annotated[List[UploadFile], File(...)],
+    ai_service_id: Annotated[Optional[int], Form()] = None,
+):
+    """Entity-type inference over PDFs picked in the ingestion dialog.
+
+    On a brand-new silo the files are not saved until the ingestion is
+    confirmed, so there is nothing for the job to read yet. These files are
+    written to a staging directory that the job removes when it finishes; they
+    are never added to the silo here.
+    """
+    from db.database import SessionLocal
+    from services.entity_type_inference_service import EntityTypeInferenceService
+
+    _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if SiloService.is_lightrag_config_locked(silo_id, db):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This silo has already been indexed; entity types can no longer be changed.",
+        )
+
+    pdfs = [f for f in files if (f.filename or "").lower().endswith(".pdf")]
+    if not pdfs:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files can be used to infer entity types.")
+
+    staging_dir = tempfile.mkdtemp(prefix="entity-types-")
+    try:
+        for index, upload in enumerate(pdfs):
+            # Index prefix keeps names unique; basename blocks path traversal.
+            name = f"{index}-{os.path.basename(upload.filename)}"
+            with open(os.path.join(staging_dir, name), "wb") as fh:
+                fh.write(await upload.read())
+        job_id = EntityTypeInferenceService.start(silo_id, ai_service_id, db)
+    except ValueError as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    background_tasks.add_task(
+        EntityTypeInferenceService.run, job_id, silo_id, ai_service_id, SessionLocal(),
+        None, staging_dir,
     )
     return {"job_id": job_id, "status": "pending"}
 

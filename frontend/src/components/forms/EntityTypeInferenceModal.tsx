@@ -29,6 +29,11 @@ interface Props {
    * (downloaded but not yet ingested) PDFs.
    */
   importJobId?: number;
+  /**
+   * PDFs picked in the ingestion dialog and not saved yet. When given, the
+   * inference reads these instead of the silo's documents.
+   */
+  files?: File[];
   /** Called with the confirmed comma-separated list. */
   onConfirm: (entityTypes: string) => void;
   onCancel: () => void;
@@ -53,7 +58,7 @@ const STAGE_LABEL: Record<InferenceJob['status'], string> = {
  * proposes, a person decides.
  */
 export function EntityTypeInferenceModal({
-  appId, siloId, aiServiceId, importJobId, onConfirm, onCancel,
+  appId, siloId, aiServiceId, importJobId, files, onConfirm, onCancel,
 }: Props) {
   const [job, setJob] = useState<InferenceJob | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -73,7 +78,10 @@ export function EntityTypeInferenceModal({
 
     (async () => {
       try {
-        const { job_id } = await apiService.inferEntityTypes(appId, siloId, aiServiceId, importJobId) as { job_id: string };
+        const started = files && files.length > 0
+          ? apiService.inferEntityTypesFromFiles(appId, siloId, files, aiServiceId)
+          : apiService.inferEntityTypes(appId, siloId, aiServiceId, importJobId);
+        const { job_id } = await started as { job_id: string };
         if (cancelled) return;
 
         timer.current = window.setInterval(async () => {
@@ -99,7 +107,7 @@ export function EntityTypeInferenceModal({
     })();
 
     return () => { cancelled = true; stopPolling(); };
-  }, [appId, siloId, aiServiceId, importJobId, stopPolling]);
+  }, [appId, siloId, aiServiceId, importJobId, files, stopPolling]);
 
   const toggle = (name: string) => {
     setSelected((current) => {

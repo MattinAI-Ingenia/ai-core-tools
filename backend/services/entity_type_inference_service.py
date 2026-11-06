@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -223,15 +224,22 @@ class EntityTypeInferenceService:
     @staticmethod
     def run(
         job_id: str, silo_id: int, ai_service_id: Optional[int], db: Session,
-        import_job_id: Optional[int] = None,
+        import_job_id: Optional[int] = None, staging_dir: Optional[str] = None,
     ) -> None:
-        """Do the work. Exceptions land on the job, never on the caller."""
+        """Do the work. Exceptions land on the job, never on the caller.
+
+        ``staging_dir`` holds PDFs uploaded for this inference only (the files
+        picked in the ingestion dialog, not yet saved to the silo). They are
+        read alongside the silo's documents and the directory is removed here.
+        """
         try:
             llm = EntityTypeInferenceService._resolve_ai_service(silo_id, ai_service_id, db)
             silo = db.query(Silo).filter(Silo.silo_id == silo_id).first()
             language = getattr(silo, "lightrag_language", None)
 
             paths = EntityTypeInferenceService._document_paths(silo_id, db, import_job_id)
+            if staging_dir:
+                paths += EntityTypeInferenceService._staged_paths(staging_dir)
             if not paths:
                 raise ValueError(
                     "This silo has no documents uploaded yet. Upload them before "
@@ -309,6 +317,16 @@ class EntityTypeInferenceService:
             _update(db, job_id, status="failed", error=str(exc))
         finally:
             db.close()
+            if staging_dir:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+    @staticmethod
+    def _staged_paths(staging_dir: str) -> List[tuple]:
+        """(doc_id, path) for the PDFs written to a staging directory."""
+        return [
+            (os.path.splitext(name)[0], os.path.join(staging_dir, name))
+            for name in sorted(os.listdir(staging_dir))
+        ]
 
     # ------------------------------------------------------------------ helpers
 

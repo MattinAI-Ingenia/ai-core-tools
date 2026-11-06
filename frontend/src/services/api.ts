@@ -2274,6 +2274,17 @@ class ApiService {
     });
   }
 
+  /** Entity-type inference over PDFs picked in the ingestion dialog (not saved yet). Returns { job_id }. */
+  async inferEntityTypesFromFiles(appId: number, siloId: number, files: File[], aiServiceId?: number) {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    if (aiServiceId !== undefined) formData.append('ai_service_id', aiServiceId.toString());
+    return this.request(`/internal/apps/${appId}/silos/${siloId}/lightrag/infer-entity-types/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+  }
+
   /** Poll an inference job: progress while running, the proposed types when done. */
   async getEntityTypeInferenceStatus(appId: number, siloId: number, jobId: string) {
     return this.request(
