@@ -90,12 +90,16 @@
     {
       "name": "LightRAG Agent",
       "description": "Agente RAG sobre el silo LightRAG; elige el modo de consulta por pregunta (skill LightRAG Query Router).",
-      "system_prompt": "Eres un asistente que responde solo con la informacion de los documentos recuperados. Si la respuesta no esta en el contexto, dilo. Cita el documento de origen.",
+      "system_prompt": "Eres un asistente que responde solo con la informacion de los documentos recuperados. Si la respuesta no esta en el contexto, dilo. Cita el documento de origen. Antes de buscar, llama a la herramienta \"Clasificador de consultas\" con la pregunta: si la consulta no es del ámbito de climatización, dilo sin buscar en los documentos.",
       "prompt_template": "{question}",
       "service_name": "LightRAG Query",
       "silo_name": "LightRAG Knowledge Base",
       "output_parser_name": null,
-      "agent_tool_refs": [],
+      "agent_tool_refs": [
+        {
+          "tool_agent_name": "Clasificador de consultas"
+        }
+      ],
       "agent_mcp_refs": [],
       "has_memory": false,
       "lightrag_query_mode": "skill-routed"
@@ -117,20 +121,37 @@
           "type": "choice",
           "instructions": "¿Qué tipo de consulta es?",
           "criteria": [
-            {"key": "averia", "description": "Fallo, error o mal funcionamiento"},
-            {"key": "instalacion", "description": "Montaje, puesta en marcha o dimensionado"},
-            {"key": "eficiencia", "description": "Consumo, rendimiento o ahorro"},
-            {"key": "otro", "description": "Cualquier otra cosa"}
+            {
+              "key": "averia",
+              "description": "Fallo, error o mal funcionamiento"
+            },
+            {
+              "key": "instalacion",
+              "description": "Montaje, puesta en marcha o dimensionado"
+            },
+            {
+              "key": "eficiencia",
+              "description": "Consumo, rendimiento o ahorro"
+            },
+            {
+              "key": "otro",
+              "description": "Cualquier otra cosa"
+            }
           ]
         },
         {
           "key": "urgencia",
           "type": "score",
           "instructions": "¿Con qué urgencia hay que atenderla?",
-          "criteria": ["Baja", "Media", "Alta"],
+          "criteria": [
+            "Baja",
+            "Media",
+            "Alta"
+          ],
           "color_start": "green"
         }
-      ]
+      ],
+      "is_tool": true
     }
   ]
 }
