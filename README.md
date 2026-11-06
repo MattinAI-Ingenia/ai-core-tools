@@ -36,16 +36,22 @@ ln -s ../.env docker/.env
 Compose reads `docker/.env`; the link keeps a single file to edit. Without symlink
 support, skip the `ln` and add `--env-file ../.env` to every `docker compose` command.
 
-Edit `.env`. Real values go only in this copy, never in `.env.example`. Required:
+Real values go only in this `.env` copy, never in `.env.example`. Fill the three secrets
+with random values in one command (it only replaces those three lines):
+
+```bash
+python3 -c "import re,secrets;t=open('.env').read();[t:=re.sub(f'(?m)^{k}=.*',f'{k}={v}',t) for k,v in {'DATABASE_PASSWORD':secrets.token_urlsafe(24),'SECRET_KEY':secrets.token_hex(32),'NEO4J_PASSWORD':secrets.token_urlsafe(24)}.items()];open('.env','w').write(t)"
+```
+
+Then edit `.env` and set your email in `AICT_OMNIADMINS`. Required variables:
 
 | Variable | Put | Why |
 |----------|-----|-----|
-| `DATABASE_PASSWORD` | a random password | Compose fails if empty |
-| `SECRET_KEY` | `python -c "import secrets; print(secrets.token_hex(32))"` | signs sessions |
-| `NEO4J_PASSWORD` | a random password, **not** `neo4j` | Neo4j 5 refuses its default; Compose fails if empty |
+| `DATABASE_PASSWORD` | a random password (the command above) | Compose fails if empty |
+| `SECRET_KEY` | a random 64-character hex string (the command above) | signs sessions |
+| `NEO4J_PASSWORD` | a random password, **not** `neo4j` (the command above) | Neo4j 5 refuses its default; Compose fails if empty |
 | `AICT_OMNIADMINS` | your email | gets an admin account on first start (step 4) |
 
-Random passwords: `python -c "import secrets; print(secrets.token_urlsafe(24))"`.
 Everything else has a working default. To serve from another host, set
 `AICT_PUBLIC_URL=http://<server-ip-or-domain>`.
 
