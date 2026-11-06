@@ -470,5 +470,5 @@ def test_measured_model_uses_its_own_output_per_call():
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=_make_lightrag_silo(model_name="some-model")):
         other = SiloService.estimate_indexing_cost(1, documents, db)
 
-    assert luna["estimated_output_tokens"] == 3500
+    assert luna["estimated_output_tokens"] == 1700
     assert other["estimated_output_tokens"] == 2000

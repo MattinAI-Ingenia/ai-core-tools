@@ -55,8 +55,10 @@ LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 # real indexing (indexing_metric, provider-reported). Others use the generic default.
 # gpt-6-luna: 14 chunks / 2 runs, 3,480-3,490 per call (reasoning tokens included).
 # ponytail: hand-kept table; derive from indexing_metric history if it grows.
+# (min, avg, max) completion tokens per LLM call. gpt-6-luna: 185,408 output over
+# 110 calls on a 3-document, 90-chunk run (indexing_metric, 2026-11-06).
 _MEASURED_OUT_PER_CALL = {
-    'gpt-6-luna': (3000, 3500, 4000),
+    'gpt-6-luna': (1400, 1700, 2100),
 }
 
 # Per-chunk marker stamping each indexing run; lets reindex delete only stale chunks.
