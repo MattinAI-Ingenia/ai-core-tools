@@ -153,7 +153,24 @@ _GUIDED_JSON_PROVIDERS = frozenset({"Custom", "OpenAI", "Azure", "OpenRouter"})
 # vLLM-served Qwen3 models emit reasoning tokens unless asked not to; the
 # flag travels in the OpenAI ``extra_body`` pass-through.
 _NO_THINKING_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
-_NO_THINKING_PROVIDERS = frozenset({"Custom", "OpenAI", "OpenRouter"})
+
+
+def _no_reasoning_kwargs(ai_service: Any) -> dict[str, Any]:
+    """Per-call kwargs that switch reasoning off for *ai_service*, or ``{}``.
+
+    Each ChatOpenAI-backed provider spells it differently: vLLM/OpenRouter take
+    the chat-template flag, OpenAI itself takes ``reasoning_effort`` (``reasoning``
+    on the Responses API, which is what an OpenAI service without endpoint uses).
+    Other clients get nothing: ``extra_body`` is an OpenAI SDK pass-through.
+    """
+    provider = getattr(ai_service, "provider", None)
+    if provider in ("Custom", "OpenRouter"):
+        return {"extra_body": _NO_THINKING_EXTRA_BODY}
+    if provider == "OpenAI":
+        if getattr(ai_service, "endpoint", None):
+            return {"reasoning_effort": "none"}
+        return {"reasoning": {"effort": "none"}}
+    return {}
 
 def _derive_json_extraction_marker() -> Optional[str]:
     """Return a sentence that appears **only** in LightRAG's JSON extraction prompt.
@@ -403,13 +420,13 @@ def build_llm_model_func(
     discriminator built by :func:`_resolve_json_marker`; passing ``None`` keeps
     LightRAG's prompt-only JSON, where nothing prevents malformed output.
 
-    Calls through ChatOpenAI-backed providers (``Custom``, ``OpenAI``,
-    ``OpenRouter``) also try ``extra_body={"chat_template_kwargs":
-    {"enable_thinking": False}}`` to switch off Qwen3-style reasoning output:
-    reasoning tokens count against ``max_tokens``, and with
-    ``LIGHTRAG_EXTRACT_MAX_TOKENS=8192`` 26% of the silo-55 extractions were
-    cut (billed ~5x output for the same visible JSON). If the server rejects
-    the parameter, it is dropped for the life of this adapter.
+    Calls through ChatOpenAI-backed providers also ask for reasoning to be off
+    (:func:`_no_reasoning_kwargs`: ``enable_thinking=false`` for vLLM/OpenRouter,
+    ``reasoning_effort=none`` for OpenAI). Reasoning tokens count against
+    ``max_tokens``, and with ``LIGHTRAG_EXTRACT_MAX_TOKENS=8192`` 26% of the
+    silo-55 extractions were cut (billed ~5x output for the same visible JSON).
+    On gpt-6-luna it also cuts output ~40% but extracts ~10-20% less graph. If
+    the server rejects the parameter, it is dropped for the life of this adapter.
     """
     if ai_service is None:
         raise ValueError("ai_service is required to build an LLM adapter")
@@ -425,10 +442,9 @@ def build_llm_model_func(
     )
     is_azure = getattr(ai_service, 'provider', None) == "Azure"
 
-    # Only ChatOpenAI-backed providers get the kwarg: ``extra_body`` is an OpenAI
-    # SDK pass-through, and other clients would fail in their own ways.
+    no_reasoning = _no_reasoning_kwargs(ai_service)
     # ponytail: per-adapter flag; once a server rejects the kwarg it is dropped for the life of this adapter
-    send_no_thinking = getattr(ai_service, 'provider', None) in _NO_THINKING_PROVIDERS
+    send_no_thinking = bool(no_reasoning)
 
     async def _ainvoke(messages: List[dict], invoke_kwargs: dict) -> Any:
         """Call ``llm.ainvoke``, dropping ``extra_body`` if the server rejects it."""
@@ -439,7 +455,7 @@ def build_llm_model_func(
         if not send_no_thinking:
             return await call()
         try:
-            return await call(extra_body=_NO_THINKING_EXTRA_BODY)
+            return await call(**no_reasoning)
         except Exception as exc:
             # Only a refused request shape (400/422, or a client TypeError) drops
             # the kwarg. Truncation, timeouts and 5xx say nothing about it: they
@@ -451,9 +467,10 @@ def build_llm_model_func(
         retry = await call()
         send_no_thinking = False
         logger.warning(
-            "LightRAG LLM %s rejected enable_thinking=false (%s: %.120s); "
+            "LightRAG LLM %s rejected the no-reasoning parameter %s (%s: %.120s); "
             "continuing without it",
             getattr(ai_service, "description", None) or getattr(ai_service, "name", None),
+            list(no_reasoning),
             type(rejected).__name__,
             rejected,
         )

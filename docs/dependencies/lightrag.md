@@ -800,6 +800,20 @@ usa «lo que queda de ventana» (~30k tokens). Cortar no pierde el trabajo hecho
 el parser usa `json_repair`, que cierra las estructuras abiertas y conserva
 todos los registros completos anteriores al corte (verificado).
 
+**Razonamiento desactivado**: los tokens de razonamiento cuentan contra el tope
+de salida y se facturan como salida. En el silo 55 (servidor vLLM que razonaba por
+defecto) el 26 % de las extracciones se cortó en el tope y se facturó ~5× la salida
+de su JSON visible; con el razonamiento forzado sobre los mismos chunks salieron
+2,6× más tokens y 4 de 12 se cortaron. El adaptador pide apagarlo en las llamadas
+de los proveedores sobre ChatOpenAI (`_no_reasoning_kwargs`, `adapters.py`):
+`chat_template_kwargs.enable_thinking=false` en `Custom`/`OpenRouter` y
+`reasoning_effort=none` en `OpenAI`. Si el servidor rechaza el parámetro (HTTP
+400/422), se reintenta una vez sin él y se desactiva para ese adaptador, con un
+aviso en el log (los timeouts, los 5xx y los truncados no lo desactivan). En
+gpt-6-luna apagarlo recorta ~35-45 % de los tokens de salida y ~40 % del tiempo,
+pero extrae ~10-20 % menos grafo (cobertura medida con juez GLM, ver el informe de
+referencia de tiempos y costes).
+
 ### 9.2 Embeddings
 
 `build_embedding_func` (`adapters.py`) construye un `EmbeddingFunc`

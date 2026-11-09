@@ -324,7 +324,7 @@ class TestBuildLlmModelFunc:
     async def test_first_call_sends_extra_body_disabling_thinking(self):
         """Qwen3 reasoning tokens count against max_tokens; the first call must
         ask the server to disable them."""
-        ai_service = _make_ai_service()
+        ai_service = _make_ai_service("Custom")
         fake_llm = MagicMock()
         fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
 
@@ -337,6 +337,28 @@ class TestBuildLlmModelFunc:
 
         kwargs = fake_llm.ainvoke.await_args.kwargs
         assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+    async def test_openai_sends_reasoning_effort_none_not_chat_template(self):
+        """OpenAI rejects chat_template_kwargs; it takes reasoning effort instead
+        (``reasoning`` on the Responses API, ``reasoning_effort`` with an endpoint)."""
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            await adapters.build_llm_model_func(_make_ai_service("OpenAI"))("hi")
+            kwargs = fake_llm.ainvoke.await_args.kwargs
+            assert kwargs["reasoning"] == {"effort": "none"}
+            assert "extra_body" not in kwargs
+
+            gateway = _make_ai_service("OpenAI")
+            gateway.endpoint = "https://gateway.example/v1"
+            await adapters.build_llm_model_func(gateway)("hi")
+            kwargs = fake_llm.ainvoke.await_args.kwargs
+            assert kwargs["reasoning_effort"] == "none"
+            assert "reasoning" not in kwargs
 
     async def test_non_openai_clients_never_get_extra_body(self):
         """extra_body is an OpenAI SDK pass-through; other clients must not see it."""
@@ -355,7 +377,7 @@ class TestBuildLlmModelFunc:
     async def test_rejected_extra_body_is_dropped_for_next_calls(self):
         """A server that rejects the kwarg must not see it again, and the
         rejection must not lose the response (one silent retry without it)."""
-        ai_service = _make_ai_service()
+        ai_service = _make_ai_service("Custom")
         fake_llm = MagicMock()
 
         class BadRequestError(Exception):
@@ -384,7 +406,7 @@ class TestBuildLlmModelFunc:
     async def test_transient_error_propagates_without_retry_and_keeps_flag(self):
         """A timeout/5xx says nothing about the kwarg: no retry, the error
         propagates as before, and the next call still sends extra_body."""
-        ai_service = _make_ai_service()
+        ai_service = _make_ai_service("Custom")
         fake_llm = MagicMock()
         fake_llm.ainvoke = AsyncMock(side_effect=RuntimeError("connection reset"))
 
@@ -404,7 +426,7 @@ class TestBuildLlmModelFunc:
     async def test_both_attempts_failing_keeps_trying_extra_body(self):
         """If the retry without extra_body also fails, the error propagates and
         the flag is NOT disabled — the failure was not caused by the kwarg."""
-        ai_service = _make_ai_service()
+        ai_service = _make_ai_service("Custom")
         fake_llm = MagicMock()
 
         class BadRequestError(Exception):
@@ -433,7 +455,7 @@ class TestBuildLlmModelFunc:
         as today, and no retry must burn a second server call."""
         from lightrag.utils import TruncatedResponse  # noqa: WPS433
 
-        ai_service = _make_ai_service()
+        ai_service = _make_ai_service("Custom")
         fake_llm = MagicMock()
 
         class LengthFinishReasonError(Exception):
