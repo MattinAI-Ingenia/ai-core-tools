@@ -217,6 +217,7 @@ const RepositoryDetailPage: React.FC = () => {
     folderName?: string;
     parentFolderId?: number;
   }>({});
+  const [folderTreeVersion, setFolderTreeVersion] = useState(0);
   const [newFolderName, setNewFolderName] = useState('');
   const [newParentFolderId, setNewParentFolderId] = useState<number | null>(null);
 
@@ -688,6 +689,7 @@ const RepositoryDetailPage: React.FC = () => {
       );
       setShowCreateFolderModal(false);
       setNewFolderName('');
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error creating folder:', err);
@@ -708,6 +710,7 @@ const RepositoryDetailPage: React.FC = () => {
       );
       setShowRenameFolderModal(false);
       setNewFolderName('');
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error renaming folder:', err);
@@ -731,6 +734,7 @@ const RepositoryDetailPage: React.FC = () => {
         setSelectedFolderId(null);
         setSelectedFolderPath('');
       }
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error deleting folder:', err);
@@ -751,6 +755,7 @@ const RepositoryDetailPage: React.FC = () => {
       );
       setShowMoveFolderModal(false);
       setNewParentFolderId(null);
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error moving folder:', err);
@@ -1250,6 +1255,7 @@ const RepositoryDetailPage: React.FC = () => {
             onFolderDelete={handleDeleteFolder}
             onFolderMove={handleMoveFolder}
             canEdit={canEdit}
+            refreshToken={folderTreeVersion}
           />
         </div>
 
