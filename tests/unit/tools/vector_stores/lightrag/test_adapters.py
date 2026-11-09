@@ -321,6 +321,142 @@ class TestBuildLlmModelFunc:
 
         assert "max_tokens" not in fake_llm.ainvoke.await_args.kwargs
 
+    async def test_first_call_sends_extra_body_disabling_thinking(self):
+        """Qwen3 reasoning tokens count against max_tokens; the first call must
+        ask the server to disable them."""
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            await llm_func("hi")
+
+        kwargs = fake_llm.ainvoke.await_args.kwargs
+        assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+    async def test_non_openai_clients_never_get_extra_body(self):
+        """extra_body is an OpenAI SDK pass-through; other clients must not see it."""
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(_make_ai_service("Anthropic"))
+            await llm_func("hi")
+
+        assert "extra_body" not in fake_llm.ainvoke.await_args.kwargs
+
+    async def test_rejected_extra_body_is_dropped_for_next_calls(self):
+        """A server that rejects the kwarg must not see it again, and the
+        rejection must not lose the response (one silent retry without it)."""
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+
+        class BadRequestError(Exception):
+            status_code = 400
+
+        def reject_extra_body(messages, config=None, **kwargs):
+            if "extra_body" in kwargs:
+                raise BadRequestError("unknown field: chat_template_kwargs")
+            return SimpleNamespace(content="ok")
+
+        fake_llm.ainvoke = AsyncMock(side_effect=reject_extra_body)
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            result = await llm_func("hi")
+            assert result == "ok"
+
+            await llm_func("hi again")
+            # 2 (rejected + retry) + 1 (next call already clean).
+            assert fake_llm.ainvoke.await_count == 3
+            assert "extra_body" not in fake_llm.ainvoke.await_args.kwargs
+
+    async def test_transient_error_propagates_without_retry_and_keeps_flag(self):
+        """A timeout/5xx says nothing about the kwarg: no retry, the error
+        propagates as before, and the next call still sends extra_body."""
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            with pytest.raises(RuntimeError, match="connection reset"):
+                await llm_func("hi")
+            assert fake_llm.ainvoke.await_count == 1
+
+            fake_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="ok"))
+            assert await llm_func("hi") == "ok"
+            assert "extra_body" in fake_llm.ainvoke.await_args.kwargs
+
+    async def test_both_attempts_failing_keeps_trying_extra_body(self):
+        """If the retry without extra_body also fails, the error propagates and
+        the flag is NOT disabled — the failure was not caused by the kwarg."""
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+
+        class BadRequestError(Exception):
+            status_code = 400
+
+        fake_llm.ainvoke = AsyncMock(side_effect=BadRequestError("bad prompt"))
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service)
+            with pytest.raises(BadRequestError, match="bad prompt"):
+                await llm_func("hi")
+            assert fake_llm.ainvoke.await_count == 2  # attempt + retry, both failed
+
+            # Next call must send extra_body again (it was never rejected).
+            fake_llm.ainvoke = AsyncMock(
+                side_effect=[SimpleNamespace(content="ok"), AssertionError("no retry here")]
+            )
+            result = await llm_func("hi")
+            assert result == "ok"
+
+    async def test_length_error_with_extra_body_salvaged_without_retry(self):
+        """Truncation is not a parameter rejection: the partial JSON is salvaged
+        as today, and no retry must burn a second server call."""
+        from lightrag.utils import TruncatedResponse  # noqa: WPS433
+
+        ai_service = _make_ai_service()
+        fake_llm = MagicMock()
+
+        class LengthFinishReasonError(Exception):
+            pass
+
+        completion = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"entities": [{"na'))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+        exc = LengthFinishReasonError("length limit reached")
+        exc.completion = completion
+        fake_llm.ainvoke = AsyncMock(side_effect=exc)
+
+        with patch(
+            "tools.aiServiceTools.create_llm_from_service",
+            return_value=fake_llm,
+        ):
+            llm_func = adapters.build_llm_model_func(ai_service, max_tokens=64)
+            result = await llm_func("hi")
+
+        assert isinstance(result, TruncatedResponse)
+        assert fake_llm.ainvoke.await_count == 1
+
 
 class TestLengthLimitSalvage:
     """A capped, schema-constrained call that hits the limit must not lose the chunk.
