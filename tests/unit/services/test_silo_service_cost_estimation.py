@@ -68,8 +68,8 @@ def test_estimate_cost_basic_calculation():
     # 1 call * (avg_chunk_tokens 1200 + 1700 overhead) = 2900
     assert result["estimated_input_tokens"] == 2900
     assert result["estimated_output_tokens"] == 2000    # 1 call * 2000 avg
-    # chunk embeddings (content 1200) + graph embeddings (0.7 * output 2000) = 2600
-    assert result["estimated_embedding_tokens"] == 2600
+    # chunk embeddings (content 1200) + 26 vectors * 27 tokens (smallest corpus) = 1902
+    assert result["estimated_embedding_tokens"] == 1902
     assert result["warnings"] == []
 
 
@@ -287,10 +287,10 @@ def test_self_hosted_llm_still_charges_for_embeddings(monkeypatch):
     db = MagicMock()
 
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo):
-        result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 4800}], db)
+        result = SiloService.estimate_indexing_cost(1, [{"content": "x" * 48000}], db)
 
-    # 3200 embedding tokens * 0.02 / 1e6, LLM side counted as 0.
-    expected = round(3200 * 0.02 / 1_000_000, 4)
+    # 10 chunks: 12,000 content + 10 * 26 * 27 = 19,020 embedding tokens * 0.02 / 1e6, LLM side 0.
+    expected = round(19020 * 0.02 / 1_000_000, 4)
     assert result["estimated_cost_min"] == expected
     assert result["estimated_cost_max"] == expected
     assert result["warnings"] == []
@@ -331,7 +331,7 @@ def test_both_self_hosted_reports_unavailable(monkeypatch):
     assert result["estimated_cost_max"] is None
     assert any("self-hosted" in w for w in result["warnings"]), result["warnings"]
     # Token counts are still reported — only the money is unknown.
-    assert result["estimated_embedding_tokens"] == 2600
+    assert result["estimated_embedding_tokens"] == 1902
 
 
 def test_unpriced_cloud_model_stays_unavailable(monkeypatch):
@@ -475,5 +475,16 @@ def test_measured_model_uses_its_own_output_per_call():
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=_make_lightrag_silo(model_name="some-model")):
         other = SiloService.estimate_indexing_cost(1, documents, db)
 
-    assert luna["estimated_output_tokens"] == 1300
+    assert luna["estimated_output_tokens"] == 1130
     assert other["estimated_output_tokens"] == 2000
+
+
+def test_merge_and_embedding_costs_grow_with_the_corpus():
+    """Merge calls and tokens per vector follow the measured curves: 1,600 chunks of silo 61
+    (gpt-6-luna) were 1.53 USD; the curves must land near it, not at the 1-chunk values."""
+    from services.silo_service import _interp, _MERGE_PER_CHUNK, _TOKENS_PER_VECTOR
+
+    assert _interp(_MERGE_PER_CHUNK, 1600) == pytest.approx(0.948)
+    assert _interp(_MERGE_PER_CHUNK, 99999) == 1.11          # flat past the measured range
+    assert _interp(_TOKENS_PER_VECTOR, 1600) == 85
+    assert _interp(_TOKENS_PER_VECTOR, 6757) == 166
