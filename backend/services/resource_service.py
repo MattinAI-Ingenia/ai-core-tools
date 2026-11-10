@@ -968,6 +968,11 @@ class ResourceService:
                 _run()
             finally:
                 silo_indexing_lock.release(lock_conn, silo_id)
+            # A resume never chains into another resume, so this fires at most once.
+            if not resumed and repository_id is not None:
+                ResourceService._auto_resume_once(
+                    repository_id, [rid for rid, _ in resource_snapshots],
+                )
 
         thread = threading.Thread(
             target=_run_and_unlock, daemon=True, name=f"index-{session_id[:8]}"
@@ -975,6 +980,32 @@ class ResourceService:
         thread.start()
 
         return session_id
+
+    @staticmethod
+    def _auto_resume_once(repository_id: int, resource_ids: List[int]) -> None:
+        """Click "Resume indexing" once when a batch ends with 'error' resources.
+
+        Their cause is usually transient (a dropped Qdrant connection halts the queue; a
+        duplicate page whose twin was still in flight), and resuming recovers it. A user
+        stop is respected; a genuinely broken file just errors again.
+        """
+        from db.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            if ResourceService.ingestion_stop_mode(repository_id):
+                return
+            failed = db.query(Resource.resource_id).filter(
+                Resource.resource_id.in_(resource_ids),
+                Resource.status == RESOURCE_STATUS_ERROR,
+            ).first()
+            if failed:
+                logger.info("Batch of repository %s ended with errors: resuming once", repository_id)
+                ResourceService.resume_indexing(db, repository_id)
+        except Exception as exc:  # 409 (user resumed first) or a DB hiccup: nothing to recover here
+            logger.warning("Automatic resume skipped for repository %s: %s", repository_id, exc)
+        finally:
+            db.close()
 
     @staticmethod
     def get_ingestion_liveness(db: Session, repository_id: int) -> dict:
