@@ -54,12 +54,11 @@ LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 # LightRAG extraction output tokens per call (min, avg, max) for models measured on
 # real indexing (indexing_metric, provider-reported). Others use the generic default.
 # ponytail: hand-kept table; derive from indexing_metric history if it grows.
-# gpt-6-luna, reasoning_effort=none (silo 60, 2026-11-09, 21 chunks): min = measured
-# 799 output tokens per chunk; avg/max add merge summaries of a larger corpus
-# (inferred from Qwen, not measured on luna). The old (1400, 1700, 2100) was
-# measured with the default effort, which reasons.
+# gpt-6-luna, reasoning_effort=none: min = 799/chunk (silo 60, 2 PDF, almost no merge);
+# avg = 1,313/chunk measured on 33 PDF / 1,600 chunks (silo 61, merge included);
+# max = avg plus merge growth at 136 PDF (inferred from Qwen, not measured on luna).
 _MEASURED_OUT_PER_CALL = {
-    'gpt-6-luna': (800, 1000, 1250),
+    'gpt-6-luna': (800, 1300, 1500),
 }
 
 # Per-model (optimistic, pessimistic) tok/s of ONE hosted-API call (prompt +
