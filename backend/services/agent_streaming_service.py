@@ -372,7 +372,6 @@ class AgentStreamingService:
                     config["configurable"]["checkpoint_id"] = rollback_checkpoint_id
                 config.setdefault("callbacks", []).append(metrics_collector)
 
-                # Attach monitoring callback if enabled
                                 # ------------------------------------------------------------
                 # 4. Build the HumanMessage payload (handles multimodal images)
                 # ------------------------------------------------------------

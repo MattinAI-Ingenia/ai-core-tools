@@ -46,8 +46,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_CONTAINER = os.environ.get("EVAL_RAG_BACKEND_CONTAINER", "docker-backend-1")
 
 # Verified 2026-08-24 (OpenRouter/Morph/CloudZero) — standard tier, no long-context
-# surcharge, no cache discount. Applied to the FULL per-call token count logged by
-# the "monitoring" middleware, which sums every model the agent chain used in that
+# surcharge, no cache discount. Applied to the FULL per-call token count (see
+# fetch_monitoring_usage), which sums every model the agent chain used in that
 # call (the OpenAI synthesis model + any local keyword-extraction model) — the
 # local model's tokens are free, so this is a deliberate upper bound, not an
 # exact figure. Matched against the agent's synthesis-model description
@@ -248,11 +248,12 @@ print(json.dumps({{
 def fetch_monitoring_usage(
     agent_id: int, since: datetime, n_calls: int, input_per_1m: float, output_per_1m: float,
 ) -> list[dict]:
-    """Pull per-call token usage logged by the agent's "monitoring" middleware.
+    """Pull per-call token usage from "[Monitoring]" backend log lines.
 
-    Requires a Middleware(middleware_type='MONITORING') attached to the agent
-    (see UsageMetadataCallbackHandler in tools/agentTools.py) — without it, no
-    [Monitoring] lines are logged and this returns an empty list for every call.
+    LEGACY: the backend no longer emits those lines (the monitoring middleware was
+    removed), so this returns an empty list and every result carries usage=None.
+    Per-call tokens, duration and LLM calls are always recorded in the
+    ``agent_execution_event`` table, per agent and run time.
 
     Correlates the Nth [Monitoring] line for this agent to the Nth question,
     which only holds because this script calls the agent strictly sequentially
@@ -734,8 +735,8 @@ def main() -> int:
                 "Upper bound: suma tokens de TODOS los modelos usados en cada "
                 "llamada (incluye el modelo local de keywords, que es gratis) y "
                 "aplica el precio del modelo de sintesis del agente (ver "
-                "pricing_used) al total. Requiere el middleware 'monitoring' "
-                "en el agente; si no esta activo, sale en 0."
+                "pricing_used) al total. Hoy sale en 0: el arnes lee lineas '[Monitoring]' "
+                "que el backend ya no emite; los tokens estan en agent_execution_event."
             ),
         },
         "resultados": results,
