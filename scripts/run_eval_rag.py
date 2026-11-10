@@ -47,7 +47,7 @@ BACKEND_CONTAINER = os.environ.get("EVAL_RAG_BACKEND_CONTAINER", "docker-backend
 
 # Verified 2026-08-24 (OpenRouter/Morph/CloudZero) — standard tier, no long-context
 # surcharge, no cache discount. Applied to the FULL per-call token count (see
-# fetch_monitoring_usage), which sums every model the agent chain used in that
+# fetch_usage_events), which sums every model the agent chain used in that
 # call (the OpenAI synthesis model + any local keyword-extraction model) — the
 # local model's tokens are free, so this is a deliberate upper bound, not an
 # exact figure. Matched against the agent's synthesis-model description
@@ -245,75 +245,63 @@ print(json.dumps({{
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
-def fetch_monitoring_usage(
-    agent_id: int, since: datetime, n_calls: int, input_per_1m: float, output_per_1m: float,
+def fetch_usage_events(
+    agent_id: int, since: datetime, results: list[dict], input_per_1m: float, output_per_1m: float,
 ) -> list[dict]:
-    """Pull per-call token usage from "[Monitoring]" backend log lines.
+    """Per-question token usage, latency and LLM calls from ``agent_execution_event``.
 
-    LEGACY: the backend no longer emits those lines (the monitoring middleware was
-    removed), so this returns an empty list and every result carries usage=None.
-    Per-call tokens, duration and LLM calls are always recorded in the
-    ``agent_execution_event`` table, per agent and run time.
-
-    Correlates the Nth [Monitoring] line for this agent to the Nth question,
-    which only holds because this script calls the agent strictly sequentially
-    (no concurrent requests). The handler logs each call's totals TWICE
-    (duplicated log statement in agent_execution_service.py) — consecutive
-    duplicates are collapsed here.
+    The backend records one row per agent run (success only here), so there is no log
+    scraping and parallel runs work: each result is matched to the row whose
+    ``response_chars`` equals the length of that result's answer (first unused row
+    in start order when two answers have the same length, which only mixes up the two
+    questions' numbers). Returns one dict per result; ``{}`` when no row matches.
     """
-    since_str = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    since_utc = since.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+    snippet = f"""
+import json
+from datetime import datetime
+from sqlalchemy import text
+from db.database import SessionLocal
+rows = SessionLocal().execute(text(
+    "select input_tokens, output_tokens, total_tokens, llm_calls, duration_ms, model_name, response_chars "
+    "from agent_execution_event where agent_id = :a and status = 'SUCCESS' and started_at >= :s "
+    "order by started_at"), {{"a": {agent_id}, "s": datetime.fromisoformat("{since_utc}")}}).fetchall()
+print(json.dumps([list(r) for r in rows]))
+"""
     try:
         out = subprocess.run(
-            ["docker", "logs", BACKEND_CONTAINER, "--since", since_str],
+            ["docker", "exec", BACKEND_CONTAINER, "python", "-c", snippet],
             capture_output=True, text=True, check=True,
         )
+        rows = json.loads(out.stdout.strip().splitlines()[-1])
     except Exception as exc:  # noqa: BLE001
-        print(f"  (no se pudo leer logs de coste: {exc})", file=sys.stderr)
-        return [{} for _ in range(n_calls)]
+        print(f"  (no se pudo leer agent_execution_event: {exc})", file=sys.stderr)
+        return [{} for _ in results]
 
-    events = []
-    last_key = None
-    for line in out.stdout.splitlines() + out.stderr.splitlines():
-        m = _MONITORING_LINE_RE.search(line)
-        if not m or int(m.group(1)) != agent_id:
+    usage = []
+    for r in results:
+        n = len(r.get("respuesta_agente") or "")
+        row = next((x for x in rows if n and x[6] == n), None)
+        if row is None:
+            usage.append({})
             continue
-        key = m.groups()
-        if key == last_key:
-            continue  # duplicate log statement, same call
-        last_key = key
-        models = json.loads(m.group(2).replace("'", '"'))
-        input_tokens, output_tokens, total_tokens, llm_calls = (int(x) for x in m.groups()[2:])
-        events.append({
-            "models": models,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-            "llm_calls": llm_calls,
-            "cost_usd_upper_bound": round(
-                input_tokens / 1_000_000 * input_per_1m
-                + output_tokens / 1_000_000 * output_per_1m,
-                6,
-            ),
+        rows.remove(row)
+        in_tok, out_tok, total, calls, dur_ms, model = (row[0] or 0), (row[1] or 0), (row[2] or 0), row[3], row[4], row[5]
+        usage.append({
+            "models": [model] if model else [],
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "total_tokens": total,
+            "llm_calls": calls,
+            "duration_s": round((dur_ms or 0) / 1000, 1),
+            "cost_usd_upper_bound": round(in_tok / 1_000_000 * input_per_1m + out_tok / 1_000_000 * output_per_1m, 6),
         })
-
-    if len(events) != n_calls:
-        print(
-            f"  (aviso: {len(events)} eventos de coste para {n_calls} llamadas — "
-            "puede haber una llamada de otra fuente en la ventana de tiempo; "
-            "se toman los ultimos N eventos, que son siempre los mas recientes)",
-            file=sys.stderr,
-        )
-    # Take the LAST n_calls — `--since` can pick up a stray earlier call to this
-    # same agent from outside this run (e.g. a manual smoke test), but never a
-    # LATER one, so the tail is always this run's own events in order.
-    if len(events) >= n_calls:
-        return events[-n_calls:]
-    return events + [{}] * (n_calls - len(events))
+    return usage
 
 
 def fetch_routes_used(agent_id: int, since: datetime, n_calls: int) -> list[list[str]]:
     """Which retrieval route(s) (cobertura/naive/local/global/hybrid/mix) fired
-    per question, read from the same backend logs as fetch_monitoring_usage.
+    per question, read from the same backend logs as fetch_usage_events.
 
     A tool call always logs its route BEFORE the turn's final [Monitoring]
     line (see agentTools.py), so bucketing every route line by the next
@@ -455,7 +443,7 @@ def run_questions_parallel(
     time) instead of one at a time.
 
     Trades away usage/routes: both are read by correlating the Nth backend
-    log line to the Nth question (fetch_monitoring_usage, fetch_routes_used),
+    log line to the Nth question (fetch_usage_events, fetch_routes_used),
     which only holds when calls are strictly sequential — with concurrent
     calls those log lines interleave unpredictably and would attribute cost/
     route to the wrong question. So this path never calls either fetcher;
@@ -531,6 +519,7 @@ def retry_failed(args, eval_set: dict, vocab: list[str], override_ids: Optional[
     needs_memory = any(q.get("sigue_a") for q in to_retry)
     previous_memory = set_agent_memory(args.agent_id, True) if needs_memory else None
     try:
+        retry_started_at = datetime.now(timezone.utc)
         new_results = run_questions(
             to_retry, args.base_url, args.app_id, args.agent_id, args.api_key,
             args.timeout, vocab,
@@ -541,8 +530,8 @@ def retry_failed(args, eval_set: dict, vocab: list[str], override_ids: Optional[
 
     config = existing.get("config", {})
     input_per_1m, output_per_1m, _ = resolve_pricing(config.get("llm_model"))
-    usage_events = fetch_monitoring_usage(
-        args.agent_id, datetime.now(timezone.utc), len(new_results), input_per_1m, output_per_1m,
+    usage_events = fetch_usage_events(
+        args.agent_id, retry_started_at, new_results, input_per_1m, output_per_1m,
     )
     route_events = fetch_routes_used(args.agent_id, datetime.now(timezone.utc), len(new_results))
     for r, usage, routes in zip(new_results, usage_events, route_events):
@@ -644,10 +633,7 @@ def main() -> int:
             questions, args.base_url, args.app_id, args.agent_id, args.api_key,
             args.timeout, vocab, args.parallel,
         )
-        print(
-            "  (modo paralelo: usage/routes no calculados, ver --help de --parallel)",
-            file=sys.stderr,
-        )
+        print("  (modo paralelo: sin rutas; el uso se casa por longitud de respuesta)", file=sys.stderr)
     else:
         needs_memory = any(q.get("sigue_a") for q in questions)
         previous_memory = set_agent_memory(args.agent_id, True) if needs_memory else None
@@ -659,15 +645,14 @@ def main() -> int:
         finally:
             if needs_memory and previous_memory is not None:
                 set_agent_memory(args.agent_id, previous_memory)
-        usage_events = fetch_monitoring_usage(
-            args.agent_id, run_started_at, len(results), input_per_1m, output_per_1m,
-        )
         route_events = fetch_routes_used(args.agent_id, run_started_at, len(results))
-        for r, usage, routes in zip(results, usage_events, route_events):
-            r["usage"] = usage or None
+        for r, routes in zip(results, route_events):
             r["routes"] = routes
-            total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
-            total_tokens += (usage or {}).get("total_tokens", 0)
+    usage_events = fetch_usage_events(args.agent_id, run_started_at, results, input_per_1m, output_per_1m)
+    for r, usage in zip(results, usage_events):
+        r["usage"] = usage or None
+        total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
+        total_tokens += (usage or {}).get("total_tokens", 0)
 
     today = date.today().isoformat().replace("-", "")
     # The EFFECTIVE value, not the DB one — see introspect_config. A filename
@@ -684,6 +669,9 @@ def main() -> int:
     # so it must never land on (and silently pass off as) a sequential run's
     # filename.
     parallel_tag = f"_parallel{args.parallel}" if args.parallel else ""
+    # Two agents with the same config (e.g. same silo settings, different silo) share
+    # every other part of the name: without this, the second run overwrote the first.
+    parallel_tag += f"_agent{args.agent_id}"
     out_name = (
         f"resultado_chunk{chunk_size}_{chunk_strategy}_{query_mode}_"
         f"{chunk_top_k_tag}_{rerank_tag}_{model_slug}_{prompt_tag}_{today}{smoke_tag}{parallel_tag}.json"
