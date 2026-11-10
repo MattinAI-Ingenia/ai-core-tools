@@ -53,12 +53,19 @@ LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 
 # LightRAG extraction output tokens per call (min, avg, max) for models measured on
 # real indexing (indexing_metric, provider-reported). Others use the generic default.
-# gpt-6-luna: 14 chunks / 2 runs, 3,480-3,490 per call (reasoning tokens included).
 # ponytail: hand-kept table; derive from indexing_metric history if it grows.
-# (min, avg, max) completion tokens per LLM call. gpt-6-luna: 185,408 output over
-# 110 calls on a 3-document, 90-chunk run (indexing_metric, 2026-11-06).
+# gpt-6-luna, reasoning_effort=none (silo 60, 2026-11-09, 21 chunks): min = measured
+# 799 output tokens per chunk; avg/max add merge summaries of a larger corpus
+# (inferred from Qwen, not measured on luna). The old (1400, 1700, 2100) was
+# measured with the default effort, which reasons.
 _MEASURED_OUT_PER_CALL = {
-    'gpt-6-luna': (1400, 1700, 2100),
+    'gpt-6-luna': (800, 1000, 1250),
+}
+
+# Per-model (optimistic, pessimistic) tok/s of ONE hosted-API call (prompt +
+# completion over latency). gpt-6-luna: 30 Domusa chunks, concurrency 6, 2026-11-09.
+_MEASURED_CLOUD_TOK_PER_S = {
+    'gpt-6-luna': (340.0, 215.0),
 }
 
 # Per-chunk marker stamping each indexing run; lets reindex delete only stale chunks.
@@ -204,7 +211,7 @@ def _llm_throughput_bounds(model_name: str, self_hosted: bool) -> Tuple[float, f
     """
     opt, pess = _LLM_THROUGHPUT_BASE
     if not self_hosted:
-        return opt * 3, pess * 3
+        return _MEASURED_CLOUD_TOK_PER_S.get(model_name, (opt * 3, pess * 3))
     params_b = _model_params_b(model_name)
     if params_b is not None and params_b < _SMALL_MODEL_PARAMS_B:
         return opt * 2, pess * 2

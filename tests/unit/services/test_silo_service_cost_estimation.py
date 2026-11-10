@@ -423,6 +423,11 @@ class TestLlmThroughputBounds:
         assert cloud[0] > self_hosted_big[0]
         assert cloud[1] > self_hosted_big[1]
 
+    def test_gpt_6_luna_uses_its_measured_per_call_rate(self):
+        assert _llm_throughput_bounds("gpt-6-luna", self_hosted=False) == (340.0, 215.0)
+        # Unmeasured hosted models keep 3x the self-hosted baseline.
+        assert _llm_throughput_bounds("gpt-4o", self_hosted=False) == (540.0, 210.0)
+
     def test_a_small_self_hosted_model_is_faster_than_a_big_one(self):
         small = _llm_throughput_bounds("Qwen3-4B-Instruct", self_hosted=True)
         big = _llm_throughput_bounds("Qwen3-30B-Instruct", self_hosted=True)
@@ -470,5 +475,5 @@ def test_measured_model_uses_its_own_output_per_call():
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=_make_lightrag_silo(model_name="some-model")):
         other = SiloService.estimate_indexing_cost(1, documents, db)
 
-    assert luna["estimated_output_tokens"] == 1700
+    assert luna["estimated_output_tokens"] == 1000
     assert other["estimated_output_tokens"] == 2000
