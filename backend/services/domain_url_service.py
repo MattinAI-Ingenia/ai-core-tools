@@ -80,8 +80,10 @@ class DomainUrlService:
         # Remove from silo if present
         domain = DomainRepository.get_by_id(domain_id, db)
         if domain and domain.silo_id:
+            from repositories.silo_repository import SiloRepository
+            from services.silo_service import SiloService, ensure_partial_delete_supported
+            ensure_partial_delete_supported(SiloRepository.get_by_id(domain.silo_id, db))
             try:
-                from services.silo_service import SiloService
                 SiloService.delete_url(domain.silo_id, domain_url.url, db)
             except Exception as e:
                 logger.warning(f"Failed to delete URL {domain_url.url} from silo: {e}")

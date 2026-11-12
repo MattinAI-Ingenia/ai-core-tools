@@ -1,10 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status, Request, Response
 from typing import Optional, Annotated
 from sqlalchemy.orm import Session
+import asyncio
 import json
 import os
 
-from services.silo_service import SiloService
+from services.silo_service import SiloService, LIGHTRAG_UNSUPPORTED_DELETE_DETAIL
 from services.media_service import MediaService
 from models.media import Media
 
@@ -410,6 +411,7 @@ async def index_multiple_documents(
     summary="Delete docs in collection",
     tags=["Silos"],
     response_model=MessageResponseSchema,
+    responses={409: {"description": LIGHTRAG_UNSUPPORTED_DELETE_DETAIL}},
 )
 async def delete_docs_in_collection(
     app_id: int,
@@ -442,6 +444,7 @@ async def delete_docs_in_collection(
     summary="Delete docs by metadata filter",
     tags=["Silos"],
     response_model=MessageResponseSchema,
+    responses={409: {"description": LIGHTRAG_UNSUPPORTED_DELETE_DETAIL}},
 )
 async def delete_docs_by_metadata(
     app_id: int,
@@ -485,6 +488,10 @@ async def delete_docs_by_metadata(
     summary="Delete all docs in collection",
     tags=["Silos"],
     response_model=MessageResponseSchema,
+    responses={
+        409: {"description": "The silo is busy (indexing or another delete is running), or a service it uses was retired"},
+        500: {"description": "The LightRAG knowledge graph could not be cleared; retry"},
+    },
 )
 async def delete_all_docs_in_collection(
     app_id: int,
@@ -492,14 +499,20 @@ async def delete_all_docs_in_collection(
     api_key: Annotated[str, Depends(get_api_key_auth)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Delete all documents in a silo collection."""
-    validate_api_key_for_app(app_id, api_key, db)
+    """Delete all documents in a silo collection.
+
+    For LightRAG silos this clears the silo's whole knowledge graph, including content indexed from any
+    repository or domain that shares it; Resource rows and files are kept (they must be re-indexed); stop other
+    indexing first.
+    """
+    auth = validate_api_key_for_app(app_id, api_key, db)
     validate_silo_ownership(db, silo_id, app_id)
 
     try:
-        SiloService.delete_all_docs_in_collection(silo_id, db)
+        await asyncio.to_thread(SiloService.delete_all_docs_in_collection, silo_id, db)
+        logger.info("public delete-all: app=%s silo=%s key_id=%s", app_id, silo_id, auth.key_id)
         return MessageResponseSchema(message="All documents deleted successfully")
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error deleting all documents in silo {silo_id} for app {app_id}: {str(e)}")
@@ -762,7 +775,8 @@ async def get_silo_media(
 
     Media sent straight to the silo leaves nothing behind once indexed (like documents): its
     file and this record are deleted, so this returns 404 after success. Its chunks carry
-    `media_id` in their metadata (delete them with `docs/delete-by-metadata`).
+    `media_id` in their metadata (delete them with `docs/delete-by-metadata`; not supported on
+    LightRAG silos, which answer 409).
     """
     validate_api_key_for_app(app_id, api_key, db)
     validate_silo_ownership(db, silo_id, app_id)
@@ -774,6 +788,7 @@ async def get_silo_media(
     summary="Delete media and its indexed chunks",
     tags=["Silos"],
     response_model=MessageResponseSchema,
+    responses={409: {"description": LIGHTRAG_UNSUPPORTED_DELETE_DETAIL}},
 )
 async def delete_silo_media(
     app_id: int,

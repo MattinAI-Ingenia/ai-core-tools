@@ -84,6 +84,21 @@ class EntityNameVariantRepository:
         return written
 
     @staticmethod
+    def delete_by_silo(silo_id: int, db) -> int:
+        """Delete every variant row of one silo (after a workspace wipe). Returns rows deleted."""
+        try:
+            deleted = (
+                db.query(EntityNameVariant)
+                .filter(EntityNameVariant.silo_id == silo_id)
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return deleted
+
+    @staticmethod
     def best_variant_map(
         silo_id: int,
         canonical_names: Optional[List[str]] = None,

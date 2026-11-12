@@ -41,6 +41,21 @@ def require_real_lightrag_backend() -> None:
         pytest.skip(f"Neo4j at {config.NEO4J_URI} is not reachable ({exc}); cannot run here.")
 
 
+def require_qdrant() -> None:
+    """Skip unless QDRANT_URL is explicitly set (config defaults to localhost) and reachable."""
+    import os
+
+    url = os.environ.get("QDRANT_URL")
+    if not url:
+        pytest.skip("QDRANT_URL is not set explicitly; refusing to touch a default localhost Qdrant.")
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port or 6333), timeout=3):
+            pass
+    except OSError as exc:
+        pytest.skip(f"Qdrant at {url} is not reachable ({exc}); cannot run here.")
+
+
 def bucket(token: str) -> int:
     return int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % EMBEDDING_DIM
 
@@ -159,6 +174,22 @@ def neo4j_label_count(label: str) -> int:
             return session.run(
                 f"MATCH (n:`{label}`) RETURN count(n) AS c"  # noqa: S608 — label from a test constant
             ).single()["c"]
+    finally:
+        driver.close()
+
+
+def delete_neo4j_workspace(label: str) -> None:
+    """Fallback wipe of one workspace's nodes (label must be ``silo_<digits>``)."""
+    from neo4j import GraphDatabase
+
+    import config
+
+    if not re.fullmatch(r"silo_\d+", label):
+        raise ValueError(f"refusing to wipe unexpected Neo4j label {label!r}")
+    driver = GraphDatabase.driver(config.NEO4J_URI, auth=(config.NEO4J_USERNAME, config.NEO4J_PASSWORD))
+    try:
+        with driver.session() as session:
+            session.run(f"MATCH (n:`{label}`) DETACH DELETE n").consume()  # noqa: S608 — label validated above
     finally:
         driver.close()
 

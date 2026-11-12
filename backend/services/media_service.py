@@ -7,7 +7,7 @@ from models.media import Media
 from utils.logger import get_logger
 
 from repositories.media_repository import MediaRepository
-from services.silo_service import SiloService
+from services.silo_service import SiloService, ensure_partial_delete_supported
 from utils.async_files import write_bytes
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
@@ -212,13 +212,19 @@ class MediaService:
         return MediaService.delete_media_item(media, db)
 
     @staticmethod
-    def delete_media_item(media: Media, db: Session) -> bool:
-        """Remove a media item's vectors, files and row."""
+    def delete_media_item(media: Media, db: Session, delete_from_silo: bool = True) -> bool:
+        """Remove a media item's vectors, files and row.
+
+        ``delete_from_silo`` is False when the caller already cleared the silo (LightRAG delete-all).
+        """
         media_id = media.media_id
+        if delete_from_silo:
+            ensure_partial_delete_supported(media.silo)
         try:
             # Delete from silo first
-            SiloService.delete_media(media)
-            logger.info(f"Media {media_id} deleted from silo")
+            if delete_from_silo:
+                SiloService.delete_media(media)
+                logger.info(f"Media {media_id} deleted from silo")
             
             # Delete file from disk
             if media.file_path and os.path.exists(media.file_path):

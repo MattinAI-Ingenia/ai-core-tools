@@ -22,11 +22,13 @@ def _resource(db_type="LIGHTRAG"):
     return SimpleNamespace(resource_id=3, repository=repo)
 
 
-def _run(resource, graph, lock="conn", delete_ok=True, row_exists=False):
+def _run(resource, graph, lock="conn", delete_ok=True, row_exists=False, legacy=False):
     """Run the public delete with mocks; return (result_or_exc, mocks)."""
     with patch.object(ResourceService, "get_repository_resource", return_value=resource), \
             patch("services.silo_indexing_lock.acquire", return_value=lock) as acquire, \
             patch("services.silo_indexing_lock.release") as release, \
+            patch("services.resource_service.SiloService.has_legacy_lightrag_documents",
+                  **({"side_effect": legacy} if isinstance(legacy, Exception) else {"return_value": legacy})), \
             patch.object(ResourceService, "delete_resource", return_value=delete_ok) as delete, \
             patch("services.resource_service.ResourceRepository.get_by_id",
                   return_value=object() if row_exists else None), \
@@ -64,6 +66,24 @@ def test_fail_or_exception_is_500_and_nothing_deleted(graph):
     assert out.detail == LIGHTRAG_DELETE_FAILED_DETAIL
     delete.assert_not_called()
     release.assert_called_once()
+
+
+def test_legacy_docs_are_409_and_nothing_deleted():
+    out, _, release, delete, g = _run(_resource(), {"return_value": "success"}, legacy=True)
+    assert isinstance(out, HTTPException) and out.status_code == 409
+    assert "legacy format" in out.detail
+    g.assert_not_called()
+    delete.assert_not_called()
+    release.assert_called_once_with("conn", 7)
+
+
+def test_legacy_check_error_surfaces_and_releases_lock():
+    boom = RuntimeError("db down")
+    out, _, release, delete, g = _run(_resource(), {"return_value": "success"}, legacy=boom)
+    assert out is boom
+    g.assert_not_called()
+    delete.assert_not_called()
+    release.assert_called_once_with("conn", 7)
 
 
 def test_lock_held_is_409_without_graph_step():

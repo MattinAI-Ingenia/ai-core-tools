@@ -155,6 +155,7 @@ class TestMediaPipelineErrors:
                              **patches.get("transcribe", {"return_value": transcription})), \
                 patch.object(media_tasks.TranscriptionService, "create_chunks", return_value=[{"text": "hola"}]), \
                 patch.object(media_tasks.SiloService, "index_media_chunk") as index, \
+                patch.object(media_tasks, "_media_row_exists", return_value=patches.get("exists", True)), \
                 patch.object(media_tasks, "ServiceHealthService") as health:
             media_tasks.process_media_task_sync(5)
         return index, health
@@ -178,6 +179,14 @@ class TestMediaPipelineErrors:
         index.assert_not_called()
         assert media.status == "error"
         assert "no embedding service" in media.error_message
+
+    def test_media_deleted_during_indexing_is_not_indexed_and_not_marked_error(self, tmp_path):
+        media = _media(tmp_path, SimpleNamespace(service_id=3, name="emb", last_error=None))
+
+        index, _ = self._run(media, tmp_path, exists=False)
+
+        index.assert_not_called()
+        assert media.status == "indexing" and media.error_message is None
 
     def test_success_clears_service_errors(self, tmp_path):
         embedding = SimpleNamespace(service_id=3, name="emb", last_error=None)

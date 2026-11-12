@@ -1742,6 +1742,9 @@ class _CollectionEventLoop:
 # (an agent turn that searches both silos can take several minutes).
 _RETIRE_GRACE_S = 900
 
+# Rows per transaction when wiping a workspace's Neo4j nodes (bounds memory/lock size).
+_NEO4J_DELETE_BATCH_ROWS = 5000
+
 
 def _close_retired_instance(collection_name: str, rag, loop: "_CollectionEventLoop") -> None:
     """Release what an evicted *rag* holds (Neo4j driver, Qdrant client, its
@@ -2790,6 +2793,29 @@ class LightRAGStore(VectorStoreInterface):
         )
         return result
 
+    def has_legacy_documents(self, collection_name: str, resource_id: int, file_name: str) -> bool:
+        """True if the file's graph docs have a legacy shape that ``delete_resource_document`` would miss.
+
+        Legacy per-page PDF docs ``res{N}-p{P}``, or legacy non-PDF docs ``doc-<hash>`` whose
+        ``file_path`` is the file's label (same helper as the indexer, so they cannot drift; plain
+        equality, so ``%``/``_`` in a name are safe). Positive evidence only: a file whose doc is
+        already gone is not legacy (a retry after a crash still completes).
+        """
+        from sqlalchemy import text  # noqa: WPS433
+
+        with self.db.engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT 1 FROM lightrag_doc_status WHERE workspace = :ws AND "
+                    "(id LIKE :page_prefix OR (id LIKE 'doc-%' AND file_path = :label)) LIMIT 1"
+                ),
+                {
+                    "ws": collection_name,
+                    "page_prefix": f"res{int(resource_id)}-p%",
+                    "label": _source_label_from_metadata({"name": file_name}),
+                },
+            ).first() is not None
+
     def delete_resource_document(self, collection_name: str, resource_id: int) -> str:
         """Delete LightRAG document ``res{resource_id}`` from *collection_name*'s workspace.
 
@@ -2879,20 +2905,15 @@ class LightRAGStore(VectorStoreInterface):
         collection_name: str,
         embedding_service=None,
     ) -> None:
+        """Wipe every LightRAG row of *collection_name* and release its cached instance.
+
+        Lenient: never raises; failures are logged at ERROR per step. Use
+        wipe_workspace when the caller must know.
+        """
         logger.info("Deleting LightRAG workspace '%s'", collection_name)
-
-        # Best-effort cleanup of the underlying storage backends, BEFORE
-        # dropping the cached instance below: _cleanup_vector_storage reuses
-        # the rag instance (and dedicated loop) already cached for this
-        # collection. Popping first would force it to build (and leak) a
-        # brand-new one just to tear it down again.
-        # LightRAG does not expose a single "drop workspace" API so we reach
-        # into each backend directly.
-        self._cleanup_neo4j(collection_name)
-        self._cleanup_vector_storage(collection_name)
-        self._cleanup_postgres(collection_name)
-
-        # Now drop the cached instance and tear down its dedicated loop/thread.
+        self._wipe_steps(collection_name)
+        # Now drop the cached instance and tear down its dedicated loop/thread
+        # (unchanged behaviour: only the strict wipe below keeps the instance).
         self._rag_instances.pop(collection_name, None)
         self._init_locks.pop(collection_name, None)
         if self._fingerprint is not None:
@@ -2901,32 +2922,87 @@ class LightRAGStore(VectorStoreInterface):
         if collection_loop is not None:
             collection_loop.close()
 
-    # -- Backend-specific cleanup helpers ---------------------------------
+    def wipe_workspace(self, collection_name: str) -> None:
+        """Strict wipe of every LightRAG row of *collection_name* (Neo4j, vectors,
+        PostgreSQL). Workspace-scoped; only for callers holding ``silo_indexing_lock``.
+        The cached instance is kept (the workspace is reused right after).
+
+        Raises before touching anything if the rag cannot be built (e.g.
+        ServiceRetiredError for a retired LLM role; a retired embedding service does
+        not raise at build time); raises RuntimeError naming the failed steps if any
+        step failed (the others still ran).
+        """
+        self._get_rag_instance(collection_name)  # fail before any step if it cannot be built
+        failed = self._wipe_steps(collection_name)
+        if failed:
+            raise RuntimeError(
+                f"LightRAG wipe of '{collection_name}' failed at: {', '.join(failed)}"
+            )
+
+    def _wipe_steps(self, collection_name: str) -> List[str]:
+        """Run every cleanup step; return failed step names.
+
+        LightRAG has no "drop workspace" API, so each backend is reached directly.
+        The vector step reuses the rag (and dedicated loop) cached for this collection.
+        It runs first: a transient Qdrant error happens before anything destructive
+        in the other stores.
+        """
+        t0 = time.monotonic()
+        failed: List[str] = []
+        for step, fn in (
+            ("vector", self._cleanup_vector_storage),
+            ("neo4j", self._cleanup_neo4j),
+            ("postgres", self._cleanup_postgres),
+        ):
+            try:
+                fn(collection_name)
+            except Exception:
+                logger.error(
+                    "LightRAG wipe of workspace '%s': step %s failed",
+                    collection_name, step, exc_info=True,
+                )
+                failed.append(step)
+        logger.info(
+            "LightRAG wipe of workspace '%s': failed steps: %s (%.1fs)",
+            collection_name, ", ".join(failed) or "none", time.monotonic() - t0,
+        )
+        return failed
+
+    # -- Backend-specific cleanup helpers (raise on failure) ---------------
 
     def _cleanup_neo4j(self, collection_name: str) -> None:
-        """Drop all Neo4j nodes/edges scoped to *collection_name*."""
+        """Delete all Neo4j nodes/edges labelled *collection_name*, in batches."""
+        if not re.fullmatch(r"silo_\d+", collection_name):
+            raise ValueError(f"Refusing Neo4j wipe of unexpected workspace {collection_name!r}")
+        import config  # noqa: WPS433
+
+        uri = getattr(config, "NEO4J_URI", None)
+        password = getattr(config, "NEO4J_PASSWORD", None)
+        username = getattr(config, "NEO4J_USERNAME", None) or "neo4j"
+        if not uri or not password:
+            raise RuntimeError("Neo4j is not configured")
+
+        from neo4j import GraphDatabase, Query  # noqa: WPS433
+
+        driver = GraphDatabase.driver(uri, auth=(username, password))
         try:
-            import config  # noqa: WPS433
-
-            uri = getattr(config, "NEO4J_URI", None)
-            password = getattr(config, "NEO4J_PASSWORD", None)
-            username = getattr(config, "NEO4J_USERNAME", None) or "neo4j"
-            if not uri or not password:
-                return
-
-            from neo4j import GraphDatabase  # noqa: WPS433
-
-            driver = GraphDatabase.driver(uri, auth=(username, password))
             # LightRAG stores the workspace as a node *label*, not a property.
-            # Use label-based matching for reliable deletion.
+            # CALL IN TRANSACTIONS needs an implicit (autocommit) transaction:
+            # session.run, not execute_write.
             with driver.session() as session:
+                # ponytail: `CALL { WITH n ... }` is deprecated since 5.23 (notice only);
+                # switch to `CALL (n)` when the minimum supported Neo4j is >= 5.23.
+                # Timeout: a partial batch delete is idempotent on retry.
                 session.run(
-                    f"MATCH (n:`{collection_name}`) DETACH DELETE n",
-                )
+                    Query(
+                        f"MATCH (n:`{collection_name}`) CALL {{ WITH n DETACH DELETE n }} "
+                        f"IN TRANSACTIONS OF {_NEO4J_DELETE_BATCH_ROWS} ROWS",
+                        timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S,
+                    )
+                ).consume()
+        finally:
             driver.close()
-            logger.info("Cleaned up Neo4j data for workspace '%s'", collection_name)
-        except Exception as exc:
-            logger.warning("Neo4j cleanup for '%s' failed: %s", collection_name, exc)
+        logger.info("Cleaned up Neo4j data for workspace '%s'", collection_name)
 
     def _cleanup_vector_storage(self, collection_name: str) -> None:
         """Drop this workspace's vectors from LightRAG's vector storage (Qdrant or PGVector).
@@ -2940,37 +3016,50 @@ class LightRAGStore(VectorStoreInterface):
 
         Uses each vector storage's own ``drop()`` (the library's native,
         workspace-scoped wipe) instead of guessing table/collection names.
+        Raises once all three were attempted if any failed.
         """
-        try:
-            rag = self._get_rag_instance(collection_name)
+        rag = self._get_rag_instance(collection_name)
+        vdbs = (
+            ("entities", rag.entities_vdb),
+            ("relationships", rag.relationships_vdb),
+            ("chunks", rag.chunks_vdb),
+        )
 
-            async def _drop_all() -> bool:
-                all_ok = True
-                for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
-                    result = await vdb.drop()
-                    if result.get("status") != "success":
-                        all_ok = False
-                        logger.warning(
-                            "%s vector drop for workspace '%s' reported: %s",
-                            self.lightrag_vector_db_type, collection_name,
-                            result.get("message"),
-                        )
-                return all_ok
+        async def _drop_all() -> List[str]:
+            failed = []
+            for name, vdb in vdbs:
+                try:
+                    # Timeout inside the coroutine: the caller holds silo_indexing_lock,
+                    # which must not be released while the loop is still writing.
+                    # ponytail: for Qdrant the real bound is httpx's per-call default
+                    # (~5 s), not LIGHTRAG_DOC_DELETE_TIMEOUT_S; wait_for only bounds the
+                    # lock wait. A client-side timeout on a huge workspace is retry-safe.
+                    result = await asyncio.wait_for(
+                        vdb.drop(), timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S
+                    )
+                    ok = result.get("status") == "success"
+                    message = result.get("message")
+                except Exception as exc:
+                    ok = False
+                    message = repr(exc)
+                if not ok:
+                    failed.append(name)
+                    logger.error(
+                        "%s vector drop of %s for workspace '%s' failed: %s",
+                        self.lightrag_vector_db_type, name, collection_name, message,
+                    )
+            return failed
 
-            if self._run_on_collection_loop(collection_name, _drop_all()):
-                logger.info(
-                    "Cleaned up %s vector storage for workspace '%s'",
-                    self.lightrag_vector_db_type, collection_name,
-                )
-        except Exception as exc:
-            logger.error(
-                "%s vector cleanup for workspace '%s' failed: %s; vector rows "
-                "may be retained in lightrag_vdb_* tables / Qdrant",
-                self.lightrag_vector_db_type, collection_name, exc,
-            )
+        failed = self._run_on_collection_loop(collection_name, _drop_all())
+        if failed:
+            raise RuntimeError(f"vector drop failed for: {', '.join(failed)}")
+        logger.info(
+            "Cleaned up %s vector storage for workspace '%s'",
+            self.lightrag_vector_db_type, collection_name,
+        )
 
     def _cleanup_postgres(self, collection_name: str) -> None:
-        """Remove KV / doc-status rows scoped to *collection_name*.
+        """Remove KV / doc-status rows scoped to *collection_name*; raises if a table failed.
 
         Vector rows are dropped beforehand by ``_cleanup_vector_storage``
         through the library's ``drop()``; the base-name ``lightrag_vdb_*``
@@ -2990,20 +3079,20 @@ class LightRAGStore(VectorStoreInterface):
         # NAMESPACE_TABLE_MAP), not ``kv_store_*``. It creates them with
         # unquoted DDL, so Postgres folds the identifiers to lower case —
         # we must delete using the lower-cased names (a quoted upper-case
-        # name would not match). KV + doc-status live in Postgres for every
-        # LightRAG silo. Best-effort — tables might not exist yet.
-        try:
-            from sqlalchemy import text  # noqa: WPS433
-            from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
-        except Exception as exc:
-            logger.warning("PostgreSQL cleanup for '%s' failed: %s", collection_name, exc)
-            return
+        # name would not match). Tables that do not exist yet (42P01) are skipped.
+        from sqlalchemy import text  # noqa: WPS433
+        from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
 
         tables = {t.lower() for t in NAMESPACE_TABLE_MAP.values()}
         deleted = {}
+        failed = []
         for table in tables:
             try:
                 with self.db.engine.begin() as conn:
+                    # Bound the time silo_indexing_lock is held (57014 = failed table).
+                    conn.execute(text(
+                        f"SET LOCAL statement_timeout = {int(LIGHTRAG_DOC_DELETE_TIMEOUT_S * 1000)}"
+                    ))
                     result = conn.execute(
                         text(f'DELETE FROM {table} WHERE workspace = :ws'),
                         {"ws": collection_name},
@@ -3018,10 +3107,13 @@ class LightRAGStore(VectorStoreInterface):
                         "table %s absent, skipped for workspace %s", table, collection_name
                     )
                 else:
-                    logger.warning(
+                    failed.append(table)
+                    logger.error(
                         "PostgreSQL cleanup of table %s for workspace '%s' failed: %s",
                         table, collection_name, exc,
                     )
+        if failed:
+            raise RuntimeError(f"PostgreSQL cleanup failed for tables: {', '.join(sorted(failed))}")
         logger.info(
             "Cleaned up PostgreSQL data for workspace '%s': %s",
             collection_name, deleted or "nothing to delete",

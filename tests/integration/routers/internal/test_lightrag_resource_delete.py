@@ -86,6 +86,7 @@ def _row_exists(db, resource_id):
 
 def _store(outcome=None, side_effect=None):
     store = MagicMock()
+    store.has_legacy_documents.return_value = False
     store.delete_resource_document.return_value = outcome
     if side_effect is not None:
         store.delete_resource_document.side_effect = side_effect
@@ -119,11 +120,17 @@ class TestLightRagSingleFileDelete:
         assert resp.json()["detail"] == LIGHTRAG_DELETE_FAILED_DETAIL
         assert "do not support deleting individual files" not in resp.text
 
-    def test_delete_all_still_409(self, client, fake_app, owner_headers, lr):
-        _, repo, _, _ = lr
-        resp = client.delete(_url(fake_app.app_id, repo.repository_id), headers=owner_headers)
+    def test_legacy_docs_are_409_and_nothing_is_deleted(self, client, db, fake_app, owner_headers, lr):
+        silo, repo, res, path = lr
+        store = _store("success")
+        store.has_legacy_documents.return_value = True
+        with patch("services.silo_service._get_vector_store", return_value=store):
+            resp = _delete(client, fake_app, repo, res, owner_headers)
         assert resp.status_code == 409
-        assert "do not support deleting individual files" in resp.json()["detail"]
+        assert "legacy format" in resp.json()["detail"]
+        store.delete_resource_document.assert_not_called()
+        assert _row_exists(db, res.resource_id) and os.path.exists(path)
+        _lock_free(silo.silo_id)
 
     def test_not_found_is_success(self, client, db, fake_app, owner_headers, lr):
         _, repo, res, path = lr
@@ -227,6 +234,7 @@ class TestLightRagSingleFileDelete:
 
         store = MagicMock()
         store.delete_resource_document.side_effect = during
+        store.has_legacy_documents.return_value = False
         with patch("services.silo_service._get_vector_store", return_value=store):
             resp = _delete(client, fake_app, repo, res, owner_headers)
         assert resp.status_code == 200, resp.text

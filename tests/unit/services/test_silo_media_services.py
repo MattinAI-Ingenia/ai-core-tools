@@ -266,7 +266,7 @@ class TestDeleteMediaItem:
         video, audio = tmp_path / "5.mp4", tmp_path / "5_audio.wav"
         video.write_bytes(b"v")
         audio.write_bytes(b"a")
-        media = SimpleNamespace(media_id=5, file_path=str(video))
+        media = SimpleNamespace(media_id=5, file_path=str(video), silo=None)
         with patch("services.media_service.SiloService.delete_media") as delete_vectors, \
                 patch("services.media_service.MediaRepository") as repo:
             assert MediaService.delete_media_item(media, MagicMock()) is True
@@ -276,7 +276,7 @@ class TestDeleteMediaItem:
         assert not audio.exists()
 
     def test_failure_rolls_back(self):
-        media = SimpleNamespace(media_id=5, file_path=None)
+        media = SimpleNamespace(media_id=5, file_path=None, silo=None)
         with patch("services.media_service.SiloService.delete_media", side_effect=RuntimeError("boom")), \
                 patch("services.media_service.MediaRepository") as repo:
             assert MediaService.delete_media_item(media, MagicMock()) is False

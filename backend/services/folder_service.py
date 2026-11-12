@@ -256,7 +256,8 @@ class FolderService:
             db: Database session
             
         Raises:
-            HTTPException: If folder not found
+            HTTPException: If folder not found, or 409 for a LightRAG repository (its
+                content would stay in the knowledge graph)
         """
         folder = FolderRepository.get_by_id(db, folder_id)
         if not folder:
@@ -264,7 +265,10 @@ class FolderService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=FOLDER_NOT_FOUND_MSG
             )
-        
+
+        from services.silo_service import ensure_partial_delete_supported
+        ensure_partial_delete_supported(getattr(getattr(folder, "repository", None), "silo", None))
+
         try:
             # First, delete all resources in this folder and its subfolders properly
             FolderService._delete_all_resources_in_folder(folder_id, db)

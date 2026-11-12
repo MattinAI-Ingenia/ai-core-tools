@@ -6,12 +6,14 @@ tests run without network access.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.documents import Document
 
+import tools.vector_stores.lightrag_store as lightrag_store_module
 from tools.vector_stores.lightrag_store import (
     LightRAGStore,
     LightRAGRetriever,
@@ -250,8 +252,20 @@ def test_delete_collection_pgvector_cleans_vector_storage(store):
     vec.assert_called_once_with("silo_1")
 
 
-def _rag_with_vdbs(results):
+@pytest.fixture(autouse=True)
+def _no_legacy_qdrant_collection(monkeypatch):
+    monkeypatch.setattr("lightrag.kg.qdrant_impl._find_legacy_collection", lambda *a, **k: None)
+
+
+def _rag_with_vdbs(results=(), workspace="silo_1"):
     rag = MagicMock()
+    for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
+        vdb.effective_workspace = workspace
+    rag.chunk_entity_relation_graph = SimpleNamespace(workspace=workspace)
+    rag.doc_status = SimpleNamespace(workspace=workspace)
+    rag.text_chunks = SimpleNamespace(workspace=workspace)
+    ok = {"status": "success"}
+    results = results or (ok, ok, ok)
     rag.entities_vdb.drop = AsyncMock(return_value=results[0])
     rag.relationships_vdb.drop = AsyncMock(return_value=results[1])
     rag.chunks_vdb.drop = AsyncMock(return_value=results[2])
@@ -273,27 +287,24 @@ def test_cleanup_vector_storage_drops_all_three_vdbs(store):
     rag.chunks_vdb.drop.assert_awaited_once()
 
 
-def test_cleanup_vector_storage_warns_on_error_status(store, caplog):
-    import asyncio
-
+def test_cleanup_vector_storage_raises_on_error_status(store, caplog):
     ok = {"status": "success"}
-    rag = _rag_with_vdbs([ok, {"status": "error", "message": "x"}, ok])
+    rag = _rag_with_vdbs([ok, {"status": "error", "message": "x"}, ok], "silo_77")
     store._get_rag_instance = MagicMock(return_value=rag)
     store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="relationships"):
         store._cleanup_vector_storage("silo_77")
 
-    assert any("silo_77" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+    rag.chunks_vdb.drop.assert_awaited_once()  # the remaining drops still ran
+    assert any("silo_77" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
 
 
-def test_cleanup_vector_storage_logs_error_when_instance_unavailable(store, caplog):
+def test_cleanup_vector_storage_raises_when_instance_unavailable(store):
     store._get_rag_instance = MagicMock(side_effect=RuntimeError("no rag"))
 
-    with caplog.at_level("ERROR"):
+    with pytest.raises(RuntimeError, match="no rag"):
         store._cleanup_vector_storage("silo_55")
-
-    assert any(r.levelname == "ERROR" and "silo_55" in r.getMessage() for r in caplog.records)
 
 
 def _pg_error(pgcode):
@@ -302,27 +313,234 @@ def _pg_error(pgcode):
     return err
 
 
-def test_cleanup_postgres_warns_on_unexpected_error(store, caplog):
+def test_cleanup_postgres_raises_on_unexpected_error(store, caplog):
     store.db = MagicMock()
     store.db.engine.begin.return_value.__enter__.return_value.execute.side_effect = _pg_error("57014")
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="lightrag_"):
         store._cleanup_postgres("silo_88")
 
     assert any(
-        r.levelname == "WARNING" and "silo_88" in r.getMessage() and "lightrag_" in r.getMessage()
+        r.levelname == "ERROR" and "silo_88" in r.getMessage() and "lightrag_" in r.getMessage()
         for r in caplog.records
     )
 
 
-def test_cleanup_postgres_undefined_table_is_not_a_warning(store, caplog):
+def test_cleanup_postgres_undefined_table_is_not_a_failure(store, caplog):
     store.db = MagicMock()
     store.db.engine.begin.return_value.__enter__.return_value.execute.side_effect = _pg_error("42P01")
 
     with caplog.at_level("WARNING"):
         store._cleanup_postgres("silo_88")
 
-    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+
+# ---------------------------------------------------------------------------
+# wipe_workspace (strict) vs delete_collection (lenient)
+# ---------------------------------------------------------------------------
+
+
+def _patch_steps(store, **overrides):
+    """Patch the three cleanup helpers (OK unless overridden by side_effect)."""
+    mocks = {}
+    for step, name in (("neo4j", "_cleanup_neo4j"), ("vector", "_cleanup_vector_storage"),
+                       ("postgres", "_cleanup_postgres")):
+        mocks[step] = MagicMock(side_effect=overrides.get(step))
+        setattr(store, name, mocks[step])
+    store._get_rag_instance = MagicMock(return_value=_rag_with_vdbs([]))
+    return mocks
+
+
+def test_wipe_workspace_returns_none_when_every_step_succeeds(store):
+    mocks = _patch_steps(store)
+
+    assert store.wipe_workspace("silo_1") is None
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+
+
+def test_cleanup_postgres_tolerates_only_missing_tables(store):
+    store.db = MagicMock()
+    execute = store.db.engine.begin.return_value.__enter__.return_value.execute
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise _pg_error("42P01")
+        return MagicMock(rowcount=0)
+
+    execute.side_effect = run
+
+    store._cleanup_postgres("silo_1")  # one absent table, the rest OK: no raise
+
+    from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP
+
+    # SET LOCAL + DELETE per table; the absent table fails on its SET LOCAL here
+    assert execute.call_count == 2 * len({t.lower() for t in NAMESPACE_TABLE_MAP.values()}) - 1
+
+
+@pytest.mark.parametrize("step", ["neo4j", "vector", "postgres"])
+def test_wipe_workspace_raises_naming_the_failed_step_but_runs_the_others(store, caplog, step):
+    mocks = _patch_steps(store, **{step: RuntimeError("boom")})
+
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match=step):
+        store.wipe_workspace("silo_1")
+
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+    assert any(
+        r.levelname == "ERROR" and "silo_1" in r.getMessage() and step in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize("step", ["neo4j", "vector", "postgres"])
+def test_delete_collection_swallows_the_same_failures(store, caplog, step):
+    mocks = _patch_steps(store, **{step: RuntimeError("boom")})
+
+    with caplog.at_level("ERROR"):
+        assert store.delete_collection("silo_1") is None
+
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+    assert any(r.levelname == "ERROR" and step in r.getMessage() for r in caplog.records)
+
+
+def test_wipe_workspace_touches_nothing_when_the_rag_cannot_be_built(store):
+    mocks = _patch_steps(store)
+    store._get_rag_instance = MagicMock(side_effect=RuntimeError("retired"))
+
+    with pytest.raises(RuntimeError, match="retired"):
+        store.wipe_workspace("silo_1")
+    for m in mocks.values():
+        m.assert_not_called()
+
+    # the lenient path has no such guard
+    store.delete_collection("silo_1")
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+
+
+def test_cleanup_vector_storage_drop_exception_is_a_failed_vdb(store):
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, ok, ok])
+    rag.entities_vdb.drop = AsyncMock(side_effect=ConnectionError("down"))
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    with pytest.raises(RuntimeError, match="entities"):
+        store._cleanup_vector_storage("silo_1")
+    rag.chunks_vdb.drop.assert_awaited_once()
+
+
+def test_cleanup_vector_storage_drop_timeout_is_a_failed_vdb(store, monkeypatch):
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, ok, ok])
+
+    async def never(*a, **k):
+        await asyncio.Event().wait()
+
+    rag.entities_vdb.drop = never
+    monkeypatch.setattr(lightrag_store_module, "LIGHTRAG_DOC_DELETE_TIMEOUT_S", 0.05)
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    with pytest.raises(RuntimeError, match="entities"):
+        store._cleanup_vector_storage("silo_1")
+    rag.relationships_vdb.drop.assert_awaited_once()
+    rag.chunks_vdb.drop.assert_awaited_once()
+
+
+# AC-7: Neo4j step
+
+
+def _neo4j_store(store, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "NEO4J_URI", "bolt://x:7687", raising=False)
+    monkeypatch.setattr(config, "NEO4J_PASSWORD", "pw", raising=False)
+    return store
+
+
+def test_cleanup_neo4j_closes_the_driver_when_the_query_fails(store, monkeypatch):
+    _neo4j_store(store, monkeypatch)
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value.run.side_effect = RuntimeError("neo down")
+
+    with patch("neo4j.GraphDatabase.driver", return_value=driver), \
+         pytest.raises(RuntimeError, match="neo down"):
+        store._cleanup_neo4j("silo_1")
+
+    driver.close.assert_called_once()
+
+
+def test_cleanup_neo4j_runs_the_batched_label_query_and_consumes_it(store, monkeypatch):
+    _neo4j_store(store, monkeypatch)
+    driver = MagicMock()
+    run = driver.session.return_value.__enter__.return_value.run
+
+    with patch("neo4j.GraphDatabase.driver", return_value=driver):
+        store._cleanup_neo4j("silo_1")
+
+    query = run.call_args.args[0]
+    text = query.text
+    assert text.endswith("IN TRANSACTIONS OF 5000 ROWS") and "`silo_1`" in text
+    assert "CALL { WITH n DETACH DELETE n }" in text
+    assert query.timeout == lightrag_store_module.LIGHTRAG_DOC_DELETE_TIMEOUT_S
+    run.return_value.consume.assert_called_once()
+    driver.close.assert_called_once()
+
+
+def test_cleanup_neo4j_rejects_a_label_that_is_not_a_silo_workspace(store, monkeypatch):
+    _neo4j_store(store, monkeypatch)
+
+    with patch("neo4j.GraphDatabase.driver") as factory, pytest.raises(ValueError):
+        store._cleanup_neo4j("silo_1) DETACH")
+    factory.assert_not_called()
+
+
+def test_cleanup_neo4j_raises_when_not_configured(store, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "NEO4J_URI", None, raising=False)
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        store._cleanup_neo4j("silo_1")
+
+
+# AC-8 (revised): only the lenient delete_collection retires the cached instance
+
+
+def _store_with_cached_rag(store, monkeypatch):
+    monkeypatch.setattr(lightrag_store_module, "_RETIRE_GRACE_S", 0)
+    rag = _rag_with_vdbs([])
+    rag.initialize_storages = AsyncMock()
+    rag.finalize_storages = AsyncMock()
+    built = []
+
+    def build(name):
+        built.append(name)
+        return rag
+
+    for step in ("_cleanup_neo4j", "_cleanup_vector_storage", "_cleanup_postgres"):
+        monkeypatch.setattr(store, step, MagicMock())
+    monkeypatch.setattr(store, "_build_rag", build)
+    store._get_rag_instance("silo_1")
+    return rag, built
+
+
+def test_wipe_workspace_keeps_the_cached_instance_and_reuses_it(store, monkeypatch):
+    rag, built = _store_with_cached_rag(store, monkeypatch)
+
+    store.wipe_workspace("silo_1")
+
+    rag.finalize_storages.assert_not_awaited()
+    assert store._rag_instances["silo_1"] is rag
+    assert store._get_rag_instance("silo_1") is rag
+    assert built == ["silo_1"]
+    store._collection_loops["silo_1"].close()
 
 
 # ---------------------------------------------------------------------------
@@ -688,3 +906,53 @@ def test_normalize_old_shape_label_already_has_page_suffix_is_not_doubled():
     assert chunk["resource_id"] == 61
     assert chunk["page"] == 5
     assert chunk["file_path"] == "f.pdf (p. 5)"
+
+
+# Fix round 2: step order, 57014 failure, env/doc_status/text_chunks blockers
+
+
+def test_wipe_steps_run_vector_then_neo4j_then_postgres(store):
+    order = []
+    for step, name in (("vector", "_cleanup_vector_storage"), ("neo4j", "_cleanup_neo4j"),
+                       ("postgres", "_cleanup_postgres")):
+        setattr(store, name, lambda c, s=step: order.append(s))
+
+    assert store._wipe_steps("silo_1") == []
+    assert order == ["vector", "neo4j", "postgres"]
+
+
+def test_cleanup_postgres_sets_a_statement_timeout_and_reports_57014_as_failed(store):
+    store.db = MagicMock()
+    execute = store.db.engine.begin.return_value.__enter__.return_value.execute
+
+    def run(stmt, *a, **k):
+        if "SET LOCAL statement_timeout" in str(stmt):
+            return MagicMock()
+        raise _pg_error("57014")
+
+    execute.side_effect = run
+
+    with pytest.raises(RuntimeError, match="failed for tables"):
+        store._cleanup_postgres("silo_1")
+    first = str(execute.call_args_list[0].args[0])
+    assert first == f"SET LOCAL statement_timeout = {int(lightrag_store_module.LIGHTRAG_DOC_DELETE_TIMEOUT_S * 1000)}"
+
+
+
+@pytest.mark.parametrize("name", ["a.pdf", "100%_x.txt"])
+def test_has_legacy_documents_queries_page_prefix_and_label_by_equality(store, name):
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = (1,)
+
+    assert store.has_legacy_documents("silo_1", 7, name) is True
+    params = conn.execute.call_args.args[1]
+    assert params["ws"] == "silo_1"
+    assert params["page_prefix"] == "res7-p%"
+    assert "file_path = :label" in str(conn.execute.call_args.args[0])
+
+
+def test_has_legacy_documents_false_when_no_row(store):
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = None
+
+    assert store.has_legacy_documents("silo_1", 7, "a.pdf") is False

@@ -4,7 +4,7 @@ from services.folder_service import FolderService
 from typing import List, Tuple, Optional
 from datetime import datetime
 import os
-from services.silo_service import SiloService
+from services.silo_service import SiloService, LIGHTRAG_SILO_BUSY_DETAIL
 from utils.logger import get_logger
 from utils.service_lifecycle import ServiceRetiredError
 from sqlalchemy import func, text
@@ -14,7 +14,6 @@ from fastapi import HTTPException, status, UploadFile
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
 
-LIGHTRAG_SILO_BUSY_DETAIL = "This silo is being indexed right now. Please try again when indexing has finished."
 LIGHTRAG_DELETE_FAILED_DETAIL = "The file was kept but may be partly removed from the knowledge graph; please retry."
 LIGHTRAG_DELETE_PARTIAL_DETAIL = (
     "Removed from the knowledge graph but the file could not be deleted. Please retry."
@@ -1657,8 +1656,8 @@ class ResourceService:
         """Delete one file of a LightRAG silo: graph first, then file + row.
 
         Raises:
-            HTTPException: 409 if the silo is busy indexing, 500 if the graph delete failed
-                (file and row are kept), 500 (partial) if the graph was cleared but the
+            HTTPException: 409 if the silo is busy indexing or the file is legacy-indexed, 500 if the graph
+                delete failed (file and row are kept), 500 (partial) if the graph was cleared but the
                 file/row step failed and the row still exists, 404 if the row is gone.
             ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
         """
@@ -1669,6 +1668,12 @@ class ResourceService:
             logger.warning("Silo %s is busy indexing; refusing to delete resource %s", silo_id, resource.resource_id)
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
         try:
+            # Legacy docs would survive a res{N} delete while the API says success.
+            if SiloService.has_legacy_lightrag_documents(resource):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=(
+                    "This file was indexed with a legacy format and cannot be deleted individually. "
+                    "Use 'Delete all files' to reset the repository, or delete the silo."
+                ))
             try:
                 outcome = SiloService.delete_lightrag_resource_document(resource)
             except ServiceRetiredError:
@@ -1706,28 +1711,94 @@ class ResourceService:
         """
         Delete every resource in a repository - business logic from router
 
+        LightRAG silos are wiped from the knowledge graph first (strict), then their rows, files
+        and repository media are removed.
+
         Raises:
-            HTTPException: If the repository's silo is LightRAG (no per-file delete support)
+            HTTPException: 409 if a LightRAG silo is busy indexing or shared, 500 if its graph wipe failed.
+            ServiceRetiredError: if a LightRAG silo's service is retired (mapped to 409 SERVICE_RETIRED).
         """
         repo = ResourceRepository.get_repository_by_id(db, repository_id)
         silo = getattr(repo, "silo", None)
         if silo is not None and (silo.vector_db_type or "").upper() == "LIGHTRAG":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="LightRAG silos do not support deleting individual files; "
-                       "delete the whole silo to remove its data.",
-            )
+            return ResourceService._delete_all_lightrag_resources(repo, silo, db)
+        return ResourceService._delete_resources_and_media(repo, db, delete_from_silo=True)
 
+    @staticmethod
+    def _delete_resources_and_media(repo, db: Session, delete_from_silo: bool) -> dict:
+        """Delete every resource of ``repo``; when the silo was already wiped, also its media."""
+        repository_id = repo.repository_id
         resources = ResourceRepository.get_by_repository_id(db, repository_id)
         deleted_count = 0
         for resource in resources:
-            if ResourceService.delete_resource(resource.resource_id, db):
+            if ResourceService.delete_resource(resource.resource_id, db, delete_from_silo=delete_from_silo):
                 deleted_count += 1
             else:
                 logger.error(f"Resource {resource.resource_id} could not be deleted in bulk delete")
+        total = len(resources)
+        if not delete_from_silo:
+            from services.media_service import MediaService
 
-        logger.info(f"Deleted {deleted_count}/{len(resources)} resources from repository {repository_id}")
-        return {"deleted_count": deleted_count, "failed_count": len(resources) - deleted_count}
+            media = list(repo.media)
+            for item in media:
+                if MediaService.delete_media_item(item, db, delete_from_silo=False):
+                    deleted_count += 1
+                else:
+                    logger.error(f"Media {item.media_id} could not be deleted in bulk delete")
+            total += len(media)
+
+        logger.info(f"Deleted {deleted_count}/{total} resources from repository {repository_id}")
+        return {"deleted_count": deleted_count, "failed_count": total - deleted_count}
+
+    @staticmethod
+    def _delete_all_lightrag_resources(repo, silo, db: Session) -> dict:
+        """Wipe the silo's graph, then delete every resource and repository media of ``repo``.
+
+        Runs under the silo indexing lock. A failed wipe deletes nothing; rows/files that fail
+        afterwards are counted in ``failed_count`` (same contract as non-LightRAG silos).
+
+        Raises:
+            HTTPException: 409 if the silo is shared with another repository/domain or busy indexing,
+                500 if the graph wipe failed.
+            ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
+        """
+        from models.domain import Domain
+        from models.repository import Repository
+        from services import silo_indexing_lock
+
+        silo_id = silo.silo_id
+        if (
+            db.query(Repository)
+            .filter(Repository.silo_id == silo_id, Repository.repository_id != repo.repository_id)
+            .first()
+            or db.query(Domain).filter(Domain.silo_id == silo_id).first()
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "The knowledge graph of this repository is shared with another repository or domain, so all "
+                    "files cannot be deleted at once. Delete the files one by one or remove the other repository first."
+                ),
+            )
+
+        lock_conn = silo_indexing_lock.acquire(silo_id)
+        if lock_conn is None:
+            logger.warning("Silo %s is busy indexing; refusing to delete all files of repository", silo_id)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
+        try:
+            try:
+                SiloService.wipe_lightrag_workspace(silo)
+            except ServiceRetiredError:
+                raise  # surfaced as 409 SERVICE_RETIRED
+            except Exception:
+                # wipe_lightrag_workspace already logged the failure with its traceback.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Could not clear the knowledge graph; no files were deleted. Please retry.",
+                )
+            return ResourceService._delete_resources_and_media(repo, db, delete_from_silo=False)
+        finally:
+            silo_indexing_lock.release(lock_conn, silo_id)
 
     @staticmethod
     def download_resource_from_repository(

@@ -237,6 +237,10 @@ def process_media_task_sync(media_id: int):
                 # Preserve chunk_index set by split_audio_visual_chunks so audio/visual
                 # pairs from the same time window share the same index for retrieval correlation.
                 chunk_data.setdefault('chunk_index', idx)
+                if not _media_row_exists(db, media_id):
+                    # Deleted meanwhile (e.g. delete-all wiped the graph): never repopulate it.
+                    logger.info(f"Media {media_id} was deleted during indexing; stopping")
+                    return
                 SiloService.index_media_chunk(chunk_data, media, db)
         except Exception as e:
             error = _provider_failure(e, EmbeddingService, embedding_service, "Indexing", "Embedding service")
@@ -283,6 +287,11 @@ def process_media_task_sync(media_id: int):
     finally:
         call_context.close()
         db.close()
+
+def _media_row_exists(db, media_id: int) -> bool:
+    """True while the Media row is still in the database."""
+    return db.query(Media.media_id).filter(Media.media_id == media_id).scalar() is not None
+
 
 def _discard_silo_media_files(media: Media) -> None:
     """Delete a silo media item's file and extracted audio."""
