@@ -2442,6 +2442,18 @@ class LightRAGStore(VectorStoreInterface):
                 session.run(
                     f"MATCH (n:`{collection_name}`) DETACH DELETE n",
                 )
+                # LightRAG also creates a fulltext and a range index per
+                # workspace label; deleting the nodes leaves them behind.
+                index_names = [
+                    rec["name"]
+                    for rec in session.run(
+                        "SHOW INDEXES YIELD name, labelsOrTypes "
+                        "WHERE labelsOrTypes = [$label] RETURN name",
+                        label=collection_name,
+                    )
+                ]
+                for name in index_names:
+                    session.run(f"DROP INDEX `{name}` IF EXISTS")
             driver.close()
             logger.info("Cleaned up Neo4j data for workspace '%s'", collection_name)
         except Exception as exc:
