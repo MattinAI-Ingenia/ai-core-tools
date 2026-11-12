@@ -257,23 +257,51 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
   | Grafo limpio pero falla borrar fichero/fila (la fila sigue) | 500 `Removed from the knowledge graph but the file could not be deleted. Please retry.` |
   | La fila ya no existe | 404 |
 
-  Reintentar es idempotente. La UI muestra el botón Delete por fichero en
-  repositorios LightRAG (Reindex y Delete All siguen ocultos; "delete all"
-  responde 409) y el error aparece en línea en el modal.
-- **Resto de rutas** (carpeta, borrar por metadata, documentos del silo,
-  SharePoint, dominio, media, supersede de Azure, cancel-discard):
-  `delete_documents` y `delete_documents_excluding` siguen siendo **no-ops
-  deliberados** (`lightrag_store.py`, marcados `ponytail:`); el grafo no se toca.
-  Reindexar para LightRAG sigue fuera de alcance (los chunks huérfanos son el
-  techo conocido).
-- **Silo/repositorio entero**: `delete_collection` (`lightrag_store.py`) limpia
-  Neo4j (`_cleanup_neo4j`), los vectores con el `drop()` de la propia librería
-  para Qdrant y PGVector (`_cleanup_vector_storage`) y KV/doc-status en
-  PostgreSQL (`_cleanup_postgres`, que registra los fallos como WARNING).
+  Reintentar es idempotente. Un fichero indexado con un formato legacy (PDF por
+  página `res{N}-p{P}`, o no-PDF con id `doc-<hash>` y `file_path` igual al
+  nombre del fichero; consulta en `LightRAGStore.has_legacy_documents`) **no se
+  puede borrar individualmente**: 409 `This file was indexed with a legacy
+  format…`. Salida: "Delete all files" o borrar el silo.
+- **Todos los ficheros del repositorio** (`DELETE /internal/apps/{app_id}/repositories/{repository_id}/resources`,
+  botón "Delete All Files"): `ResourceService._delete_all_lightrag_resources`
+  toma `silo_indexing_lock`, hace el **wipe estricto** del workspace
+  (`SiloService.wipe_lightrag_workspace` -> `LightRAGStore.wipe_workspace`:
+  vectores, Neo4j por lotes y PostgreSQL; si un paso falla lanza error y no se
+  borra nada) y después borra las filas, los ficheros y el media del
+  repositorio. Respuestas: 409 silo ocupado o compartido con otro repositorio
+  o dominio, 409 `SERVICE_RETIRED`, 500 si el wipe falla (nada borrado), 200
+  `{deleted_count, failed_count}`. Tras el wipe se resetean las variantes de
+  nombre de entidad y las cachés. El wipe borra **todo** el workspace (también
+  contenido indexado por la API); no recuperable.
+- **Silo entero**: `delete_collection` (`lightrag_store.py`), sin cambios:
+  limpia Neo4j, vectores y PostgreSQL y descarta la instancia en caché.
+- **Endpoint público `DELETE /public/v1/app/{app}/silos/{id}/docs/delete/all`**:
+  en LightRAG toma el lock (409 si está ocupado) y usa el wipe estricto (500 si
+  falla). Es una operación del índice, como en los otros silos: las filas de
+  `Resource` y sus ficheros **se conservan** (hay que reindexar).
+- **Rutas que ahora responden 409 en silos LightRAG** (antes respondían 200
+  sin tocar el grafo): borrar documentos por id o por metadata, borrar una URL
+  de dominio, borrar media (interno y público) y borrar una carpeta. Mensaje:
+  borrar el fichero desde su repositorio, "Delete all files" o borrar el silo.
+  `delete_documents` y `delete_documents_excluding` siguen siendo no-ops en el
+  store.
+
+**Fuera de alcance / trabajo futuro**:
+- Borrado de carpeta de un repositorio LightRAG (hoy 409).
+- Borrar del grafo contenido de SharePoint, dominio, media o indexado por la
+  API: esas fuentes indexan con id `doc-<hash>` y no se guarda qué id borrar;
+  haría falta un id determinista por fuente. Un sync de SharePoint que elimina
+  o reemplaza un fichero sigue dejando su contenido en el grafo.
+- Reindexar para LightRAG (los chunks huérfanos son el techo conocido).
+- El wipe no lleva guardas contra `QDRANT_/NEO4J_/POSTGRES_WORKSPACE` ni contra
+  colecciones Qdrant heredadas sin etiquetar (la misma exposición que ya tenía
+  borrar el silo).
+- Problema previo, sin tocar: `delete_resource` ignora la carpeta del recurso
+  al borrar el fichero y no valida que la ruta quede dentro del directorio del
+  repositorio (todos los tipos de silo).
 
 **Límites conocidos del borrado por fichero**:
-- Solo se borran documentos con id `res{N}`. Los documentos legacy por página
-  (`res{N}-p{P}`) **no** se eliminan; esta funcionalidad no incluye migración.
+- Solo se borran documentos con id `res{N}`; los ficheros legacy se detectan y se rechazan con 409 (ver arriba), sin migración.
 - La indexación de media-chunks y multi-content no toma `silo_indexing_lock`,
   así que una escritura concurrente de otro worker no queda serializada.
 - Estados permanentes de la librería (requieren recuperación) salen como
