@@ -40,6 +40,8 @@ Decisiones tomadas durante la medición de tiempos, costes y modelos del GraphRA
 
 ## Mantenimiento
 
-- Se borran de Neo4j los workspaces (`silo_N`) sin nodos y sin silo asociado en
-  PostgreSQL, junto con sus índices. Los workspaces con nodos aunque su silo ya no exista
-  (`silo_11`, `silo_12`, `silo_32`, `silo_33`, `silo_35`) no se tocan.
+- Se borran de Neo4j todos los workspaces (`silo_N`) sin silo asociado en PostgreSQL,
+  con sus nodos e índices: 40 vacíos (80 índices) y 5 con datos (`silo_11`, `silo_12`,
+  `silo_32`, `silo_33`, `silo_35`). Neo4j queda solo con los 11 silos vivos.
+- `LightRAGStore._cleanup_neo4j` borra también los dos índices (fulltext y range) del
+  workspace al eliminar un silo; antes solo borraba los nodos y dejaba los índices.
