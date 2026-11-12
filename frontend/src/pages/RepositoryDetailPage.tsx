@@ -179,6 +179,7 @@ const RepositoryDetailPage: React.FC = () => {
   const [resourceToDelete, setResourceToDelete] = useState<Resource | null>(null);
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
   const [deletingAll, setDeletingAll] = useState(false);
+  const [deleteAllError, setDeleteAllError] = useState<string | null>(null);
   const [deletingResource, setDeletingResource] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [showMoveModal, setShowMoveModal] = useState(false);
@@ -871,13 +872,19 @@ const RepositoryDetailPage: React.FC = () => {
 
   const confirmDeleteAllResources = async () => {
     setDeletingAll(true);
+    setDeleteAllError(null);
     try {
-      await apiService.deleteAllResources(Number.parseInt(appId!), Number.parseInt(repositoryId!));
+      const result = await apiService.deleteAllResources(Number.parseInt(appId!), Number.parseInt(repositoryId!));
       await loadRepository();
-      setShowDeleteAllModal(false);
+      if (result.failed_count > 0) {
+        setDeleteAllError(`${result.failed_count} file(s) could not be deleted (${result.deleted_count} deleted). Please retry.`);
+      } else {
+        setShowDeleteAllModal(false);
+      }
     } catch (err) {
       console.error('Error deleting all resources:', err);
-      setError('Failed to delete all files');
+      setDeleteAllError(err instanceof Error && err.message ? err.message : 'Failed to delete all files');
+      await loadRepository(); // a partial failure may have removed some files
     } finally {
       setDeletingAll(false);
     }
@@ -1098,15 +1105,16 @@ const RepositoryDetailPage: React.FC = () => {
                 </button>
               )}
 
-              {!isLightRAG && (
-                <button
-                  onClick={() => setShowDeleteAllModal(true)}
-                  disabled={uploading || repository.resources.length === 0}
-                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
-                >
-                  <Trash2 className="w-4 h-4" /> Delete All Files
-                </button>
-              )}
+              <button
+                onClick={() => {
+                  setDeleteAllError(null);
+                  setShowDeleteAllModal(true);
+                }}
+                disabled={uploading || (!isLightRAG && repository.resources.length === 0)}
+                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
+              >
+                <Trash2 className="w-4 h-4" /> Delete All Files
+              </button>
             </>
           )}
         </div>
@@ -1613,9 +1621,15 @@ const RepositoryDetailPage: React.FC = () => {
       >
         <div className="p-6">
           <p className="text-gray-700 mb-6">
-            Are you sure you want to delete all {repository.resources.length} files in this repository?
-            This action cannot be undone.
+            {isLightRAG
+              ? `This deletes all ${repository.resources.length} files and ${repository.media.length} media files of this repository and clears the whole knowledge graph of its silo, including anything else indexed into it (for example content sent through the API). It cannot be recovered, and uploading the files again means paying the full LLM extraction cost again.`
+              : `Are you sure you want to delete all ${repository.resources.length} files in this repository? This action cannot be undone.`}
           </p>
+          {deleteAllError && (
+            <div role="alert" className="mb-6 text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              {deleteAllError}
+            </div>
+          )}
           <div className="flex justify-end gap-3">
             <button
               onClick={() => setShowDeleteAllModal(false)}
