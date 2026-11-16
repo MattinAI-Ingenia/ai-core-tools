@@ -266,8 +266,8 @@ class FolderService:
                 detail=FOLDER_NOT_FOUND_MSG
             )
 
-        from services.silo_service import ensure_partial_delete_supported
-        ensure_partial_delete_supported(getattr(getattr(folder, "repository", None), "silo", None))
+        from services.silo_service import ensure_not_lightrag
+        ensure_not_lightrag(getattr(getattr(folder, "repository", None), "silo", None))
 
         try:
             # First, delete all resources in this folder and its subfolders properly

@@ -4,7 +4,7 @@ from services.folder_service import FolderService
 from typing import List, Tuple, Optional
 from datetime import datetime
 import os
-from services.silo_service import SiloService, LIGHTRAG_SILO_BUSY_DETAIL
+from services.silo_service import SiloService, LIGHTRAG_SILO_BUSY_DETAIL, lightrag_silo_lock
 from utils.logger import get_logger
 from utils.service_lifecycle import ServiceRetiredError
 from sqlalchemy import func, text
@@ -1692,13 +1692,7 @@ class ResourceService:
                 file/row step failed and the row still exists, 404 if the row is gone.
             ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
         """
-        from services import silo_indexing_lock
-
-        lock_conn = silo_indexing_lock.acquire(silo_id)
-        if lock_conn is None:
-            logger.warning("Silo %s is busy indexing; refusing to delete resource %s", silo_id, resource.resource_id)
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
-        try:
+        with lightrag_silo_lock(silo_id, f"delete resource {resource.resource_id}"):
             # Legacy docs would survive a res{N} delete while the API says success.
             if SiloService.has_legacy_lightrag_documents(resource):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=(
@@ -1734,8 +1728,6 @@ class ResourceService:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found or could not be deleted"
                 )
-        finally:
-            silo_indexing_lock.release(lock_conn, silo_id)
 
     @staticmethod
     def delete_all_resources_from_repository(repository_id: int, db: Session) -> dict:
@@ -1795,8 +1787,6 @@ class ResourceService:
         """
         from models.domain import Domain
         from models.repository import Repository
-        from services import silo_indexing_lock
-
         silo_id = silo.silo_id
         if (
             db.query(Repository)
@@ -1812,11 +1802,7 @@ class ResourceService:
                 ),
             )
 
-        lock_conn = silo_indexing_lock.acquire(silo_id)
-        if lock_conn is None:
-            logger.warning("Silo %s is busy indexing; refusing to delete all files of repository", silo_id)
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
-        try:
+        with lightrag_silo_lock(silo_id, f"delete all files of repository {repo.repository_id}"):
             try:
                 SiloService.wipe_lightrag_workspace(silo)
             except ServiceRetiredError:
@@ -1828,8 +1814,6 @@ class ResourceService:
                     detail="Could not clear the knowledge graph; no files were deleted. Please retry.",
                 )
             return ResourceService._delete_resources_and_media(repo, db, delete_from_silo=False)
-        finally:
-            silo_indexing_lock.release(lock_conn, silo_id)
 
     @staticmethod
     def download_resource_from_repository(

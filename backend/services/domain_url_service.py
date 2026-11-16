@@ -81,8 +81,8 @@ class DomainUrlService:
         domain = DomainRepository.get_by_id(domain_id, db)
         if domain and domain.silo_id:
             from repositories.silo_repository import SiloRepository
-            from services.silo_service import SiloService, ensure_partial_delete_supported
-            ensure_partial_delete_supported(SiloRepository.get_by_id(domain.silo_id, db))
+            from services.silo_service import SiloService, ensure_not_lightrag
+            ensure_not_lightrag(SiloRepository.get_by_id(domain.silo_id, db))
             try:
                 SiloService.delete_url(domain.silo_id, domain_url.url, db)
             except Exception as e:

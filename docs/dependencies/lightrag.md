@@ -72,7 +72,6 @@ alternativo + KV + doc-status). Ver §8.
 | `ENTITY_EXTRACT_MAX_GLEANING` | `0` | `backend/config.py` |
 | `LIGHTRAG_EXTRACT_MAX_TOKENS` | sin tope | tope de salida del rol `extract` (ver 9.1.3) |
 | `LIGHTRAG_EXTRACT_GUIDED_JSON` | `true` | manda el esquema como `response_format` (ver 9.1.3) |
-| `LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE` | `true` | el borrado de un fichero también borra sus entradas de la caché LLM (ver §5 "Borrado"); cualquier valor distinto de `true` = `false`, y entonces el texto extraído del fichero borrado permanece en `lightrag_llm_cache` hasta borrar el silo entero (a tener en cuenta en retención/derecho de supresión); el valor seguro es `true` |
 | `MAX_PARALLEL_INSERT` | `3` | documentos (= ficheros) en paralelo; leída por LightRAG al importar |
 | `MAX_ASYNC_LLM` | `4` | llamadas LLM concurrentes por rol; leída por LightRAG al importar |
 | `EMBEDDING_FUNC_MAX_ASYNC` | `8` | llamadas de embedding concurrentes |
@@ -244,7 +243,7 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
   `ResourceService._delete_lightrag_resource` (`resource_service.py`) toma
   `silo_indexing_lock` y llama a `LightRAGStore.delete_resource_document`
   (`lightrag_store.py`), que ejecuta `adelete_by_doc_id("res{N}",
-  delete_llm_cache=LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE)` en el loop de la
+  delete_llm_cache=True)` (la caché LLM guarda el texto del fichero borrado) en el loop de la
   colección, acotado por `LIGHTRAG_DOC_DELETE_TIMEOUT_S` (600 s). Solo con
   estado `success`/`not_found` se borran el fichero y la fila `Resource`.
   Respuestas:
@@ -321,16 +320,13 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
   explícito en el servicio, borrar el fichero y restaurar la fecha; o borrar el
   silo entero. Esto se aparta de la regla de la plataforma de que borrar/limpiar
   nunca se bloquea por fin de servicio (pendiente como follow-up).
-- Con `LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE=false` el texto extraído del
-  fichero borrado queda en `lightrag_llm_cache` hasta borrar el silo entero
-  (retención/supresión); el default `true` es el seguro.
 
 **Diagnóstico** (logger del backend; el de LightRAG es `lightrag`):
 
 | Caso | Log a buscar |
 |---|---|
-| Borrado correcto | INFO `LightRAG delete of 'res{N}' in workspace 'silo_{id}': status=… status_code=… delete_llm_cache=… (Ns)` |
-| 409 por la librería | WARNING `LightRAG delete of 'res{N}' in workspace 'silo_{id}' returned not_allowed (status_code=…)` (igual con `fail`) |
+| Borrado correcto | INFO `LightRAG delete of 'res{N}' in workspace 'silo_{id}': status=… status_code=… (Ns)` |
+| 409 por la librería | WARNING, misma línea con `status=not_allowed` (igual con `fail`) |
 | 500 fallo del grafo | ERROR `Graph delete of resource N in silo S failed` con traceback |
 | 500 grafo limpio, falla fichero/fila | ERROR `Resource N removed from graph of silo S but file/row removal failed; a retry completes it`; la causa es el traceback previo `Error deleting resource N`: revisar permisos de escritura y disco bajo `REPO_BASE_FOLDER/<repository_id>/` |
 | Borrado de silo: vectores | ERROR `… vector cleanup for workspace 'silo_N' failed: …; vector rows may be retained in lightrag_vdb_* tables / Qdrant`. Limpieza manual: `DELETE FROM lightrag_vdb_{entity,relation,chunks}_<sufijo> WHERE workspace='silo_N'` (una sentencia por tabla) o delete-by-filter en Qdrant sobre `workspace_id` |

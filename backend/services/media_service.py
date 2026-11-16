@@ -7,7 +7,7 @@ from models.media import Media
 from utils.logger import get_logger
 
 from repositories.media_repository import MediaRepository
-from services.silo_service import SiloService, ensure_partial_delete_supported
+from services.silo_service import SiloService, ensure_not_lightrag
 from utils.async_files import write_bytes
 
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
@@ -219,7 +219,7 @@ class MediaService:
         """
         media_id = media.media_id
         if delete_from_silo:
-            ensure_partial_delete_supported(media.silo)
+            ensure_not_lightrag(media.silo)
         try:
             # Delete from silo first
             if delete_from_silo:

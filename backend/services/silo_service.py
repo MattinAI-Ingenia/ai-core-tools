@@ -5,7 +5,7 @@ import functools
 import math
 import os
 import re
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import uuid
 from models.media import Media
 from models.silo import Silo
@@ -355,26 +355,27 @@ def _resolve_vector_db_type(silo: Optional[Silo] = None, override: Optional[str]
     return 'PGVECTOR'
 
 
-def ensure_partial_delete_supported(silo: Optional[Silo]) -> None:
-    """Refuse a partial delete on a LightRAG silo, where it would leave the content in the graph.
-
-    Raises:
-        HTTPException: 409 for a LightRAG silo. Nothing is counted, deleted or built before it.
-    """
+def ensure_not_lightrag(silo: Optional[Silo], detail: str = LIGHTRAG_UNSUPPORTED_DELETE_DETAIL) -> None:
+    """409 with *detail* on a LightRAG silo, before anything is touched: a partial delete or a
+    single-file reindex there would leave the old content in the knowledge graph."""
     if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
-        logger.warning("Refusing a partial delete on LightRAG silo %s", silo.silo_id)
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_UNSUPPORTED_DELETE_DETAIL)
+        logger.warning("Refusing on LightRAG silo %s: %s", silo.silo_id, detail)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-def ensure_reindex_supported(silo: Optional[Silo]) -> None:
-    """Refuse a single-file reindex on a LightRAG silo, which would not replace the file's graph content.
+@contextmanager
+def lightrag_silo_lock(silo_id: int, action: str):
+    """Hold ``silo_indexing_lock`` for a LightRAG delete; 409 if a run or another delete holds it."""
+    from services import silo_indexing_lock  # noqa: PLC0415
 
-    Raises:
-        HTTPException: 409 for a LightRAG silo, before anything is indexed.
-    """
-    if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
-        logger.warning("Refusing a single-file reindex on LightRAG silo %s", silo.silo_id)
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL)
+    conn = silo_indexing_lock.acquire(silo_id)
+    if conn is None:
+        logger.warning("Silo %s is busy indexing; refusing to %s", silo_id, action)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
+    try:
+        yield
+    finally:
+        silo_indexing_lock.release(conn, silo_id)
 
 
 def _end_read_transaction_before_lightrag(session: Optional[Session]) -> None:
@@ -2875,7 +2876,7 @@ class SiloService:
         """
         Delete documents from a silo using its embedding service
         """
-        ensure_partial_delete_supported(SiloRepository.get_by_id(silo_id, db))
+        ensure_not_lightrag(SiloRepository.get_by_id(silo_id, db))
         logger.info(f"Eliminando documentos {ids} del silo {silo_id}")
 
         if not SiloService.check_silo_collection_exists(silo_id, db):
@@ -2912,42 +2913,33 @@ class SiloService:
         """
         logger.info(f"Deleting all documents from silo {silo_id}")
 
-        # Any silo type; the body below keeps its own fetch so the non-LightRAG branch stays byte-identical.
-        probe = SiloRepository.get_by_id(silo_id, db)
-        if probe is not None and _resolve_vector_db_type(probe) == 'LIGHTRAG':
-            from services import silo_indexing_lock  # noqa: PLC0415  (local, as in the other LightRAG delete paths)
-
-            lock_conn = silo_indexing_lock.acquire(silo_id)
-            if lock_conn is None:
-                logger.warning("Silo %s is busy indexing; refusing to delete all documents", silo_id)
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
-            try:
-                # Resource rows/files are kept on purpose (migration procedure, docs/dependencies/lightrag.md 13.8).
-                SiloService.wipe_lightrag_workspace(probe)
-                # The graph is empty now: their files are no longer indexed, so the UI offers "Resume indexing".
-                from models.repository import Repository  # noqa: PLC0415 — avoids import cycle
-                repo_ids = db.query(Repository.repository_id).filter(Repository.silo_id == silo_id)
-                db.query(Resource).filter(Resource.repository_id.in_(repo_ids)).update(
-                    {"status": "pending", "error_message": None, "progress_done": 0, "progress_total": None},
-                    synchronize_session=False,
-                )
-                db.commit()
-            except ServiceRetiredError:
-                raise
-            except Exception as exc:
-                # wipe_lightrag_workspace already logged the failure once.
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_WIPE_FAILED_DETAIL
-                ) from exc
-            finally:
-                silo_indexing_lock.release(lock_conn, silo_id)
+        silo = SiloRepository.get_by_id(silo_id, db)
+        if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
+            with lightrag_silo_lock(silo_id, "delete all documents"):
+                try:
+                    # Resource rows/files are kept on purpose (migration procedure, docs/dependencies/lightrag.md 13.8).
+                    SiloService.wipe_lightrag_workspace(silo)
+                    # The graph is empty now: their files are no longer indexed, so the UI offers "Resume indexing".
+                    from models.repository import Repository  # noqa: PLC0415 — avoids import cycle
+                    repo_ids = db.query(Repository.repository_id).filter(Repository.silo_id == silo_id)
+                    db.query(Resource).filter(Resource.repository_id.in_(repo_ids)).update(
+                        {"status": "pending", "error_message": None, "progress_done": 0, "progress_total": None},
+                        synchronize_session=False,
+                    )
+                    db.commit()
+                except ServiceRetiredError:
+                    raise
+                except Exception as exc:
+                    # wipe_lightrag_workspace already logged the failure once.
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_WIPE_FAILED_DETAIL
+                    ) from exc
             return
 
         if not SiloService.check_silo_collection_exists(silo_id, db):
             logger.warning(f"Collection for silo {silo_id} does not exist, nothing to delete")
             return
 
-        silo = SiloRepository.get_by_id(silo_id, db)
         if not silo:
             logger.error(f"Silo {silo_id} not found")
             return
@@ -2974,7 +2966,7 @@ class SiloService:
         Returns:
             Number of documents deleted
         """
-        ensure_partial_delete_supported(SiloRepository.get_by_id(silo_id, db))
+        ensure_not_lightrag(SiloRepository.get_by_id(silo_id, db))
         logger.info(f"Deleting documents from silo {silo_id} with filter: {filter_metadata}")
 
         if not SiloService.check_silo_collection_exists(silo_id, db):

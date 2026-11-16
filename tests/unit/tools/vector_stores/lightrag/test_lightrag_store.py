@@ -168,15 +168,9 @@ def test_delete_documents_is_noop(store, mock_rag, caplog):
 
 
 @pytest.mark.parametrize("status", ["success", "not_found", "not_allowed", "fail"])
-@pytest.mark.parametrize("llm_cache", [True, False])
-def test_delete_resource_document_passes_through(
-    store, mock_rag, monkeypatch, caplog, status, llm_cache
-):
+def test_delete_resource_document_passes_through(store, mock_rag, caplog, status):
     import asyncio
 
-    import config
-
-    monkeypatch.setattr(config, "LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE", llm_cache)
     store._get_rag_instance = MagicMock(return_value=mock_rag)
     mock_rag.adelete_by_doc_id = AsyncMock(
         return_value=SimpleNamespace(status=status, status_code=418, message="SECRET-MSG")
@@ -188,7 +182,7 @@ def test_delete_resource_document_passes_through(
     ) as run, caplog.at_level("WARNING"):
         assert store.delete_resource_document("silo_7", 42) == status
 
-    mock_rag.adelete_by_doc_id.assert_awaited_once_with("res42", delete_llm_cache=llm_cache)
+    mock_rag.adelete_by_doc_id.assert_awaited_once_with("res42", delete_llm_cache=True)
     assert run.call_args.args[0] == "silo_7"
     warned = any(r.levelname == "WARNING" for r in caplog.records)
     assert warned == (status in ("not_allowed", "fail"))

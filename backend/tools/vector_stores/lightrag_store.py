@@ -207,45 +207,14 @@ _PAGE_MARKER_LOOKALIKE_RE = re.compile(r"^([ \t]*)<<<(page:[0-9]{1,6}>>>[ \t]*)$
 
 
 def neutralize_page_text(text: str) -> str:
-    """Sanitize *text* and neutralise any line that merely LOOKS like a
-    ``<<<page:N>>>`` marker, so it can never be parsed back as a real one.
+    """Sanitize *text* and defuse lines that look like ``<<<page:N>>>`` markers.
 
-    Shared by ``page_marked_text`` (per page, before marking) and by any
-    whole-file Document whose content is never run through
-    ``page_marked_text`` but still gets its own ``res{N}`` chunk-id prefix
-    (e.g. a non-PDF Resource upload) — a marker-lookalike line in that
-    content would otherwise be mistaken by ``CHUNK_ID_RESOURCE_PAGE_RE``'s
-    *page-aware* readers for a page boundary that forges a fake page number,
-    an attack surface that DIDN'T exist before those Documents got a
-    ``res{N}``-shaped id (their old ``doc-<hash>`` id never matched that
-    regex in the first place).
-
-    Each page's text is run through LightRAG's own
-    ``sanitize_text_for_encoding`` (strip -> ``html.unescape`` -> strip
-    control chars/surrogates -> strip) BEFORE neutralisation —
-    ``apipeline_enqueue_documents`` applies that same sanitizer to the
-    stored text again later, and without pre-applying it here a lookalike
-    line that doesn't match ``_PAGE_MARKER_LOOKALIKE_RE`` yet (e.g.
-    ``&lt;&lt;&lt;page:999&gt;&gt;&gt;``) could sanitize INTO a real
-    ``<<<page:999>>>`` marker after neutralisation already ran, forging a
-    page boundary.
-
-    ``sanitize_text_for_encoding`` is NOT idempotent — each pass only peels
-    ONE layer of HTML-entity encoding, so a multi-layer-encoded payload
-    (e.g. ``&amp;lt;&amp;lt;&amp;lt;page:999&amp;gt;&amp;gt;&amp;gt;``, or an
-    entity with a control char/surrogate embedded inside it) can still
-    survive one pass unresolved and then forge a marker on LightRAG's LATER
-    second pass. Looping this sanitizer until it stabilises would close that
-    but is O(n^2) on adversarial nested encoding (``&amp;amp;amp;...``).
-    Instead, every ``&`` is re-escaped to ``&amp;`` after this one sanitize
-    pass: by then every control char/surrogate is already gone (the
-    sanitizer removed them), so the only thing LightRAG's later second pass
-    can still do is ``html.unescape`` — and re-escaped ``&amp;`` can only
-    unescape back to a literal ``&``, never regenerate a resolvable entity.
-    This also fixes a content-fidelity side effect of the plain sanitize
-    call: real page text containing a literal HTML entity (e.g.
-    ``&amp;lt;b&amp;gt;``) would otherwise be double-unescaped here instead
-    of being unescaped exactly once by LightRAG itself.
+    Runs LightRAG's own ``sanitize_text_for_encoding`` first, so an encoded
+    lookalike (``&lt;&lt;&lt;page:9&gt;&gt;&gt;``) is caught too, then re-escapes
+    every ``&``: LightRAG unescapes the stored text once more later, and an
+    escaped ``&amp;`` can only come back as ``&``, never as a new entity that
+    forges a page boundary. Used for PDF pages (``page_marked_text``) and for
+    whole-file non-PDF Documents, which also get a ``res{N}`` id.
     """
     from lightrag.utils import sanitize_text_for_encoding  # noqa: WPS433
 
@@ -351,42 +320,19 @@ def _assign_start_pages(chunks: list, clean: str, starts: List[Tuple[int, int]])
 
 
 async def _achunk_page_aware(rag, option: str, tokenizer, content: str) -> list:
-    """Chunk a whole document with *option*'s strategy, page-aware.
+    """LightRAG ``chunking_func`` hook: chunk the whole file with *option*, page-aware.
 
-    This is LightRAG's legacy ``chunking_func`` hook (see ``_build_rag``):
-    the whole file's page-marked text is chunked in ONE call per strategy,
-    and each resulting chunk gets a ``p{page}-chunk-{order}`` id when the
-    text was page-marked (``strip_page_markers`` found markers) — unmarked
-    text gets no ``chunk_id`` at all, so the chunker's own natural output is
-    preserved unchanged (today's behavior for non-PDF / non-Resource text).
+    Page-marked text gets ``p{page}-chunk-{order}`` chunk ids; unmarked text is
+    returned exactly as the chunker produced it. F/R/P are sync and run in
+    ``asyncio.to_thread`` (not the library's single-worker chunking executor,
+    which would serialise chunking app-wide); V needs ``rag.embedding_func`` on
+    the loop, so only marker handling is offloaded.
 
-    The sync chunkers (F/R/P) run inside ``asyncio.to_thread`` since LightRAG
-    invokes this hook directly on the event loop. V is async and needs
-    ``rag.embedding_func`` to run ON the loop, so only the marker-stripping
-    around it is offloaded. ``run_in_chunking_executor`` (the library's own
-    private offload) is deliberately NOT used here: it is a process-wide
-    single-worker (``max_workers=1``) executor with no nested-submission
-    support (see ``lightrag.utils.get_chunking_executor``) — routing through
-    it would serialize chunking for the whole app onto one thread. The
-    library's own ``chunking_func`` docstring documents ``asyncio.to_thread``
-    as the correct extension point for a CPU-bound custom chunker.
-
-    Three deliberate divergences from LightRAG's own explicit-selector
-    dispatch (``pipeline.py``'s ``process_single_document``), which this
-    function otherwise mirrors via ``_resolve_strategy_options``:
-
-    1. V skips ``apply_trusted_sentence_split_regex`` — safe here because
-       ``rag.addon_params`` is read live on every call, not from a
-       per-document snapshot that could go stale (see GHSA-32jh-39m7-8x84,
-       which that helper exists to guard against for the snapshot path).
-    2. P gets no ``blocks_path``/``doc_id`` — raw text has neither, so P
-       always falls back to recursive-character chunking internally. This is
-       a pre-existing limitation of calling these chunkers outside LightRAG's
-       own document-parsing pipeline, not introduced here — P is already
-       disabled as a selectable strategy in the frontend.
-    3. Per-document chunk options are resolved LIVE from the silo's current
-       config at actual-chunking time, not snapshotted at enqueue time (see
-       ``_ainsert``'s docstring for the resulting trade-off).
+    Divergences from LightRAG's own selector dispatch: (1) V skips
+    ``apply_trusted_sentence_split_regex`` (addon_params is read live, so the
+    GHSA-32jh-39m7-8x84 snapshot issue does not apply); (2) P has no
+    blocks_path/doc_id and falls back to recursive-character (P is disabled in
+    the UI); (3) options are resolved at chunking time, not enqueue time.
     """
     size, opts = _resolve_strategy_options(rag, option)
 
@@ -409,19 +355,13 @@ async def _achunk_page_aware(rag, option: str, tokenizer, content: str) -> list:
 
             clean, starts = strip_page_markers(content)
             if option == "F":
-                result = chunking_by_fixed_token(
-                    tokenizer, clean, size, _emit_source_span=True, **opts
-                )
-            elif option == "R":
-                result = chunking_by_recursive_character(tokenizer, clean, size, **opts)
-            else:  # "P"
-                # No blocks_path/doc_id available from this hook (raw text
-                # has neither) -> chunking_by_paragraph_semantic always falls
-                # back to recursive-character chunking internally. Pre-
-                # existing limitation of calling it outside LightRAG's own
-                # document-parsing pipeline; P is already disabled in the
-                # frontend's strategy picker.
-                result = chunking_by_paragraph_semantic(tokenizer, clean, size, **opts)
+                opts["_emit_source_span"] = True
+            # P falls back to recursive-character here (see divergence 2 above).
+            chunker = {
+                "F": chunking_by_fixed_token,
+                "R": chunking_by_recursive_character,
+            }.get(option, chunking_by_paragraph_semantic)
+            result = chunker(tokenizer, clean, size, **opts)
             if starts:
                 _assign_start_pages(result, clean, starts)
             return result, starts
@@ -447,34 +387,15 @@ CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)(?:-p(\d+))?-chunk-\d+")
 
 
 def _lightrag_doc_id(doc: Document) -> str:
-    """Stable LightRAG document id for *doc*, so a chunk's own id can be
-    parsed straight back to (resource_id, page) — see CHUNK_ID_RESOURCE_PAGE_RE
-    — instead of guessing from the display-only file_path label.
+    """Stable LightRAG document id, so chunk ids parse back to (resource, page).
 
-    ``doc.id`` is set ONLY by the Resource whole-file PDF/DOCX/TXT/MD
-    extraction in ``silo_service.py``'s ``extract_documents_from_file``
-    (split=False path, step_004), always shaped ``res{N}`` — when set AND
-    shaped that way, it is trusted directly and returned as-is. No
-    public/caller metadata can ever set a Document's id this way:
-    ``SiloService._create_documents_for_indexing`` (the path every
-    caller-supplied dict goes through) always rebuilds Documents from those
-    dicts without an ``id`` field. The shape check is defence in depth, not a
-    currently-reachable gap: if a future caller ever passes a Document whose
-    ``.id`` traces back to untrusted input (e.g. round-tripped from a
-    vector-store search result), it can't be smuggled through as a literal
-    LightRAG doc id.
+    - ``doc.id`` shaped ``res{N}``: set only by the whole-file Resource
+      extraction (``SiloService.extract_documents_from_file``, split=False);
+      returned as-is. The shape check keeps an untrusted id from passing through.
+    - ``resource_id`` + ``page`` in metadata: legacy ``res{id}-p{page}``.
+    - Otherwise (e.g. crawled Domain pages): LightRAG's content hash.
 
-    Falls back to today's per-page logic for everything else, reading from
-    ``doc.metadata``/``doc.page_content`` instead of separate args: a
-    ``resource_id`` + ``page`` pair gives ``res{id}-p{page}`` (legacy shape,
-    only reachable via caller-supplied metadata on split=True ingestion
-    paths — kept unchanged so those existing ids don't change). Anything else
-    (no resource/page — e.g. crawled Domain pages) falls back to LightRAG's
-    own default (content hash).
-
-    Content-hash duplicate detection (lightrag/pipeline.py,
-    get_existing_doc_by_content_hash) is independent of the id we supply, so
-    this changes nothing about resume/dedup behaviour.
+    Content-hash dedup is independent of this id, so resume/dedup are unchanged.
     """
     if doc.id and re.fullmatch(r"res\d+", doc.id):
         return doc.id
@@ -774,30 +695,16 @@ async def _abest_variant_names(collection_name: str, names) -> Dict[str, str]:
 
 
 async def _ainsert(rag, texts, file_paths=None, ids=None):
-    """Insert documents through LightRAG's legacy ``chunking_func`` hook.
+    """Enqueue and process through LightRAG's legacy ``chunking_func`` hook.
 
-    No ``process_options`` selector is passed to ``apipeline_enqueue_documents``
-    — LightRAG then falls back to its legacy 6-arg ``chunking_func`` path
-    (logged by LightRAG itself as ``Chunking F(legacy)``), which is now used
-    deliberately rather than as a fallback: it is LightRAG's only public
-    extension point where we can both assign per-chunk page-aware
-    ``chunk_id``s AND still dispatch the silo's configured F/R/V/P chunking
-    strategy over the WHOLE file in one call — see ``_build_rag``'s
-    ``_page_aware_chunking`` closure and ``_achunk_page_aware``.
-    ``_achunk_page_aware`` logs its own, more accurate, INFO line since
-    LightRAG's generic "Chunking F(legacy)" line is misleading on its own
-    (it says F regardless of which strategy actually ran).
+    No ``process_options`` selector on purpose: the legacy hook is the only
+    extension point that can both set page-aware chunk ids and run the silo's
+    F/R/V/P strategy over the whole file (see ``_achunk_page_aware``; LightRAG
+    logs it as ``Chunking F(legacy)`` whatever strategy ran).
 
-    Accepted trade-off: before this hook, chunk options were resolved once
-    at enqueue time and snapshotted into ``content_data["chunk_options"]``,
-    so a resumed/retried document re-chunked with the SAME config it was
-    enqueued with. The legacy hook's fixed 6-arg signature has no slot for a
-    per-document snapshot, so ``_achunk_page_aware`` instead re-resolves the
-    silo's chunk config LIVE, at actual-chunking time. If a silo's chunking
-    config changes while documents sit enqueued-but-unprocessed, an
-    in-flight or later-retried document can pick up the new config instead
-    of the one it was enqueued under. Re-adding a snapshot would mean
-    re-adding the selector this step removes, which defeats the point.
+    Trade-off: chunk options are no longer snapshotted at enqueue time, so a
+    document enqueued before a chunking-config change and processed after it
+    uses the new config.
     """
     await rag.apipeline_enqueue_documents(texts, ids=ids, file_paths=file_paths)
     await rag.apipeline_process_enqueue_documents()
@@ -1218,7 +1125,7 @@ async def _aprocess_enqueued_with_progress(
     # need a chunk-progress query (their doc-level work is already done).
     last_reported: Dict[Any, tuple] = {}
     finished_reported: set = set()
-    chunk_query_failure_logged = [False]
+    chunk_query_failure_logged = False
 
     async def _report(counts) -> None:
         """Best-effort chunk-level progress_callback fan-out for *counts*.
@@ -1242,8 +1149,9 @@ async def _aprocess_enqueued_with_progress(
             # Phase-1 estimate silently, forever, at DEBUG level. Only the
             # first failure needs to be loud; the rest would just spam this
             # every 0.5s for the remainder of the run.
-            level = logger.warning if not chunk_query_failure_logged[0] else logger.debug
-            chunk_query_failure_logged[0] = True
+            nonlocal chunk_query_failure_logged
+            level = logger.debug if chunk_query_failure_logged else logger.warning
+            chunk_query_failure_logged = True
             level("[%s] Chunk-progress query failed (best-effort): %s", workspace, exc)
             chunk = {}
 
@@ -2841,10 +2749,7 @@ class LightRAGStore(VectorStoreInterface):
         (the caller treats them as failure), including ``TimeoutError`` once the delete
         body exceeds ``LIGHTRAG_DOC_DELETE_TIMEOUT_S``; a retry is idempotent.
         """
-        import config  # noqa: WPS433
-
         doc_id = f"res{int(resource_id)}"
-        delete_llm_cache = config.LIGHTRAG_DELETE_LLM_CACHE_ON_DOC_DELETE
         rag = self._get_rag_instance(collection_name)
         t_start = time.perf_counter()
 
@@ -2859,23 +2764,17 @@ class LightRAGStore(VectorStoreInterface):
         # silo_indexing_lock while the loop is still writing.
         async def _delete():
             return await asyncio.wait_for(
-                rag.adelete_by_doc_id(doc_id, delete_llm_cache=delete_llm_cache),
+                # Also drop its LLM-cache entries: they hold the deleted file's text.
+                rag.adelete_by_doc_id(doc_id, delete_llm_cache=True),
                 timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S,
             )
 
         result = self._run_on_collection_loop(collection_name, _delete())
-        logger.info(
-            "LightRAG delete of '%s' in workspace '%s': status=%s "
-            "status_code=%s delete_llm_cache=%s (%.1fs)",
-            doc_id, collection_name, result.status, result.status_code,
-            delete_llm_cache, time.perf_counter() - t_start,
+        log = logger.warning if result.status in ("not_allowed", "fail") else logger.info
+        log(
+            "LightRAG delete of '%s' in workspace '%s': status=%s status_code=%s (%.1fs)",
+            doc_id, collection_name, result.status, result.status_code, time.perf_counter() - t_start,
         )
-        if result.status in ("not_allowed", "fail"):
-            logger.warning(
-                "LightRAG delete of '%s' in workspace '%s' returned %s "
-                "(status_code=%s)",
-                doc_id, collection_name, result.status, result.status_code,
-            )
         return result.status
 
     def delete_documents(
