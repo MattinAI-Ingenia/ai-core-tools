@@ -256,7 +256,7 @@ class FolderService:
             db: Database session
             
         Raises:
-            HTTPException: If folder not found, or 409 for a LightRAG repository (its
+            HTTPException: If folder not found, or 409 for a LightRAG repository holding files (their
                 content would stay in the knowledge graph)
         """
         folder = FolderRepository.get_by_id(db, folder_id)
@@ -266,8 +266,12 @@ class FolderService:
                 detail=FOLDER_NOT_FOUND_MSG
             )
 
+        # Refuse only when files would be left in a LightRAG graph; an empty folder has nothing to remove.
+        from models.resource import Resource
         from services.silo_service import ensure_not_lightrag
-        ensure_not_lightrag(getattr(getattr(folder, "repository", None), "silo", None))
+        subtree_ids = FolderService._get_all_subfolder_ids_recursive(folder_id, db) + [folder_id]
+        if db.query(Resource.resource_id).filter(Resource.folder_id.in_(subtree_ids)).first():
+            ensure_not_lightrag(getattr(getattr(folder, "repository", None), "silo", None))
 
         try:
             # First, delete all resources in this folder and its subfolders properly

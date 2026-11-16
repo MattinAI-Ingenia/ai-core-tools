@@ -318,3 +318,44 @@ class TestLightRagFolderDeleteRefused:
         assert db.get(Folder, folder_id) is not None
         assert _row_exists(db, rid)
         assert os.path.exists(path)
+
+
+class TestLightRagEmptyFolderDelete:
+    def _folder_url(self, fake_app, repo, folder_id):
+        return f"/internal/apps/{fake_app.app_id}/repositories/{repo.repository_id}/folders/{folder_id}"
+
+    def test_empty_folder_is_deleted(self, client, db, fake_app, owner_headers, repo_base):
+        silo = _make_silo(db, fake_app, "LIGHTRAG")
+        repo = _repo(db, fake_app, silo)
+        folder = Folder(name="Empty", repository_id=repo.repository_id)
+        db.add(folder)
+        db.commit()
+        folder_id = folder.folder_id
+
+        resp = client.delete(self._folder_url(fake_app, repo, folder_id), headers=owner_headers)
+        assert resp.status_code == 200, resp.text
+        db.expire_all()
+        assert db.get(Folder, folder_id) is None
+
+    def test_folder_with_file_in_subfolder_is_still_409(self, client, db, fake_app, owner_headers, repo_base):
+        from services.silo_service import LIGHTRAG_UNSUPPORTED_DELETE_DETAIL
+
+        silo = _make_silo(db, fake_app, "LIGHTRAG")
+        repo = _repo(db, fake_app, silo)
+        parent = Folder(name="Parent", repository_id=repo.repository_id)
+        db.add(parent)
+        db.flush()
+        child = Folder(name="Child", repository_id=repo.repository_id, parent_folder_id=parent.folder_id)
+        db.add(child)
+        db.flush()
+        res, path = _resource_in(db, repo, child, repo_base, "nested.txt")
+        rid, parent_id = res.resource_id, parent.folder_id
+        db.commit()
+
+        resp = client.delete(self._folder_url(fake_app, repo, parent_id), headers=owner_headers)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == LIGHTRAG_UNSUPPORTED_DELETE_DETAIL
+        db.expire_all()
+        assert db.get(Folder, parent_id) is not None
+        assert _row_exists(db, rid)
+        assert os.path.exists(path)
