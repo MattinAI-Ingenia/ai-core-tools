@@ -251,7 +251,7 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
 
   | Situación | HTTP |
   |---|---|
-  | Silo ocupado (lock tomado, o la librería responde `not_allowed`) | 409 `This silo is being indexed right now…` |
+  | Silo ocupado (lock tomado, o la librería responde `not_allowed`) | 409 `This silo is busy (indexing or another delete is running). Please try again when it has finished.` |
   | Servicio retirado | 409 `SERVICE_RETIRED` |
   | Fallo del grafo (o `TimeoutError`): el fichero y la fila se conservan, el grafo puede quedar parcialmente borrado y un reintento lo completa | 500 `The file was kept but may be partly removed from the knowledge graph; please retry.` |
   | Grafo limpio pero falla borrar fichero/fila (la fila sigue) | 500 `Removed from the knowledge graph but the file could not be deleted. Please retry.` |
@@ -1328,13 +1328,14 @@ recursos del repositorio.
 
 #### Camino NO destructivo (solo para silos 100% Resource): vaciar el silo sin perder Repository/ficheros
 
-```
+```http
 DELETE /public/v1/app/{app}/silos/{id}/docs/delete/all
 ```
 
-(`backend/routers/public/v1/silos.py` → `SiloService.delete_all_docs_in_collection`,
-que llama a `delete_collection` del store — §5, "Borrado"). Limpia Neo4j,
-Qdrant y PostgreSQL del workspace `silo_{id}` **entero** — TODO lo que viva en
+(`backend/routers/public/v1/silos.py` → `SiloService.delete_all_docs_in_collection`
+→ `SiloService.wipe_lightrag_workspace` → `LightRAGStore.wipe_workspace`, wipe
+estricto que lanza error si falla (500) — §5, "Borrado"). Limpia Neo4j,
+vectores y PostgreSQL del workspace `silo_{id}` **entero** — TODO lo que viva en
 ese workspace, no solo los documentos de `Resource`: los chunks de `Media`
 (`SiloService.index_media_chunk` escribe en la misma colección del silo), el
 contenido metido por la ruta pública `index-file` y los chunks de `Domain`
@@ -1347,36 +1348,21 @@ mezclado, borra ese contenido exactamente igual que borrar el Silo entero.
 **Solo existe como endpoint de la API pública — no hay botón equivalente en
 la UI interna.**
 
-> ⚠️ Esta ruta **no toma el `silo_indexing_lock`** del silo
-> (`services/silo_service.py`, el mismo lock que usa la indexación) — nada le
-> impide correr en paralelo con una ingestión activa, lo que dejaría el
-> workspace a medio vaciar sobre trabajo en curso. Confirmar `is_indexing:
-> false` primero y no lanzarlo si alguien puede arrancar una ingestión a la
-> vez (p. ej. bloquear la ventana de mantenimiento).
+> ⚠️ La ruta toma el `silo_indexing_lock` del silo
+> (`services/silo_service.py`) y responde 409 si está ocupado, pero los
+> escritores de media, dominio y `index-file` público **no** toman ese lock
+> (límites conocidos, §5 "Borrado"), así que pueden seguir escribiendo durante
+> el wipe. Confirmar que ninguno está activo antes de lanzarlo (p. ej.
+> ventana de mantenimiento).
 
-Después de vaciar, hay que **reindexar cada `Resource`** para que vuelva a
-haber contenido:
-
-- **Repos pequeños (unas pocas decenas de ficheros)**: uno a uno,
-  `POST /internal/apps/{app}/silos/{id}/resources/{resource_id}/reindex`
-  (`backend/routers/internal/silos.py`) — síncrono, un fichero cada vez.
-- **Repos grandes**: poner `resource.status = 'pending'` en las filas
-  afectadas y pulsar "Resume indexing" en la UI (usa el alimentador con
-  ventana deslizante, la barra de progreso y pausa de siempre, §5.1/§13.6).
-  **`resource_service.py` confirma que `resume_indexing` solo recoge filas en
-  `pending/error/indexing` + `STOP_STATUSES` (`paused`, `cancelled`) — NO
-  `ready`** (`backend/services/resource_service.py`), así que un simple
-  "Resume" sobre recursos ya `ready` no hace nada: hace falta resetear su
-  `status` a `pending` primero, a mano (no hay endpoint para esto). El
-  modelo usa `__tablename__ = 'Resource'` (con mayúscula — Postgres es
-  sensible a mayúsculas en identificadores entrecomillados, así que el
-  nombre va entre comillas dobles):
-  ```sql
-  UPDATE "Resource" SET status = 'pending'
-  WHERE repository_id = :id AND status = 'ready';
-  ```
-  **Verificar este paso en staging antes de darlo por un procedimiento
-  cerrado** — no se ha probado en vivo contra una tabla real de producción.
+Tras el wipe, todos los `Resource` de los repositorios del silo pasan
+automáticamente a `status = 'pending'` (`progress_done` 0, `progress_total`
+NULL, `error_message` NULL) y la UI ofrece "Resume indexing" (alimentador con
+ventana deslizante, barra de progreso y pausa de siempre, §5.1/§13.6). No hace
+falta tocar la base de datos a mano. Alternativa para repos pequeños (unas
+pocas decenas de ficheros): uno a uno,
+`POST /internal/apps/{app}/silos/{id}/resources/{resource_id}/reindex`
+(`backend/routers/internal/silos.py`) — síncrono, un fichero cada vez.
 
 #### Qué SÍ se pierde si en vez de esto se borra el Repository o el Silo
 
