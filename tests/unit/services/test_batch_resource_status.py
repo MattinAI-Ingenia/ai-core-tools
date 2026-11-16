@@ -86,3 +86,14 @@ class TestProgressUpdateFields:
         """total not yet known (chunk counting still running) must not read
         as "already done"."""
         assert 'status' not in ResourceService._progress_update_fields(0, 0)
+
+    def test_total_none_falls_back_to_the_phase_one_estimate(self):
+        """Finished but the real chunk count is unknown (dedup hit, failed
+        before chunking, or the chunk-progress query itself failed) — show
+        100% of the Phase-1 estimate instead of a null division."""
+        fields = ResourceService._progress_update_fields(None, None, estimate=12)
+        assert fields == {'progress_done': 12, 'progress_total': 12, 'status': 'ready'}
+
+    def test_total_none_without_an_estimate_falls_back_to_one(self):
+        fields = ResourceService._progress_update_fields(None, None)
+        assert fields == {'progress_done': 1, 'progress_total': 1, 'status': 'ready'}

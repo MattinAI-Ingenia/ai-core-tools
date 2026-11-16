@@ -2,7 +2,7 @@
 
 Two things are pinned here:
 
-* both numbers are in the same unit (LightRAG documents — one per PDF page),
+* both numbers are in the same unit (LightRAG documents — one per file),
   since the per-file bar divides one by the other;
 * ``done`` counts *finished* documents.  Counting admissions instead (what
   ``pipeline_status["cur_batch"]`` does) made the first ``max_parallel_insert``

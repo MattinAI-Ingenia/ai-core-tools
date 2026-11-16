@@ -202,9 +202,9 @@ stubbed so it runs offline:
   LightRAG.
 - A retrieval query whose answer exists in exactly one document returns a
   chunk containing that document's fact, whose chunk id parses back to the
-  ingested `Resource` (`res{id}-p{page}-chunk{n}`) and whose source label is
-  the blob's staged filename — the provenance chain from FR-6 survives into
-  LightRAG's own storage.
+  ingested `Resource` (`res{id}-p{page}-chunk-{n}` for a PDF, `res{id}-chunk-{n}`
+  for other formats) and whose source label is the blob's staged filename —
+  the provenance chain from FR-6 survives into LightRAG's own storage.
 - Indexing and querying both run on the collection's single persistent event
   loop thread (the concurrency fix from commit `6fa7f59a`).
 - A no-op re-run skips everything without disturbing what is indexed.
@@ -215,9 +215,9 @@ Operational caveats learned while validating (apply to real use too):
   air-gapped deployments must pre-seed `TIKTOKEN_CACHE_DIR`.
 - LightRAG creates its PostgreSQL tables with **lowercase** names
   (`lightrag_doc_full`, `lightrag_vdb_chunks_<embedding-model>_<dim>d`, …).
-  `LightRAGStore._cleanup_postgres` targets the wrong (JSON-backend) table
-  names, so deleting a LightRAG silo leaves rows behind in Postgres; the test
-  cleans up after itself and the fix belongs to a dedicated follow-up.
+  Deleting a LightRAG silo now removes them (`LightRAGStore._cleanup_vector_storage`
+  uses the library's `drop()`; `_cleanup_postgres` clears KV/doc-status); the
+  test still cleans up after itself as belt-and-braces.
 - The Neo4j community image does not support per-database creation; LightRAG
   logs a warning and falls back to the default database (workspace isolation
   is by node label, so this is expected).

@@ -1,10 +1,11 @@
 from typing import Optional, List, Dict, Any, Tuple, Union
+from fastapi import HTTPException, status
 import config
 import functools
 import math
 import os
 import re
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import uuid
 from models.media import Media
 from models.silo import Silo
@@ -50,6 +51,16 @@ COLLECTION_PREFIX = 'silo_'
 DEFAULT_SEARCH_LIMIT = 100
 MAX_SEARCH_LIMIT = 200
 LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
+LIGHTRAG_SILO_BUSY_DETAIL = "This silo is busy (indexing or another delete is running). Please try again when it has finished."
+LIGHTRAG_WIPE_FAILED_DETAIL = "Could not clear the knowledge graph. Please retry."
+LIGHTRAG_UNSUPPORTED_DELETE_DETAIL = (
+    "In a LightRAG silo this would not remove the content from the knowledge graph, so nothing was deleted. "
+    "Delete the file from its repository, use 'Delete all files', or delete the silo."
+)
+LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL = (
+    "Reindexing a single file is not supported in a LightRAG silo: it would not replace the file's content in the "
+    "knowledge graph. Delete the file and upload it again, or use 'Delete all files' and resume indexing."
+)
 
 # LightRAG extraction output tokens per call (min, avg, max) for models measured on
 # real indexing (indexing_metric, provider-reported). Others use the generic default.
@@ -342,6 +353,29 @@ def _resolve_vector_db_type(silo: Optional[Silo] = None, override: Optional[str]
         return silo.vector_db_type.upper()
 
     return 'PGVECTOR'
+
+
+def ensure_not_lightrag(silo: Optional[Silo], detail: str = LIGHTRAG_UNSUPPORTED_DELETE_DETAIL) -> None:
+    """409 with *detail* on a LightRAG silo, before anything is touched: a partial delete or a
+    single-file reindex there would leave the old content in the knowledge graph."""
+    if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
+        logger.warning("Refusing on LightRAG silo %s: %s", silo.silo_id, detail)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
+@contextmanager
+def lightrag_silo_lock(silo_id: int, action: str):
+    """Hold ``silo_indexing_lock`` for a LightRAG delete; 409 if a run or another delete holds it."""
+    from services import silo_indexing_lock  # noqa: PLC0415
+
+    conn = silo_indexing_lock.acquire(silo_id)
+    if conn is None:
+        logger.warning("Silo %s is busy indexing; refusing to %s", silo_id, action)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
+    try:
+        yield
+    finally:
+        silo_indexing_lock.release(conn, silo_id)
 
 
 def _end_read_transaction_before_lightrag(session: Optional[Session]) -> None:
@@ -1664,8 +1698,12 @@ class SiloService:
             file_extension: File extension (e.g., '.pdf', '.docx', '.txt')
             base_metadata: Metadata dict to attach to each document
             split: When True (default, for PGVector/Qdrant), split into ~1000-char
-                chunks. When False (LightRAG), return one Document per page/file so
-                LightRAG applies its own token-based chunking (``lightrag_chunk_token_size``).
+                chunks. When False (LightRAG), return exactly one Document per file
+                so LightRAG applies its own token-based chunking
+                (``lightrag_chunk_token_size``). PDFs get ``<<<page:N>>>`` marker
+                lines embedded in their content. Resource-linked documents
+                (anything with a ``resource_id`` in base_metadata) get
+                ``id=res{N}`` stamped on that single Document.
         Returns:
             List[Document]: List of Document objects
         """
@@ -1674,6 +1712,12 @@ class SiloService:
 
         if base_metadata is None:
             base_metadata = {}
+
+        whole_file_id = (
+            f"res{base_metadata['resource_id']}"
+            if not split and base_metadata.get("resource_id") is not None
+            else None
+        )
 
         # Determine file type and use appropriate loader
         if file_extension == '.pdf':
@@ -1691,9 +1735,10 @@ class SiloService:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             docs = text_splitter.split_documents(pages)
         else:
-            # LightRAG path: keep one Document per page/file so LightRAG can
-            # chunk by its own configured token size instead of being fed
-            # pre-split text (which would bypass lightrag_chunk_token_size).
+            # LightRAG path: start from one Document per page (PDFs) / per file
+            # (DOCX, TXT, MD) so cleaning/filtering below runs per page. PDFs
+            # are then folded into a single whole-file Document with page
+            # markers further down; non-PDF sources are already one Document.
             docs = pages
 
         # Clean known PDF extraction artifacts (e.g. @@@@, 64/64/64/...) from
@@ -1708,11 +1753,54 @@ class SiloService:
         if filtered:
             logger.debug(f"Filtered {filtered} garbage chunk(s) from {file_path}")
 
+        if not split and file_extension == '.pdf':
+            # Whole-file PDF path: fold the surviving pages into ONE Document
+            # with <<<page:N>>> markers so LightRAG chunks the file once while
+            # still being able to attribute each chunk back to its start page
+            # (see page_marked_text / strip_page_markers). Page numbers are
+            # read from PyMuPDFLoader's own per-Document metadata (0-based, so
+            # +1) BEFORE base_metadata is merged in — a caller-supplied "page"
+            # key (e.g. CSV extra_metadata) must never shadow the real one.
+            # Filtered-out pages just leave gaps in the marker sequence.
+            if not docs:
+                return []
+            from tools.vector_stores.lightrag_store import page_marked_text  # noqa: PLC0415
+            # A whole-file Resource Document carries no "page" key of its own
+            # (see _source_label_from_metadata's docstring) — the real
+            # per-chunk page lives in the chunk id instead. A caller-supplied
+            # "page" in base_metadata must be dropped here too, not just kept
+            # out of the markers: left in, it would bake a stale "(p. N)"
+            # suffix into the citation label that _page_label then never
+            # corrects (it only appends a page when one isn't already there).
+            whole_file_metadata = {k: v for k, v in base_metadata.items() if k != "page"}
+            return [
+                Document(
+                    page_content=page_marked_text((d.metadata["page"] + 1, d.page_content) for d in docs),
+                    metadata=whole_file_metadata,
+                    id=whole_file_id,
+                )
+            ]
+
         for doc in docs:
             doc.metadata.update(base_metadata)
-            # Only add page number if it exists (PDFs have page metadata, DOCX/TXT don't)
+            # Only add page number if it exists (split=True PDFs still carry
+            # per-chunk page metadata; DOCX/TXT/MD never do). split=False PDFs
+            # return earlier above with page markers instead of this loop.
             if "page" in doc.metadata:
                 doc.metadata["page"] = doc.metadata["page"] + 1
+        if whole_file_id and len(docs) == 1:
+            # Exactly one Document resulted (split=False DOCX/TXT/MD always
+            # produce one) — stamp the resource's whole-file id on it. Never
+            # stamp more than one Document with the same id: that would
+            # silently collapse distinct Documents into one LightRAG document.
+            docs[0].id = whole_file_id
+            # This id is "res{N}"-shaped (unlike the old doc-<hash> id), so a
+            # line that merely looks like a <<<page:N>>> marker in the raw
+            # content (plain or HTML-entity-encoded) would otherwise be
+            # mistaken for a real page boundary by the page-aware readers —
+            # neutralise it the same way page_marked_text does for PDFs.
+            from tools.vector_stores.lightrag_store import neutralize_page_text  # noqa: PLC0415
+            docs[0].page_content = neutralize_page_text(docs[0].page_content)
         return docs
 
     @staticmethod
@@ -1871,11 +1959,27 @@ class SiloService:
             )
             if not docs:
                 return 0
-            # One unit = one item fed to the vector store: a pre-split chunk for
-            # the other backends, a whole page/file for LightRAG (split=False).
-            # This has to be the same unit the progress callback reports in, or
-            # the bar shows things like "3/14" for a 13-page PDF — LightRAG's
-            # own token-chunking is not observable per page beforehand.
+            # One unit = one chunk that will be fed to the vector store: for
+            # LightRAG that's an estimated token-window chunk count (it chunks
+            # internally, so we feed it one whole-file Document, PDFs
+            # page-marked, via split=False); for the other backends it's a
+            # pre-split chunk (len(docs)).
+            if is_lightrag:
+                from tools.vector_stores.lightrag_store import strip_page_markers  # noqa: PLC0415
+                size = silo.lightrag_chunk_token_size or 1200
+                overlap = (
+                    silo.lightrag_chunk_overlap_token_size
+                    if silo.lightrag_chunk_overlap_token_size is not None
+                    else 100
+                )
+                # ponytail: estimate only — ignores strategy P's own 2000-token
+                # default, V's semantic splitting, and any CHUNK_* env var
+                # overrides; the real count is corrected once LightRAG actually
+                # chunks the file (step_006's per-chunk progress callback).
+                return sum(
+                    _chunks_from_tokens(_count_tokens(strip_page_markers(d.page_content)[0]), size, overlap)
+                    for d in docs
+                )
             return len(docs)
         except Exception:
             return 0
@@ -2559,6 +2663,102 @@ class SiloService:
             session.close()
 
     @staticmethod
+    def delete_lightrag_resource_document(resource: Resource) -> str:
+        """Strict graph delete for the LightRAG single-file delete only.
+
+        The caller must hold ``silo_indexing_lock``. Unlike the tolerant ``delete_resource`` this
+        never swallows errors.
+
+        Args:
+            resource: Resource whose document is removed from the silo's knowledge graph.
+
+        Returns:
+            The library ``DeletionResult.status`` (success | not_found | not_allowed | fail).
+
+        Raises:
+            ValueError: If the silo has no embedding service.
+        """
+        silo = resource.repository.silo
+        if not silo.embedding_service:
+            raise ValueError(f"Silo {silo.silo_id} has no embedding service")
+        # Also ends the owning session's read transaction before any LightRAG work.
+        store = _get_vector_store(silo)
+        outcome = store.delete_resource_document(COLLECTION_PREFIX + str(silo.silo_id), resource.resource_id)
+        if outcome in ("success", "not_found"):
+            try:
+                from services.metadata_values_cache_service import MetadataValuesCacheService
+                MetadataValuesCacheService.invalidate(silo.silo_id)
+            except Exception as _cache_exc:
+                logger.warning(
+                    "metadata_values_cache: invalidation failed after delete_lightrag_resource_document "
+                    "for silo=%d: %s", silo.silo_id, _cache_exc,
+                )
+        return outcome
+
+    @staticmethod
+    def has_legacy_lightrag_documents(resource: Resource) -> bool:
+        """True if the resource was indexed with a legacy shape that a single-file delete would miss.
+
+        The caller must hold ``silo_indexing_lock`` (the file delete's own lock).
+        """
+        silo = resource.repository.silo
+        store = _get_vector_store(silo)
+        return store.has_legacy_documents(COLLECTION_PREFIX + str(silo.silo_id), resource.resource_id, resource.uri)
+
+    @staticmethod
+    def wipe_lightrag_workspace(silo: Silo) -> None:
+        """Strict wipe of the silo's LightRAG workspace, then reset its derived state.
+
+        The caller must hold ``silo_indexing_lock``. Never reports "nothing to delete": a rag that
+        cannot be built is a failure. Resource rows and files are not touched. The reset (entity-name
+        variants and caches) runs only after a successful wipe and never fails the operation. Only this
+        worker's caches are reset; other workers' caches expire within their TTL (60 s variant names,
+        600 s metadata values).
+
+        Args:
+            silo: LightRAG silo to wipe.
+
+        Raises:
+            ServiceRetiredError: A retired LLM role (expected; logged by the caller's mapping).
+            Exception: Any other build or wipe failure (including RuntimeError for a refused wipe) is
+                logged here at ERROR and re-raised.
+        """
+        silo_id = silo.silo_id
+        try:
+            # Also ends the owning session's read transaction before any LightRAG work.
+            store = _get_vector_store(silo)
+            store.wipe_workspace(COLLECTION_PREFIX + str(silo_id))
+        except ServiceRetiredError:
+            raise
+        except Exception:
+            logger.error("lightrag wipe failed for silo=%d", silo_id, exc_info=True)
+            raise
+
+        from repositories.entity_name_variant_repository import EntityNameVariantRepository  # noqa: PLC0415
+        from services.metadata_values_cache_service import MetadataValuesCacheService  # noqa: PLC0415
+        from tools.vector_stores.lightrag_store import invalidate_variant_name_cache  # noqa: PLC0415
+
+        db = None
+        try:
+            db = SessionLocal()
+            deleted = EntityNameVariantRepository.delete_by_silo(silo_id, db)
+            logger.info("lightrag wipe: silo=%d variants_deleted=%d", silo_id, deleted)
+        except Exception:
+            # delete_by_silo rolls back its own failures.
+            logger.error("lightrag wipe: entity-name variant cleanup failed for silo=%d", silo_id, exc_info=True)
+        finally:
+            if db is not None:
+                db.close()
+        for name, reset in (
+            ("variant-name cache", invalidate_variant_name_cache),
+            ("metadata-values cache", MetadataValuesCacheService.invalidate),
+        ):
+            try:
+                reset(silo_id)
+            except Exception:
+                logger.error("lightrag wipe: %s invalidation failed for silo=%d", name, silo_id, exc_info=True)
+
+    @staticmethod
     def delete_resource(resource: Resource):
         """
         Delete a resource using its silo's embedding service
@@ -2676,8 +2876,9 @@ class SiloService:
         """
         Delete documents from a silo using its embedding service
         """
+        ensure_not_lightrag(SiloRepository.get_by_id(silo_id, db))
         logger.info(f"Eliminando documentos {ids} del silo {silo_id}")
-        
+
         if not SiloService.check_silo_collection_exists(silo_id, db):
             logger.warning(f"La colección para el silo {silo_id} no existe")
             return
@@ -2705,14 +2906,40 @@ class SiloService:
     def delete_all_docs_in_collection(silo_id: int, db: Session):
         """
         Delete all documents from a silo collection.
+
+        Raises:
+            HTTPException: 409 if a LightRAG silo is being indexed, 500 if its wipe failed.
+            ServiceRetiredError: if a LightRAG silo's service is retired (mapped to 409 SERVICE_RETIRED).
         """
         logger.info(f"Deleting all documents from silo {silo_id}")
-        
+
+        silo = SiloRepository.get_by_id(silo_id, db)
+        if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
+            with lightrag_silo_lock(silo_id, "delete all documents"):
+                try:
+                    # Resource rows/files are kept on purpose (migration procedure, docs/dependencies/lightrag.md 13.8).
+                    SiloService.wipe_lightrag_workspace(silo)
+                    # The graph is empty now: their files are no longer indexed, so the UI offers "Resume indexing".
+                    from models.repository import Repository  # noqa: PLC0415 — avoids import cycle
+                    repo_ids = db.query(Repository.repository_id).filter(Repository.silo_id == silo_id)
+                    db.query(Resource).filter(Resource.repository_id.in_(repo_ids)).update(
+                        {"status": "pending", "error_message": None, "progress_done": 0, "progress_total": None},
+                        synchronize_session=False,
+                    )
+                    db.commit()
+                except ServiceRetiredError:
+                    raise
+                except Exception as exc:
+                    # wipe_lightrag_workspace already logged the failure once.
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_WIPE_FAILED_DETAIL
+                    ) from exc
+            return
+
         if not SiloService.check_silo_collection_exists(silo_id, db):
             logger.warning(f"Collection for silo {silo_id} does not exist, nothing to delete")
             return
 
-        silo = SiloRepository.get_by_id(silo_id, db)
         if not silo:
             logger.error(f"Silo {silo_id} not found")
             return
@@ -2739,8 +2966,9 @@ class SiloService:
         Returns:
             Number of documents deleted
         """
+        ensure_not_lightrag(SiloRepository.get_by_id(silo_id, db))
         logger.info(f"Deleting documents from silo {silo_id} with filter: {filter_metadata}")
-        
+
         if not SiloService.check_silo_collection_exists(silo_id, db):
             logger.warning(f"Collection for silo {silo_id} does not exist")
             return 0
@@ -3361,12 +3589,17 @@ class SiloService:
             raise ValueError("Silo has no embedding service configured")
 
         chunk_token_size = silo.lightrag_chunk_token_size or 1200
+        # Pre-existing fallback, deliberately left as-is (0, not LightRAG's own
+        # 100 default like count_resource_chunks uses) — out of scope for this
+        # step; don't unify the two without a separate, deliberate change.
         chunk_overlap_token_size = silo.lightrag_chunk_overlap_token_size or 0
+
+        from tools.vector_stores.lightrag_store import strip_page_markers  # noqa: PLC0415
 
         num_chunks = 0
         total_content_tokens = 0
         for doc in documents:
-            doc_tokens = _count_tokens(doc.get('content', ''))
+            doc_tokens = _count_tokens(strip_page_markers(doc.get('content', ''))[0])
             total_content_tokens += doc_tokens
             num_chunks += _chunks_from_tokens(doc_tokens, chunk_token_size, chunk_overlap_token_size)
 

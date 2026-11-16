@@ -6,22 +6,36 @@ tests run without network access.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.documents import Document
 
+import tools.vector_stores.lightrag_store as lightrag_store_module
 from tools.vector_stores.lightrag_store import (
     LightRAGStore,
     LightRAGRetriever,
+    CHUNK_ID_RESOURCE_PAGE_RE,
+    _FULL_DOC_ID_RESOURCE_RE,
     _lightrag_doc_id,
     _normalize_lightrag_graph,
+    _page_label,
+    _source_label_from_metadata,
 )
 
 # pytest.ini does not enable pytest-asyncio's auto mode, so mark every
 # async test in this module explicitly.
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _store_caplog(caplog):
+    """The project logger does not propagate to root, so attach caplog's handler directly."""
+    lightrag_store_module.logger.addHandler(caplog.handler)
+    yield
+    lightrag_store_module.logger.removeHandler(caplog.handler)
 
 
 # ---------------------------------------------------------------------------
@@ -110,18 +124,107 @@ def test_index_documents_skips_blank_content(store, mock_rag):
     mock_rag.ainsert.assert_not_called()
 
 
+def test_index_documents_domain_crawl_pages_still_get_content_hash_ids(store, mock_rag):
+    # AC-35 (NFR-1): Domain/URL crawl Documents (no resource_id, no .id set)
+    # are completely untouched by this spec — they must keep getting
+    # doc-<hash> ids, exactly like before the whole-file PDF refactor.
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [
+        Document(page_content="crawled page one", metadata={"url": "https://example.com/a", "domain_id": 1}),
+        Document(page_content="crawled page two", metadata={"url": "https://example.com/b", "domain_id": 1}),
+    ]
+    with patch("tools.vector_stores.lightrag_store._ainsert_with_progress", new_callable=AsyncMock) as mock_insert:
+        store.index_documents("silo_1", docs)
+
+    ids = mock_insert.call_args.kwargs["ids"]
+    assert len(ids) == 2
+    assert all(doc_id.startswith("doc-") for doc_id in ids)
+    assert len(set(ids)) == 2
+
+
 # ---------------------------------------------------------------------------
 # delete_documents
 # ---------------------------------------------------------------------------
 
 
-def test_delete_documents_is_noop(store, mock_rag):
-    # delete_documents is a deliberate no-op (per-document graph deletion unsupported)
+def test_delete_documents_is_noop(store, mock_rag, caplog):
+    # AC-9: delete_documents never touches the graph, whatever the filter
     store._get_rag_instance = MagicMock(return_value=mock_rag)
 
-    store.delete_documents("silo_1", ["doc1", "doc2"])
+    ids_list = [
+        {"resource_id": {"$eq": 42}},
+        ["doc1", "doc2"],
+        {"url": {"$eq": "https://x"}},
+        {"media_id": {"$eq": 3}},
+    ]
+    for ids in ids_list:
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            store.delete_documents("silo_1", ids)
+        assert any(r.levelname == "WARNING" for r in caplog.records)
 
     mock_rag.adelete_by_doc_id.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["success", "not_found", "not_allowed", "fail"])
+def test_delete_resource_document_passes_through(store, mock_rag, caplog, status):
+    import asyncio
+
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+    mock_rag.adelete_by_doc_id = AsyncMock(
+        return_value=SimpleNamespace(status=status, status_code=418, message="SECRET-MSG")
+    )
+
+    with patch.object(
+        store, "_run_on_collection_loop",
+        side_effect=lambda name, coro: asyncio.run(coro),
+    ) as run, caplog.at_level("WARNING"):
+        assert store.delete_resource_document("silo_7", 42) == status
+
+    mock_rag.adelete_by_doc_id.assert_awaited_once_with("res42", delete_llm_cache=True)
+    assert run.call_args.args[0] == "silo_7"
+    warned = any(r.levelname == "WARNING" for r in caplog.records)
+    assert warned == (status in ("not_allowed", "fail"))
+    assert "SECRET-MSG" not in caplog.text
+    if warned:
+        warning = next(r for r in caplog.records if r.levelname == "WARNING")
+        assert "418" in warning.getMessage()
+
+
+def test_delete_resource_document_times_out(store, mock_rag, monkeypatch):
+    import asyncio
+
+    import tools.vector_stores.lightrag_store as mod
+
+    cancelled = []
+
+    async def _hang(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(mod, "LIGHTRAG_DOC_DELETE_TIMEOUT_S", 0.05)
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+    mock_rag.adelete_by_doc_id = _hang
+
+    with patch.object(
+        store, "_run_on_collection_loop",
+        side_effect=lambda name, coro: asyncio.run(coro),
+    ), pytest.raises(asyncio.TimeoutError):
+        store.delete_resource_document("silo_7", 42)
+
+    # The cancel ran (and finished) before the method returned.
+    assert cancelled
+
+
+def test_delete_resource_document_propagates_rag_errors(store):
+    store._get_rag_instance = MagicMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        store.delete_resource_document("silo_7", 42)
 
 
 # ---------------------------------------------------------------------------
@@ -133,11 +236,313 @@ def test_delete_collection_removes_cached_instance(store, mock_rag):
     store._rag_instances["silo_1"] = mock_rag
 
     with patch.object(store, "_cleanup_neo4j"), \
-         patch.object(store, "_cleanup_qdrant"), \
+         patch.object(store, "_cleanup_vector_storage"), \
          patch.object(store, "_cleanup_postgres"):
         store.delete_collection("silo_1")
 
     assert "silo_1" not in store._rag_instances
+
+
+def test_delete_collection_pgvector_cleans_vector_storage(store):
+    store.lightrag_vector_db_type = "PGVECTOR"
+
+    with patch.object(store, "_cleanup_neo4j"), \
+         patch.object(store, "_cleanup_vector_storage") as vec, \
+         patch.object(store, "_cleanup_postgres"):
+        store.delete_collection("silo_1")
+
+    vec.assert_called_once_with("silo_1")
+
+
+@pytest.fixture(autouse=True)
+def _no_legacy_qdrant_collection(monkeypatch):
+    monkeypatch.setattr("lightrag.kg.qdrant_impl._find_legacy_collection", lambda *a, **k: None)
+
+
+def _rag_with_vdbs(results=(), workspace="silo_1"):
+    rag = MagicMock()
+    for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
+        vdb.effective_workspace = workspace
+    rag.chunk_entity_relation_graph = SimpleNamespace(workspace=workspace)
+    rag.doc_status = SimpleNamespace(workspace=workspace)
+    rag.text_chunks = SimpleNamespace(workspace=workspace)
+    ok = {"status": "success"}
+    results = results or (ok, ok, ok)
+    rag.entities_vdb.drop = AsyncMock(return_value=results[0])
+    rag.relationships_vdb.drop = AsyncMock(return_value=results[1])
+    rag.chunks_vdb.drop = AsyncMock(return_value=results[2])
+    return rag
+
+
+def test_cleanup_vector_storage_drops_all_three_vdbs(store):
+    import asyncio
+
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, ok, ok])
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    store._cleanup_vector_storage("silo_1")
+
+    rag.entities_vdb.drop.assert_awaited_once()
+    rag.relationships_vdb.drop.assert_awaited_once()
+    rag.chunks_vdb.drop.assert_awaited_once()
+
+
+def test_cleanup_vector_storage_raises_on_error_status(store, caplog):
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, {"status": "error", "message": "x"}, ok], "silo_77")
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="relationships"):
+        store._cleanup_vector_storage("silo_77")
+
+    rag.chunks_vdb.drop.assert_awaited_once()  # the remaining drops still ran
+    assert any("silo_77" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_cleanup_vector_storage_raises_when_instance_unavailable(store):
+    store._get_rag_instance = MagicMock(side_effect=RuntimeError("no rag"))
+
+    with pytest.raises(RuntimeError, match="no rag"):
+        store._cleanup_vector_storage("silo_55")
+
+
+def _pg_error(pgcode):
+    err = Exception("boom")
+    err.orig = SimpleNamespace(pgcode=pgcode)
+    return err
+
+
+def test_cleanup_postgres_raises_on_unexpected_error(store, caplog):
+    store.db = MagicMock()
+    store.db.engine.begin.return_value.__enter__.return_value.execute.side_effect = _pg_error("57014")
+
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="lightrag_"):
+        store._cleanup_postgres("silo_88")
+
+    assert any(
+        r.levelname == "ERROR" and "silo_88" in r.getMessage() and "lightrag_" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_cleanup_postgres_undefined_table_is_not_a_failure(store, caplog):
+    store.db = MagicMock()
+    store.db.engine.begin.return_value.__enter__.return_value.execute.side_effect = _pg_error("42P01")
+
+    with caplog.at_level("WARNING"):
+        store._cleanup_postgres("silo_88")
+
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+
+# ---------------------------------------------------------------------------
+# wipe_workspace (strict) vs delete_collection (lenient)
+# ---------------------------------------------------------------------------
+
+
+def _patch_steps(store, **overrides):
+    """Patch the three cleanup helpers (OK unless overridden by side_effect)."""
+    mocks = {}
+    for step, name in (("neo4j", "_cleanup_neo4j"), ("vector", "_cleanup_vector_storage"),
+                       ("postgres", "_cleanup_postgres")):
+        mocks[step] = MagicMock(side_effect=overrides.get(step))
+        setattr(store, name, mocks[step])
+    store._get_rag_instance = MagicMock(return_value=_rag_with_vdbs([]))
+    return mocks
+
+
+def test_wipe_workspace_returns_none_when_every_step_succeeds(store):
+    mocks = _patch_steps(store)
+
+    assert store.wipe_workspace("silo_1") is None
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+
+
+def test_cleanup_postgres_tolerates_only_missing_tables(store):
+    store.db = MagicMock()
+    execute = store.db.engine.begin.return_value.__enter__.return_value.execute
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise _pg_error("42P01")
+        return MagicMock(rowcount=0)
+
+    execute.side_effect = run
+
+    store._cleanup_postgres("silo_1")  # one absent table, the rest OK: no raise
+
+    from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP
+
+    # SET LOCAL + DELETE per table; the absent table fails on its SET LOCAL here
+    assert execute.call_count == 2 * len({t.lower() for t in NAMESPACE_TABLE_MAP.values()}) - 1
+
+
+@pytest.mark.parametrize("step", ["neo4j", "vector", "postgres"])
+def test_wipe_workspace_raises_naming_the_failed_step_but_runs_the_others(store, caplog, step):
+    mocks = _patch_steps(store, **{step: RuntimeError("boom")})
+
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match=step):
+        store.wipe_workspace("silo_1")
+
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+    assert any(
+        r.levelname == "ERROR" and "silo_1" in r.getMessage() and step in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize("step", ["neo4j", "vector", "postgres"])
+def test_delete_collection_swallows_the_same_failures(store, caplog, step):
+    mocks = _patch_steps(store, **{step: RuntimeError("boom")})
+
+    with caplog.at_level("ERROR"):
+        assert store.delete_collection("silo_1") is None
+
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+    assert any(r.levelname == "ERROR" and step in r.getMessage() for r in caplog.records)
+
+
+def test_wipe_workspace_touches_nothing_when_the_rag_cannot_be_built(store):
+    mocks = _patch_steps(store)
+    store._get_rag_instance = MagicMock(side_effect=RuntimeError("retired"))
+
+    with pytest.raises(RuntimeError, match="retired"):
+        store.wipe_workspace("silo_1")
+    for m in mocks.values():
+        m.assert_not_called()
+
+    # the lenient path has no such guard
+    store.delete_collection("silo_1")
+    for m in mocks.values():
+        m.assert_called_once_with("silo_1")
+
+
+def test_cleanup_vector_storage_drop_exception_is_a_failed_vdb(store):
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, ok, ok])
+    rag.entities_vdb.drop = AsyncMock(side_effect=ConnectionError("down"))
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    with pytest.raises(RuntimeError, match="entities"):
+        store._cleanup_vector_storage("silo_1")
+    rag.chunks_vdb.drop.assert_awaited_once()
+
+
+def test_cleanup_vector_storage_drop_timeout_is_a_failed_vdb(store, monkeypatch):
+    ok = {"status": "success"}
+    rag = _rag_with_vdbs([ok, ok, ok])
+
+    async def never(*a, **k):
+        await asyncio.Event().wait()
+
+    rag.entities_vdb.drop = never
+    monkeypatch.setattr(lightrag_store_module, "LIGHTRAG_DOC_DELETE_TIMEOUT_S", 0.05)
+    store._get_rag_instance = MagicMock(return_value=rag)
+    store._run_on_collection_loop = lambda name, coro: asyncio.run(coro)
+
+    with pytest.raises(RuntimeError, match="entities"):
+        store._cleanup_vector_storage("silo_1")
+    rag.relationships_vdb.drop.assert_awaited_once()
+    rag.chunks_vdb.drop.assert_awaited_once()
+
+
+# AC-7: Neo4j step
+
+
+def _neo4j_store(store, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "NEO4J_URI", "bolt://x:7687", raising=False)
+    monkeypatch.setattr(config, "NEO4J_PASSWORD", "pw", raising=False)
+    return store
+
+
+def test_cleanup_neo4j_closes_the_driver_when_the_query_fails(store, monkeypatch):
+    _neo4j_store(store, monkeypatch)
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value.run.side_effect = RuntimeError("neo down")
+
+    with patch("neo4j.GraphDatabase.driver", return_value=driver), \
+         pytest.raises(RuntimeError, match="neo down"):
+        store._cleanup_neo4j("silo_1")
+
+    driver.close.assert_called_once()
+
+
+def test_cleanup_neo4j_runs_the_batched_label_query_and_consumes_it(store, monkeypatch):
+    _neo4j_store(store, monkeypatch)
+    driver = MagicMock()
+    run = driver.session.return_value.__enter__.return_value.run
+
+    with patch("neo4j.GraphDatabase.driver", return_value=driver):
+        store._cleanup_neo4j("silo_1")
+
+    query = run.call_args_list[0].args[0]  # the batched delete; SHOW/DROP INDEX calls follow it
+    text = query.text
+    assert text.endswith("IN TRANSACTIONS OF 5000 ROWS") and "`silo_1`" in text
+    assert "CALL { WITH n DETACH DELETE n }" in text
+    assert query.timeout == lightrag_store_module.LIGHTRAG_DOC_DELETE_TIMEOUT_S
+    run.return_value.consume.assert_called_once()
+    driver.close.assert_called_once()
+
+
+def test_cleanup_neo4j_rejects_a_label_that_is_not_a_silo_workspace(store, monkeypatch):
+    _neo4j_store(store, monkeypatch)
+
+    with patch("neo4j.GraphDatabase.driver") as factory, pytest.raises(ValueError):
+        store._cleanup_neo4j("silo_1) DETACH")
+    factory.assert_not_called()
+
+
+def test_cleanup_neo4j_raises_when_not_configured(store, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "NEO4J_URI", None, raising=False)
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        store._cleanup_neo4j("silo_1")
+
+
+# AC-8 (revised): only the lenient delete_collection retires the cached instance
+
+
+def _store_with_cached_rag(store, monkeypatch):
+    monkeypatch.setattr(lightrag_store_module, "_RETIRE_GRACE_S", 0)
+    rag = _rag_with_vdbs([])
+    rag.initialize_storages = AsyncMock()
+    rag.finalize_storages = AsyncMock()
+    built = []
+
+    def build(name):
+        built.append(name)
+        return rag
+
+    for step in ("_cleanup_neo4j", "_cleanup_vector_storage", "_cleanup_postgres"):
+        monkeypatch.setattr(store, step, MagicMock())
+    monkeypatch.setattr(store, "_build_rag", build)
+    store._get_rag_instance("silo_1")
+    return rag, built
+
+
+def test_wipe_workspace_keeps_the_cached_instance_and_reuses_it(store, monkeypatch):
+    rag, built = _store_with_cached_rag(store, monkeypatch)
+
+    store.wipe_workspace("silo_1")
+
+    rag.finalize_storages.assert_not_awaited()
+    assert store._rag_instances["silo_1"] is rag
+    assert store._get_rag_instance("silo_1") is rag
+    assert built == ["silo_1"]
+    store._collection_loops["silo_1"].close()
 
 
 # ---------------------------------------------------------------------------
@@ -251,15 +656,45 @@ def test_get_distinct_metadata_values_returns_empty(store):
 
 
 def test_lightrag_doc_id_encodes_resource_and_page():
-    assert _lightrag_doc_id({"resource_id": 61, "page": 5}, "some text") == "res61-p5"
+    doc = Document(page_content="some text", metadata={"resource_id": 61, "page": 5})
+    assert _lightrag_doc_id(doc) == "res61-p5"
 
 
 def test_lightrag_doc_id_falls_back_to_content_hash_without_resource_or_page():
     # Domain/web-crawled content has neither — must still get a valid,
     # LightRAG-shaped id instead of erroring.
-    doc_id = _lightrag_doc_id({}, "crawled page text")
+    doc_id = _lightrag_doc_id(Document(page_content="crawled page text"))
     assert doc_id.startswith("doc-")
     assert not doc_id.startswith("res")
+
+
+def test_lightrag_doc_id_trusts_an_explicitly_set_id():
+    # step_004: only the Resource whole-file extraction sets Document.id —
+    # when it's set, it is trusted directly, regardless of metadata.
+    doc = Document(id="res7", page_content="whole file text", metadata={"resource_id": 999, "page": 3})
+    assert _lightrag_doc_id(doc) == "res7"
+
+
+def test_lightrag_doc_id_resource_id_alone_in_metadata_cannot_fake_a_whole_file_id():
+    # AD-2 guarantee: caller-supplied metadata alone (no real .id set, no
+    # page) must never produce a bare "res{N}" id — only extract_documents_
+    # from_file's whole-file path can do that, by setting .id directly.
+    doc = Document(page_content="some text", metadata={"resource_id": 7})
+    doc_id = _lightrag_doc_id(doc)
+    assert doc_id != "res7"
+    assert doc_id.startswith("doc-")
+
+
+@pytest.mark.parametrize("malformed_id", ["../../etc", "res7; DROP TABLE", "res7-p12", "res"])
+def test_lightrag_doc_id_rejects_a_malformed_explicit_id(malformed_id):
+    # Defence in depth: only a bare "res{N}"-shaped .id is trusted. Anything
+    # else set on .id (not reachable today, but not something to trust
+    # blindly either) falls through to the metadata/hash logic instead of
+    # being used verbatim as the LightRAG doc id.
+    doc = Document(id=malformed_id, page_content="some text")
+    doc_id = _lightrag_doc_id(doc)
+    assert doc_id != malformed_id
+    assert doc_id.startswith("doc-")
 
 
 def test_index_documents_passes_resource_and_page_ids_to_ainsert(store, mock_rag):
@@ -273,6 +708,95 @@ def test_index_documents_passes_resource_and_page_ids_to_ainsert(store, mock_rag
         store.index_documents("silo_1", docs)
 
     assert mock_insert.call_args.kwargs["ids"] == ["res61-p1", "res61-p2"]
+
+
+def test_index_documents_whole_file_document_uses_its_explicit_id(store, mock_rag):
+    # step_004: a single whole-file Document (resource_id folded into .id by
+    # extract_documents_from_file) must be indexed under that exact id.
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [Document(id="res61", page_content="whole file text", metadata={"resource_id": 61, "name": "f.pdf"})]
+    with patch("tools.vector_stores.lightrag_store._ainsert_with_progress", new_callable=AsyncMock) as mock_insert:
+        store.index_documents("silo_1", docs)
+
+    assert mock_insert.call_args.kwargs["ids"] == ["res61"]
+
+
+def test_enqueue_documents_whole_file_document(store, mock_rag):
+    store._get_rag_instance = MagicMock(return_value=mock_rag)
+
+    docs = [Document(id="res7", page_content="<<<page:1>>>\nx", metadata={"resource_id": 7, "name": "m.pdf"})]
+    with patch("tools.vector_stores.lightrag_store._aenqueue", new_callable=AsyncMock) as mock_enqueue:
+        result = store.enqueue_documents("silo_1", docs)
+
+    assert result == {7: ["res7"]}
+    assert mock_enqueue.call_args.kwargs["file_paths"] == ["m.pdf"]
+    assert mock_enqueue.call_args.kwargs["ids"] == ["res7"]
+
+
+# ---------------------------------------------------------------------------
+# _source_label_from_metadata
+# ---------------------------------------------------------------------------
+
+
+def test_source_label_strips_path_and_keeps_resource_id_out_of_the_label():
+    assert _source_label_from_metadata({"name": "a/b/m.pdf", "resource_id": 7}) == "m.pdf"
+
+
+def test_source_label_appends_page_when_present():
+    assert _source_label_from_metadata({"name": "a/b/m.pdf", "page": 3}) == "m.pdf (p. 3)"
+
+
+# ---------------------------------------------------------------------------
+# NFR-1: caller-supplied metadata alone can never trigger the whole-file
+# res{N} id path — only extract_documents_from_file's Resource extraction can.
+# ---------------------------------------------------------------------------
+
+
+def test_create_documents_for_indexing_never_collapses_chunk_ids():
+    from services.silo_service import SiloService
+
+    # Realistic multi-chunk caller-metadata scenario (e.g. the public
+    # index-file endpoint's payload shape): varied content so chunk
+    # boundaries differ, same shape a public caller would send.
+    paragraph = "The quick brown fox jumps over the lazy dog near the riverbank. "
+    content = "\n\n".join(f"{paragraph}Paragraph number {i}." for i in range(40))
+    docs = SiloService._create_documents_for_indexing(1, [{"content": content, "metadata": {"resource_id": 5}}])
+
+    assert len(docs) > 1
+    ids = [_lightrag_doc_id(doc) for doc in docs]
+    assert all(doc_id.startswith("doc-") for doc_id in ids)
+    assert "res5" not in ids
+    assert len(set(ids)) == len(ids)
+
+
+def test_create_documents_for_indexing_single_chunk_resource_id_without_page_gets_a_hash_id():
+    # AC-35: the public index-file shape — a single caller-supplied dict with
+    # resource_id and no "page" key — must never produce the whole-file
+    # "res{N}" id; only extract_documents_from_file's own Resource extraction
+    # (which sets Document.id directly) can do that.
+    from services.silo_service import SiloService
+
+    docs = SiloService._create_documents_for_indexing(1, [{"content": "short content", "metadata": {"resource_id": 5}}])
+
+    assert len(docs) == 1
+    doc_id = _lightrag_doc_id(docs[0])
+    assert doc_id.startswith("doc-")
+    assert doc_id != "res5"
+
+
+def test_create_documents_for_indexing_single_chunk_resource_id_and_page_keeps_legacy_shape():
+    # AC-35: today's legacy per-page shape (res{N}-p{P}) must still work
+    # through the public-API-metadata path when the caller supplies both
+    # resource_id and page (step_002's backward-compat guarantee).
+    from services.silo_service import SiloService
+
+    docs = SiloService._create_documents_for_indexing(
+        1, [{"content": "short content", "metadata": {"resource_id": 5, "page": 2}}],
+    )
+
+    assert len(docs) == 1
+    assert _lightrag_doc_id(docs[0]) == "res5-p2"
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +824,137 @@ def test_normalize_omits_resource_and_page_for_content_hash_ids():
     chunk = result["data"]["chunks"][0]
     assert "resource_id" not in chunk
     assert "page" not in chunk
+
+
+# ---------------------------------------------------------------------------
+# CHUNK_ID_RESOURCE_PAGE_RE / _FULL_DOC_ID_RESOURCE_RE: accept both the old
+# per-page PDF id shape and the new per-file shape (step_002 of
+# lightrag-pdf-document-schema — no writer changes yet, readers only).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("chunk_id,expected", [
+    ("res7-chunk-000", ("7", None)),            # new DOCX/TXT/MD shape
+    ("res7-p12-chunk-037", ("7", "12")),         # new PDF-chunk shape
+    ("res7-p12-chunk-037-s01", ("7", "12")),     # new PDF shape, hard-split child
+    ("res7-p12-chunk-000", ("7", "12")),         # old per-page PDF shape
+])
+def test_chunk_id_resource_page_re_matches_both_shapes(chunk_id, expected):
+    match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
+    assert match is not None
+    assert (match.group(1), match.group(2)) == expected
+
+
+def test_chunk_id_resource_page_re_does_not_match_non_resource_ids():
+    assert CHUNK_ID_RESOURCE_PAGE_RE.match("doc-abc-chunk-000") is None
+
+
+def test_chunk_id_resource_page_re_requires_a_digit_chunk_index():
+    # "-chunk-" must be followed by digits — a malformed/non-digit index
+    # (never produced by _lightrag_doc_id, but not something to silently
+    # accept either) must not match.
+    assert CHUNK_ID_RESOURCE_PAGE_RE.match("res7-chunk-abc") is None
+
+
+@pytest.mark.parametrize("doc_id", ["res7", "res7-p12"])
+def test_full_doc_id_resource_re_matches_both_shapes(doc_id):
+    assert _FULL_DOC_ID_RESOURCE_RE.match(doc_id) is not None
+
+
+@pytest.mark.parametrize("doc_id", ["doc-abc", "res7-p12-chunk-000"])
+def test_full_doc_id_resource_re_rejects_non_doc_ids(doc_id):
+    assert _FULL_DOC_ID_RESOURCE_RE.match(doc_id) is None
+
+
+@pytest.mark.parametrize("file_path", ["", "unknown_source"])
+def test_page_label_does_not_attach_a_page_to_a_sourceless_file_path(file_path):
+    # No real file name to attach a page to — must stay exactly "" or
+    # "unknown_source" so the frontend's "Unknown source" fallback (an
+    # exact/empty match, see CitationBadge.tsx / LightRAGGraphBubble.tsx)
+    # still fires, instead of showing a bare "(p. 12)" or "unknown_source (p. 12)".
+    assert _page_label(file_path, 12) == file_path
+
+
+# ---------------------------------------------------------------------------
+# _normalize_lightrag_graph: new-shape chunk ids
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_appends_page_to_a_bare_file_name_for_new_shape_pdf_chunk():
+    raw = {"data": {"chunks": [{"chunk_id": "res7-p12-chunk-037", "content": "text", "file_path": "m.pdf"}]}}
+
+    chunk = _normalize_lightrag_graph(raw)["data"]["chunks"][0]
+
+    assert chunk["resource_id"] == 7
+    assert chunk["page"] == 12
+    assert chunk["file_path"] == "m.pdf (p. 12)"
+
+
+def test_normalize_new_docx_shape_has_no_page_and_leaves_file_path_bare():
+    raw = {"data": {"chunks": [{"chunk_id": "res8-chunk-000", "content": "text", "file_path": "d.docx"}]}}
+
+    chunk = _normalize_lightrag_graph(raw)["data"]["chunks"][0]
+
+    assert chunk["resource_id"] == 8
+    assert "page" not in chunk
+    assert chunk["file_path"] == "d.docx"
+
+
+def test_normalize_old_shape_label_already_has_page_suffix_is_not_doubled():
+    raw = {"data": {"chunks": [{"chunk_id": "res61-p5-chunk-000", "content": "text", "file_path": "f.pdf (p. 5)"}]}}
+
+    chunk = _normalize_lightrag_graph(raw)["data"]["chunks"][0]
+
+    assert chunk["resource_id"] == 61
+    assert chunk["page"] == 5
+    assert chunk["file_path"] == "f.pdf (p. 5)"
+
+
+# Fix round 2: step order, 57014 failure, env/doc_status/text_chunks blockers
+
+
+def test_wipe_steps_run_vector_then_neo4j_then_postgres(store):
+    order = []
+    for step, name in (("vector", "_cleanup_vector_storage"), ("neo4j", "_cleanup_neo4j"),
+                       ("postgres", "_cleanup_postgres")):
+        setattr(store, name, lambda c, s=step: order.append(s))
+
+    assert store._wipe_steps("silo_1") == []
+    assert order == ["vector", "neo4j", "postgres"]
+
+
+def test_cleanup_postgres_sets_a_statement_timeout_and_reports_57014_as_failed(store):
+    store.db = MagicMock()
+    execute = store.db.engine.begin.return_value.__enter__.return_value.execute
+
+    def run(stmt, *a, **k):
+        if "SET LOCAL statement_timeout" in str(stmt):
+            return MagicMock()
+        raise _pg_error("57014")
+
+    execute.side_effect = run
+
+    with pytest.raises(RuntimeError, match="failed for tables"):
+        store._cleanup_postgres("silo_1")
+    first = str(execute.call_args_list[0].args[0])
+    assert first == f"SET LOCAL statement_timeout = {int(lightrag_store_module.LIGHTRAG_DOC_DELETE_TIMEOUT_S * 1000)}"
+
+
+
+@pytest.mark.parametrize("name", ["a.pdf", "100%_x.txt"])
+def test_has_legacy_documents_queries_page_prefix_and_label_by_equality(store, name):
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = (1,)
+
+    assert store.has_legacy_documents("silo_1", 7, name) is True
+    params = conn.execute.call_args.args[1]
+    assert params["ws"] == "silo_1"
+    assert params["page_prefix"] == "res7-p%"
+    assert "file_path = :label" in str(conn.execute.call_args.args[0])
+
+
+def test_has_legacy_documents_false_when_no_row(store):
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.first.return_value = None
+
+    assert store.has_legacy_documents("silo_1", 7, "a.pdf") is False

@@ -26,7 +26,7 @@ def test_cleanup_neo4j_deletes_nodes_and_workspace_indexes():
         store._cleanup_neo4j("silo_7")
 
     queries = [c.args[0] for c in session.run.call_args_list]
-    assert queries[0] == "MATCH (n:`silo_7`) DETACH DELETE n"
+    assert queries[0].text.startswith("MATCH (n:`silo_7`) CALL { WITH n DETACH DELETE n }")
     assert session.run.call_args_list[1].kwargs == {"label": "silo_7"}
     assert queries[2:] == [
         "DROP INDEX `entity_id_fulltext_idx_silo_7` IF EXISTS",

@@ -166,6 +166,45 @@ class TestCancelDiscardsUnindexed:
         discard.assert_not_called()
 
 
+class TestDiscardUnindexedAfterCancelSQL:
+    """_discard_unindexed_after_cancel's processed-count filter must match
+    both the new per-file id shape (exact match, "res{N}") and the old
+    per-page id shape (prefix match, "res{N}-p%") — see
+    lightrag-pdf-document-schema step_002."""
+
+    @staticmethod
+    def _run(scalar_return):
+        repo = SimpleNamespace(silo_id=7)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [(42,)]
+        db.execute.return_value.scalar.return_value = scalar_return
+        with patch("db.database.SessionLocal", return_value=db), \
+             patch("services.resource_service.ResourceRepository.get_repository_by_id", return_value=repo), \
+             patch.object(ResourceService, "delete_resource", return_value=True) as delete_mock:
+            discarded = ResourceService._discard_unindexed_after_cancel(1)
+        return discarded, db, delete_mock
+
+    def test_nonzero_indexed_count_keeps_the_resource(self):
+        # One combined (exact OR prefix) query — a non-zero count means
+        # something was indexed, whichever half of the OR matched (which half
+        # actually matched is pinned by test_params_are_bound_not_interpolated
+        # below, via the captured SQL/params).
+        discarded, db, delete_mock = self._run(scalar_return=1)
+        assert discarded == 0
+        delete_mock.assert_not_called()
+
+    def test_zero_count_discards_the_resource(self):
+        discarded, db, delete_mock = self._run(scalar_return=0)
+        assert discarded == 1
+        delete_mock.assert_called_once_with(42, db)
+
+    def test_params_are_bound_not_interpolated(self):
+        _, db, _ = self._run(scalar_return=0)
+        sql_arg, params = db.execute.call_args[0]
+        assert "id = :exact OR id LIKE :prefix" in str(sql_arg)
+        assert params == {"ws": "silo_7", "exact": "res42", "prefix": "res42-p%"}
+
+
 class TestPauseBanksElapsedTime:
     """Pause has to bank the batch's wall time, or the resumed run's progress
     bar restarts at 00:00:00 (the clock is now() - progress_started_at, and

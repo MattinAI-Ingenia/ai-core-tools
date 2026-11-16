@@ -75,9 +75,9 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   // Stop controls. Pause is reversible (a single click); Cancel removes the
   // files it never started, so it goes through a disclaimer first. Both stay in
   // the "…ing" state after the request: neither is instant. Pause aborts each
-  // page at its next checkpoint, so pages already handed to the model run to
-  // completion and are then discarded; cancel deliberately does the opposite
-  // and lets the in-flight files finish.
+  // file at its next checkpoint, so files already handed to the pipeline are
+  // dropped and redone on resume; cancel deliberately does the opposite and
+  // lets the in-flight files finish.
   const [stopState, setStopState] = React.useState<
     { mode: 'pause' | 'cancel'; phase: 'stopping' | 'failed' } | null
   >(null);
@@ -164,7 +164,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
         type="button"
         onClick={() => requestStop('pause')}
         disabled={busy('pause')}
-        title="Pause indexing. Pages in progress are dropped and redone on resume; files not started are kept for later."
+        title="Pause indexing. Files in progress are dropped and redone on resume; files not started are kept for later."
         className={`${stopBtn} ${failed('pause')
           ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100'
           : 'text-amber-700 border-amber-300 bg-white hover:bg-amber-50'}`}
@@ -254,7 +254,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
           type="button"
           onClick={onResume}
           disabled={resuming}
-          title="Pick up an ingestion that was interrupted. Pages already indexed are skipped."
+          title="Pick up an ingestion that was interrupted. Files already indexed are skipped; interrupted files are redone."
           className={`${stopBtn} text-amber-700 border-amber-300 bg-white hover:bg-amber-50`}
         >
           {resuming

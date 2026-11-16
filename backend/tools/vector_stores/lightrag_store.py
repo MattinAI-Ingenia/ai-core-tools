@@ -23,6 +23,7 @@ import threading
 import time
 import tempfile
 import weakref
+from bisect import bisect_right
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from langchain_core.callbacks import (
@@ -73,6 +74,10 @@ logging.getLogger("lightrag").addFilter(_DropUnconfiguredRoleLog())
 # a fixed cap here instead killed the feeder mid-run and stranded every
 # resource the primed window hadn't reached.
 
+# Upper bound for one adelete_by_doc_id call. Covers entity-rebuild LLM
+# summary calls (LLM workers time out at 120/240s).
+LIGHTRAG_DOC_DELETE_TIMEOUT_S = 600.0
+
 # How long a SINGLE enqueue call may take before it is treated as hung.
 # _aenqueue does no LLM work (just a doc_status/storage write, normally
 # sub-second), so this is far below the LLM worker timeouts (120s/240s,
@@ -93,6 +98,9 @@ _LIGHTRAG_MODES = frozenset({"local", "global", "hybrid", "naive", "mix", "bypas
 # Maps a silo's chunking strategy to LightRAG's native ``process_options``
 # selector char (see lightrag.constants.PROCESS_OPTION_CHUNK_*). Unknown or
 # legacy values (e.g. the old "token_window") fall back to fixed-token "F".
+# Not fed to LightRAG's own selector anymore (see _ainsert) -- every document
+# now goes through the page-aware ``chunking_func`` hook, and this feeds
+# _resolve_strategy_options there instead.
 _CHUNK_STRATEGY_OPTION = {
     "fixed_token": "F",
     "recursive_character": "R",
@@ -158,7 +166,10 @@ def _source_label_from_metadata(metadata: dict) -> str:
     Prefers the original file name and appends the page number when available
     (PDFs carry ``page``). Falls back through other known location keys, and
     finally to LightRAG's own ``"unknown_source"`` sentinel so the UI can detect
-    and label truly source-less chunks consistently.
+    and label truly source-less chunks consistently. A whole-file Resource
+    Document has no ``page`` key in its metadata, so its label is just the bare
+    file name; readers (``_page_label``) rebuild the "(p. N)" suffix from the
+    chunk id instead.
     """
     name = (
         metadata.get("name")
@@ -178,46 +189,266 @@ def _source_label_from_metadata(metadata: dict) -> str:
     return label
 
 
+# A page marker is a whole line matching ``^<<<page:([1-9]\d*)>>>$`` with
+# exactly one "\n" immediately after it; text counts as page-marked only when
+# it STARTS with such a line (see strip_page_markers). Used to carry PDF page
+# boundaries through a single whole-file chunking call (see
+# _achunk_page_aware) instead of chunking one LightRAG document per page.
+# The digit group is capped at 6 digits (no real PDF has anywhere near
+# 999999 pages) so a pathological page number can never hit Python's
+# int-string conversion limit or risk overflowing the ~255-char chunk-id
+# column once prefixed.
+_PAGE_MARKER_RE = re.compile(r"^<<<page:([1-9][0-9]{0,5})>>>$", re.MULTILINE)
+
+# A line that merely LOOKS like a marker (real page content, not our own
+# join) — neutralised by page_marked_text before marking so it can never be
+# mistaken for a real marker later. Same digit cap as _PAGE_MARKER_RE.
+_PAGE_MARKER_LOOKALIKE_RE = re.compile(r"^([ \t]*)<<<(page:[0-9]{1,6}>>>[ \t]*)$", re.MULTILINE)
+
+
+def neutralize_page_text(text: str) -> str:
+    """Sanitize *text* and defuse lines that look like ``<<<page:N>>>`` markers.
+
+    Runs LightRAG's own ``sanitize_text_for_encoding`` first, so an encoded
+    lookalike (``&lt;&lt;&lt;page:9&gt;&gt;&gt;``) is caught too, then re-escapes
+    every ``&``: LightRAG unescapes the stored text once more later, and an
+    escaped ``&amp;`` can only come back as ``&``, never as a new entity that
+    forges a page boundary. Used for PDF pages (``page_marked_text``) and for
+    whole-file non-PDF Documents, which also get a ``res{N}`` id.
+    """
+    from lightrag.utils import sanitize_text_for_encoding  # noqa: WPS433
+
+    return _PAGE_MARKER_LOOKALIKE_RE.sub(
+        r"\1<<\2", sanitize_text_for_encoding(text)
+    ).replace("&", "&amp;")
+
+
+def page_marked_text(pages) -> str:
+    """Join ``(page_number, cleaned_text)`` pairs into one page-marked string.
+
+    Each page is prefixed with its own ``<<<page:N>>>`` marker line so a
+    single whole-file chunking call can still recover which page a chunk
+    came from (see strip_page_markers / _achunk_page_aware). Each page's text
+    is neutralised first (see ``neutralize_page_text``) so a line in it that
+    merely looks like a marker can never be parsed back as a real one.
+    """
+    neutralized = ((n, neutralize_page_text(text)) for n, text in pages)
+    return "\n\n".join(f"<<<page:{n}>>>\n{text}" for n, text in neutralized)
+
+
+def strip_page_markers(text: str) -> Tuple[str, List[Tuple[int, int]]]:
+    """Remove page markers, returning ``(clean_text, [(offset, page), ...])``.
+
+    ``offset`` is the position in the OUTPUT (marker-stripped) string where
+    that page's text begins. Text that does not START with a marker is
+    returned unchanged with an empty list — a marker-like line appearing
+    later in otherwise-unmarked text is just content, not a real marker
+    sequence, and must not be touched.
+    """
+    if not _PAGE_MARKER_RE.match(text):
+        return text, []
+
+    pieces: List[str] = []
+    starts: List[Tuple[int, int]] = []
+    pos = 0
+    out_len = 0
+    for m in _PAGE_MARKER_RE.finditer(text):
+        pieces.append(text[pos:m.start()])
+        out_len += m.start() - pos
+        end = m.end()
+        if end < len(text) and text[end] == "\n":
+            end += 1
+        starts.append((out_len, int(m.group(1))))
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces), starts
+
+
+def _resolve_strategy_options(rag, option: str) -> Tuple[int, dict]:
+    """Resolve ``(chunk_token_size, kwargs)`` for one chunking strategy letter.
+
+    Mirrors LightRAG's own explicit-selector dispatch (``pipeline.py``'s
+    ``process_single_document``) so this hook uses the library's exact
+    per-strategy option resolution instead of reinventing it.
+    """
+    from lightrag.parser.routing import chunk_strategy_key, resolve_chunk_options  # noqa: WPS433
+
+    strategy_key = chunk_strategy_key(option)
+    chunk_opts = resolve_chunk_options(rag.addon_params, process_options=option)
+    resolved = int(chunk_opts.get("chunk_token_size") or rag.chunk_token_size)
+    opts = dict(chunk_opts.get(strategy_key) or {})
+    size = int(opts.pop("chunk_token_size", resolved))
+    if option == "R" and "separators" in opts:
+        from lightrag.chunker.recursive_character import normalize_r_separators  # noqa: WPS433
+
+        seps = normalize_r_separators(opts["separators"])
+        if seps:
+            opts["separators"] = seps
+        else:
+            opts.pop("separators")
+    return size, opts
+
+
+def _assign_start_pages(chunks: list, clean: str, starts: List[Tuple[int, int]]) -> None:
+    """Set ``chunk["chunk_id"] = f"p{page}-chunk-{order:03d}"`` on every chunk.
+
+    ``starts`` is ``[(offset_in_clean_text, page_number), ...]`` in order (see
+    strip_page_markers). A chunk's page comes from its own ``_source_span``
+    when the chunker emitted one; otherwise from a ``clean.find()`` fallback
+    anchored at the previous chunk's start, so overlapping/out-of-order
+    chunks never walk the page backward. A chunk whose start can't be
+    determined either way carries forward the previous chunk's page.
+    """
+    offsets = [o for o, _ in starts]
+    page = starts[0][1]
+    cursor = 0
+    for order, chunk in enumerate(chunks):
+        start = (chunk.get("_source_span") or {}).get("start")
+        if not isinstance(start, int):
+            # Theoretical O(k * n) ceiling if many consecutive chunks lack
+            # _source_span (k = chunk count, n = len(clean)). Currently
+            # dormant: F always emits spans here, and R/V/P-via-R all emit
+            # spans on lightrag-hku 1.5.6 too — flagged so this isn't
+            # silently reintroduced as a real hot path on a future bump.
+            found = clean.find(chunk.get("content") or "", cursor)
+            if found >= 0:
+                start = found
+        if isinstance(start, int):
+            page = starts[bisect_right(offsets, start) - 1][1]
+            cursor = start
+        chunk["chunk_id"] = f"p{page}-chunk-{order:03d}"
+
+
+async def _achunk_page_aware(rag, option: str, tokenizer, content: str) -> list:
+    """LightRAG ``chunking_func`` hook: chunk the whole file with *option*, page-aware.
+
+    Page-marked text gets ``p{page}-chunk-{order}`` chunk ids; unmarked text is
+    returned exactly as the chunker produced it. F/R/P are sync and run in
+    ``asyncio.to_thread`` (not the library's single-worker chunking executor,
+    which would serialise chunking app-wide); V needs ``rag.embedding_func`` on
+    the loop, so only marker handling is offloaded.
+
+    Divergences from LightRAG's own selector dispatch: (1) V skips
+    ``apply_trusted_sentence_split_regex`` (addon_params is read live, so the
+    GHSA-32jh-39m7-8x84 snapshot issue does not apply); (2) P has no
+    blocks_path/doc_id and falls back to recursive-character (P is disabled in
+    the UI); (3) options are resolved at chunking time, not enqueue time.
+    """
+    size, opts = _resolve_strategy_options(rag, option)
+
+    if option == "V":
+        from lightrag.chunker import chunking_by_semantic_vector  # noqa: WPS433
+
+        clean, starts = await asyncio.to_thread(strip_page_markers, content)
+        chunks = await chunking_by_semantic_vector(
+            tokenizer, clean, size, embedding_func=rag.embedding_func, **opts
+        )
+        if starts:
+            await asyncio.to_thread(_assign_start_pages, chunks, clean, starts)
+    else:
+        def _sync_chunk():
+            from lightrag.chunker import (  # noqa: WPS433
+                chunking_by_fixed_token,
+                chunking_by_paragraph_semantic,
+                chunking_by_recursive_character,
+            )
+
+            clean, starts = strip_page_markers(content)
+            if option == "F":
+                opts["_emit_source_span"] = True
+            # P falls back to recursive-character here (see divergence 2 above).
+            chunker = {
+                "F": chunking_by_fixed_token,
+                "R": chunking_by_recursive_character,
+            }.get(option, chunking_by_paragraph_semantic)
+            result = chunker(tokenizer, clean, size, **opts)
+            if starts:
+                _assign_start_pages(result, clean, starts)
+            return result, starts
+
+        chunks, starts = await asyncio.to_thread(_sync_chunk)
+
+    logger.info(
+        "[%s] Page-aware chunking %s: %d chunk(s), %d page marker(s)",
+        getattr(rag, "workspace", None), option, len(chunks), len(starts),
+    )
+    return chunks
+
+
 # Matches a chunk id LightRAG derives from an id _lightrag_doc_id returned
 # (f"{doc_id}-chunk-{n}"): resource id and page, straight out of the id
-# instead of re-parsing the human-readable file_path label.
-CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)-p(\d+)-chunk-\d+$")
+# instead of re-parsing the human-readable file_path label. Covers both the
+# old per-page PDF shape ("res7-p12-chunk-037", page in group 2) and the new
+# per-file shape ("res7-chunk-000", with an optional "-p{P}" for PDF chunks —
+# page absent for DOCX/TXT/MD). The chunk index must still be digits ("-chunk-
+# abc" does not match); no end anchor after it so it also matches a "-sNN"
+# hard-split suffix on the chunk id.
+CHUNK_ID_RESOURCE_PAGE_RE = re.compile(r"^res(\d+)(?:-p(\d+))?-chunk-\d+")
 
 
-def _lightrag_doc_id(metadata: dict, content: str) -> str:
-    """Stable LightRAG document id for one page, so a chunk's own id can be
-    parsed straight back to (resource_id, page) — see CHUNK_ID_RESOURCE_PAGE_RE
-    — instead of guessing from the display-only file_path label.
+def _lightrag_doc_id(doc: Document) -> str:
+    """Stable LightRAG document id, so chunk ids parse back to (resource, page).
 
-    Content-hash duplicate detection (lightrag/pipeline.py,
-    get_existing_doc_by_content_hash) is independent of the id we supply, so
-    this changes nothing about resume/dedup behaviour.
+    - ``doc.id`` shaped ``res{N}``: set only by the whole-file Resource
+      extraction (``SiloService.extract_documents_from_file``, split=False);
+      returned as-is. The shape check keeps an untrusted id from passing through.
+    - ``resource_id`` + ``page`` in metadata: legacy ``res{id}-p{page}``.
+    - Otherwise (e.g. crawled Domain pages): LightRAG's content hash.
 
-    Falls back to LightRAG's own default (content hash) for content with no
-    resource/page — non-PDF sources such as crawled Domain pages.
+    Content-hash dedup is independent of this id, so resume/dedup are unchanged.
     """
+    if doc.id and re.fullmatch(r"res\d+", doc.id):
+        return doc.id
+
+    metadata = doc.metadata or {}
     resource_id = metadata.get("resource_id")
     page = metadata.get("page")
     if resource_id is not None and page is not None:
         return f"res{resource_id}-p{page}"
     from lightrag.utils import compute_mdhash_id  # noqa: WPS433
 
-    return compute_mdhash_id(content, prefix="doc-")
+    return compute_mdhash_id(doc.page_content, prefix="doc-")
 
 
 # Matches the PARENT doc id (no "-chunk-N" suffix) — see _lightrag_doc_id and
 # CHUNK_ID_RESOURCE_PAGE_RE just above, which matches the CHUNK id instead.
-_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)-p(\d+)$")
+# Covers both the old per-page doc id ("res7-p12") and the new per-file one
+# ("res7").
+_FULL_DOC_ID_RESOURCE_RE = re.compile(r"^res(\d+)(?:-p\d+)?$")
+
+# Trailing "(p. N)" already baked into an old-shape file_path label — used by
+# _page_label to avoid double-appending the page when rebuilding the label.
+_PAGE_SUFFIX_RE = re.compile(r"\s\(p\. \d+\)$")
+
+
+def _page_label(file_path: str, page: Optional[int]) -> str:
+    """Human-readable source label with the page appended, idempotently.
+
+    Returns *file_path* unchanged when there is no page to add, when it
+    already ends in a "(p. N)" suffix (old-shape labels bake the page in
+    already — appending again would double it up), or when there is no real
+    file name to attach a page to (empty, or LightRAG's "unknown_source"
+    sentinel — see _source_label_from_metadata) so the frontend's "Unknown
+    source" fallback (an exact/empty match) still fires instead of showing a
+    bare "(p. N)" or "unknown_source (p. N)".
+    """
+    if page is None or not file_path or file_path == "unknown_source" or _PAGE_SUFFIX_RE.search(file_path):
+        return file_path
+    return f"{file_path} (p. {page})"
 
 
 def _group_chunk_rows(
     rows: list[tuple[str, str, str, str]], per_doc_cap: int = 3,
-) -> dict[str, list[tuple[str, str, int, str]]]:
+) -> dict[str, list[tuple[str, str, Optional[int], str]]]:
     """Group (full_doc_id, file_path, content, chunk_id) rows by resource id.
 
-    Rows whose full_doc_id doesn't match the res{N}-p{N} shape (non-PDF
-    sources, e.g. crawled Domain pages — see _lightrag_doc_id's content-hash
-    fallback) are skipped: there is no resource_id to group them under.
+    Handles both the old per-page doc id shape (full_doc_id "res7-p12", page
+    baked into full_doc_id) and the new per-file shape (full_doc_id "res7",
+    page — if any — read from the chunk id instead, via
+    CHUNK_ID_RESOURCE_PAGE_RE). Rows whose full_doc_id doesn't match either
+    shape (non-PDF sources, e.g. crawled Domain pages — see
+    _lightrag_doc_id's content-hash fallback) are skipped: there is no
+    resource_id to group them under.
 
     per_doc_cap: at most this many snippets per document — the FIRST match
     per document already answers "does it appear here", which is the whole
@@ -225,24 +456,28 @@ def _group_chunk_rows(
 
     file_path travels alongside each snippet (not just the content) because
     Task 3's citation block needs the real "file.pdf p.N" label, not a
-    synthetic one. page travels too — the frontend's "Open PDF at page N"
-    button needs it (see agentTools.py's chunk dicts), and it was otherwise
-    discarded here despite being right there in full_doc_id.
+    synthetic one — rebuilt (idempotently) via _page_label so a new-shape row
+    with a bare file name still gets its page appended. page travels too —
+    the frontend's "Open PDF at page N" button needs it (see agentTools.py's
+    chunk dicts), and is None when the chunk carries no page (new DOCX/TXT/MD
+    shape).
 
     chunk_id is LightRAG's own id for the chunk ("res319-p71-chunk-000"), the
     string the graph's source_id fields use: the playground marks a cited chunk
     and the entities extracted from it by matching it. It is read from the row,
     never rebuilt from the page — a page can hold more than one chunk.
     """
-    grouped: dict[str, list[tuple[str, str, int, str]]] = {}
+    grouped: dict[str, list[tuple[str, str, Optional[int], str]]] = {}
     for full_doc_id, file_path, content, chunk_id in rows:
         match = _FULL_DOC_ID_RESOURCE_RE.match(full_doc_id)
         if not match:
             continue
-        resource_id, page = match.group(1), int(match.group(2))
+        resource_id = match.group(1)
+        chunk_match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
+        page = int(chunk_match.group(2)) if chunk_match and chunk_match.group(2) else None
         snippets = grouped.setdefault(resource_id, [])
         if len(snippets) < per_doc_cap:
-            snippets.append((file_path, content.strip(), page, chunk_id))
+            snippets.append((_page_label(file_path, page), content.strip(), page, chunk_id))
     return grouped
 
 
@@ -262,7 +497,7 @@ def documents_to_lightrag_payload(documents) -> Tuple[List[str], List[str], List
             continue
         texts.append(doc.page_content)
         file_paths.append(_source_label_from_metadata(doc.metadata or {}))
-        ids.append(_lightrag_doc_id(doc.metadata or {}, doc.page_content))
+        ids.append(_lightrag_doc_id(doc))
     return texts, file_paths, ids
 
 
@@ -459,32 +694,23 @@ async def _abest_variant_names(collection_name: str, names) -> Dict[str, str]:
     return await asyncio.to_thread(_best_variant_names, collection_name, list(names))
 
 
-async def _ainsert(rag, texts, file_paths=None, ids=None, process_options="F"):
-    """Insert documents through LightRAG's modern (non-legacy) chunking router.
+async def _ainsert(rag, texts, file_paths=None, ids=None):
+    """Enqueue and process through LightRAG's legacy ``chunking_func`` hook.
 
-    The plain ``rag.ainsert`` enqueues without a chunking selector, which makes
-    LightRAG fall back to its legacy 6-arg ``chunking_func`` path (logged as
-    ``Chunking F(legacy)``). Enqueuing with ``process_options="F"`` instead
-    selects the fixed-token chunker explicitly, so the new file-chunker contract
-    is used (logged as ``Chunking F``). The chunk size/overlap still come from
-    the silo config via ``addon_params['chunker']``.
+    No ``process_options`` selector on purpose: the legacy hook is the only
+    extension point that can both set page-aware chunk ids and run the silo's
+    F/R/V/P strategy over the whole file (see ``_achunk_page_aware``; LightRAG
+    logs it as ``Chunking F(legacy)`` whatever strategy ran).
+
+    Trade-off: chunk options are no longer snapshotted at enqueue time, so a
+    document enqueued before a chunking-config change and processed after it
+    uses the new config.
     """
-    from lightrag.parser.routing import resolve_chunk_options
-
-    chunk_opts = resolve_chunk_options(
-        rag.addon_params, process_options=process_options
-    )
-    await rag.apipeline_enqueue_documents(
-        texts,
-        ids=ids,
-        file_paths=file_paths,
-        process_options=process_options,
-        chunk_options=chunk_opts,
-    )
+    await rag.apipeline_enqueue_documents(texts, ids=ids, file_paths=file_paths)
     await rag.apipeline_process_enqueue_documents()
 
 
-async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, ids=None, process_options="F"):
+async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=None, ids=None):
     """Run the insert with optional sub-document progress reporting.
 
     Polls the workspace's doc_status counts every 0.5s while the insert runs.
@@ -493,8 +719,8 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     retrieved chunks carry a human-readable source instead of "unknown_source".
 
     ``progress_callback`` is called as ``(done, total)`` where both are counted
-    in LightRAG documents (one per page for PDFs) — the same unit, so the
-    caller can render a percentage without mixing it with its own estimates.
+    in LightRAG documents — the same unit, so the caller can render a
+    percentage without mixing it with its own estimates.
 
     ``done`` counts documents that actually **finished**.  The obvious counter,
     ``pipeline_status["cur_batch"]``, is incremented when a document *enters*
@@ -505,7 +731,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     of true completions: pipeline_status has no such counter.
     """
     if progress_callback is None:
-        await _ainsert(rag, texts, file_paths=file_paths, ids=ids, process_options=process_options)
+        await _ainsert(rag, texts, file_paths=file_paths, ids=ids)
         return
 
     total = len(texts)
@@ -568,7 +794,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
 
     poll_task = asyncio.create_task(_poll())
     try:
-        await _ainsert(rag, texts, file_paths=file_paths, ids=ids, process_options=process_options)
+        await _ainsert(rag, texts, file_paths=file_paths, ids=ids)
     finally:
         poll_task.cancel()
         await asyncio.gather(poll_task, return_exceptions=True)
@@ -576,7 +802,7 @@ async def _ainsert_with_progress(rag, texts, progress_callback=None, file_paths=
     await asyncio.to_thread(progress_callback, run_total[0], run_total[0])
 
 
-async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
+async def _aenqueue(rag, texts, file_paths=None, ids=None):
     """Enqueue documents WITHOUT processing them yet (no LLM calls).
 
     Split out of :func:`_ainsert` so a caller can enqueue several resources'
@@ -586,18 +812,7 @@ async def _aenqueue(rag, texts, file_paths=None, ids=None, process_options="F"):
     across resources instead of each resource being capped by its own page
     count because it ran a whole enqueue+process cycle alone.
     """
-    from lightrag.parser.routing import resolve_chunk_options
-
-    chunk_opts = resolve_chunk_options(
-        rag.addon_params, process_options=process_options
-    )
-    await rag.apipeline_enqueue_documents(
-        texts,
-        ids=ids,
-        file_paths=file_paths,
-        process_options=process_options,
-        chunk_options=chunk_opts,
-    )
+    await rag.apipeline_enqueue_documents(texts, ids=ids, file_paths=file_paths)
 
 
 async def _arequest_lightrag_cancellation(rag) -> None:
@@ -729,21 +944,78 @@ async def _arequest_failed_retry(rag) -> None:
         logger.info("[%s] Requested retry of FAILED documents", workspace)
 
 
+def _doc_chunk_progress(workspace: str, doc_ids: List[str]) -> Dict[str, Tuple[int, int]]:
+    """``{doc_id: (chunks_done, chunks_total)}`` for docs that have started chunking.
+
+    ``chunks_total`` is the doc's own ``chunks_count`` (set once LightRAG has
+    split it); ``chunks_done`` counts chunks that have run entity/relation
+    extraction (``llm_cache_list`` populated). A doc with ``chunks_count == 0``
+    (not yet chunked) has no row in the result — callers must treat a missing
+    key as "unknown total", not zero.
+
+    Module-level sync query (like ``_best_variant_names``), always called via
+    ``asyncio.to_thread``; raises on failure — the caller (``_report``) is
+    what makes it best-effort.
+    """
+    if not doc_ids:
+        return {}
+
+    from db.database import SessionLocal  # noqa: WPS433
+    from sqlalchemy import text  # noqa: WPS433
+
+    db = SessionLocal()
+    try:
+        # ponytail: runs every 0.5s over only the currently-open doc ids of a
+        # batch; if a single file ever reaches tens of thousands of chunks,
+        # this may need throttling — not a concern at today's realistic file
+        # sizes.
+        #
+        # Explicit JOIN LATERAL + LEFT JOIN on (workspace, id) — the only
+        # index lightrag_doc_chunks has — instead of a correlated subquery:
+        # that shape leaves Postgres no path except per-id PK lookups driven
+        # from each doc's own bounded chunks_list, so cost scales with
+        # chunks-per-doc, never with every chunk ever ingested into the silo.
+        rows = db.execute(
+            text(
+                "SELECT s.id, s.chunks_count, "
+                "count(c.id) FILTER (WHERE jsonb_array_length(c.llm_cache_list) > 0) AS chunks_done "
+                "FROM lightrag_doc_status s "
+                "JOIN LATERAL jsonb_array_elements_text(s.chunks_list) AS chunk_id ON true "
+                "LEFT JOIN lightrag_doc_chunks c ON c.workspace = s.workspace AND c.id = chunk_id "
+                "WHERE s.workspace = :ws AND s.id = ANY(:ids) AND s.chunks_count > 0 "
+                "GROUP BY s.id, s.chunks_count"
+            ),
+            {"ws": workspace, "ids": list(doc_ids)},
+        ).fetchall()
+        return {row[0]: (row[2], row[1]) for row in rows}
+    finally:
+        db.close()
+
+
 async def _aprocess_enqueued_with_progress(
     rag, doc_ids_by_resource, progress_callback=None, should_cancel=None,
-    retry_failed=False, feed=None, window=3, process_options="F",
+    retry_failed=False, feed=None, window=3,
 ):
     """Run ONE ``apipeline_process_enqueue_documents()`` for everything
     currently enqueued in this workspace, reporting progress PER RESOURCE.
 
     ``doc_ids_by_resource`` maps ``resource_id -> [doc_id, ...]`` for that
-    resource's LightRAG doc ids (``res{resource_id}-p{page}``, see
-    ``_lightrag_doc_id``) — known up front because ids are assigned
+    resource's LightRAG doc ids — ``res{resource_id}`` (one per file; see
+    ``_lightrag_doc_id``) for newly-ingested resources, though an old
+    pre-migration silo may still hold ``res{resource_id}-p{page}`` docs
+    indexed before this unit switch. Known up front because ids are assigned
     deterministically at enqueue time, before any processing happens.
 
     ``progress_callback(resource_id, done, total)`` fires whenever a
-    resource's finished-doc count changes (poll, not push — same 0.5s
-    cadence as ``_ainsert_with_progress``).
+    resource's progress changes (poll, not push — same 0.5s cadence as
+    ``_ainsert_with_progress``). Unlike that function, here ``done``/``total``
+    are counted in CHUNKS, not documents: a resource is now one LightRAG
+    document, so a doc-level 0/1 -> 1/1 jump would no longer show real
+    progress. ``(None, None)`` means "finished but the real chunk count is
+    unknown" (e.g. a content-dedup hit, a doc that failed before it was ever
+    chunked, or the chunk-progress query itself failing) — the caller keeps
+    showing its own estimate in that case. Doc-level completion (used to
+    decide *when* a resource is done) is unaffected by any of this.
 
     ``apipeline_process_enqueue_documents()`` itself drains **everything**
     pending in the workspace, not just what was just enqueued here (see its
@@ -759,7 +1031,8 @@ async def _aprocess_enqueued_with_progress(
     documents already started finish whole.
 
     Returns ``{resource_id: {"processed": N, "failed": N, "total": N}}`` once
-    the whole batch is drained.
+    the whole batch is drained (still doc-level — unrelated to the chunk-level
+    numbers handed to ``progress_callback``).
     """
     # Mutable: the feeder adds resources to these as it enqueues them.
     doc_ids_by_resource = dict(doc_ids_by_resource)
@@ -843,6 +1116,78 @@ async def _aprocess_enqueued_with_progress(
     last_done = {rid: -1 for rid in doc_ids_by_resource}
     stop_mode: List[Optional[str]] = [None]
 
+    workspace = getattr(rag, "workspace", None)
+    # Chunk-level reporting layer, parallel to the doc-level bookkeeping
+    # above (last_done/totals/_counts stay exactly doc-level — they still
+    # drive completion and the feeder window). last_reported holds the
+    # (done, total) last sent per resource so _report can skip no-op calls
+    # and stay monotonic; finished_reported marks resources that no longer
+    # need a chunk-progress query (their doc-level work is already done).
+    last_reported: Dict[Any, tuple] = {}
+    finished_reported: set = set()
+    chunk_query_failure_logged = False
+
+    async def _report(counts) -> None:
+        """Best-effort chunk-level progress_callback fan-out for *counts*.
+
+        ``counts`` is a doc-level {rid: {"processed", "failed"}} dict, same
+        shape as ``_counts()`` returns — completion is still decided purely
+        from that doc-level state. A chunk-progress query failure must never
+        abort the run: it just means the bar keeps showing the Phase-1
+        estimate instead of a real count.
+        """
+        if progress_callback is None:
+            return
+        open_rids = [rid for rid in counts if rid not in finished_reported]
+        ids = [d for rid in open_rids for d in doc_ids_by_resource[rid]]
+        try:
+            chunk = await asyncio.to_thread(_doc_chunk_progress, workspace, ids) if ids else {}
+        except Exception as exc:
+            # WARNING once per run — this query depends on LightRAG-owned
+            # column names (chunks_list/llm_cache_list/chunks_count); a
+            # schema change there would otherwise degrade the bar to the
+            # Phase-1 estimate silently, forever, at DEBUG level. Only the
+            # first failure needs to be loud; the rest would just spam this
+            # every 0.5s for the remainder of the run.
+            nonlocal chunk_query_failure_logged
+            level = logger.debug if chunk_query_failure_logged else logger.warning
+            chunk_query_failure_logged = True
+            level("[%s] Chunk-progress query failed (best-effort): %s", workspace, exc)
+            chunk = {}
+
+        for rid in open_rids:
+            c = counts[rid]
+            finished = c["processed"] + c["failed"] >= totals[rid]
+            parts = [chunk.get(d) for d in doc_ids_by_resource[rid]]
+            total = sum(t for _, t in parts) if parts and all(parts) else None
+
+            if finished:
+                report = (total, total)
+                finished_reported.add(rid)
+            elif total:
+                done = min(sum(d for d, _ in parts), total - 1)
+                prev = last_reported.get(rid)
+                if prev is not None and prev[1] == total:
+                    done = max(done, prev[0])
+                report = (done, total)
+            else:
+                continue  # total still unknown: leave the Phase-1 estimate showing
+
+            if report != last_reported.get(rid):
+                last_reported[rid] = report
+                try:
+                    await asyncio.to_thread(progress_callback, rid, *report)
+                except Exception:
+                    # One resource's write failing must not blank the final
+                    # per-resource counts for every OTHER resource in the
+                    # batch — _poll's own blanket except already covers this
+                    # during polling, but the one-time final flush has no
+                    # other safety net around it.
+                    logger.warning(
+                        "[%s] progress_callback failed for resource %s (chunk-level)",
+                        workspace, rid, exc_info=True,
+                    )
+
     async def _poll():
         cancel_sent = False
         while True:
@@ -853,12 +1198,7 @@ async def _aprocess_enqueued_with_progress(
                     done = c["processed"] + c["failed"]
                     if last_done.get(rid, -1) != done:
                         last_done[rid] = done
-                        if progress_callback is not None:
-                            # Offload the (synchronous, DB-writing) callback to
-                            # a worker thread — same reason as should_cancel
-                            # below: a slow/contended write must not stall
-                            # this poll's event loop.
-                            await asyncio.to_thread(progress_callback, rid, done, totals[rid])
+                await _report(counts)
                 # Stop handling rides this same poll: it is already the loop that
                 # runs beside the long apipeline_process_enqueue_documents call,
                 # in the right process for LightRAG's per-process flag. The DB
@@ -949,8 +1289,7 @@ async def _aprocess_enqueued_with_progress(
         while True:
             try:
                 await asyncio.wait_for(
-                    _aenqueue(rag, texts, file_paths=file_paths, ids=ids,
-                              process_options=process_options),
+                    _aenqueue(rag, texts, file_paths=file_paths, ids=ids),
                     timeout=FEED_ENQUEUE_CALL_TIMEOUT_S,
                 )
                 return
@@ -991,7 +1330,7 @@ async def _aprocess_enqueued_with_progress(
             for doc_id, file_path in zip(ids, file_paths):
                 id_to_resource[doc_id] = rid
                 id_to_file_path[doc_id] = file_path
-            logger.info("[%s] Fed resource %s (%d page(s)) into the pipeline",
+            logger.info("[%s] Fed resource %s (%d document(s)) into the pipeline",
                         getattr(rag, "workspace", None), rid, len(ids))
         return True
 
@@ -1028,11 +1367,7 @@ async def _aprocess_enqueued_with_progress(
         )
 
     final_counts = await _counts()
-    if progress_callback is not None:
-        for rid, c in final_counts.items():
-            await asyncio.to_thread(
-                progress_callback, rid, c["processed"] + c["failed"], totals[rid]
-            )
+    await _report(final_counts)
     return {rid: {**c, "total": totals[rid]} for rid, c in final_counts.items()}
 
 
@@ -1319,6 +1654,9 @@ class _CollectionEventLoop:
 # request that started on it just before a configuration change can still finish
 # (an agent turn that searches both silos can take several minutes).
 _RETIRE_GRACE_S = 900
+
+# Rows per transaction when wiping a workspace's Neo4j nodes (bounds memory/lock size).
+_NEO4J_DELETE_BATCH_ROWS = 5000
 
 
 def _close_retired_instance(collection_name: str, rag, loop: "_CollectionEventLoop") -> None:
@@ -1755,7 +2093,9 @@ def _normalize_lightrag_graph(raw_data: dict, name_map: Optional[Dict[str, str]]
         match = CHUNK_ID_RESOURCE_PAGE_RE.match(chunk_id)
         if match:
             entry["resource_id"] = int(match.group(1))
-            entry["page"] = int(match.group(2))
+            if match.group(2):
+                entry["page"] = int(match.group(2))
+                entry["file_path"] = _page_label(entry["file_path"], entry["page"])
         chunks.append(entry)
 
     return {
@@ -2057,6 +2397,23 @@ class LightRAGStore(VectorStoreInterface):
             else config.ENTITY_EXTRACT_MAX_GLEANING
         )
 
+        # Page-aware chunking via LightRAG's legacy chunking_func hook — see
+        # _ainsert / _achunk_page_aware. ``rag`` is late-bound: the closure
+        # captures the variable, not its value now, so by the time LightRAG
+        # actually CALLS this (during indexing) ``rag`` already points at the
+        # instance built two lines below.
+        option = self._chunk_process_option
+
+        def _page_aware_chunking(
+            tokenizer, content, _split_by_character, _split_by_character_only,
+            _overlap, _size,
+        ):
+            # The overlap/size positional args LightRAG passes here are the
+            # stale top-level legacy params — ignored, since
+            # _achunk_page_aware re-resolves per-strategy options itself via
+            # resolve_chunk_options (addon_params['chunker']), not these.
+            return _achunk_page_aware(rag, option, tokenizer, content)
+
         rag = LightRAG(
             working_dir=self._working_dir,
             workspace=collection_name,
@@ -2068,6 +2425,7 @@ class LightRAGStore(VectorStoreInterface):
             kv_storage=storage_cfg["kv_storage"],
             doc_status_storage=storage_cfg["doc_status_storage"],
             entity_extract_max_gleaning=gleaning,
+            chunking_func=_page_aware_chunking,
             **extra_kwargs,
         )
         # Mutate in place (not a constructor kwarg) so LightRAG's own
@@ -2141,7 +2499,7 @@ class LightRAGStore(VectorStoreInterface):
                 continue
             texts.append(doc.page_content)
             file_paths.append(_source_label_from_metadata(doc.metadata or {}))
-            ids.append(_lightrag_doc_id(doc.metadata or {}, doc.page_content))
+            ids.append(_lightrag_doc_id(doc))
 
         if not texts:
             logger.debug("No non-empty texts to index; skipping.")
@@ -2166,7 +2524,7 @@ class LightRAGStore(VectorStoreInterface):
         try:
             self._run_on_collection_loop(
                 collection_name,
-                _ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
+                _ainsert_with_progress(rag, texts, progress_callback, file_paths=file_paths, ids=ids),
             )
         finally:
             reset_active_variant_collector(variant_token)
@@ -2222,7 +2580,7 @@ class LightRAGStore(VectorStoreInterface):
         for doc in documents:
             if not doc.page_content:
                 continue
-            doc_id = _lightrag_doc_id(doc.metadata or {}, doc.page_content)
+            doc_id = _lightrag_doc_id(doc)
             texts.append(doc.page_content)
             file_paths.append(_source_label_from_metadata(doc.metadata or {}))
             ids.append(doc_id)
@@ -2240,7 +2598,7 @@ class LightRAGStore(VectorStoreInterface):
         )
         self._run_on_collection_loop(
             collection_name,
-            _aenqueue(rag, texts, file_paths=file_paths, ids=ids, process_options=self._chunk_process_option),
+            _aenqueue(rag, texts, file_paths=file_paths, ids=ids),
         )
         return doc_ids_by_resource
 
@@ -2332,7 +2690,6 @@ class LightRAGStore(VectorStoreInterface):
                     rag, doc_ids_by_resource, progress_callback,
                     should_cancel=should_cancel, retry_failed=retry_failed,
                     feed=feed, window=window,
-                    process_options=self._chunk_process_option,
                 ),
             )
         finally:
@@ -2356,21 +2713,84 @@ class LightRAGStore(VectorStoreInterface):
         )
         return result
 
+    def has_legacy_documents(self, collection_name: str, resource_id: int, file_name: str) -> bool:
+        """True if the file's graph docs have a legacy shape that ``delete_resource_document`` would miss.
+
+        Legacy per-page PDF docs ``res{N}-p{P}``, or legacy non-PDF docs ``doc-<hash>`` whose
+        ``file_path`` is the file's label (same helper as the indexer, so they cannot drift; plain
+        equality, so ``%``/``_`` in a name are safe). Positive evidence only: a file whose doc is
+        already gone is not legacy (a retry after a crash still completes).
+        """
+        from sqlalchemy import text  # noqa: WPS433
+
+        with self.db.engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT 1 FROM lightrag_doc_status WHERE workspace = :ws AND "
+                    "(id LIKE :page_prefix OR (id LIKE 'doc-%' AND file_path = :label)) LIMIT 1"
+                ),
+                {
+                    "ws": collection_name,
+                    "page_prefix": f"res{int(resource_id)}-p%",
+                    "label": _source_label_from_metadata({"name": file_name}),
+                },
+            ).first() is not None
+
+    def delete_resource_document(self, collection_name: str, resource_id: int) -> str:
+        """Delete LightRAG document ``res{resource_id}`` from *collection_name*'s workspace.
+
+        ONLY the single-file delete calls this. The caller holds
+        ``silo_indexing_lock``, which covers resource upload/index/resume/
+        reindex and the single-file delete; media-chunk and multi-content
+        indexing do NOT take it (known gap). Every other delete path goes
+        through the no-op ``delete_documents`` and leaves the graph alone.
+        Returns ``DeletionResult.status``
+        (``success | not_found | not_allowed | fail``). Exceptions propagate
+        (the caller treats them as failure), including ``TimeoutError`` once the delete
+        body exceeds ``LIGHTRAG_DOC_DELETE_TIMEOUT_S``; a retry is idempotent.
+        """
+        doc_id = f"res{int(resource_id)}"
+        rag = self._get_rag_instance(collection_name)
+        t_start = time.perf_counter()
+
+        # Timeout lives inside the coroutine so cancellation runs on the
+        # collection loop and completes before this method returns.
+        # ponytail: wait_for bounds the delete body only. If the library's
+        # finally hands off to a pending-ingress drain (another in-process
+        # writer on this workspace), that drain runs uncancelled and this call
+        # waits for it; a hung socket in the cancellation cleanup can also
+        # outlive the timeout. Upgrade path: lock-gate media/multi-content
+        # writers. Do NOT add an outer .run(timeout=...): it would release
+        # silo_indexing_lock while the loop is still writing.
+        async def _delete():
+            return await asyncio.wait_for(
+                # Also drop its LLM-cache entries: they hold the deleted file's text.
+                rag.adelete_by_doc_id(doc_id, delete_llm_cache=True),
+                timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S,
+            )
+
+        result = self._run_on_collection_loop(collection_name, _delete())
+        log = logger.warning if result.status in ("not_allowed", "fail") else logger.info
+        log(
+            "LightRAG delete of '%s' in workspace '%s': status=%s status_code=%s (%.1fs)",
+            doc_id, collection_name, result.status, result.status_code, time.perf_counter() - t_start,
+        )
+        return result.status
+
     def delete_documents(
         self,
         collection_name: str,
         ids,
         embedding_service=None,
     ) -> None:
-        # ponytail: no-op by design. Per-document delete in LightRAG means
-        # unwinding the doc's entities/relations from the knowledge graph, which
-        # is not supported yet. Whole-silo teardown still works via
-        # delete_collection(). Upgrade path: wire adelete_by_doc_id + graph
-        # entity/relation cleanup (followup #2).
+        # ponytail: no-op by design. Generic per-filter graph delete is
+        # intentionally not supported: out-of-scope callers run without the
+        # cross-worker silo lock. The single-file delete uses
+        # delete_resource_document(); whole-silo purge uses delete_collection().
         logger.warning(
-            "LightRAGStore.delete_documents is a no-op (per-document graph "
-            "deletion unsupported); data retained for workspace '%s'. Delete the "
-            "whole silo to purge.",
+            "LightRAGStore.delete_documents is a no-op (graph data is not "
+            "removed by filter/id deletes); data retained for workspace '%s'. "
+            "Use the single-file delete or delete the whole silo to purge.",
             collection_name,
         )
 
@@ -2382,10 +2802,9 @@ class LightRAGStore(VectorStoreInterface):
         embedding_service=None,
     ) -> None:
         # ponytail: no-op — LightRAG deletes by doc_id, not metadata filter, so
-        # it can't run the index-then-swap stale-chunk purge. Re-inserting the
-        # same content is idempotent (doc_id = content hash), so reindex still
-        # refreshes; orphaned chunks from removed content are the known ceiling.
-        # Upgrade path: map resource_id -> doc_ids and delete_by_doc_id (followup #2/#3).
+        # it can't run the index-then-swap stale-chunk purge. Reindex for
+        # LightRAG is a known gap: stale chunks are not purged, and LightRAG's
+        # name/id dedup rejects re-enqueuing res{N}. Follow-up.
         logger.warning(
             "LightRAGStore.delete_documents_excluding is a no-op (metadata-filter "
             "deletion unsupported); stale chunks not purged for workspace '%s'.",
@@ -2397,21 +2816,15 @@ class LightRAGStore(VectorStoreInterface):
         collection_name: str,
         embedding_service=None,
     ) -> None:
+        """Wipe every LightRAG row of *collection_name* and release its cached instance.
+
+        Lenient: never raises; failures are logged at ERROR per step. Use
+        wipe_workspace when the caller must know.
+        """
         logger.info("Deleting LightRAG workspace '%s'", collection_name)
-
-        # Best-effort cleanup of the underlying storage backends, BEFORE
-        # dropping the cached instance below: _cleanup_qdrant reuses whatever
-        # rag instance (and dedicated loop) is already cached for this
-        # collection — popping first would force it to build (and leak) a
-        # brand-new one just to immediately tear it down again.
-        # LightRAG does not expose a single "drop workspace" API so we reach
-        # into each backend directly.
-        self._cleanup_neo4j(collection_name)
-        if self.lightrag_vector_db_type == "QDRANT":
-            self._cleanup_qdrant(collection_name)
-        self._cleanup_postgres(collection_name)
-
-        # Now drop the cached instance and tear down its dedicated loop/thread.
+        self._wipe_steps(collection_name)
+        # Now drop the cached instance and tear down its dedicated loop/thread
+        # (unchanged behaviour: only the strict wipe below keeps the instance).
         self._rag_instances.pop(collection_name, None)
         self._init_locks.pop(collection_name, None)
         if self._fingerprint is not None:
@@ -2420,28 +2833,84 @@ class LightRAGStore(VectorStoreInterface):
         if collection_loop is not None:
             collection_loop.close()
 
-    # -- Backend-specific cleanup helpers ---------------------------------
+    def wipe_workspace(self, collection_name: str) -> None:
+        """Strict wipe of every LightRAG row of *collection_name* (Neo4j, vectors,
+        PostgreSQL). Workspace-scoped; only for callers holding ``silo_indexing_lock``.
+        The cached instance is kept (the workspace is reused right after).
+
+        Raises before touching anything if the rag cannot be built (e.g.
+        ServiceRetiredError for a retired LLM role; a retired embedding service does
+        not raise at build time); raises RuntimeError naming the failed steps if any
+        step failed (the others still ran).
+        """
+        self._get_rag_instance(collection_name)  # fail before any step if it cannot be built
+        failed = self._wipe_steps(collection_name)
+        if failed:
+            raise RuntimeError(
+                f"LightRAG wipe of '{collection_name}' failed at: {', '.join(failed)}"
+            )
+
+    def _wipe_steps(self, collection_name: str) -> List[str]:
+        """Run every cleanup step; return failed step names.
+
+        LightRAG has no "drop workspace" API, so each backend is reached directly.
+        The vector step reuses the rag (and dedicated loop) cached for this collection.
+        It runs first: a transient Qdrant error happens before anything destructive
+        in the other stores.
+        """
+        t0 = time.monotonic()
+        failed: List[str] = []
+        for step, fn in (
+            ("vector", self._cleanup_vector_storage),
+            ("neo4j", self._cleanup_neo4j),
+            ("postgres", self._cleanup_postgres),
+        ):
+            try:
+                fn(collection_name)
+            except Exception:
+                logger.error(
+                    "LightRAG wipe of workspace '%s': step %s failed",
+                    collection_name, step, exc_info=True,
+                )
+                failed.append(step)
+        logger.info(
+            "LightRAG wipe of workspace '%s': failed steps: %s (%.1fs)",
+            collection_name, ", ".join(failed) or "none", time.monotonic() - t0,
+        )
+        return failed
+
+    # -- Backend-specific cleanup helpers (raise on failure) ---------------
 
     def _cleanup_neo4j(self, collection_name: str) -> None:
-        """Drop all Neo4j nodes/edges scoped to *collection_name*."""
+        """Delete all Neo4j nodes/edges labelled *collection_name*, in batches."""
+        if not re.fullmatch(r"silo_\d+", collection_name):
+            raise ValueError(f"Refusing Neo4j wipe of unexpected workspace {collection_name!r}")
+        import config  # noqa: WPS433
+
+        uri = getattr(config, "NEO4J_URI", None)
+        password = getattr(config, "NEO4J_PASSWORD", None)
+        username = getattr(config, "NEO4J_USERNAME", None) or "neo4j"
+        if not uri or not password:
+            raise RuntimeError("Neo4j is not configured")
+
+        from neo4j import GraphDatabase, Query  # noqa: WPS433
+
+        driver = GraphDatabase.driver(uri, auth=(username, password))
         try:
-            import config  # noqa: WPS433
-
-            uri = getattr(config, "NEO4J_URI", None)
-            password = getattr(config, "NEO4J_PASSWORD", None)
-            username = getattr(config, "NEO4J_USERNAME", None) or "neo4j"
-            if not uri or not password:
-                return
-
-            from neo4j import GraphDatabase  # noqa: WPS433
-
-            driver = GraphDatabase.driver(uri, auth=(username, password))
             # LightRAG stores the workspace as a node *label*, not a property.
-            # Use label-based matching for reliable deletion.
+            # CALL IN TRANSACTIONS needs an implicit (autocommit) transaction:
+            # session.run, not execute_write.
             with driver.session() as session:
+                # ponytail: `CALL { WITH n ... }` is deprecated since 5.23 (notice only);
+                # switch to `CALL (n)` when the minimum supported Neo4j is >= 5.23.
+                # Timeout: a partial batch delete is idempotent on retry.
                 session.run(
-                    f"MATCH (n:`{collection_name}`) DETACH DELETE n",
-                )
+                    Query(
+                        f"MATCH (n:`{collection_name}`) CALL {{ WITH n DETACH DELETE n }} "
+                        f"IN TRANSACTIONS OF {_NEO4J_DELETE_BATCH_ROWS} ROWS",
+                        timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S,
+                    )
+                ).consume()
                 # LightRAG also creates a fulltext and a range index per
                 # workspace label; deleting the nodes leaves them behind.
                 index_names = [
@@ -2453,47 +2922,71 @@ class LightRAGStore(VectorStoreInterface):
                     )
                 ]
                 for name in index_names:
-                    session.run(f"DROP INDEX `{name}` IF EXISTS")
+                    session.run(f"DROP INDEX `{name}` IF EXISTS").consume()
+        finally:
             driver.close()
-            logger.info("Cleaned up Neo4j data for workspace '%s'", collection_name)
-        except Exception as exc:
-            logger.warning("Neo4j cleanup for '%s' failed: %s", collection_name, exc)
+        logger.info("Cleaned up Neo4j data for workspace '%s'", collection_name)
 
-    def _cleanup_qdrant(self, collection_name: str) -> None:
-        """Drop this workspace's points from LightRAG's shared Qdrant collections.
+    def _cleanup_vector_storage(self, collection_name: str) -> None:
+        """Drop this workspace's vectors from LightRAG's vector storage (Qdrant or PGVector).
 
-        There is no per-workspace Qdrant collection to delete by name: LightRAG
-        partitions ONE physical collection per data kind (entities/
-        relationships/chunks) across every workspace via a ``workspace_id``
-        payload field on each point (see ``lightrag.kg.qdrant_impl``). A
-        previous version of this method looked for collections named
-        ``lightrag_{workspace}_*``, which never exist, so it silently deleted
-        nothing while logging success — every deleted repository's vectors
-        leaked forever into the shared collections.
+        Qdrant: LightRAG partitions ONE physical collection per data kind
+        (entities/relationships/chunks) across every workspace via a
+        ``workspace_id`` payload field on each point (see
+        ``lightrag.kg.qdrant_impl``). PGVector: tables are model-suffixed
+        (``lightrag_vdb_*_{suffix}``) and rows carry a ``workspace`` column,
+        so deleting by the base table name misses them.
 
         Uses each vector storage's own ``drop()`` (the library's native,
-        workspace-payload-filtered wipe, including legacy-collection
-        handling) instead of guessing collection names.
+        workspace-scoped wipe) instead of guessing table/collection names.
+        Raises once all three were attempted if any failed.
         """
-        try:
-            rag = self._get_rag_instance(collection_name)
+        rag = self._get_rag_instance(collection_name)
+        vdbs = (
+            ("entities", rag.entities_vdb),
+            ("relationships", rag.relationships_vdb),
+            ("chunks", rag.chunks_vdb),
+        )
 
-            async def _drop_all():
-                for vdb in (rag.entities_vdb, rag.relationships_vdb, rag.chunks_vdb):
-                    result = await vdb.drop()
-                    if result.get("status") != "success":
-                        logger.warning(
-                            "Qdrant drop for workspace '%s' reported: %s",
-                            collection_name, result.get("message"),
-                        )
+        async def _drop_all() -> List[str]:
+            failed = []
+            for name, vdb in vdbs:
+                try:
+                    # Timeout inside the coroutine: the caller holds silo_indexing_lock,
+                    # which must not be released while the loop is still writing.
+                    # ponytail: for Qdrant the real bound is httpx's per-call default
+                    # (~5 s), not LIGHTRAG_DOC_DELETE_TIMEOUT_S; wait_for only bounds the
+                    # lock wait. A client-side timeout on a huge workspace is retry-safe.
+                    result = await asyncio.wait_for(
+                        vdb.drop(), timeout=LIGHTRAG_DOC_DELETE_TIMEOUT_S
+                    )
+                    ok = result.get("status") == "success"
+                    message = result.get("message")
+                except Exception as exc:
+                    ok = False
+                    message = repr(exc)
+                if not ok:
+                    failed.append(name)
+                    logger.error(
+                        "%s vector drop of %s for workspace '%s' failed: %s",
+                        self.lightrag_vector_db_type, name, collection_name, message,
+                    )
+            return failed
 
-            self._run_on_collection_loop(collection_name, _drop_all())
-            logger.info("Cleaned up Qdrant collections for workspace '%s'", collection_name)
-        except Exception as exc:
-            logger.warning("Qdrant cleanup for '%s' failed: %s", collection_name, exc)
+        failed = self._run_on_collection_loop(collection_name, _drop_all())
+        if failed:
+            raise RuntimeError(f"vector drop failed for: {', '.join(failed)}")
+        logger.info(
+            "Cleaned up %s vector storage for workspace '%s'",
+            self.lightrag_vector_db_type, collection_name,
+        )
 
     def _cleanup_postgres(self, collection_name: str) -> None:
-        """Remove KV / vector / doc-status rows scoped to *collection_name*.
+        """Remove KV / doc-status rows scoped to *collection_name*; raises if a table failed.
+
+        Vector rows are dropped beforehand by ``_cleanup_vector_storage``
+        through the library's ``drop()``; the base-name ``lightrag_vdb_*``
+        deletes below are harmless leftovers that normally hit "table absent".
 
         ``self.db`` is ``db.database.Database`` — a thin wrapper exposing only
         ``.engine``/``._async_engine`` (see its docstring: "no module-level
@@ -2509,30 +3002,41 @@ class LightRAGStore(VectorStoreInterface):
         # NAMESPACE_TABLE_MAP), not ``kv_store_*``. It creates them with
         # unquoted DDL, so Postgres folds the identifiers to lower case —
         # we must delete using the lower-cased names (a quoted upper-case
-        # name would not match). KV + doc-status live in Postgres for every
-        # LightRAG silo; the vector tables (lightrag_vdb_*) only when
-        # lightrag_vector_db_type=PGVECTOR. Deleting them all is harmless
-        # otherwise. Best-effort — tables might not exist yet.
-        try:
-            from sqlalchemy import text  # noqa: WPS433
-            from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
-        except Exception as exc:
-            logger.warning("PostgreSQL cleanup for '%s' failed: %s", collection_name, exc)
-            return
+        # name would not match). Tables that do not exist yet (42P01) are skipped.
+        from sqlalchemy import text  # noqa: WPS433
+        from lightrag.kg.postgres_impl import NAMESPACE_TABLE_MAP  # noqa: WPS433
 
         tables = {t.lower() for t in NAMESPACE_TABLE_MAP.values()}
         deleted = {}
+        failed = []
         for table in tables:
             try:
                 with self.db.engine.begin() as conn:
+                    # Bound the time silo_indexing_lock is held (57014 = failed table).
+                    conn.execute(text(
+                        f"SET LOCAL statement_timeout = {int(LIGHTRAG_DOC_DELETE_TIMEOUT_S * 1000)}"
+                    ))
                     result = conn.execute(
                         text(f'DELETE FROM {table} WHERE workspace = :ws'),
                         {"ws": collection_name},
                     )
                     if result.rowcount:
                         deleted[table] = result.rowcount
-            except Exception:
-                pass  # Table may not exist, or this deployment doesn't use it — that's fine.
+            except Exception as exc:
+                orig = getattr(exc, "orig", None)
+                sqlstate = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+                if sqlstate == "42P01":
+                    logger.debug(
+                        "table %s absent, skipped for workspace %s", table, collection_name
+                    )
+                else:
+                    failed.append(table)
+                    logger.error(
+                        "PostgreSQL cleanup of table %s for workspace '%s' failed: %s",
+                        table, collection_name, exc,
+                    )
+        if failed:
+            raise RuntimeError(f"PostgreSQL cleanup failed for tables: {', '.join(sorted(failed))}")
         logger.info(
             "Cleaned up PostgreSQL data for workspace '%s': %s",
             collection_name, deleted or "nothing to delete",
@@ -2585,7 +3089,7 @@ class LightRAGStore(VectorStoreInterface):
     def find_chunks_mentioning(
         self, collection_name: str, term: Optional[Union[str, List[str]]],
         doc_filter: Optional[Union[str, int, List[Union[str, int]]]] = None,
-    ) -> tuple[dict[str, list[tuple[str, str, int, str]]], bool]:
+    ) -> tuple[dict[str, list[tuple[str, str, Optional[int], str]]], bool]:
         """Every document whose chunks literally contain *term* — no chunk_top_k,
         no similarity ranking. See _group_chunk_rows for the per-document cap.
 
@@ -2629,11 +3133,12 @@ class LightRAGStore(VectorStoreInterface):
         if doc_ids:
             doc_clauses = []
             for i, doc_id in enumerate(doc_ids):
-                key = f"doc_pattern_{i}"
-                doc_clauses.append(f"full_doc_id LIKE :{key}")
-                params[key] = f"res{doc_id}-p%"
+                exact_key, pattern_key = f"doc_exact_{i}", f"doc_pattern_{i}"
+                doc_clauses.append(f"(full_doc_id = :{exact_key} OR full_doc_id LIKE :{pattern_key})")
+                params[exact_key] = f"res{doc_id}"
+                params[pattern_key] = f"res{doc_id}-p%"
             sql += " AND (" + " OR ".join(doc_clauses) + ")"
-        sql += f" ORDER BY full_doc_id LIMIT {self._COVERAGE_QUERY_ROW_CAP}"
+        sql += f" ORDER BY full_doc_id, chunk_order_index LIMIT {self._COVERAGE_QUERY_ROW_CAP}"
 
         with self.db.engine.connect() as conn:
             rows = conn.execute(text(sql), params).fetchall()

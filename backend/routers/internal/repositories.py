@@ -408,9 +408,10 @@ async def estimate_upload_resources(
                 "folder_id": folder_id,
             }
 
-            # Estimation is LightRAG-only; feed whole pages/files so the chunk
-            # count reflects LightRAG's own token-based chunking (not the
-            # generic pre-split path used by PGVector/Qdrant).
+            # Estimation is LightRAG-only; LightRAG chunks internally by token
+            # size, so feed it one whole-file Document (PDFs page-marked) —
+            # not the generic pre-split path used by PGVector/Qdrant — so the
+            # chunk count reflects LightRAG's own token-based chunking.
             docs = SiloService.extract_documents_from_file(temp_path, file_ext, base_metadata, split=False)
             for doc in docs:
                 extracted_documents.append({
@@ -784,7 +785,8 @@ async def delete_resource(
     logger.info(f"Delete resource endpoint called - app_id: {app_id}, repository_id: {repository_id}, resource_id: {resource_id}, user_id: {user_id}")
     
     # Use ResourceService to handle the business logic
-    result = ResourceService.delete_resource_from_repository(
+    result = await asyncio.to_thread(
+        ResourceService.delete_resource_from_repository,
         app_id=app_id,
         repository_id=repository_id,
         resource_id=resource_id,
@@ -807,6 +809,7 @@ async def delete_all_resources(
 ):
     """
     Delete every resource (file) in a repository. The repository itself is kept.
+    For LightRAG repositories the repository's whole knowledge graph is cleared and its media files are deleted and counted too.
     """
     user_id = int(auth_context.identity.id)
 
@@ -814,9 +817,12 @@ async def delete_all_resources(
 
     _validate_repository_app_ownership(repository_id, app_id, db)
 
-    result = ResourceService.delete_all_resources_from_repository(
-        repository_id=repository_id,
-        db=db
+    result = await asyncio.to_thread(
+        ResourceService.delete_all_resources_from_repository, repository_id=repository_id, db=db
+    )
+    logger.info(
+        f"Delete all resources done - user_id: {user_id}, app_id: {app_id}, repository_id: {repository_id}, "
+        f"deleted_count: {result['deleted_count']}, failed_count: {result['failed_count']}"
     )
 
     return result

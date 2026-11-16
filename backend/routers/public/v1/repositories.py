@@ -27,7 +27,7 @@ from .auth import (
 
 from models.repository import Repository
 from services.repository_service import RepositoryService
-from services.silo_service import SiloService
+from services.silo_service import SiloService, LIGHTRAG_UNSUPPORTED_DELETE_DETAIL
 from services.media_service import MediaService
 from db.database import get_db
 
@@ -491,6 +491,7 @@ async def move_media(
     summary="Delete media",
     tags=["Media"],
     response_model=MessageResponseSchema,
+    responses={409: {"description": LIGHTRAG_UNSUPPORTED_DELETE_DETAIL}},
 )
 async def delete_media(
     app_id: int,

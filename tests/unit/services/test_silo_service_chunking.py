@@ -341,6 +341,251 @@ class TestExtractDocumentsFromFileSplitter:
         assert docs[0].metadata["page"] == 1
 
 
+class TestExtractDocumentsFromFileWholeFile:
+    """step_004: split=False returns exactly one Document per file.
+
+    PDFs get <<<page:N>>> markers embedded in their content; Resource-linked
+    documents (resource_id in base_metadata) get id=res{N} stamped on it.
+    """
+
+    GOOD_PAGES = [
+        "This is the first real page with plenty of alphanumeric content to pass the filter, page one.",
+        "This is the second real page with plenty of alphanumeric content to pass the filter, page two.",
+        "This is the fourth real page with plenty of alphanumeric content to pass the filter, page four.",
+        "This is the fifth real page with plenty of alphanumeric content to pass the filter, page five.",
+    ]
+    GARBAGE_PAGE = "@@@@"  # symbol-only -> dropped by _clean_chunk_text / _is_meaningful_chunk
+
+    @staticmethod
+    def _single_page_doc(extension: str, text: str) -> Document:
+        metadata = {"source": f"/tmp/test{extension}"}
+        if extension == ".pdf":
+            metadata["page"] = 0
+        return Document(page_content=text, metadata=metadata)
+
+    @staticmethod
+    def _loader_name(extension: str) -> str:
+        return {".pdf": "PyMuPDFLoader", ".docx": "Docx2txtLoader", ".txt": "TextLoader", ".md": "TextLoader"}[extension]
+
+    def _mock_pdf_pages(self, texts: list[str]):
+        return [Document(page_content=t, metadata={"page": i, "source": "/tmp/test.pdf"}) for i, t in enumerate(texts)]
+
+    def test_pdf_whole_file_skips_filtered_page_keeps_marker_order(self):
+        from tools.vector_stores.lightrag_store import strip_page_markers
+
+        texts = [self.GOOD_PAGES[0], self.GOOD_PAGES[1], self.GARBAGE_PAGE, self.GOOD_PAGES[2], self.GOOD_PAGES[3]]
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = self._mock_pdf_pages(texts)
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.pdf", file_extension=".pdf",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert len(docs) == 1
+        content = docs[0].page_content
+        assert content.startswith("<<<page:1>>>")
+        assert "<<<page:3>>>" not in content
+        positions = [content.index(f"<<<page:{n}>>>") for n in (1, 2, 4, 5)]
+        assert positions == sorted(positions)
+
+        clean, _ = strip_page_markers(content)
+        assert clean == "\n\n".join(self.GOOD_PAGES)
+        assert docs[0].id == "res7"
+        assert docs[0].metadata["resource_id"] == 7
+
+    def test_pdf_whole_file_all_pages_filtered_returns_empty(self):
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = self._mock_pdf_pages([self.GARBAGE_PAGE] * 3)
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.pdf", file_extension=".pdf",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert docs == []
+
+    def test_pdf_split_true_unchanged(self):
+        """Backward-compat: split=True PDF output is unaffected by this diff."""
+        texts = [self.GOOD_PAGES[0], self.GARBAGE_PAGE, self.GOOD_PAGES[1]]
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = self._mock_pdf_pages(texts)
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.pdf", file_extension=".pdf",
+                base_metadata={"resource_id": 7}, split=True,
+            )
+
+        assert len(docs) == 2
+        assert docs[0].page_content == self.GOOD_PAGES[0]
+        assert docs[0].metadata["page"] == 1
+        assert docs[1].page_content == self.GOOD_PAGES[1]
+        assert docs[1].metadata["page"] == 3  # original page index 2 -> +1
+        for doc in docs:
+            assert doc.id is None
+            assert doc.metadata["resource_id"] == 7
+
+    def test_txt_split_false_single_document_with_id(self):
+        text = "Short plain text content, long enough to pass the meaningful-chunk filter."
+        with patch("langchain_community.document_loaders.TextLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(".txt", text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.txt", file_extension=".txt",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].page_content == text
+        assert docs[0].id == "res7"
+
+    def test_docx_split_false_single_document_with_id(self):
+        text = "Short docx content, long enough to pass the meaningful-chunk filter easily."
+        with patch("langchain_community.document_loaders.Docx2txtLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(".docx", text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.docx", file_extension=".docx",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].page_content == text
+        assert docs[0].id == "res7"
+
+    def test_txt_whole_file_marker_lookalike_is_neutralized(self):
+        """A non-PDF whole-file Document now gets a res{N}-shaped id too (unlike
+        the old doc-<hash> id), so a line that merely looks like a page marker
+        in its own content must not survive to be mistaken for a real one."""
+        text = "<<<page:7>>>\nThe rest of the document has plenty of real content, long enough to pass the filter."
+        with patch("langchain_community.document_loaders.TextLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(".txt", text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.txt", file_extension=".txt",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].id == "res7"
+        assert "<<<page:7>>>" not in docs[0].page_content
+
+    def test_txt_whole_file_html_encoded_marker_lookalike_is_neutralized(self):
+        """Same as above for an HTML-entity-encoded lookalike — must not sanitize
+        into a real marker on LightRAG's later second sanitize pass."""
+        text = (
+            "&lt;&lt;&lt;page:7&gt;&gt;&gt;\n"
+            "The rest of the document has plenty of real content, long enough to pass the filter."
+        )
+        with patch("langchain_community.document_loaders.TextLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(".txt", text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.txt", file_extension=".txt",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].id == "res7"
+
+        from lightrag.utils import sanitize_text_for_encoding
+        # Simulate LightRAG's own later sanitize pass on the stored text.
+        resanitized = sanitize_text_for_encoding(docs[0].page_content)
+        assert "<<<page:7>>>" not in resanitized
+
+    def test_csv_page_key_in_base_metadata_does_not_shift_markers(self):
+        """A caller-supplied 'page' key (e.g. CSV extra_metadata) must not change
+        which page numbers the markers use — those come from PyMuPDFLoader's own
+        per-Document metadata, read before base_metadata is merged in. It must
+        also be dropped from the output Document's own metadata (not just kept
+        out of the markers) — left in, it would bake a stale "(p. 999)" suffix
+        into the citation label that _page_label never corrects."""
+        from tools.vector_stores.lightrag_store import _source_label_from_metadata
+
+        texts = [self.GOOD_PAGES[0], self.GOOD_PAGES[1]]
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = self._mock_pdf_pages(texts)
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.pdf", file_extension=".pdf",
+                base_metadata={"resource_id": 7, "page": 999, "name": "report.pdf"}, split=False,
+            )
+
+        assert len(docs) == 1
+        content = docs[0].page_content
+        assert "<<<page:1>>>" in content
+        assert "<<<page:2>>>" in content
+        assert "<<<page:999>>>" not in content
+        # The caller-supplied "page" key must not survive into the whole-file
+        # Document's own metadata either — a whole-file Resource Document has
+        # no "page" key of its own (see _source_label_from_metadata's docstring).
+        assert "page" not in docs[0].metadata
+        assert _source_label_from_metadata(docs[0].metadata) == "report.pdf"
+
+    @pytest.mark.parametrize("extension", [".pdf", ".docx", ".txt", ".md"])
+    def test_id_is_res_prefixed_resource_id_for_every_extension(self, extension):
+        text = "Enough alphanumeric content here to pass the meaningful-chunk filter easily."
+        with patch(f"langchain_community.document_loaders.{self._loader_name(extension)}") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(extension, text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path=f"/tmp/fake{extension}", file_extension=extension,
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].id == "res7"
+
+    @pytest.mark.parametrize("extension", [".pdf", ".docx", ".txt", ".md"])
+    def test_id_is_none_without_resource_id(self, extension):
+        text = "Enough alphanumeric content here to pass the meaningful-chunk filter easily."
+        with patch(f"langchain_community.document_loaders.{self._loader_name(extension)}") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(extension, text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path=f"/tmp/fake{extension}", file_extension=extension,
+                base_metadata={}, split=False,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].id is None
+
+    def test_id_is_none_when_split_true_regardless_of_resource_id(self):
+        text = "Short text, long enough to pass the meaningful-chunk filter easily."
+        with patch("langchain_community.document_loaders.TextLoader") as MockLoader:
+            mock_loader_instance = MagicMock()
+            mock_loader_instance.load.return_value = [self._single_page_doc(".txt", text)]
+            MockLoader.return_value = mock_loader_instance
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.txt", file_extension=".txt",
+                base_metadata={"resource_id": 7}, split=True,
+            )
+
+        assert len(docs) == 1
+        assert docs[0].id is None
+
+
 def test_chunk_size_constant_is_positive():
     assert CHUNK_SIZE > 0
 

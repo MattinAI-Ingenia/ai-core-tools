@@ -8,7 +8,7 @@ semantic-only ones the reranker scores as relevant, flagged as such.
 """
 import asyncio
 
-from tools.coverage_union import augment_with_semantic
+from tools.coverage_union import augment_with_semantic, snippet_key
 
 
 def _run(coro):
@@ -281,3 +281,39 @@ def test_a_window_is_keyed_by_the_chunk_id_when_the_snippet_has_one():
         {}, "x", semantic_chunks_fn=_semantic([chunk]), rerank_fn=rerank, excerpts_out=excerpts,
     ))
     assert list(excerpts) == ["res3-p1-chunk-001"]
+
+
+# --- lightrag-pdf-document-schema step_007: new-shape ids (whole-file PDF and
+# DOCX resource docs) must behave identically here — this module never parses
+# chunk ids, it only passes them through, so a PDF id whose order keeps
+# climbing across the whole file (res3-p1-chunk-004, instead of resetting per
+# page like the old res{N}-p{P} doc's chunk-000/001) and a page-less DOCX id
+# (res4-chunk-000) must dedup/key exactly like the old-shape ones above.
+
+
+def test_new_shape_pdf_and_docx_snippets_dedup_and_key_correctly_alongside_old_shape():
+    pdf_chunk = {**_chunk(3, "Boiler class (according to EN 303- 5)"), "id": "res3-p1-chunk-004"}
+    docx_chunk = {**_chunk(4, "docx mention", page=None, name="d.docx"), "id": "res4-chunk-000"}
+
+    grouped, added = _run(augment_with_semantic(
+        _literal(), "EN 303-5",
+        semantic_chunks_fn=_semantic([pdf_chunk, docx_chunk]),
+        rerank_fn=_scores({
+            "Boiler class (according to EN 303- 5)": 0.9,
+            "docx mention": 0.9,
+        }),
+    ))
+
+    # Neither resource id (3, 4) was in the literal result -> both are new,
+    # unioned in, tier "semantic" (dedup keys off resource_id, not id shape).
+    assert added == {3: "semantic", 4: "semantic"}
+    assert grouped[3][0] == (
+        "DOC3.pdf (p. 1)", "Boiler class (according to EN 303- 5)", 1, "res3-p1-chunk-004",
+    )
+    assert grouped[4][0] == ("d.docx", "docx mention", None, "res4-chunk-000")
+
+    # snippet_key uses each chunk's own id regardless of shape, so excerpts
+    # for the two new-shape snippets never collide with each other or with
+    # the old-shape ones keyed earlier in this file.
+    assert snippet_key(grouped[3][0]) == "res3-p1-chunk-004"
+    assert snippet_key(grouped[4][0]) == "res4-chunk-000"

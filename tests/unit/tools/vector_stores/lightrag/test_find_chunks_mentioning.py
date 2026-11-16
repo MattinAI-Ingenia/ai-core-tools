@@ -19,20 +19,20 @@ from tools.vector_stores.lightrag_store import LightRAGStore, _group_chunk_rows
 
 def test_groups_snippets_by_resource_id():
     rows = [
-        ("res271-p10", "CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.", "res271-p10-chunk-000"),
-        ("res271-p42", "CDOC004043.pdf p.42", "Revisar la válvula de seguridad cada año.", "res271-p42-chunk-000"),
-        ("res275-p3", "CDOC001961.pdf p.3", "La válvula de seguridad debe purgarse.", "res275-p3-chunk-000"),
+        ("res271-p10", "CDOC004043.pdf (p. 10)", "La válvula de seguridad se instala aquí.", "res271-p10-chunk-000"),
+        ("res271-p42", "CDOC004043.pdf (p. 42)", "Revisar la válvula de seguridad cada año.", "res271-p42-chunk-000"),
+        ("res275-p3", "CDOC001961.pdf (p. 3)", "La válvula de seguridad debe purgarse.", "res275-p3-chunk-000"),
     ]
     grouped = _group_chunk_rows(rows)
     assert set(grouped.keys()) == {"271", "275"}
     assert len(grouped["271"]) == 2
     assert len(grouped["275"]) == 1
     # file_path and page travel with the snippet — Task 3's citations need the
-    # real "file.pdf p.N" label, and the frontend's "Open PDF" button needs
+    # real "file.pdf (p. N)" label, and the frontend's "Open PDF" button needs
     # the page number, not just the resource id. The chunk id travels too: the
     # playground marks a cited chunk by it.
     assert grouped["271"][0] == (
-        "CDOC004043.pdf p.10", "La válvula de seguridad se instala aquí.", 10, "res271-p10-chunk-000",
+        "CDOC004043.pdf (p. 10)", "La válvula de seguridad se instala aquí.", 10, "res271-p10-chunk-000",
     )
 
 
@@ -66,6 +66,27 @@ def test_a_page_with_several_chunks_keeps_each_chunks_own_id():
 
 def test_empty_rows_returns_empty_dict():
     assert _group_chunk_rows([]) == {}
+
+
+# --- new-shape rows (full_doc_id is the bare "res{N}", page from chunk id) ---
+
+
+def test_new_shape_pdf_chunk_rebuilds_the_page_label_from_the_chunk_id():
+    rows = [("res7", "m.pdf", "contenido de la página 12", "res7-p12-chunk-037")]
+    grouped = _group_chunk_rows(rows)
+    assert grouped["7"][0] == ("m.pdf (p. 12)", "contenido de la página 12", 12, "res7-p12-chunk-037")
+
+
+def test_old_shape_row_with_label_already_carrying_the_page_is_not_doubled():
+    rows = [("res7-p12", "m.pdf (p. 12)", "contenido", "res7-p12-chunk-000")]
+    grouped = _group_chunk_rows(rows)
+    assert grouped["7"][0] == ("m.pdf (p. 12)", "contenido", 12, "res7-p12-chunk-000")
+
+
+def test_new_docx_shape_row_has_no_page_and_bare_file_path():
+    rows = [("res8", "d.docx", "contenido", "res8-chunk-000")]
+    grouped = _group_chunk_rows(rows)
+    assert grouped["8"][0] == ("d.docx", "contenido", None, "res8-chunk-000")
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +157,34 @@ def test_doc_filter_accepts_a_list_and_ors_the_conditions():
     sql_arg = str(conn.execute.call_args[0][0])
     params = conn.execute.call_args[0][1]
     assert "OR" in sql_arg
+    assert params["doc_exact_0"] == "res280"
     assert params["doc_pattern_0"] == "res280-p%"
+    assert params["doc_exact_1"] == "res282"
     assert params["doc_pattern_1"] == "res282-p%"
+    assert params["doc_exact_2"] == "res296"
     assert params["doc_pattern_2"] == "res296-p%"
+
+
+def test_doc_filter_clause_pairs_exact_match_with_the_like_prefix():
+    """A new-shape resource (full_doc_id == "res7" exactly, no "-p" suffix)
+    must match too, not just the old per-page prefix."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = []
+    store.find_chunks_mentioning("silo_1", term="P20", doc_filter=7)
+    sql_arg = str(conn.execute.call_args[0][0])
+    assert "full_doc_id = :doc_exact_0 OR full_doc_id LIKE :doc_pattern_0" in sql_arg
+    assert "workspace = :ws" in sql_arg
+
+
+def test_order_by_is_file_then_chunk_order():
+    """A file is now one document — snippets must come back in reading order."""
+    store = _make_store()
+    conn = store.db.engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = []
+    store.find_chunks_mentioning("silo_1", term="P20", doc_filter=None)
+    sql_arg = str(conn.execute.call_args[0][0])
+    assert "ORDER BY full_doc_id, chunk_order_index" in sql_arg
 
 
 def test_term_matching_is_accent_insensitive():

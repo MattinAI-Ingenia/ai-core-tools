@@ -4,8 +4,9 @@ from services.folder_service import FolderService
 from typing import List, Tuple, Optional
 from datetime import datetime
 import os
-from services.silo_service import SiloService
+from services.silo_service import SiloService, LIGHTRAG_SILO_BUSY_DETAIL, lightrag_silo_lock
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status, UploadFile
@@ -13,15 +14,26 @@ from fastapi import HTTPException, status, UploadFile
 REPO_BASE_FOLDER = os.path.abspath(os.getenv('REPO_BASE_FOLDER'))
 logger = get_logger(__name__)
 
-# How many resources the feeder keeps in flight in a LightRAG ingestion.
-# Sized against MAX_PARALLEL_INSERT (48 here): documents in this corpus average
-# 38 pages, so 3 resources are ~114 pages — comfortably more than the pool can
-# run at once, which is all it takes to keep it full. Raising it does not add
-# throughput, it only makes a 'cancel' finish more documents before stopping.
+LIGHTRAG_DELETE_FAILED_DETAIL = "The file was kept but may be partly removed from the knowledge graph; please retry."
+LIGHTRAG_DELETE_PARTIAL_DETAIL = (
+    "Removed from the knowledge graph but the file could not be deleted. Please retry."
+)
+
+# How many resources (files) the feeder keeps in flight in a LightRAG ingestion
+# — not pages or documents. Since the document-per-file refactor, a resource
+# is ONE LightRAG document; within it, LightRAG extracts up to MAX_ASYNC_LLM
+# chunks concurrently, so a single large PDF can fill that pool on its own
+# while many small files might not fill it at all. Real document-level
+# parallelism is min(this window, MAX_PARALLEL_INSERT): for many small files
+# raising this window DOES add real throughput (each file only uses a few of
+# its MAX_ASYNC_LLM slots); for a few large files MAX_ASYNC_LLM is the real
+# lever instead. It also makes a 'cancel' finish more files before stopping.
+# Deployment-specific, found by experimentation — see
+# docs/dependencies/lightrag.md sec. "Rodaje del feeder" for the tuning rule.
 INGESTION_FEED_WINDOW = int(os.getenv('INGESTION_FEED_WINDOW', '3'))
 
 # Seconds a batch must run before its ETA is published. Below this the estimate
-# is dominated by pages LightRAG skips by dedup, so it is worse than no answer.
+# is dominated by files LightRAG skips by dedup, so it is worse than no answer.
 ETA_WARMUP_SECONDS = 30
 
 def _is_transient_llm_failure(exc: BaseException) -> bool:
@@ -167,7 +179,9 @@ class ResourceService:
             raise ValueError(f"Failed to move resource: {str(e)}")
 
     @staticmethod
-    def delete_resource(resource_id: int, db: Session, delete_file: bool = True) -> bool:
+    def delete_resource(
+        resource_id: int, db: Session, delete_file: bool = True, delete_from_silo: bool = True
+    ) -> bool:
         """
         Delete a resource (database record and silo indexing, file optional)
 
@@ -180,6 +194,8 @@ class ResourceService:
                 URI was reused by its replacement) — deleting the DB row and
                 vectors is still correct, but removing the file would destroy
                 the replacement's content.
+            delete_from_silo: Whether to remove the resource from its silo's vector store.
+                False when the caller already removed it, e.g. the LightRAG single-file delete.
 
         Returns:
             True if deletion was successful, False if resource not found
@@ -191,8 +207,9 @@ class ResourceService:
 
         try:
             # Delete from silo first
-            SiloService.delete_resource(resource)
-            logger.info(f"Resource {resource_id} deleted from silo")
+            if delete_from_silo:
+                SiloService.delete_resource(resource)
+                logger.info(f"Resource {resource_id} deleted from silo")
 
             # Delete file from disk
             if delete_file:
@@ -209,7 +226,7 @@ class ResourceService:
             return True
 
         except Exception as e:
-            logger.error(f"Error deleting resource {resource_id}: {str(e)}")
+            logger.exception(f"Error deleting resource {resource_id}: {str(e)}")
             ResourceRepository.rollback(db)
             return False
     
@@ -479,20 +496,30 @@ class ResourceService:
         return db.query(Resource).filter_by(resource_id=resource_id).first()
 
     @staticmethod
-    def _progress_update_fields(n: int, total: int) -> dict:
+    def _progress_update_fields(n: Optional[int], total: Optional[int],
+                                 estimate: Optional[int] = None) -> dict:
         """The row update for one live progress tick of a LightRAG-batch resource.
 
-        Flips to 'ready' the moment this resource's own pages all reach a
-        terminal LightRAG state (processed or failed — the same test the
-        end-of-batch finalization loop uses), instead of waiting for the
-        whole batch call to return. The sliding window already lets other
-        resources keep working while one is done; without this, the done one
-        just sits at "indexing" for however long the slowest one in the batch
-        takes, and depends on reaching that shared finalization step to ever
-        become 'ready' at all — a batch-wide crash orphans it regardless of
-        it having finished. Re-applying the same rule there afterwards is a
-        harmless no-op for a resource already 'ready'.
+        Flips to 'ready' the moment this resource's own chunks of the file's
+        document all reach a terminal LightRAG state (processed or failed —
+        the same test the end-of-batch finalization loop uses), instead of
+        waiting for the whole batch call to return. The sliding window
+        already lets other resources keep working while one is done; without
+        this, the done one just sits at "indexing" for however long the
+        slowest one in the batch takes, and depends on reaching that shared
+        finalization step to ever become 'ready' at all — a batch-wide crash
+        orphans it regardless of it having finished. Re-applying the same
+        rule there afterwards is a harmless no-op for a resource already
+        'ready'.
+
+        ``total is None`` means the resource finished but its real chunk
+        count could not be determined (content-dedup hit, failed before
+        chunking, or the chunk-progress query itself failed) — fall back to
+        the Phase-1 ``estimate`` (or 1) so the bar shows 100% of something
+        reasonable instead of a null division.
         """
+        if total is None:
+            n = total = estimate or 1
         update = {'progress_done': n, 'progress_total': total}
         if total and n >= total:
             update['status'] = 'ready'
@@ -506,8 +533,9 @@ class ResourceService:
         ``counts`` is the batch call's own return value for this resource — {}
         when the call raised, even for a resource that had already finished:
         the exception wipes the return value, not the DB row. ``row_progress_*``
-        is what ``_on_progress_multi`` wrote live as each page landed, so it
-        survives that exception intact and is what completeness falls back to.
+        is what ``_on_progress_multi`` wrote live as the file's chunks were
+        extracted, so it survives that exception intact and is what
+        completeness falls back to.
 
         A resource that reached 100% lands 'ready' regardless of whether the
         batch call blew up elsewhere — the crash is not this resource's
@@ -741,7 +769,9 @@ class ResourceService:
                             # _progress_update_fields for why this can also
                             # finalize the resource, ahead of the batch's own
                             # end-of-call loop below.
-                            update = ResourceService._progress_update_fields(n, total)
+                            update = ResourceService._progress_update_fields(
+                                n, total, estimate=chunk_counts.get(rid),
+                            )
                             _db_p = _SessionLocal()
                             try:
                                 _db_p.query(ResourceModel).filter_by(resource_id=rid).update(update)
@@ -1232,12 +1262,14 @@ class ResourceService:
     def _discard_unindexed_after_cancel(repository_id: int) -> int:
         """Delete the resources a cancelled run never indexed. Returns how many.
 
-        Only ``cancelled`` resources with **zero** indexed pages are touched:
+        Only ``cancelled`` resources with **zero** indexed documents are touched:
         those never reached the vector store, so deleting them removes a row and
         a file and nothing else — no orphaned entities, no half-indexed
-        document. A resource that got even one page through is left alone; there
-        is no per-document delete in LightRAG to unwind it with, so silently
-        dropping its row would strand that page in the graph.
+        document. A resource that got even one document through is left alone;
+        there is no per-document delete in LightRAG to unwind it with, so
+        silently dropping its row would strand that document in the graph.
+        Matches both the old per-page id shape (``res{N}-p{P}``, via the LIKE
+        prefix) and the new per-file shape (``res{N}`` exactly).
 
         Best-effort per resource: one failure must not abandon the rest.
         """
@@ -1263,13 +1295,13 @@ class ResourceService:
                 indexed = db.execute(
                     text(
                         "SELECT count(*) FROM lightrag_doc_status "
-                        "WHERE workspace = :ws AND id LIKE :prefix AND status = 'processed'"
+                        "WHERE workspace = :ws AND (id = :exact OR id LIKE :prefix) AND status = 'processed'"
                     ),
-                    {"ws": workspace, "prefix": f"res{resource_id}-p%"},
+                    {"ws": workspace, "exact": f"res{resource_id}", "prefix": f"res{resource_id}-p%"},
                 ).scalar() or 0
                 if indexed:
                     logger.info(
-                        "Keeping cancelled resource %s: %s page(s) already indexed",
+                        "Keeping cancelled resource %s: %s document(s) already indexed",
                         resource_id, indexed,
                     )
                     continue
@@ -1631,18 +1663,12 @@ class ResourceService:
         # Scoped lookup: 404 unless the resource belongs to this repository.
         resource = ResourceService.get_repository_resource(repository_id, resource_id, db)
 
-        # LightRAG has no real per-file delete (it would need to unwind the doc's
-        # entities/relations from the knowledge graph). Block it up-front so the
-        # file isn't removed from DB/disk while its graph data lingers — deleting
-        # would be a lie. Whole-silo delete is the supported way to purge.
+        # LightRAG: graph data is removed first (under the silo indexing lock); file + row only after.
         silo = getattr(getattr(resource, "repository", None), "silo", None)
         if silo is not None and (silo.vector_db_type or "").upper() == "LIGHTRAG":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="LightRAG silos do not support deleting individual files; "
-                       "delete the whole silo to remove its data.",
-            )
-
+            ResourceService._delete_lightrag_resource(resource, silo.silo_id, db)
+            logger.info(f"Resource {resource_id} deleted successfully")
+            return {"message": "Resource deleted successfully"}
 
         # Use delete_resource method with database session
         success = ResourceService.delete_resource(resource_id, db)
@@ -1657,32 +1683,137 @@ class ResourceService:
         return {"message": "Resource deleted successfully"}
 
     @staticmethod
+    def _delete_lightrag_resource(resource: Resource, silo_id: int, db: Session) -> None:
+        """Delete one file of a LightRAG silo: graph first, then file + row.
+
+        Raises:
+            HTTPException: 409 if the silo is busy indexing or the file is legacy-indexed, 500 if the graph
+                delete failed (file and row are kept), 500 (partial) if the graph was cleared but the
+                file/row step failed and the row still exists, 404 if the row is gone.
+            ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
+        """
+        with lightrag_silo_lock(silo_id, f"delete resource {resource.resource_id}"):
+            # Legacy docs would survive a res{N} delete while the API says success.
+            if SiloService.has_legacy_lightrag_documents(resource):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=(
+                    "This file was indexed with a legacy format and cannot be deleted individually. "
+                    "Use 'Delete all files' to reset the repository, or delete the silo."
+                ))
+            try:
+                outcome = SiloService.delete_lightrag_resource_document(resource)
+            except ServiceRetiredError:
+                raise  # a retry can never succeed; surfaced as 409 SERVICE_RETIRED
+            except Exception:
+                logger.exception("Graph delete of resource %s in silo %s failed", resource.resource_id, silo_id)
+                outcome = "fail"
+            if outcome == "not_allowed":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_SILO_BUSY_DETAIL)
+            if outcome not in ("success", "not_found"):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_DELETE_FAILED_DETAIL
+                )
+            # Plain int: delete_resource rolls back on failure, which expires
+            # `resource`; reading its attributes afterwards could raise
+            # ObjectDeletedError if the row was removed concurrently.
+            resource_id = resource.resource_id
+            if not ResourceService.delete_resource(resource_id, db, delete_from_silo=False):
+                if ResourceRepository.get_by_id(db, resource_id) is not None:
+                    logger.error(
+                        "Resource %s removed from graph of silo %s but file/row removal failed; a retry completes it",
+                        resource_id, silo_id,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=LIGHTRAG_DELETE_PARTIAL_DETAIL
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found or could not be deleted"
+                )
+
+    @staticmethod
     def delete_all_resources_from_repository(repository_id: int, db: Session) -> dict:
         """
         Delete every resource in a repository - business logic from router
 
+        LightRAG silos are wiped from the knowledge graph first (strict), then their rows, files
+        and repository media are removed.
+
         Raises:
-            HTTPException: If the repository's silo is LightRAG (no per-file delete support)
+            HTTPException: 409 if a LightRAG silo is busy indexing or shared, 500 if its graph wipe failed.
+            ServiceRetiredError: if a LightRAG silo's service is retired (mapped to 409 SERVICE_RETIRED).
         """
         repo = ResourceRepository.get_repository_by_id(db, repository_id)
         silo = getattr(repo, "silo", None)
         if silo is not None and (silo.vector_db_type or "").upper() == "LIGHTRAG":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="LightRAG silos do not support deleting individual files; "
-                       "delete the whole silo to remove its data.",
-            )
+            return ResourceService._delete_all_lightrag_resources(repo, silo, db)
+        return ResourceService._delete_resources_and_media(repo, db, delete_from_silo=True)
 
+    @staticmethod
+    def _delete_resources_and_media(repo, db: Session, delete_from_silo: bool) -> dict:
+        """Delete every resource of ``repo``; when the silo was already wiped, also its media."""
+        repository_id = repo.repository_id
         resources = ResourceRepository.get_by_repository_id(db, repository_id)
         deleted_count = 0
         for resource in resources:
-            if ResourceService.delete_resource(resource.resource_id, db):
+            if ResourceService.delete_resource(resource.resource_id, db, delete_from_silo=delete_from_silo):
                 deleted_count += 1
             else:
                 logger.error(f"Resource {resource.resource_id} could not be deleted in bulk delete")
+        total = len(resources)
+        if not delete_from_silo:
+            from services.media_service import MediaService
 
-        logger.info(f"Deleted {deleted_count}/{len(resources)} resources from repository {repository_id}")
-        return {"deleted_count": deleted_count, "failed_count": len(resources) - deleted_count}
+            media = list(repo.media)
+            for item in media:
+                if MediaService.delete_media_item(item, db, delete_from_silo=False):
+                    deleted_count += 1
+                else:
+                    logger.error(f"Media {item.media_id} could not be deleted in bulk delete")
+            total += len(media)
+
+        logger.info(f"Deleted {deleted_count}/{total} resources from repository {repository_id}")
+        return {"deleted_count": deleted_count, "failed_count": total - deleted_count}
+
+    @staticmethod
+    def _delete_all_lightrag_resources(repo, silo, db: Session) -> dict:
+        """Wipe the silo's graph, then delete every resource and repository media of ``repo``.
+
+        Runs under the silo indexing lock. A failed wipe deletes nothing; rows/files that fail
+        afterwards are counted in ``failed_count`` (same contract as non-LightRAG silos).
+
+        Raises:
+            HTTPException: 409 if the silo is shared with another repository/domain or busy indexing,
+                500 if the graph wipe failed.
+            ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
+        """
+        from models.domain import Domain
+        from models.repository import Repository
+        silo_id = silo.silo_id
+        if (
+            db.query(Repository)
+            .filter(Repository.silo_id == silo_id, Repository.repository_id != repo.repository_id)
+            .first()
+            or db.query(Domain).filter(Domain.silo_id == silo_id).first()
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "The knowledge graph of this repository is shared with another repository or domain, so all "
+                    "files cannot be deleted at once. Delete the files one by one or remove the other repository first."
+                ),
+            )
+
+        with lightrag_silo_lock(silo_id, f"delete all files of repository {repo.repository_id}"):
+            try:
+                SiloService.wipe_lightrag_workspace(silo)
+            except ServiceRetiredError:
+                raise  # surfaced as 409 SERVICE_RETIRED
+            except Exception:
+                # wipe_lightrag_workspace already logged the failure with its traceback.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Could not clear the knowledge graph; no files were deleted. Please retry.",
+                )
+            return ResourceService._delete_resources_and_media(repo, db, delete_from_silo=False)
 
     @staticmethod
     def download_resource_from_repository(

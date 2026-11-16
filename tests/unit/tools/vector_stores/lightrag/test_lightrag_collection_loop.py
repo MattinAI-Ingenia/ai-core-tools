@@ -214,7 +214,7 @@ def test_delete_collection_closes_the_dedicated_loop():
     store = _make_store()
     with patch.object(store, "_build_rag", side_effect=lambda name: _mock_rag()), \
          patch.object(store, "_cleanup_neo4j"), \
-         patch.object(store, "_cleanup_qdrant"), \
+         patch.object(store, "_cleanup_vector_storage"), \
          patch.object(store, "_cleanup_postgres"):
         store._get_rag_instance("silo_1")
         thread = store._collection_loops["silo_1"]._thread
