@@ -278,7 +278,8 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
 - **Endpoint público `DELETE /public/v1/app/{app}/silos/{id}/docs/delete/all`**:
   en LightRAG toma el lock (409 si está ocupado) y usa el wipe estricto (500 si
   falla). Es una operación del índice, como en los otros silos: las filas de
-  `Resource` y sus ficheros **se conservan** (hay que reindexar).
+  `Resource` y sus ficheros **se conservan**, pero los recursos de los
+  repositorios del silo pasan a `pending` (la UI ofrece "Resume indexing").
 - **Rutas que ahora responden 409 en silos LightRAG** (antes respondían 200
   sin tocar el grafo): borrar documentos por id o por metadata, borrar una URL
   de dominio, borrar media (interno y público) y borrar una carpeta. Mensaje:

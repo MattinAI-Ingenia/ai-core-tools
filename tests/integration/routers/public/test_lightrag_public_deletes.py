@@ -108,6 +108,25 @@ class TestPublicDeleteAllLightRAG:
         assert resp.status_code == 200
         store.wipe_workspace.assert_called_once_with(f"silo_{lightrag_silo.silo_id}")
 
+    def test_success_marks_repository_files_as_not_indexed(self, client, db, fake_app, lightrag_silo, fake_api_key):
+        from models.repository import Repository
+        from models.resource import Resource
+
+        repo = Repository(name="Repo", type="default", status="active", app_id=fake_app.app_id,
+                          silo_id=lightrag_silo.silo_id, create_date=datetime.now())
+        db.add(repo)
+        db.flush()
+        res = Resource(name="a.txt", type="txt", status="indexed", repository_id=repo.repository_id,
+                       progress_done=5, progress_total=5)
+        db.add(res)
+        db.flush()
+        with patch(GET_STORE, return_value=MagicMock()):
+            resp = _delete(client, fake_app, lightrag_silo, fake_api_key)
+        assert resp.status_code == 200
+        db.expire_all()
+        res = db.get(Resource, res.resource_id)
+        assert (res.status, res.progress_done, res.progress_total) == ("pending", 0, None)
+
 
 class TestPublicDeleteAllPgvectorUnchanged:
     def test_pgvector_ignores_lock_and_deletes_collection(self, client, db, fake_app, fake_api_key):

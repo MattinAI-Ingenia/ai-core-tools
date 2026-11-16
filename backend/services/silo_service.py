@@ -2909,6 +2909,14 @@ class SiloService:
             try:
                 # Resource rows/files are kept on purpose (migration procedure, docs/dependencies/lightrag.md 13.8).
                 SiloService.wipe_lightrag_workspace(probe)
+                # The graph is empty now: their files are no longer indexed, so the UI offers "Resume indexing".
+                from models.repository import Repository  # noqa: PLC0415 — avoids import cycle
+                repo_ids = db.query(Repository.repository_id).filter(Repository.silo_id == silo_id)
+                db.query(Resource).filter(Resource.repository_id.in_(repo_ids)).update(
+                    {"status": "pending", "error_message": None, "progress_done": 0, "progress_total": None},
+                    synchronize_session=False,
+                )
+                db.commit()
             except ServiceRetiredError:
                 raise
             except Exception as exc:
