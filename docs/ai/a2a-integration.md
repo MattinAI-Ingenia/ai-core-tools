@@ -109,7 +109,7 @@ Their v0.3-compat equivalents (`message/send`, `message/stream`, `tasks/get`, `t
 
 ## Limits & rate limiting
 
-- The app's `agent_rate_limit` execution budget is consumed **only** by `SendMessage`/`SendStreamingMessage` (and their v0.3 equivalents). `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` and `GetExtendedAgentCard` still require a valid key but never touch that budget, so a client polling for task status cannot drain it.
+- The app's `agent_rate_limit` execution budget is tracked independently for each app-agent pair and consumed **only** by `SendMessage`/`SendStreamingMessage` (and their v0.3 equivalents). `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` and `GetExtendedAgentCard` still require a valid key but never touch that budget, so a client polling for task status cannot drain it.
 - Card and catalog requests are rate-limited **per client IP**, before any auth or DB work, through a separate budget (`A2A_DISCOVERY_RATE_LIMIT_PER_MINUTE`, default 60/min) that never shares a bucket with an app's execution budget.
 - The RPC endpoint also has its own pre-auth, per-IP limiter (`A2A_RPC_PREAUTH_RATE_LIMIT_PER_MINUTE`, default 300/min) that bounds raw request volume before any app/agent resolution — it doesn't replace the execution budget above, only bounds abuse against it.
 - Concurrent **streams** (`SendStreamingMessage`/`SubscribeToTask`) are bounded by a bulkhead: per app (`A2A_MAX_CONCURRENT_STREAMS_PER_APP`, default 10), per API key (`A2A_MAX_CONCURRENT_STREAMS_PER_KEY`, default 5) and per worker process (`A2A_MAX_CONCURRENT_STREAMS_WORKER`, default 40, auto-clamped below `UVICORN_LIMIT_CONCURRENCY`). Exceeding any of them returns a retryable JSON-RPC error with a retry hint instead of a raw failure.
@@ -155,7 +155,7 @@ To bump the pin:
 
 ## Environment variables
 
-Almost all variables are read in exactly one place, `backend/utils/a2a_config.py`, and are documented with the same defaults in `docker/.env.example`. For those, every value is optional and a malformed one falls back to its default with a startup warning rather than failing to start. Three variables are the exception, read directly where they're used instead of through `a2a_config.py`; a malformed or non-positive value in any of them also falls back to its default:
+Almost all variables are read in exactly one place, `backend/utils/a2a_config.py`, and are documented with the same defaults in `.env.example`. For those, every value is optional and a malformed one falls back to its default with a startup warning rather than failing to start. Three variables are the exception, read directly where they're used instead of through `a2a_config.py`; a malformed or non-positive value in any of them also falls back to its default:
 
 - `A2A_FILE_URL_MAX_TTL_SECONDS` — read **per call** in `backend/utils/security.py` (`_max_ttl_seconds`), so a change takes effect without a restart.
 - `A2A_DISCOVERY_MAX_TRACKED_KEYS` and `A2A_DISCOVERY_OVERFLOW_MULTIPLIER` — read once, **at import time**, in `backend/services/rate_limit_service.py:21-34`. They size the per-IP key-namespace limiter's tracked-key cap and its shared overflow bucket's budget multiplier, used by both the A2A discovery limiter and the A2A RPC pre-auth limiter (and by nothing else). A malformed value is logged as a warning at startup.
@@ -198,7 +198,7 @@ Almost all variables are read in exactly one place, `backend/utils/a2a_config.py
 
 ¹ Not read through `a2a_config.py` — see the exceptions listed above the table.
 
-Deployment-related variables (`UVICORN_*`, `CADDY_TRUSTED_PROXIES`, `ALEMBIC_LOCK_TIMEOUT`, ...) are covered in [Operations / deployment runbook](#operations--deployment-runbook) below and documented in `docker/.env.example`.
+Deployment-related variables (`UVICORN_*`, `CADDY_TRUSTED_PROXIES`, `ALEMBIC_LOCK_TIMEOUT`, ...) are covered in [Operations / deployment runbook](#operations--deployment-runbook) below and documented in `.env.example`.
 
 ## Manual conformance (a2a-tck)
 

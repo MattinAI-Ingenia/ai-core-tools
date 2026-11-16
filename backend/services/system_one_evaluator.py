@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from pydantic import TypeAdapter
 
 from models.system_one_agent import SystemOneAgent
-from schemas.system_one_schemas import Question, QuestionList, SystemOneResult, Timings, Usage
+from schemas.system_one_schemas import DEFAULT_MAX_STATE_CHARS, Question, QuestionList, SystemOneResult, Timings, Usage
 from services.agent_metrics_recorder import record_agent_execution
 from services.system_one_service_service import max_concurrency_of, provider_of
 from services.system_one_state import (
@@ -28,6 +28,7 @@ from tools.aiServiceTools import create_llm_from_service
 from tools.system_one_client import Endpoint, SystemOneError
 from tools.system_one_decisions import decide_all
 from utils.logger import get_logger
+from utils.service_lifecycle import SERVICE_KIND_SYSTEM_ONE, ensure_service_active
 
 logger = get_logger(__name__)
 
@@ -164,6 +165,8 @@ class SystemOneEvaluator:
                 status_code=409,
                 detail="This agent has no System One service: choose one in the agent's settings",
             )
+        # Raises ServiceRetiredError (409 SERVICE_RETIRED over HTTP) once the service is past its end of service.
+        ensure_service_active(service, SERVICE_KIND_SYSTEM_ONE)
         if not service.description:
             raise HTTPException(
                 status_code=409,
@@ -191,7 +194,7 @@ class SystemOneEvaluator:
             agent_description=agent.description or "",
             questions=TypeAdapter(QuestionList).validate_python(agent.questions),
             endpoint=endpoint,
-            max_state_chars=agent.max_state_chars or 6000,
+            max_state_chars=agent.max_state_chars or DEFAULT_MAX_STATE_CHARS,
             summarize=summarize,
             metrics_subject=SimpleNamespace(app_id=agent.app_id, agent_id=agent.agent_id, service_id=None,
                                             ai_service=None, output_parser_id=None),

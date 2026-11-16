@@ -132,7 +132,7 @@ Decided on purpose when the knowledge router shipped; each says when to reopen i
 Full detail: `docs/superpowers/specs/2026-10-07-knowledge-router-design.md` (untracked, `specs/` is gitignored).
 
 1. **Citation numbering across a HITL pause.** A turn with human approval spans two HTTP
-   requests (pause, then `stream_resume_agent_chat`), and the resumed request rebuilds the
+   requests (pause, then the approval stream), and the resumed request rebuilds the
    agent with the citation counter at 0. If the agent retrieved chunks both *before* and
    *after* the pause, `[N]` repeats between the two searches: live, the frontend resolves it
    against a graph holding only the post-resume chunks; after a reload, the history merges both

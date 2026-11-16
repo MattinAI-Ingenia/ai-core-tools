@@ -805,20 +805,45 @@ desplegable de `extract_service`/`keywords_service` muestra estas
 recomendaciones directamente en el formulario — componente
 `LightRAGModelHints` (`frontend/src/components/forms/LightRAGModelHints.tsx`,
 usado desde `SiloForm.tsx` y `RepositoryFormPage.tsx`), fila "Open-source" de
-cada rol. Este benchmark es la evidencia que respalda esas dos filas
-concretas; el resto de filas (OpenAI, Anthropic, Mistral, Google) no se ha
-verificado con este mismo método.
+cada rol. La fila Open-source de `keyword` está respaldada por este benchmark;
+la de `extract` (Qwen3.6-35B-A3B) lo está por el A/B de corpus completo del
+silo 54 (ver el informe enlazado en la recomendación de abajo). El resto de
+filas (Anthropic, Mistral, Google) no se ha verificado con este mismo método.
+
+La fila OpenAI es **GPT-6 Luna** para `extract` y `keyword` (2026-11-05),
+con una prueba pequeña sobre texto genérico (Wikipedia, `compare_extraction.py`
+con el esquema JSON de producción + indexación real de 14 chunks):
+
+- `extract`: frente a gpt-5.4-mini en los mismos chunks, más entidades y
+  relaciones (45/42 frente a 37/34), coherentes y sin truncados, a ~1/7 del
+  coste por chunk; ~2× más lento. Es de razonamiento: sus tokens de
+  razonamiento se cobran como salida (~3.500 tokens de salida por llamada
+  medidos; es el valor que usa la estimación de coste de indexación).
+- `keyword`: sin el defecto de gpt-5.4-mini (dejó vacías las low-level
+  keywords en 1 de 3 preguntas) ni la verbosidad de gpt-5.4-nano.
+- gpt-4.1-nano ya está deprecado en la API (404).
+- Al usarlo como LLM de agente (con tools), el servicio de OpenAI **no debe
+  llevar endpoint**: sin endpoint se usa la Responses API; con
+  `https://api.openai.com/v1` explícito va por chat completions y los modelos
+  de razonamiento rechazan las tools (400).
 
 Recomendación resultante, en producción vía `LIGHTRAG_EXTRACT_MODEL` /
 `LIGHTRAG_KEYWORD_MODEL` (o el `AIService` del silo correspondiente):
 
-- **`extract`**: **Qwen3-30B-A3B-Instruct** — el más exhaustivo de los
-  probados sobre las 61 chunks del corpus, sin diferencias de exactitud
-  factual frente a alternativas cloud. Requiere `--json` (ver 9.1.2) sin
-  excepción — en modo delimitado es directamente inutilizable. Tiene
-  variación real entre pasadas idénticas (mismo prompt, `temperature=0`);
-  no tratar sus totales como una cifra fija si se usa para dimensionar un
-  SLA de indexación.
+- **`extract`**: **Qwen3.6-35B-A3B** — actualizado 2026-10-30 tras reindexar el
+  corpus DOMUSA completo (33 docs, 1.600 páginas) con este modelo: throughput
+  de indexación 3.709 tok/s agregados (2,2× la corrida anterior) y, en el A/B
+  contra el índice anterior con los mismos 63 IDs del set UC y la misma
+  síntesis, recall macro 0,981 vs 0,953/0,965 y latencia de consulta 60s vs
+  88-127s, sin regresiones sistemáticas
+  ([informe](../../benchmark/informes/es/informe_eval_silo54_qwen36idx_20261030.md)).
+  Sustituye a **Qwen3-30B-A3B-Instruct**, ganador del benchmark de 61 chunks,
+  que queda como referencia metodológica del benchmark (no como pick de
+  producción). Sigue aplicándose lo aprendido con aquel: requiere `--json`
+  (ver 9.1.2) sin excepción — en modo delimitado es directamente inutilizable
+  — y tiene variación real entre pasadas idénticas (mismo prompt,
+  `temperature=0`); no tratar sus totales como una cifra fija si se usa para
+  dimensionar un SLA de indexación.
 - **`keyword`**: **Qwen3-4B-Instruct** — único modelo sin ningún defecto en
   el benchmark de 7 preguntas (frente a la alucinación puntual de
   Qwen3-30B-A3B y la verbosidad sistemática de gpt-5.4-nano), con respuestas
@@ -912,6 +937,20 @@ resumen → texto plano en el idioma pedido, sin rastro de JSON.
 usa «lo que queda de ventana» (~30k tokens). Cortar no pierde el trabajo hecho:
 el parser usa `json_repair`, que cierra las estructuras abiertas y conserva
 todos los registros completos anteriores al corte (verificado).
+
+**Razonamiento desactivado**: los tokens de razonamiento cuentan contra el tope
+de salida y se facturan como salida. En el silo 55 (servidor vLLM que razonaba por
+defecto) el 26 % de las extracciones se cortó en el tope y se facturó ~5× la salida
+de su JSON visible; con el razonamiento forzado sobre los mismos chunks salieron
+2,6× más tokens y 4 de 12 se cortaron. El adaptador pide apagarlo en las llamadas
+de los proveedores sobre ChatOpenAI (`_no_reasoning_kwargs`, `adapters.py`):
+`chat_template_kwargs.enable_thinking=false` en `Custom`/`OpenRouter` y
+`reasoning_effort=none` en `OpenAI`. Si el servidor rechaza el parámetro (HTTP
+400/422), se reintenta una vez sin él y se desactiva para ese adaptador, con un
+aviso en el log (los timeouts, los 5xx y los truncados no lo desactivan). En
+gpt-6-luna apagarlo recorta ~35-45 % de los tokens de salida y ~40 % del tiempo,
+pero extrae ~10-20 % menos grafo (cobertura medida con juez GLM, ver el informe de
+referencia de tiempos y costes).
 
 ### 9.2 Embeddings
 

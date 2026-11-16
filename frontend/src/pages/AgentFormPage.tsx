@@ -98,7 +98,7 @@ interface Agent {
   media_chunk_overlap?: number | null;
   ai_services: Array<ServiceOptionLike & { supports_video?: boolean; is_system?: boolean }>;
   sandbox_services: ServiceOptionLike[];
-  system_one_services?: Array<{ service_id: number; name: string }>;
+  system_one_services?: ServiceOptionLike[];
   silos: Array<{ silo_id: number; name: string; vector_db_type?: string }>;
   output_parsers: Array<{ parser_id: number; name: string }>;
   lightrag_query_modes?: string[];
@@ -359,7 +359,8 @@ function AgentFormPage() {
       return;
     }
     let cancelled = false;
-    apiService.testSystemOneService(Number.parseInt(appId), serviceId)
+    // The status check, not the test: editors may read it, and it never spends a real (token) call.
+    apiService.getSystemOneServiceStatus(Number.parseInt(appId), serviceId)
       .then((result) => { if (!cancelled) setServerQuestionLimits(questionLimits(result.limits)); })
       .catch(() => { if (!cancelled) setServerQuestionLimits({}); });
     return () => { cancelled = true; };
@@ -754,6 +755,28 @@ function AgentFormPage() {
     });
   }, [appId, agentId, marketplaceProfile, mutate]);
 
+  /**
+   * Shared tail of both save paths: create or update with the shared toasts, then leave on success.
+   * The raw promise is returned too, for a caller that inspects the error itself (A2A field errors).
+   */
+  const saveAgent = async (submitData: Record<string, unknown>) => {
+    const isNew = Number.parseInt(agentId || '0') === 0;
+    // Created once so both the toast (via `mutate`) and a caller that inspects the raw error
+    // observe the same settled promise instead of issuing the request twice.
+    const submitPromise = isNew
+      ? apiService.createAgent(Number.parseInt(appId || '0'), 0, submitData)
+      : apiService.updateAgent(Number.parseInt(appId || '0'), Number.parseInt(agentId || '0'), submitData);
+    setSaving(true);
+    const result = await mutate(() => submitPromise, {
+      loading: isNew ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
+      success: isNew ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
+      error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
+    });
+    setSaving(false);
+    if (result !== undefined) navigate(`/apps/${appId}/agents`);
+    return { result, submitPromise };
+  };
+
   const submitSystemOneAgent = async () => {
     if (!appId || !agentId) return;
     if (!formData.name.trim()) {
@@ -776,7 +799,6 @@ function AgentFormPage() {
       return;
     }
 
-    const isNew = Number.parseInt(agentId) === 0;
     const submitData = {
       name: formData.name,
       description: formData.description,
@@ -790,23 +812,7 @@ function AgentFormPage() {
     };
 
     setError(null);
-    setSaving(true);
-    const result = await mutate(
-      () =>
-        isNew
-          ? apiService.createAgent(Number.parseInt(appId), 0, submitData)
-          : apiService.updateAgent(Number.parseInt(appId), Number.parseInt(agentId), submitData),
-      {
-        loading: isNew ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
-        success: isNew ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
-        error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
-      },
-    );
-    setSaving(false);
-
-    if (result !== undefined) {
-      navigate(`/apps/${appId}/agents`);
-    }
+    await saveAgent(submitData);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -913,32 +919,15 @@ function AgentFormPage() {
       ...a2aFields,
     };
 
-    const isNew = Number.parseInt(agentId) === 0;
-
     // Save the marketplace profile first, but only once the form is valid, and
     // wait for it so it never races with the agent save below.
     await handleSaveMarketplaceProfile();
 
     setError(null);
     setA2aFieldErrors({});
-    setSaving(true);
-    // Created once so both the toast (via `mutate`) and our own error inspection
-    // below observe the same settled promise instead of issuing the request twice.
-    const submitPromise = isNew
-      ? apiService.createAgent(Number.parseInt(appId), 0, submitData)
-      : apiService.updateAgent(Number.parseInt(appId), Number.parseInt(agentId), submitData);
 
-    const result = await mutate(() => submitPromise, {
-      loading: isNew ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
-      success: isNew ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
-      error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
-    });
-    setSaving(false);
-
-    if (result !== undefined) {
-      navigate(`/apps/${appId}/agents`);
-      return;
-    }
+    const { result, submitPromise } = await saveAgent(submitData);
+    if (result !== undefined) return;
 
     try {
       await submitPromise;
@@ -994,6 +983,8 @@ function AgentFormPage() {
       ];
 
   const videoServiceOptions = agent?.ai_services?.filter((service) => service.supports_video);
+  // Checked once per render; the System One tab shows it only when the problems were revealed.
+  const questionProblems = showQuestionProblems ? checkQuestions(formData.questions, questionContext) : null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
@@ -1114,8 +1105,10 @@ function AgentFormPage() {
               systemOneServices={agent?.system_one_services ?? []}
               aiServices={(agent?.ai_services ?? []).filter((s) => !s.is_system)}
               serviceId={formData.system_one_service_id}
+              savedServiceId={agent?.system_one_service_id}
               onServiceChange={(id) => handleInputChange('system_one_service_id', id)}
               summarizationServiceId={formData.summarization_service_id}
+              savedSummarizationServiceId={agent?.summarization_service_id}
               onSummarizationChange={(id) => handleInputChange('summarization_service_id', id)}
               maxStateChars={formData.max_state_chars}
               onMaxStateCharsChange={(value) => handleInputChange('max_state_chars', value)}
@@ -1124,8 +1117,8 @@ function AgentFormPage() {
               questions={formData.questions}
               onQuestionsChange={(questions) => handleInputChange('questions', questions)}
               limits={serverQuestionLimits}
-              generalProblems={showQuestionProblems ? checkQuestions(formData.questions, questionContext).general : []}
-              problemsByQuestion={showQuestionProblems ? checkQuestions(formData.questions, questionContext).byQuestion : []}
+              generalProblems={questionProblems?.general ?? []}
+              problemsByQuestion={questionProblems?.byQuestion ?? []}
             />
           )}
 

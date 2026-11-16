@@ -15,6 +15,7 @@ from schemas.system_one_schemas import ChoiceAnswer, NoulAnswer, ScoreAnswer, Sy
 from services.system_one_evaluator import SystemOneEvaluator, SystemOneSnapshot
 from utils.logger import get_logger
 from utils.schema_utils import sanitize_identifier
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -76,14 +77,7 @@ def format_tool_content(result: SystemOneResult) -> str:
 
 
 def _error_text(exc: HTTPException) -> str:
-    if exc.status_code == 503:
-        return "System One is unavailable or overloaded; try again later."
-    if exc.status_code == 504:
-        return "System One timed out; try again later."
-    if exc.status_code == 502:
-        return "System One returned an unexpected response."
-    if exc.status_code == 422:
-        return f"System One rejected the request: {exc.detail}"
+    # The evaluator already maps each failure to its curated message (SystemOneEvaluator._ERRORS in exc.detail).
     return f"System One could not evaluate the text: {exc.detail}"
 
 
@@ -101,18 +95,21 @@ class IACTSystemOneTool(BaseTool):
     attached_files: Optional[List[Dict]] = None
 
     @classmethod
-    async def create(cls, agent, user_context: Optional[Dict] = None, attached_files: Optional[List[Dict]] = None,
-                     user_message: Optional[str] = None) -> "IACTSystemOneTool":
+    async def create(cls, agent, user_context: Optional[Dict] = None,
+                     attached_files: Optional[List[Dict]] = None) -> "IACTSystemOneTool":
         try:
             snapshot = SystemOneEvaluator.snapshot(agent)
+        except ServiceRetiredError:
+            raise    # like any agent used as a tool: a retired service fails the turn (409 SERVICE_RETIRED)
         except HTTPException as exc:
-            # Its service was deleted. The calling agent still gets the tool so that its LLM can tell the user
-            # why it cannot be used, instead of the whole turn failing while the tools are built.
+            # Its service was deleted. The calling agent still gets the tool so that its LLM can tell
+            # the user why it cannot be used, instead of the whole turn failing while the tools are built.
+            reason = str(exc.detail)
             return cls(
                 name=sanitize_identifier(agent.name),
-                description=f"{agent.description or agent.name} (currently unavailable: {exc.detail})",
+                description=f"{agent.description or agent.name} (currently unavailable: {reason})",
                 agent_id=agent.agent_id,
-                unavailable=str(exc.detail),
+                unavailable=reason,
                 user_context=user_context,
             )
         return cls(

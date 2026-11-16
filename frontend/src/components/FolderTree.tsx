@@ -23,6 +23,8 @@ interface FolderTreeProps {
   onFolderDelete?: (folderId: number, folderName: string) => void;
   onFolderMove?: (folderId: number, currentParentId?: number) => void;
   canEdit?: boolean;
+  /** Increment to make the tree reload its folders (e.g. after create/rename/delete/move). */
+  refreshToken?: number;
 }
 
 interface FolderNodeProps {
@@ -212,7 +214,8 @@ const FolderTree: React.FC<FolderTreeProps> = ({
   onFolderRename,
   onFolderDelete,
   onFolderMove,
-  canEdit = true
+  canEdit = true,
+  refreshToken = 0
 }) => {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -222,7 +225,6 @@ const FolderTree: React.FC<FolderTreeProps> = ({
 
   const loadFolders = async () => {
     try {
-      setLoading(true);
       const response = await apiService.getFolderTree(appId, repositoryId);
       console.log('FolderTree API response:', response);
       setFolders(response.folders || []);
@@ -235,7 +237,7 @@ const FolderTree: React.FC<FolderTreeProps> = ({
 
   useEffect(() => {
     void loadFolders();
-  }, [appId, repositoryId]);
+  }, [appId, repositoryId, refreshToken]);
 
   const toggleExpand = (folderId: number) => {
     setExpandedFolders(prev => {

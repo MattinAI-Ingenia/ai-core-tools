@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 # value a tenant just typed into this form" at this layer — the safe default
 # blocks both. Self-hosted deployments whose OpenSandbox server genuinely
 # lives on an internal/private address (e.g. the ``opensandbox:8080`` Docker
-# service name from docker/.env.example) must opt in explicitly. This only
+# service name from .env.example) must opt in explicitly. This only
 # gates the diagnostic "Test Connection" probe; actual sandbox usage via
 # ``tools.sandbox.factory.resolve_provider`` is unaffected.
 _ALLOW_PRIVATE_TEST_TARGETS_ENV = "SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE"

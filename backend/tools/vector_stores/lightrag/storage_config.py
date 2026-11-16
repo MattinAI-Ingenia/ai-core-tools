@@ -64,7 +64,7 @@ def _require(name: str, value: Optional[str]) -> str:
     if not value:
         raise RuntimeError(
             f"LIGHTRAG_ENABLED=true but {name} is not configured. "
-            "Set it in the environment (see docker/.env.example)."
+            "Set it in the environment (see .env.example)."
         )
     return value
 

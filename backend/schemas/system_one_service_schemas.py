@@ -3,8 +3,15 @@ from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
+from schemas.service_lifecycle_schemas import ServiceLifecycleFieldsMixin, ServiceLifecycleStatusLiteral
+
 
 Provider = Literal["system_one", "openai_decisions"]
+
+
+def _strip_credentials(v):
+    # Trailing whitespace/newlines sneak in when pasting; they break the Authorization header.
+    return v.strip() if isinstance(v, str) else v
 
 
 class SystemOneServiceListItemSchema(BaseModel):
@@ -17,6 +24,9 @@ class SystemOneServiceListItemSchema(BaseModel):
     max_concurrency: int = 1
     agent_count: int = 0          # agents that would be left without a service if this one were deleted
     created_at: Optional[datetime] = None
+    end_of_service_at: Optional[datetime] = None
+    deprecation_notice: Optional[str] = None
+    lifecycle_status: ServiceLifecycleStatusLiteral = "active"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -31,6 +41,9 @@ class SystemOneServiceDetailSchema(BaseModel):
     model: str = ""
     max_concurrency: int = 1
     created_at: Optional[datetime] = None
+    end_of_service_at: Optional[datetime] = None
+    deprecation_notice: Optional[str] = None
+    lifecycle_status: ServiceLifecycleStatusLiteral = "active"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -43,13 +56,10 @@ class SystemOneConnectionConfigSchema(BaseModel):
     # Known from the Test step on: lets a server with no model listing be checked with a real call.
     model: Optional[Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]] = None
 
-    @field_validator("api_key", mode="before")
-    @classmethod
-    def _strip_credentials(cls, v):
-        return v.strip() if isinstance(v, str) else v
+    _strip_credentials = field_validator("api_key", mode="before")(_strip_credentials)
 
 
-class CreateUpdateSystemOneServiceSchema(BaseModel):
+class CreateUpdateSystemOneServiceSchema(ServiceLifecycleFieldsMixin):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
     endpoint: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
     api_key: Optional[str] = ""    # optional Bearer token; "****…" = keep the stored one, "" = no token
@@ -57,8 +67,4 @@ class CreateUpdateSystemOneServiceSchema(BaseModel):
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
     max_concurrency: Optional[int] = Field(default=None, ge=1)
 
-    @field_validator("api_key", mode="before")
-    @classmethod
-    def _strip_credentials(cls, v):
-        # Trailing whitespace/newlines sneak in when pasting; they break the Authorization header.
-        return v.strip() if isinstance(v, str) else v
+    _strip_credentials = field_validator("api_key", mode="before")(_strip_credentials)

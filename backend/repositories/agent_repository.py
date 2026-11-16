@@ -1,5 +1,6 @@
 from typing import Optional, List, Dict, Any
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, selectin_polymorphic, selectinload
 from models.agent import Agent, AgentMCP, AgentTool, AgentSkill
 from models.conversation import Conversation
 from models.middleware import AgentMiddleware
@@ -80,10 +81,20 @@ class AgentRepository:
             return agent
     
     @staticmethod
-    def get_by_app_id(db: Session, app_id: int) -> List[Agent]:
-        """Get all agents for a specific app"""
-        return db.query(Agent).filter(Agent.app_id == app_id).order_by(Agent.create_date.desc()).all()
-    
+    def get_by_app_id(db: Session, app_id: int, with_subclasses: bool = False) -> List[Agent]:
+        """Get all agents for a specific app.
+
+        ``with_subclasses`` batch-loads the OCR / System One rows and the System One service (no N+1) for
+        callers that read them; the others only need the base columns.
+        """
+        query = db.query(Agent)
+        if with_subclasses:
+            query = query.options(
+                selectin_polymorphic(Agent, [OCRAgent, SystemOneAgent]),
+                selectinload(SystemOneAgent.system_one_service),
+            )
+        return query.filter(Agent.app_id == app_id).order_by(Agent.create_date.desc()).all()
+
     @staticmethod
     def get_tool_agents_by_app_id(db: Session, app_id: int, exclude_agent_id: Optional[int] = None) -> List[Agent]:
         """Get agents that are marked as tools for a specific app"""
@@ -130,7 +141,7 @@ class AgentRepository:
                 agent = AgentRepository.get_ocr_agent_by_id(db, agent_id)
             if not agent:
                 agent = AgentRepository.get_system_one_agent_by_id(db, agent_id)
-
+            
             if agent:
                 return AgentRepository._delete_agent_with_associations(db, agent)
             return False
@@ -357,6 +368,7 @@ class AgentRepository:
                 "is_system": s.app_id is None,
                 "end_of_service_at": to_utc(s.end_of_service_at),
                 "deprecation_notice": s.deprecation_notice,
+                "is_system": s.app_id is None,
             }
             for s in ai_services
         ]
@@ -412,7 +424,12 @@ class AgentRepository:
 
         # System One services (per app only)
         system_one_services_list = [
-            {"service_id": s.service_id, "name": s.name}
+            {
+                "service_id": s.service_id,
+                "name": s.name,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
+            }
             for s in SystemOneServiceRepository.get_by_app_id(db, app_id)
         ]
 

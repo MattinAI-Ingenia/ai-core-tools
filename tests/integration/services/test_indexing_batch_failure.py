@@ -182,3 +182,23 @@ class TestBatchFailureLeavesResourcesInError:
             "crash must not stay 'pending' forever either"
         )
         assert "429 insufficient_quota" in never_fed_reloaded.error_message
+
+
+class TestAutomaticResume:
+    """A finished batch asks for ONE automatic "Resume indexing"; a resume never chains."""
+
+    def _run(self, committed_lightrag_repo, **kwargs):
+        session, repo, silo = committed_lightrag_repo
+        r1 = _add(session, repo, name="one.pdf")
+        with patch.object(SiloService, "process_enqueued_batch", side_effect=RuntimeError("boom")), \
+             patch.object(ResourceService, "_auto_resume_once") as auto:
+            ResourceService._index_resources_background([r1], silo_id=silo.silo_id, **kwargs)
+        return auto, repo, r1
+
+    def test_a_fresh_batch_requests_one_automatic_resume(self, committed_lightrag_repo, no_op_indexing_plumbing):
+        auto, repo, r1 = self._run(committed_lightrag_repo)
+        auto.assert_called_once_with(repo.repository_id, [r1.resource_id])
+
+    def test_a_resumed_batch_does_not_chain_another(self, committed_lightrag_repo, no_op_indexing_plumbing):
+        auto, _, _ = self._run(committed_lightrag_repo, resumed=True)
+        auto.assert_not_called()

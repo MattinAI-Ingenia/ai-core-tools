@@ -58,6 +58,47 @@ LIGHTRAG_UNSUPPORTED_DELETE_DETAIL = (
     "Delete the file from its repository, use 'Delete all files', or delete the silo."
 )
 
+# LightRAG extraction output tokens per call (min, avg, max) for models measured on
+# real indexing (indexing_metric, provider-reported). Others use the generic default.
+# ponytail: hand-kept table; derive from indexing_metric history if it grows.
+# gpt-6-luna, reasoning_effort=none, EXTRACTION calls only (merge is added below):
+# min = 799/chunk (silo 60, 2 PDF, short answers); avg = 1,130 (silo 61, 33 PDF: 1,313 per
+# chunk measured minus the merge share); max = 1,300 (dense pages, inferred).
+_MEASURED_OUT_PER_CALL = {
+    'gpt-6-luna': (800, 1130, 1300),
+}
+
+# Merge (description summary) calls per chunk grow with the corpus: cumulative ratio
+# measured on silo 59 (136 PDF, 6,757 chunks, 10-11). It varies with how much documents
+# repeat each other (33-PDF runs: 0.56-0.68 at 1,600 chunks vs 0.94 here), so this leans
+# high. Flat past 6,500 chunks: not measured.
+_MERGE_PER_CHUNK = ((0, 0.0), (500, 0.72), (1000, 0.93), (2000, 0.96), (3000, 1.01),
+                    (5000, 1.08), (6500, 1.11))
+# (input, output) tokens of one merge call, from silo 61 (gpt-6-luna, 1,089 merges).
+_MERGE_CALL_TOKENS = (800, 270)
+# Embedding: ~26 vectors per chunk (entities + relations + the chunk), each as long as the
+# merged description it holds, which grows with the corpus: (chunks, tokens per vector)
+# from silos 60 (27), 57/61 (79-94) and 59 (166).
+_VECTORS_PER_CHUNK = 26
+_TOKENS_PER_VECTOR = ((21, 27), (1600, 85), (6757, 166))
+
+
+def _interp(points, x: float) -> float:
+    """Piecewise-linear value of ``points`` ((x, y) pairs) at ``x``, flat outside the ends."""
+    if x <= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return points[-1][1]
+
+
+# Per-model (optimistic, pessimistic) tok/s of ONE hosted-API call (prompt +
+# completion over latency). gpt-6-luna: 30 Domusa chunks, concurrency 6, 2026-11-09.
+_MEASURED_CLOUD_TOK_PER_S = {
+    'gpt-6-luna': (340.0, 215.0),
+}
+
 # Per-chunk marker stamping each indexing run; lets reindex delete only stale chunks.
 INDEX_BATCH_FIELD = 'index_batch'
 
@@ -201,7 +242,7 @@ def _llm_throughput_bounds(model_name: str, self_hosted: bool) -> Tuple[float, f
     """
     opt, pess = _LLM_THROUGHPUT_BASE
     if not self_hosted:
-        return opt * 3, pess * 3
+        return _MEASURED_CLOUD_TOK_PER_S.get(model_name, (opt * 3, pess * 3))
     params_b = _model_params_b(model_name)
     if params_b is not None and params_b < _SMALL_MODEL_PARAMS_B:
         return opt * 2, pess * 2
@@ -3555,34 +3596,16 @@ class SiloService:
         # pass. So calls/chunk = 1 + max_gleaning (not 2 + max_gleaning).
         extraction_calls = num_chunks * (1 + max_gleaning)
         embedding_calls = num_chunks
-        # Fixed prompt overhead per LightRAG extraction call (measured against
-        # lightrag.prompt.PROMPTS): system 1,305 + few-shot examples 2,244 +
-        # user wrapper 250 ≈ 3,800 tokens on top of the chunk content every call.
-        _prompt_overhead_tokens = 3800
-        # Entity+relationship JSON output is large and varies with entity density.
-        _out_per_call_avg = 2000
-        _out_per_call_min = 1000
-        _out_per_call_max = 3000
-
-        # Average real chunk size in tokens (last chunk of a doc is smaller than
-        # chunk_token_size), used for the per-call content portion.
-        avg_chunk_tokens = (total_content_tokens / num_chunks) if num_chunks else chunk_token_size
-
-        estimated_llm_calls = extraction_calls
-        estimated_input_tokens = int(extraction_calls * (avg_chunk_tokens + _prompt_overhead_tokens))
-        estimated_output_tokens = int(extraction_calls * _out_per_call_avg)
-
-        # Embedding tokens = chunk embeddings (≈ all content) + the entity and
-        # relationship description embeddings LightRAG writes to the vector store.
-        # Those descriptions ARE the extraction output, so the graph contribution
-        # tracks output (entity density), not raw content. A flat content-based
-        # factor underestimated dense documents by 2-3x.
-        estimated_embedding_tokens = int(total_content_tokens + estimated_output_tokens)
-
-        estimated_cost_min = None
-        estimated_cost_max = None
-
-        warnings: List[str] = []
+        # Fixed prompt overhead per LightRAG extraction call on top of the chunk
+        # content. JSON extraction is forced in code (lightrag.md §9.1.2): its prompt
+        # (entity_extraction_json_system_prompt 1,144 + examples 112 + user 205,
+        # o200k) plus entity-type/language guidance ≈ 1,700. Measured with
+        # gpt-6-luna on 14 chunks: 1,725/call. (The old 3,800 was the delimited
+        # prompt with its long few-shot examples, no longer sent.)
+        _prompt_overhead_tokens = 1700
+        # Entity+relationship JSON output varies with entity density and, for
+        # reasoning models, includes the reasoning tokens. Generic default, plus
+        # per-model values measured on real indexing (indexing_metric).
 
         def _service_model_name(service):
             if service is None:
@@ -3598,6 +3621,36 @@ class SiloService:
         # fall back to legacy indexing_service for older silos.
         extract_service = getattr(silo, 'extract_service', None) or silo.indexing_service
         model_name = _service_model_name(extract_service)
+        _out_per_call_min, _out_per_call_avg, _out_per_call_max = _MEASURED_OUT_PER_CALL.get(
+            model_name, (1000, 2000, 3000)
+        )
+
+        # Average real chunk size in tokens (last chunk of a doc is smaller than
+        # chunk_token_size), used for the per-call content portion.
+        avg_chunk_tokens = (total_content_tokens / num_chunks) if num_chunks else chunk_token_size
+
+        merge_calls = int(num_chunks * _interp(_MERGE_PER_CHUNK, num_chunks))
+        merge_out_tokens = merge_calls * _MERGE_CALL_TOKENS[1]
+        estimated_llm_calls = extraction_calls + merge_calls
+        estimated_input_tokens = int(
+            extraction_calls * (avg_chunk_tokens + _prompt_overhead_tokens)
+            + merge_calls * _MERGE_CALL_TOKENS[0]
+        )
+        estimated_output_tokens = int(extraction_calls * _out_per_call_avg + merge_out_tokens)
+
+        # Embedding tokens = the chunks themselves + the entity/relationship vectors
+        # (see _TOKENS_PER_VECTOR: their length grows with the corpus because merged
+        # descriptions get longer, which the old "70% of the output" rule missed by ~2x).
+        estimated_embedding_tokens = int(
+            total_content_tokens
+            + num_chunks * _VECTORS_PER_CHUNK * _interp(_TOKENS_PER_VECTOR, num_chunks)
+        )
+
+        estimated_cost_min = None
+        estimated_cost_max = None
+
+        warnings: List[str] = []
+
         embedding_model_name = (
             getattr(silo.embedding_service, 'description', None)
             or getattr(silo.embedding_service, 'model_name', None)
@@ -3636,11 +3689,11 @@ class SiloService:
             llm_input_cost = estimated_input_tokens * in_price / 1_000_000
             llm_cost_min = (
                 llm_input_cost
-                + (extraction_calls * _out_per_call_min) * out_price / 1_000_000
+                + (extraction_calls * _out_per_call_min + merge_out_tokens) * out_price / 1_000_000
             )
             llm_cost_max = (
                 llm_input_cost
-                + (extraction_calls * _out_per_call_max) * out_price / 1_000_000
+                + (extraction_calls * _out_per_call_max + merge_out_tokens) * out_price / 1_000_000
             )
         else:
             warnings.append(

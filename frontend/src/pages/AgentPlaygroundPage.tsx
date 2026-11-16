@@ -25,6 +25,7 @@ interface Agent {
   max_state_chars?: number | null;
   summarization_service_id?: number | null;
   lifecycle_warnings?: ServiceLifecycleWarning[];
+  system_one_service_id?: number | null;
   silo?: {
     silo_id: number;
     name: string;

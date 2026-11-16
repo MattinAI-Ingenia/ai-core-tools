@@ -29,6 +29,10 @@ Frontend y backend viajan por el mismo origen → **sin CORS**, sin necesidad de
 
 ## Dos formas de obtener las imágenes
 
+> En la rama `lightrag` solo vale la **Opción B (build en local)**. Las imágenes
+> de GHCR se construyen desde `develop`, que no incluye LightRAG, y no hay
+> ningún tag `lightrag` publicado.
+
 | | Opción A — Pull desde GHCR | Opción B — Build en local |
 |---|---|---|
 | Cuándo | Cliente, demos, CI de producción | Dev local con cambios de código |
@@ -46,18 +50,20 @@ El tag por defecto es `develop` (último build de la rama `develop`). En servido
 
 ## Uso
 
-### A. Despliegue tirando de GHCR (recomendado para cliente)
+### A. Despliegue tirando de GHCR (recomendado para cliente; no vale en la rama `lightrag`)
 
 ```bash
-cd docker
-cp .env.example .env
+cp .env.example .env        # desde la RAÍZ del repo: aquí no hay .env.example
+ln -s ../.env docker/.env   # Compose lee docker/.env: es un enlace, no una copia
 # Editar .env:
 #   AICT_PUBLIC_URL=http://<ip-o-dominio>
 #   DATABASE_PASSWORD=<robusta>   # [REQUERIDO] el compose falla si está vacío
 #   SECRET_KEY=<hex aleatorio>    # [REQUERIDO] el compose falla si está vacío
+#   NEO4J_PASSWORD=<robusta>      # [REQUERIDO] distinta de "neo4j", que Neo4j rechaza
 #   AICT_OMNIADMINS=<emails del cliente>
 #   OPENAI_API_KEY=<...>
 #   IMAGE_TAG=sha-<commit>   # o "develop" para el último
+cd docker
 docker compose pull backend frontend
 docker compose up -d
 ```
@@ -77,15 +83,20 @@ Pide al administrador de red del cliente que abra el **80/tcp** hacia el servido
 > `docker login ghcr.io -u <usuario-github>` usando un Personal Access Token
 > con scope `read:packages`.
 
-### B. Dev local con cambios de código
+### B. Build en local (dev, y la única opción en la rama `lightrag`)
 
 ```bash
+cp .env.example .env        # desde la RAÍZ del repo: aquí no hay .env.example
+ln -s ../.env docker/.env   # Compose lee docker/.env: es un enlace, no una copia
+# Editar .env: DATABASE_PASSWORD, SECRET_KEY y NEO4J_PASSWORD son [REQUERIDOS]
+# (el compose falla si están vacíos; Neo4j rechaza la contraseña "neo4j");
+# además AICT_OMNIADMINS (tu email, para el primer login)
 cd docker
-cp .env.example .env
-# Editar .env: DATABASE_PASSWORD y SECRET_KEY son [REQUERIDOS] (el compose falla
-# si están vacíos); además OPENAI_API_KEY y AICT_OMNIADMINS
 docker compose up -d --build
 ```
+
+Sin enlaces simbólicos (Windows sin permisos), en vez del `ln`:
+`docker compose --env-file ../.env up -d --build` (y lo mismo en cada comando).
 
 `--build` reconstruye las imágenes desde los Dockerfiles y las etiqueta como
 `ghcr.io/lksnext-ai-lab/mattinai-backend:develop` (queda local, no se publica).
@@ -416,7 +427,7 @@ Cuando el cliente tenga dominio interno y abra el 443:
    despliegue detrás de otro proxy/balanceador o con TLS):
    - **Proxies de confianza**: si este Caddy queda él mismo detrás de otro
      proxy/LB (no el caso de arriba, donde Caddy termina el TLS), fija
-     `CADDY_TRUSTED_PROXIES` a la CIDR de ese LB (ver `docker/.env.example`;
+     `CADDY_TRUSTED_PROXIES` a la CIDR de ese LB (ver `.env.example`;
      si esa CIDR es pública, añádela también a `UVICORN_FORWARDED_ALLOW_IPS`,
      el LB debe sobrescribir `X-Forwarded-For` y nunca uses `0.0.0.0/0`)
      para que Caddy confíe en SU `X-Forwarded-For` en vez de sobrescribirlo
@@ -436,7 +447,7 @@ Cuando el cliente tenga dominio interno y abra el 443:
      IP real (y entonces aplica el punto anterior sobre
      `CADDY_TRUSTED_PROXIES`).
    - **URL pública**: con TLS, `A2A_PUBLIC_BASE_URL` (o, si está vacía,
-     `FRONTEND_URL`) debe ser la URL `https://` pública real
+     `AICT_PUBLIC_URL`) debe ser la URL `https://` pública real
      (`https://mattinai.cliente.local`), no `http://localhost` — de lo
      contrario las tarjetas A2A y las URLs de fichero firmadas apuntan al
      esquema/host equivocado.
@@ -444,7 +455,7 @@ Cuando el cliente tenga dominio interno y abra el 443:
      (backend/Dockerfile, RB-15), sube también `stop_grace_period` del
      servicio `backend` en el compose por encima de ese valor (más margen
      para `close_runtime` y el resto del lifespan) — ver el comentario junto
-     a esa variable en `docker/.env.example` y `docker-compose.yaml`.
+     a esa variable en `.env.example` y `docker-compose.yaml`.
 
 ## Utilities aisladas
 

@@ -220,11 +220,22 @@ const RepositoryDetailPage: React.FC = () => {
     folderName?: string;
     parentFolderId?: number;
   }>({});
+  const [folderTreeVersion, setFolderTreeVersion] = useState(0);
   const [newFolderName, setNewFolderName] = useState('');
   const [newParentFolderId, setNewParentFolderId] = useState<number | null>(null);
 
   // Media 
   const [showMediaUploadModal, setShowMediaUploadModal] = useState(false);
+
+  // Only one blocking ingest dialog at a time. Upload Media, the CSV import
+  // stepper and the CSV review each cover the whole page; letting two be open
+  // buries one under the other (the review's confirm modal "disappears"
+  // behind Upload Media) and turns clicks into pass-throughs.
+  const closeIngestDialogs = () => {
+    setShowMediaUploadModal(false);
+    setShowCsvImportModal(false);
+    setShowImportReviewModal(false);
+  };
   const [mediaFiles, setMediaFiles] = useState<File[]>([]);
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [uploadType, setUploadType] = useState<'file' | 'youtube'>('file');
@@ -437,6 +448,7 @@ const RepositoryDetailPage: React.FC = () => {
 
   const resetPendingUploadEstimate = () => {
     setShowEstimateModal(false);
+    setShowEntityTypesModal(false);
     setPendingUploadFiles([]);
     setUploadEstimate(null);
     if (fileInputRef.current) {
@@ -582,6 +594,7 @@ const RepositoryDetailPage: React.FC = () => {
 
       setPendingUploadFiles(selectedFiles);
       setUploadEstimate(estimate);
+      closeIngestDialogs();
       setShowEstimateModal(true);
     } catch (err: any) {
       console.error('Error estimating upload:', err);
@@ -679,6 +692,7 @@ const RepositoryDetailPage: React.FC = () => {
       );
       setShowCreateFolderModal(false);
       setNewFolderName('');
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error creating folder:', err);
@@ -699,6 +713,7 @@ const RepositoryDetailPage: React.FC = () => {
       );
       setShowRenameFolderModal(false);
       setNewFolderName('');
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error renaming folder:', err);
@@ -722,6 +737,7 @@ const RepositoryDetailPage: React.FC = () => {
         setSelectedFolderId(null);
         setSelectedFolderPath('');
       }
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error deleting folder:', err);
@@ -742,6 +758,7 @@ const RepositoryDetailPage: React.FC = () => {
       );
       setShowMoveFolderModal(false);
       setNewParentFolderId(null);
+      setFolderTreeVersion(v => v + 1);
       await loadRepository();
     } catch (err: any) {
       console.error('Error moving folder:', err);
@@ -1060,6 +1077,7 @@ const RepositoryDetailPage: React.FC = () => {
 
               <button
                 onClick={() => {
+                  closeIngestDialogs();
                   setShowMediaUploadModal(true);
                 }}
                 disabled={uploading}
@@ -1069,7 +1087,10 @@ const RepositoryDetailPage: React.FC = () => {
               </button>
 
               <button
-                onClick={() => setShowCsvImportModal(true)}
+                onClick={() => {
+                  closeIngestDialogs();
+                  setShowCsvImportModal(true);
+                }}
                 disabled={uploading || indexingInProgress}
                 title={indexingInProgress ? 'Indexing in progress — please wait' : undefined}
                 className="bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50"
@@ -1130,7 +1151,7 @@ const RepositoryDetailPage: React.FC = () => {
         onImportStarted={(job) => setActiveImportJob(job)}
       />
       {activeImportJob && (
-        <CsvImportBanner job={activeImportJob} onReview={() => setShowImportReviewModal(true)} />
+        <CsvImportBanner job={activeImportJob} onReview={() => { closeIngestDialogs(); setShowImportReviewModal(true); }} />
       )}
       {activeImportJob && (
         <CsvImportReviewModal
@@ -1249,6 +1270,7 @@ const RepositoryDetailPage: React.FC = () => {
             onFolderDelete={handleDeleteFolder}
             onFolderMove={handleMoveFolder}
             canEdit={canEdit}
+            refreshToken={folderTreeVersion}
           />
         </div>
 
@@ -1298,7 +1320,10 @@ const RepositoryDetailPage: React.FC = () => {
                     </button>
 
                     <button
-                      onClick={() => setShowMediaUploadModal(true)}
+                      onClick={() => {
+                        closeIngestDialogs();
+                        setShowMediaUploadModal(true);
+                      }}
                       className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg"
                     >
                       Upload Media
@@ -1561,6 +1586,7 @@ const RepositoryDetailPage: React.FC = () => {
         <EntityTypeInferenceModal
           appId={Number.parseInt(appId!)}
           siloId={repository.silo_id}
+          files={pendingUploadFiles}
           onConfirm={applyInferredEntityTypes}
           onCancel={() => setShowEntityTypesModal(false)}
         />

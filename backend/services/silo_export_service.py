@@ -4,6 +4,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from models.silo import Silo
 from schemas.export_schemas import (
+    LIGHTRAG_SILO_FIELDS,
     ExportSiloSchema,
     SiloExportFileSchema,
 )
@@ -83,6 +84,11 @@ class SiloExportService(BaseExportService):
             metadata_definition_name=metadata_definition_name,
             fixed_metadata=silo.fixed_metadata,
             description=silo.description,
+            # indexing_service is the legacy alias of the extract role
+            extract_service_name=getattr(silo.extract_service or silo.indexing_service, "name", None),
+            keywords_service_name=getattr(silo.keywords_service, "name", None),
+            vlm_service_name=getattr(silo.vlm_service, "name", None),
+            **{field: getattr(silo, field) for field in LIGHTRAG_SILO_FIELDS},
         )
 
         # Optionally bundle dependencies for portability

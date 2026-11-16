@@ -18,14 +18,12 @@ from models.system_one_agent import SystemOneAgent
 from models.system_one_service import SystemOneService
 from schemas.export_schemas import AgentExportFileSchema, ExportSystemOneServiceSchema
 from schemas.import_schemas import ComponentType, ConflictMode, ImportSummarySchema
-from schemas.system_one_schemas import QuestionList, questions_error_message
+from schemas.system_one_schemas import DEFAULT_MAX_STATE_CHARS, MAX_STATE_CHARS_ERROR, MIN_MAX_STATE_CHARS, QuestionList, questions_error_message
 from services.system_one_service_service import max_concurrency_of, provider_of
 from tools import system_one_client
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-_DEFAULT_MAX_STATE_CHARS = 6000
 
 
 def system_one_export_fields(agent: Any) -> Dict[str, Any]:
@@ -51,6 +49,8 @@ def export_system_one_service(service: SystemOneService) -> ExportSystemOneServi
         model_name=service.description or "",
         max_concurrency=max_concurrency_of(service),
         provider=provider_of(service),
+        end_of_service_at=service.end_of_service_at,
+        deprecation_notice=service.deprecation_notice,
     )
 
 
@@ -77,6 +77,8 @@ def import_system_one_service(session: Session, item: ExportSystemOneServiceSche
         description=item.model_name or None,
         extra_config=json.dumps({"max_concurrency": max(1, item.max_concurrency or 1), "provider": item.provider}),
         create_date=datetime.now(),
+        end_of_service_at=item.end_of_service_at,
+        deprecation_notice=item.deprecation_notice,
     )
     session.add(service)
     session.flush()
@@ -151,7 +153,9 @@ def import_system_one_agent(
         name = new_name
 
     stored_questions = [q.model_dump(mode="json", exclude_none=True) for q in questions]
-    max_chars = data.max_state_chars or _DEFAULT_MAX_STATE_CHARS
+    max_chars = data.max_state_chars or DEFAULT_MAX_STATE_CHARS
+    if max_chars < MIN_MAX_STATE_CHARS:      # same floor as the agent form
+        raise ValueError(MAX_STATE_CHARS_ERROR)
 
     if existing is not None and conflict_mode == ConflictMode.OVERRIDE:
         existing.description = data.description

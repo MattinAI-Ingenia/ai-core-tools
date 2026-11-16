@@ -16,7 +16,7 @@ from services.a2a_server.lifecycle_service import schedule_owner_purge
 from services.service_lifecycle_service import ServiceLifecycleService
 from utils import a2a_config
 from repositories.system_one_service_repository import SystemOneServiceRepository
-from schemas.system_one_schemas import QuestionList, questions_error_message
+from schemas.system_one_schemas import DEFAULT_MAX_STATE_CHARS, MAX_STATE_CHARS_ERROR, MIN_MAX_STATE_CHARS, QuestionList, questions_error_message
 from services.system_one_state import MIN_TEXT_ROOM_CHARS, question_overhead_chars
 from utils.logger import get_logger
 from types import SimpleNamespace
@@ -254,7 +254,7 @@ class AgentService:
 
     def get_agents_list(self, db: Session, app_id: int) -> List[AgentListItemSchema]:
         """Get list of agents with AI service details for display"""
-        agents = AgentRepository.get_by_app_id(db, app_id)
+        agents = AgentRepository.get_by_app_id(db, app_id, with_subclasses=True)
         
         # Get AI services for this app
         ai_services_dict = AgentRepository.get_ai_services_dict_by_app_id(db, app_id)
@@ -281,6 +281,7 @@ class AgentService:
                 type=agent.type or "agent",
                 is_tool=agent.is_tool or False,
                 created_at=agent.create_date,
+                last_used_date=getattr(agent, 'last_used_date', None),
                 request_count=agent.request_count or 0,
                 service_id=getattr(agent, 'service_id', None),
                 ai_service=ai_service_info,
@@ -330,6 +331,11 @@ class AgentService:
             {**option, **ServiceLifecycleService.option_fields(
                 SimpleNamespace(**option), lifecycle_ctx.warning_days)}
             for option in form_data['sandbox_services']
+        ]
+        system_one_service_options = [
+            {**option, **ServiceLifecycleService.option_fields(
+                SimpleNamespace(**option), lifecycle_ctx.warning_days)}
+            for option in form_data.get('system_one_services', [])
         ]
         lifecycle_warnings = (
             ServiceLifecycleService.warnings_for_agent(lifecycle_ctx.agent_refs.get(agent_id), lifecycle_ctx)
@@ -399,6 +405,7 @@ class AgentService:
             lightrag_query_mode=lightrag_query_mode,
             middleware_ids=associations.get('middleware_ids', []),
             created_at=agent.create_date,
+            last_used_date=getattr(agent, 'last_used_date', None),
             request_count=getattr(agent, 'request_count', 0) or 0,
             # OCR-specific fields
             vision_service_id=getattr(agent, 'vision_service_id', None),
@@ -422,12 +429,12 @@ class AgentService:
             # Form data
             ai_services=ai_service_options,
             sandbox_services=sandbox_service_options,
-            system_one_services=form_data.get('system_one_services', []),
-            silos=form_data.get('silos', []),
-            output_parsers=form_data.get('output_parsers', []),
-            tools=form_data.get('tools', []),
-            mcp_configs=form_data.get('mcp_configs', []),
-            skills=form_data.get('skills', []),
+            system_one_services=system_one_service_options,
+            silos=form_data['silos'],
+            output_parsers=form_data['output_parsers'],
+            tools=form_data['tools'],
+            mcp_configs=form_data['mcp_configs'],
+            skills=form_data['skills'],
             middlewares=form_data.get('middlewares', []),
             # Marketplace
             marketplace_visibility=(
@@ -732,7 +739,13 @@ class AgentService:
             raise ValueError("An agent's type cannot be changed once it is created")
 
     def _apply_system_one_fields(self, db: Session, agent: SystemOneAgent, data: dict) -> None:
-        """System One fields (service, questions, summarization LLM, size) and neutral values for the rest."""
+        """System One fields (service, questions, summarization LLM, size) and neutral values for the rest.
+
+        A retired System One service or summarization LLM cannot be newly assigned: keeping the one the agent
+        already has is allowed (``ensure_assignable``). The current values are read before they are overwritten.
+        """
+        from utils.service_lifecycle import ensure_assignable, SERVICE_KIND_AI, SERVICE_KIND_SYSTEM_ONE
+
         app_id = data['app_id']
         creating = agent.agent_id is None
         if data.get('a2a_enabled'):
@@ -741,10 +754,15 @@ class AgentService:
 
         service_id = data.get('system_one_service_id')
         if service_id is not None:
-            if SystemOneServiceRepository.get_by_id_and_app_id(db, service_id, app_id) is None:
+            service = SystemOneServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
+            if service is None:
                 raise ValueError(
                     f"System One service {service_id} does not exist or does not belong to this app"
                 )
+            ensure_assignable(
+                service, None if creating else agent.system_one_service_id,
+                'system_one_service_id', SERVICE_KIND_SYSTEM_ONE,
+            )
             agent.system_one_service_id = service_id
         elif creating:
             raise ValueError("system_one_service_id is required for System One agents")
@@ -763,21 +781,29 @@ class AgentService:
             summarization_id = data['summarization_service_id'] or None
             if summarization_id is not None:
                 # App-level services only: a platform-level LLM would run unmetered (the chat path meters it).
-                own = {s.service_id for s in AgentRepository.get_ai_services_by_app_id(db, app_id) if s.app_id == app_id}
-                if summarization_id not in own:
+                own = {
+                    s.service_id: s for s in AgentRepository.get_ai_services_by_app_id(db, app_id)
+                    if s.app_id == app_id
+                }
+                summarization = own.get(summarization_id)
+                if summarization is None:
                     raise ValueError(
                         f"summarization_service_id {summarization_id} does not exist or does not belong to this app"
                     )
+                ensure_assignable(
+                    summarization, None if creating else agent.summarization_service_id,
+                    'summarization_service_id', SERVICE_KIND_AI,
+                )
             agent.summarization_service_id = summarization_id
 
         max_chars = data.get('max_state_chars')
         if max_chars is not None:
             # No upper limit of ours: the server enforces its own prompt budget (and a text over it is shrunk and retried).
-            if max_chars < 500:
-                raise ValueError("max_state_chars must be at least 500")
+            if max_chars < MIN_MAX_STATE_CHARS:
+                raise ValueError(MAX_STATE_CHARS_ERROR)
             agent.max_state_chars = max_chars
         elif creating:
-            agent.max_state_chars = 6000
+            agent.max_state_chars = DEFAULT_MAX_STATE_CHARS
 
         # The server counts the text PLUS one question in every prompt, and max_state_chars is that per-prompt budget:
         # a question that eats it leaves nothing to evaluate (the length of a question is judged here, not per field).

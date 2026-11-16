@@ -215,15 +215,36 @@ export function CsvImportReviewModal({
   ];
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Review CSV import" size="xlarge">
-      <DataTable
-        data={visibleRows}
-        columns={columns}
-        keyExtractor={(row) => row.id}
-      />
+    <>
+      <Modal isOpen={isOpen} onClose={onClose} title="Review CSV import" size="xlarge">
+        <DataTable
+          data={visibleRows}
+          columns={columns}
+          keyExtractor={(row) => row.id}
+        />
+        <div className="flex justify-end gap-3 mt-4">
+          <button
+            type="button"
+            onClick={handleDiscardUnselected}
+            className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" /> Discard unselected
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirmClick}
+            disabled={estimating || selected.size === 0 || !!(ingestion.progress && !ingestion.isComplete)}
+            className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 disabled:hover:bg-green-600 transition-colors"
+          >
+            {estimating
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Loading…</>
+              : <><UploadCloud className="w-4 h-4" /> Ingest selected</>}
+          </button>
+        </div>
+      </Modal>
       <CostEstimateModal
         isOpen={!!costEstimate}
-        onClose={() => setCostEstimate(null)}
+        onClose={() => { setCostEstimate(null); setShowEntityTypesModal(false); }}
         onConfirm={doConfirm}
         confirming={confirming}
         estimate={costEstimate}
@@ -250,25 +271,6 @@ export function CsvImportReviewModal({
           onCancel={() => setShowEntityTypesModal(false)}
         />
       )}
-      <div className="flex justify-end gap-3 mt-4">
-        <button
-          type="button"
-          onClick={handleDiscardUnselected}
-          className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-colors"
-        >
-          <Trash2 className="w-4 h-4" /> Discard unselected
-        </button>
-        <button
-          type="button"
-          onClick={handleConfirmClick}
-          disabled={estimating || selected.size === 0 || !!(ingestion.progress && !ingestion.isComplete)}
-          className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 disabled:hover:bg-green-600 transition-colors"
-        >
-          {estimating
-            ? <><Loader2 className="w-4 h-4 animate-spin" /> Loading…</>
-            : <><UploadCloud className="w-4 h-4" /> Ingest selected</>}
-        </button>
-      </div>
-    </Modal>
+    </>
   );
 }

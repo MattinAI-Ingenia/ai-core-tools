@@ -23,6 +23,7 @@ module can be imported even when ``lightrag-hku`` is not installed or when
 from __future__ import annotations
 
 import contextvars
+import functools
 import logging
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, List, Optional
@@ -148,6 +149,28 @@ _EXTRACTION_JSON_SCHEMA: dict[str, Any] = {
 # "json_schema"}``. Anthropic / Mistral / Google use different mechanisms, so
 # they keep prompt-only JSON instead of erroring on an unknown parameter.
 _GUIDED_JSON_PROVIDERS = frozenset({"Custom", "OpenAI", "Azure", "OpenRouter"})
+
+# vLLM-served Qwen3 models emit reasoning tokens unless asked not to; the
+# flag travels in the OpenAI ``extra_body`` pass-through.
+_NO_THINKING_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _no_reasoning_kwargs(ai_service: Any) -> dict[str, Any]:
+    """Per-call kwargs that switch reasoning off for *ai_service*, or ``{}``.
+
+    Each ChatOpenAI-backed provider spells it differently: vLLM/OpenRouter take
+    the chat-template flag, OpenAI itself takes ``reasoning_effort`` (``reasoning``
+    on the Responses API, which is what an OpenAI service without endpoint uses).
+    Other clients get nothing: ``extra_body`` is an OpenAI SDK pass-through.
+    """
+    provider = getattr(ai_service, "provider", None)
+    if provider in ("Custom", "OpenRouter"):
+        return {"extra_body": _NO_THINKING_EXTRA_BODY}
+    if provider == "OpenAI":
+        if getattr(ai_service, "endpoint", None):
+            return {"reasoning_effort": "none"}
+        return {"reasoning": {"effort": "none"}}
+    return {}
 
 def _derive_json_extraction_marker() -> Optional[str]:
     """Return a sentence that appears **only** in LightRAG's JSON extraction prompt.
@@ -396,6 +419,14 @@ def build_llm_model_func(
     sentence, so the server constrains decoding to the schema. It is the
     discriminator built by :func:`_resolve_json_marker`; passing ``None`` keeps
     LightRAG's prompt-only JSON, where nothing prevents malformed output.
+
+    Calls through ChatOpenAI-backed providers also ask for reasoning to be off
+    (:func:`_no_reasoning_kwargs`: ``enable_thinking=false`` for vLLM/OpenRouter,
+    ``reasoning_effort=none`` for OpenAI). Reasoning tokens count against
+    ``max_tokens``, and with ``LIGHTRAG_EXTRACT_MAX_TOKENS=8192`` 26% of the
+    silo-55 extractions were cut (billed ~5x output for the same visible JSON).
+    On gpt-6-luna it also cuts output ~40% but extracts ~10-20% less graph. If
+    the server rejects the parameter, it is dropped for the life of this adapter.
     """
     if ai_service is None:
         raise ValueError("ai_service is required to build an LLM adapter")
@@ -410,6 +441,40 @@ def build_llm_model_func(
         if json_marker else None
     )
     is_azure = getattr(ai_service, 'provider', None) == "Azure"
+
+    no_reasoning = _no_reasoning_kwargs(ai_service)
+    # ponytail: per-adapter flag; once a server rejects the kwarg it is dropped for the life of this adapter
+    send_no_thinking = bool(no_reasoning)
+
+    async def _ainvoke(messages: List[dict], invoke_kwargs: dict) -> Any:
+        """Call ``llm.ainvoke``, dropping ``extra_body`` if the server rejects it."""
+        nonlocal send_no_thinking
+        call = functools.partial(
+            llm.ainvoke, messages, config={"metadata": {"lc_source": "lightrag"}}, **invoke_kwargs
+        )
+        if not send_no_thinking:
+            return await call()
+        try:
+            return await call(**no_reasoning)
+        except Exception as exc:
+            # Only a refused request shape (400/422, or a client TypeError) drops
+            # the kwarg. Truncation, timeouts and 5xx say nothing about it: they
+            # take the existing error path unchanged, with no extra call —
+            # disabling it there would bring reasoning back for the whole run.
+            if not (isinstance(exc, TypeError) or getattr(exc, "status_code", None) in (400, 422)):
+                raise
+            rejected = exc  # Python deletes ``exc`` after the except block.
+        retry = await call()
+        send_no_thinking = False
+        logger.warning(
+            "LightRAG LLM %s rejected the no-reasoning parameter %s (%s: %.120s); "
+            "continuing without it",
+            getattr(ai_service, "description", None) or getattr(ai_service, "name", None),
+            list(no_reasoning),
+            type(rejected).__name__,
+            rejected,
+        )
+        return retry
 
     async def llm_model_func(
         prompt: str,
@@ -442,11 +507,7 @@ def build_llm_model_func(
             invoke_kwargs["response_format"] = extraction_response_format
         truncated = False
         try:
-            response = await llm.ainvoke(
-                messages,
-                config={"metadata": {"lc_source": "lightrag"}},
-                **invoke_kwargs,
-            )
+            response = await _ainvoke(messages, invoke_kwargs)
         except Exception as exc:  # noqa: BLE001 - re-raised unless salvageable
             response = _salvage_length_limit(exc)
             if response is None:
