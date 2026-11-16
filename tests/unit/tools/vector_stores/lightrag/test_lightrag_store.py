@@ -484,7 +484,7 @@ def test_cleanup_neo4j_runs_the_batched_label_query_and_consumes_it(store, monke
     with patch("neo4j.GraphDatabase.driver", return_value=driver):
         store._cleanup_neo4j("silo_1")
 
-    query = run.call_args.args[0]
+    query = run.call_args_list[0].args[0]  # the batched delete; SHOW/DROP INDEX calls follow it
     text = query.text
     assert text.endswith("IN TRANSACTIONS OF 5000 ROWS") and "`silo_1`" in text
     assert "CALL { WITH n DETACH DELETE n }" in text
