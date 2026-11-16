@@ -437,6 +437,7 @@ class TestLightRagDeleteResource:
         repo, res, path, silo = lightrag_resource
         rid = res.resource_id
         store = MagicMock()
+        store.has_legacy_documents.return_value = False
         store.delete_resource_document.return_value = "success"
         with patch("services.silo_service._get_vector_store", return_value=store):
             resp = client.delete(

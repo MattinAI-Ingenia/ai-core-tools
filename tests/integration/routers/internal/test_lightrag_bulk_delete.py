@@ -6,10 +6,19 @@ from unittest.mock import patch
 
 import pytest
 
+import services.resource_service as resource_service_module
 from models.folder import Folder
 from models.repository import Repository
 from models.resource import Resource
 from tests.integration.routers.internal.test_lightrag_resource_delete import _make_silo, _row_exists
+
+
+@pytest.fixture(autouse=True)
+def _resource_service_caplog(caplog):
+    """The project logger does not propagate to root, so attach caplog's handler directly."""
+    resource_service_module.logger.addHandler(caplog.handler)
+    yield
+    resource_service_module.logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture(autouse=True)

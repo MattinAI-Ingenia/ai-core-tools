@@ -30,6 +30,14 @@ from tools.vector_stores.lightrag_store import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _store_caplog(caplog):
+    """The project logger does not propagate to root, so attach caplog's handler directly."""
+    lightrag_store_module.logger.addHandler(caplog.handler)
+    yield
+    lightrag_store_module.logger.removeHandler(caplog.handler)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

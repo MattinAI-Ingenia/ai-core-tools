@@ -6,12 +6,21 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+import services.silo_service as silo_service_module
 from services.silo_service import (
     LIGHTRAG_UNSUPPORTED_DELETE_DETAIL,
     LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL,
     ensure_partial_delete_supported,
     ensure_reindex_supported,
 )
+
+
+@pytest.fixture(autouse=True)
+def _silo_service_caplog(caplog):
+    """The project logger does not propagate to root, so attach caplog's handler directly."""
+    silo_service_module.logger.addHandler(caplog.handler)
+    yield
+    silo_service_module.logger.removeHandler(caplog.handler)
 
 
 @pytest.mark.parametrize("silo", [None, SimpleNamespace(silo_id=1, vector_db_type="PGVECTOR"),
