@@ -57,6 +57,10 @@ LIGHTRAG_UNSUPPORTED_DELETE_DETAIL = (
     "In a LightRAG silo this would not remove the content from the knowledge graph, so nothing was deleted. "
     "Delete the file from its repository, use 'Delete all files', or delete the silo."
 )
+LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL = (
+    "Reindexing a single file is not supported in a LightRAG silo: it would not replace the file's content in the "
+    "knowledge graph. Delete the file and upload it again, or use 'Delete all files' and resume indexing."
+)
 
 # LightRAG extraction output tokens per call (min, avg, max) for models measured on
 # real indexing (indexing_metric, provider-reported). Others use the generic default.
@@ -360,6 +364,17 @@ def ensure_partial_delete_supported(silo: Optional[Silo]) -> None:
     if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
         logger.warning("Refusing a partial delete on LightRAG silo %s", silo.silo_id)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_UNSUPPORTED_DELETE_DETAIL)
+
+
+def ensure_reindex_supported(silo: Optional[Silo]) -> None:
+    """Refuse a single-file reindex on a LightRAG silo, which would not replace the file's graph content.
+
+    Raises:
+        HTTPException: 409 for a LightRAG silo, before anything is indexed.
+    """
+    if silo is not None and _resolve_vector_db_type(silo) == 'LIGHTRAG':
+        logger.warning("Refusing a single-file reindex on LightRAG silo %s", silo.silo_id)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL)
 
 
 def _end_read_transaction_before_lightrag(session: Optional[Session]) -> None:

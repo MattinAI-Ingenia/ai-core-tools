@@ -293,7 +293,11 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
   API: esas fuentes indexan con id `doc-<hash>` y no se guarda qué id borrar;
   haría falta un id determinista por fuente. Un sync de SharePoint que elimina
   o reemplaza un fichero sigue dejando su contenido en el grafo.
-- Reindexar para LightRAG (los chunks huérfanos son el techo conocido).
+- Reindexar un fichero suelto en LightRAG: no se ofrece en la UI y
+  `POST /internal/apps/{app_id}/silos/{silo_id}/resources/{resource_id}/reindex`
+  responde 409 en silos LightRAG (no sustituiría su contenido en el grafo). Para
+  rehacerlo: borrar el fichero y subirlo de nuevo, o "Delete all files" y
+  "Resume indexing".
 - El wipe no lleva guardas contra `QDRANT_/NEO4J_/POSTGRES_WORKSPACE` ni contra
   colecciones Qdrant heredadas sin etiquetar (la misma exposición que ya tenía
   borrar el silo).

@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from services.silo_service import LIGHTRAG_UNSUPPORTED_DELETE_DETAIL, ensure_partial_delete_supported
+from services.silo_service import (
+    LIGHTRAG_UNSUPPORTED_DELETE_DETAIL,
+    LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL,
+    ensure_partial_delete_supported,
+    ensure_reindex_supported,
+)
 
 
 @pytest.mark.parametrize("silo", [None, SimpleNamespace(silo_id=1, vector_db_type="PGVECTOR"),
@@ -22,3 +27,16 @@ def test_lightrag_silo_raises_409_and_warns(caplog):
     assert exc.value.status_code == 409
     assert exc.value.detail == LIGHTRAG_UNSUPPORTED_DELETE_DETAIL
     assert any(r.levelno == logging.WARNING and "LightRAG silo 7" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("silo", [None, SimpleNamespace(silo_id=1, vector_db_type="PGVECTOR"),
+                                  SimpleNamespace(silo_id=1, vector_db_type="QDRANT")])
+def test_reindex_is_supported_outside_lightrag(silo):
+    ensure_reindex_supported(silo)
+
+
+def test_reindex_on_a_lightrag_silo_raises_409():
+    with pytest.raises(HTTPException) as exc:
+        ensure_reindex_supported(SimpleNamespace(silo_id=7, vector_db_type="LIGHTRAG"))
+    assert exc.value.status_code == 409
+    assert exc.value.detail == LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL

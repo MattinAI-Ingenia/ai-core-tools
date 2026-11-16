@@ -11,7 +11,9 @@ import tempfile
 import time
 import asyncio
 
-from services.silo_service import SiloService, ResourceIndexingError, _end_read_transaction_before_lightrag
+from services.silo_service import (
+    SiloService, ResourceIndexingError, ensure_reindex_supported, _end_read_transaction_before_lightrag,
+)
 from services.silo_export_service import SiloExportService
 from services.silo_import_service import SiloImportService
 from models.silo import Silo
@@ -531,7 +533,7 @@ async def count_silo_documents(
     "/{silo_id}/resources/{resource_id}/reindex",
     summary="Reindex a single repository resource into this silo",
     tags=["Silos"],
-    responses={409: {"description": "A service used by this resource was retired"}},
+    responses={409: {"description": "A service used by this resource was retired, or the silo is a LightRAG silo"}},
 )
 async def reindex_silo_resource(
     app_id: int,
@@ -555,6 +557,7 @@ async def reindex_silo_resource(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Resource does not belong to this silo",
         )
+    ensure_reindex_supported(resource.repository.silo)
     # Same exclusion as an upload: two LightRAG runs on one workspace do
     # read-modify-write on the same graph nodes, so concurrent merges silently
     # lose descriptions and source-ids. LightRAG's own guard is per-process and
