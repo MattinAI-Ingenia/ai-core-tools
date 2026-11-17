@@ -684,6 +684,8 @@ def build_prompt(
     """
     outlines = fit_budget(outlines, max_tokens)
     template = _PROMPT_ES if (language or "").strip().lower() == "spanish" else _PROMPT_EN
+    # ponytail: English prompt, class names in the silo language (no-op on the Spanish template)
+    template = template.replace("One noun, English,", f"One noun, {language or 'English'},")
     return template.format(
         n=len(outlines),
         lo=min_types,

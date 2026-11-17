@@ -24,7 +24,7 @@ interface LightRAGAdvancedSettingsProps {
 
 // ponytail: closed list instead of free text — LightRAG interpolates this
 // literal into the prompt, a typo degrades silently with no error.
-export const LIGHTRAG_LANGUAGES = ['English', 'Spanish'];
+export const LIGHTRAG_LANGUAGES = ['English', 'Spanish', 'French', 'Italian'];
 
 // LightRAG's own built-in default entity types (English) and this project's
 // Spanish translation of them — shown as the placeholder for lightrag_entity_types

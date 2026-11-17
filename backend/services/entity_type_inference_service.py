@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from sqlalchemy.orm import Session
 
 from models.enums.import_row_status import ImportRowStatus
@@ -234,6 +235,8 @@ class EntityTypeInferenceService:
         """
         try:
             llm = EntityTypeInferenceService._resolve_ai_service(silo_id, ai_service_id, db)
+            usage = UsageMetadataCallbackHandler()  # tokens of both calls, saved on the job
+            llm.callbacks = [usage]
             silo = db.query(Silo).filter(Silo.silo_id == silo_id).first()
             language = getattr(silo, "lightrag_language", None)
 
@@ -307,7 +310,10 @@ class EntityTypeInferenceService:
             # class and invented an empty one), so a result that came back
             # emptier than it went in is discarded in favour of the first pass.
             types = merged if merged else first
-            _update(db, job_id, status="done", types=types, candidates=first)
+            _update(
+                db, job_id, status="done", types=types, candidates=first,
+                usage=usage.usage_metadata,
+            )
             logger.info(
                 "Entity types inferred for silo %s: %s",
                 silo_id, ", ".join(t.get("name", "?") for t in types),
@@ -359,7 +365,10 @@ class EntityTypeInferenceService:
                     "infer the types."
                 )
 
-        return create_llm_from_service(service, 0.2, False)
+        llm = create_llm_from_service(service, 0.2, False)
+        if getattr(llm, "use_responses_api", False):  # ponytail: OpenAI only; others may reject the param
+            llm.reasoning_effort = "high"
+        return llm
 
     @staticmethod
     def _document_paths(
