@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-secrets.ps1\"",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/run.sh\" guard-secrets.ps1",
             "timeout": 15
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-git-add.ps1\"",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/run.sh\" guard-git-add.ps1",
             "if": "Bash(git add*)",
             "timeout": 15
           }
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/hooks/lint-frontend.ps1\"",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/run.sh\" lint-frontend.ps1",
             "timeout": 60
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session-context.ps1\"",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/run.sh\" session-context.ps1",
             "timeout": 20
           }
         ]
