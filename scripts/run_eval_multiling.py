@@ -7,8 +7,8 @@ memory needed), then compute, with no LLM involved:
 
   silos_retrieved / silos_cited  silo ids of the retrieved / cited chunks
                                  (router payloads carry silo_id on every chunk)
-  routing_ok                     ES -> only the ES silo, EN -> only the EN silo,
-                                 ALL -> both silos retrieved (router agents only)
+  routing_ok                     ES/EN/IT/FR -> only that language's silo,
+                                 ALL/NS -> every silo retrieved (router agents only)
   bad_cites                      [N] with no chunk N in the payload
   doc_recall                     expected docs found in the cited chunks' file_path
                                  or in the answer text
@@ -23,7 +23,7 @@ import json
 import re
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -64,7 +64,7 @@ def ask(base: str, app_id: int, agent_id: int, api_key: str, message: str, timeo
         return parse_sse_done(resp, stats)
 
 
-def score(q: dict, text: str, graph: dict | None, es_silo: int, en_silo: int) -> dict:
+def score(q: dict, text: str, graph: dict | None, silos: dict) -> dict:
     chunks = ((graph or {}).get("data") or {}).get("chunks") or []
     cites = sorted({int(n) for n in CITE_RE.findall(text)})
     bad = [n for n in cites if not 1 <= n <= len(chunks)]
@@ -72,14 +72,14 @@ def score(q: dict, text: str, graph: dict | None, es_silo: int, en_silo: int) ->
     retrieved_silos = sorted({c.get("silo_id") for c in chunks if c.get("silo_id") is not None})
     cited_silos = sorted({c.get("silo_id") for c in cited if c.get("silo_id") is not None})
     want = q["idioma_esperado"]
-    wanted_silos = {"es": es_silo, "en": en_silo}
+    wanted = {silos[lang] for lang in want}  # one silo per expected language
     tagged = bool(retrieved_silos)
     if not tagged:
         routing_ok = None  # not a router payload
-    elif want == ["es", "en"]:
-        routing_ok = set(retrieved_silos) == {es_silo, en_silo}
+    elif len(want) > 1:
+        routing_ok = set(retrieved_silos) == wanted
     else:
-        routing_ok = set(retrieved_silos) <= {wanted_silos[want[0]]} and bool(retrieved_silos)
+        routing_ok = set(retrieved_silos) <= wanted and bool(retrieved_silos)
     haystack = text + " " + " ".join(str(c.get("file_path", "")) for c in cited)
     expected = q.get("docs_esperados") or []
     found = [d for d in expected if d in haystack]
@@ -88,7 +88,7 @@ def score(q: dict, text: str, graph: dict | None, es_silo: int, en_silo: int) ->
         "silos_retrieved": retrieved_silos, "silos_cited": cited_silos, "routing_ok": routing_ok,
         "doc_recall": round(len(found) / len(expected), 3) if expected else None,
         "docs_found": found,
-        "wrong_silo_cited": [s for s in cited_silos if tagged and want != ["es", "en"] and s != wanted_silos[want[0]]],
+        "wrong_silo_cited": [s for s in cited_silos if tagged and len(want) == 1 and s not in wanted],
     }
 
 
@@ -98,13 +98,15 @@ def main() -> None:
     ap.add_argument("--agent-id", type=int, required=True)
     ap.add_argument("--app-id", type=int, default=1)
     ap.add_argument("--base-url", default="http://localhost")
-    ap.add_argument("--eval-set", default=str(REPO_ROOT / "benchmark/preguntas/multiling/eval_set_multiling_v1.json"))
-    ap.add_argument("--only", default="ALL,ES,EN,NS", help="comma-separated blocks to run")
+    ap.add_argument("--eval-set", default=str(REPO_ROOT / "benchmark/preguntas/multiling/eval_set_multiling_v2.json"))
+    ap.add_argument("--only", default="ALL,ES,EN,IT,FR,NS", help="comma-separated blocks to run")
     ap.add_argument("--limit", type=int, default=None, help="max questions per block")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--es-silo", type=int, default=37)
     ap.add_argument("--en-silo", type=int, default=39)
+    ap.add_argument("--fr-silo", type=int, default=66)
+    ap.add_argument("--it-silo", type=int, default=67)
     ap.add_argument("--label", default="")
     ap.add_argument("--ids", default=None, help="comma-separated question ids to run (ignores --only/--limit)")
     ap.add_argument("--retry-errors-from", default=None, help="only re-run the questions that errored in this result file")
@@ -133,7 +135,7 @@ def main() -> None:
         t0 = time.monotonic()
         try:
             text, graph = ask(args.base_url, args.app_id, args.agent_id, args.api_key, q["pregunta"], args.timeout, stats)
-            return {**q, "respuesta_agente": text, "error": None, **score(q, text, graph, args.es_silo, args.en_silo),
+            return {**q, "respuesta_agente": text, "error": None, **score(q, text, graph, {"es": args.es_silo, "en": args.en_silo, "fr": args.fr_silo, "it": args.it_silo}),
                     "latency_s": round(time.monotonic() - t0, 1), "tool_calls": stats.get("tool_calls", {}),
                     "graph_chunks": [{k: c.get(k) for k in ("id", "file_path", "silo_id", "silo_name", "resource_id", "page")}
                                      for c in ((graph or {}).get("data") or {}).get("chunks") or []]}
@@ -141,8 +143,25 @@ def main() -> None:
             return {**q, "respuesta_agente": None, "error": str(exc), "latency_s": round(time.monotonic() - t0, 1),
                     "tool_calls": stats.get("tool_calls", {})}
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        results = list(pool.map(run, selected))
+    out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
+    path = out / f"multiling_agent{args.agent_id}{('_' + args.label) if args.label else ''}_{date.today():%Y%m%d}.json"
+    partial = path.with_suffix(".jsonl")  # one line per finished question: a crash loses nothing
+    by_id: dict = {}
+    if partial.exists():  # resume: keep what already finished without error
+        for line in partial.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if not r["error"]:
+                by_id[r["id"]] = r
+    todo = [q for q in selected if q["id"] not in by_id]
+    print(f"{len(by_id)} already done, {len(todo)} to run ({partial})", flush=True)
+    with ThreadPoolExecutor(max_workers=args.workers) as pool, partial.open("a", encoding="utf-8") as fh:
+        for fut in as_completed([pool.submit(run, q) for q in todo]):
+            r = fut.result()
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            fh.flush()
+            by_id[r["id"]] = r
+            print(f"[{len(by_id)}/{len(selected)}] {r['id']} {'ERROR' if r['error'] else 'ok'} {r['latency_s']}s", flush=True)
+    results = [by_id[q["id"]] for q in selected]
 
     summary = {}
     for b in blocks:
@@ -158,8 +177,6 @@ def main() -> None:
             "wrong_silo_cited_total": sum(len(r["wrong_silo_cited"]) for r in ok),
             "doc_recall_mean": round(sum(rec) / len(rec), 3) if rec else None,
         }
-    out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
-    path = out / f"multiling_agent{args.agent_id}{('_' + args.label) if args.label else ''}_{date.today():%Y%m%d}.json"
     path.write_text(json.dumps({"agent_id": args.agent_id, "summary": summary, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(path)

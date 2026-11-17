@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # Compose (v2) names containers "<project>-<service>-<n>", project defaulting
@@ -392,9 +392,10 @@ print(json.dumps(previous))
 
 def run_questions(
     questions: list[dict], base_url: str, app_id: int, agent_id: int, api_key: str,
-    timeout: int, vocab: list[str],
+    timeout: int, vocab: list[str], on_result: Optional[Callable[[dict], None]] = None,
 ) -> list[dict]:
     """Call the agent for each question in order, scoring doc recall as it goes.
+    `on_result` is called with each result the moment it exists (incremental save).
 
     Shared by a full run and a --retry-failed run: identical per-question
     behaviour, only the input list differs.
@@ -432,12 +433,21 @@ def run_questions(
             "latency_s": round(time.monotonic() - t0, 2),
             "doc_recall": score_doc_recall(response_text, q.get("docs_esperados") or [], vocab),
         })
+        if on_result:
+            on_result(results[-1])
     return results
+
+
+def append_result(path: Path, result: dict) -> None:
+    """One JSON line per finished question: a crash loses at most the question in flight."""
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
 def run_questions_parallel(
     questions: list[dict], base_url: str, app_id: int, agent_id: int, api_key: str,
     timeout: int, vocab: list[str], max_workers: int,
+    on_result: Optional[Callable[[dict], None]] = None,
 ) -> list[dict]:
     """Same as run_questions, but fires calls concurrently (max_workers at a
     time) instead of one at a time.
@@ -484,6 +494,8 @@ def run_questions_parallel(
                 "usage": None,
                 "routes": [],
             }
+            if on_result:
+                on_result(results[i])
     return results
 
 
@@ -625,35 +637,6 @@ def main() -> int:
     if args.limit:
         questions = questions[: args.limit]
 
-    run_started_at = datetime.now(timezone.utc)
-    total_cost = 0.0
-    total_tokens = 0
-    if args.parallel:
-        results = run_questions_parallel(
-            questions, args.base_url, args.app_id, args.agent_id, args.api_key,
-            args.timeout, vocab, args.parallel,
-        )
-        print("  (modo paralelo: sin rutas; el uso se casa por longitud de respuesta)", file=sys.stderr)
-    else:
-        needs_memory = any(q.get("sigue_a") for q in questions)
-        previous_memory = set_agent_memory(args.agent_id, True) if needs_memory else None
-        try:
-            results = run_questions(
-                questions, args.base_url, args.app_id, args.agent_id, args.api_key,
-                args.timeout, vocab,
-            )
-        finally:
-            if needs_memory and previous_memory is not None:
-                set_agent_memory(args.agent_id, previous_memory)
-        route_events = fetch_routes_used(args.agent_id, run_started_at, len(results))
-        for r, routes in zip(results, route_events):
-            r["routes"] = routes
-    usage_events = fetch_usage_events(args.agent_id, run_started_at, results, input_per_1m, output_per_1m)
-    for r, usage in zip(results, usage_events):
-        r["usage"] = usage or None
-        total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
-        total_tokens += (usage or {}).get("total_tokens", 0)
-
     today = date.today().isoformat().replace("-", "")
     # The EFFECTIVE value, not the DB one — see introspect_config. A filename
     # that says 60 for a run that executed at 30 is worse than no filename tag.
@@ -677,6 +660,52 @@ def main() -> int:
         f"{chunk_top_k_tag}_{rerank_tag}_{model_slug}_{prompt_tag}_{today}{smoke_tag}{parallel_tag}.json"
     )
     out_path = Path(args.out_dir) / out_name
+
+    # Resume: answers already saved without error are kept (usage/routes of those
+    # are not recovered), only the missing or errored questions are asked again.
+    partial = out_path.with_suffix(".jsonl")
+    answered: dict = {}
+    if partial.exists():
+        for line in partial.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if not r["error"]:
+                answered[r["id"]] = r
+    all_questions = questions
+    questions = [q for q in all_questions if q["id"] not in answered]
+    print(f"{len(answered)} ya respondidas, {len(questions)} por hacer ({partial.name})", file=sys.stderr)
+    on_result = lambda r: append_result(partial, r)  # noqa: E731
+
+    run_started_at = datetime.now(timezone.utc)
+    total_cost = 0.0
+    total_tokens = 0
+    if args.parallel:
+        results = run_questions_parallel(
+            questions, args.base_url, args.app_id, args.agent_id, args.api_key,
+            args.timeout, vocab, args.parallel, on_result,
+        )
+        print("  (modo paralelo: sin rutas; el uso se casa por longitud de respuesta)", file=sys.stderr)
+    else:
+        needs_memory = any(q.get("sigue_a") for q in questions)
+        previous_memory = set_agent_memory(args.agent_id, True) if needs_memory else None
+        try:
+            results = run_questions(
+                questions, args.base_url, args.app_id, args.agent_id, args.api_key,
+                args.timeout, vocab, on_result,
+            )
+        finally:
+            if needs_memory and previous_memory is not None:
+                set_agent_memory(args.agent_id, previous_memory)
+        route_events = fetch_routes_used(args.agent_id, run_started_at, len(results))
+        for r, routes in zip(results, route_events):
+            r["routes"] = routes
+    usage_events = fetch_usage_events(args.agent_id, run_started_at, results, input_per_1m, output_per_1m)
+    for r, usage in zip(results, usage_events):
+        r["usage"] = usage or None
+        total_cost += (usage or {}).get("cost_usd_upper_bound", 0.0)
+        total_tokens += (usage or {}).get("total_tokens", 0)
+    new_by_id = {r["id"]: r for r in results}
+    results = [answered.get(q["id"]) or new_by_id[q["id"]] for q in all_questions]
+
 
     # Belt and braces on top of smoke_tag: never replace a result that covered
     # MORE questions than this one, whatever the filename says. Side-steps
