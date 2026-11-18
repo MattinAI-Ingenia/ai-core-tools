@@ -28,7 +28,7 @@ def _make_agent(name: str = "Sub Agent") -> Agent:
 
 
 class _StreamingReactAgent:
-    async def astream(self, _payload, stream_mode=None):
+    async def astream(self, _payload, config=None, stream_mode=None):
         assert stream_mode == ["updates", "custom"]
         yield (
             "updates",
@@ -81,7 +81,7 @@ class _StreamingReactAgent:
             },
         )
 
-    async def ainvoke(self, _payload):
+    async def ainvoke(self, _payload, config=None):
         raise AssertionError("ainvoke should not be used when a stream writer is available")
 
 
@@ -386,7 +386,7 @@ async def test_iact_tool_arun_returns_structured_response_as_json():
 
 
 class _StructuredStreamingReactAgent:
-    async def astream(self, _payload, stream_mode=None):
+    async def astream(self, _payload, config=None, stream_mode=None):
         yield (
             "updates",
             {
@@ -481,7 +481,7 @@ async def test_iact_tool_arun_without_astream_returns_structured_response():
 
 
 class _StreamingWithNonDictDeltaReactAgent:
-    async def astream(self, _payload, stream_mode=None):
+    async def astream(self, _payload, config=None, stream_mode=None):
         yield ("updates", {"__interrupt__": ("not", "a", "dict")})
         yield ("updates", {"model": {"messages": [AIMessage(content="plain answer")]}})
 
@@ -685,3 +685,23 @@ async def test_iact_ocr_tool_processes_multiple_pdfs():
         await tool._arun(query="extract")
 
     assert mock_exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_subagent_records_tokens_with_its_own_collector():
+    """AGENT_AS_TOOL events had NULL tokens: the parent's collector skips nested runs and
+    the sub-agent's own collector was never passed to the recorder."""
+    from services.agent_metrics_collector import AgentMetricsCollector
+
+    agent = _make_agent("Research Agent")
+    agent.agent_id = 42
+    with patch("tools.agentTools.get_llm", return_value=MagicMock()):
+        tool = agentTools.IACTTool(agent)
+    tool.react_agent = _StreamingReactAgent()
+
+    with patch("langgraph.config.get_stream_writer", return_value=lambda _e: None), \
+            patch.object(agentTools.IACTTool, "_record_metrics") as record:
+        await tool.run_subagent("run code")
+
+    collector = record.call_args.args[4]
+    assert isinstance(collector, AgentMetricsCollector)

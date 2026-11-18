@@ -30,7 +30,7 @@ from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.documents import Document
 import langsmith as ls
 from langchain_core.tools import StructuredTool
-from services.agent_metrics_collector import METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
+from services.agent_metrics_collector import AgentMetricsCollector, METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
 from tools.system_one_tool import IACTSystemOneTool
 import json
 import asyncio
@@ -38,7 +38,7 @@ import re
 import json
 import time
 import uuid
-from services.agent_metrics_collector import METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
+from services.agent_metrics_collector import AgentMetricsCollector, METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
 import os
 import base64
 import mimetypes
@@ -1870,7 +1870,27 @@ class IACTTool(BaseTool):
         finally:
             self._record_metrics(query, started_at, result, error)
 
-    def _record_metrics(self, query: str, started_at: datetime, result: Any, error: Optional[Exception]) -> None:
+    @staticmethod
+    def _config_with_collector(collector: "AgentMetricsCollector") -> dict:
+        """Run config that keeps the parent's callbacks (run tree, tracing) and adds *collector*.
+
+        The parent's collector skips nested runs, so without its own collector a
+        sub-agent's tokens were recorded nowhere (AGENT_AS_TOOL events had NULL tokens)."""
+        from langchain_core.runnables.config import ensure_config
+
+        config = ensure_config()
+        callbacks = config.get("callbacks")
+        if hasattr(callbacks, "add_handler"):
+            callbacks = callbacks.copy()
+            callbacks.add_handler(collector, inherit=True)
+        else:
+            callbacks = list(callbacks or []) + [collector]
+        return {**config, "callbacks": callbacks}
+
+    def _record_metrics(
+        self, query: str, started_at: datetime, result: Any, error: Optional[Exception],
+        collector: Optional["AgentMetricsCollector"] = None,
+    ) -> None:
         """Record this sub-agent run as an AGENT_AS_TOOL execution linked to its parent."""
         from services.agent_metrics_recorder import record_agent_execution
 
@@ -1892,6 +1912,7 @@ class IACTTool(BaseTool):
             result=result if isinstance(result, dict) else None,
             image_files=[],
             message=query,
+            collector=collector,
         )
 
     def _format_tool_query(self, query: str) -> str:
@@ -2007,15 +2028,18 @@ class IACTTool(BaseTool):
         started_at = datetime.utcnow()
         turn_messages: list = []
         error = None
+        collector = AgentMetricsCollector()
         try:
-            return await self._run_subagent(query, turn_messages)
+            return await self._run_subagent(query, turn_messages, collector)
         except Exception as e:
             error = e
             raise
         finally:
-            self._record_metrics(query, started_at, {"messages": turn_messages}, error)
+            self._record_metrics(query, started_at, {"messages": turn_messages}, error, collector)
 
-    async def _run_subagent(self, query: str, turn_messages: list) -> Tuple[str, Optional[dict]]:
+    async def _run_subagent(
+        self, query: str, turn_messages: list, collector: Optional["AgentMetricsCollector"] = None,
+    ) -> Tuple[str, Optional[dict]]:
         from tools.streaming_utils import (
             extract_lightrag_graph_from_artifact,
             map_stream_event,
@@ -2031,9 +2055,10 @@ class IACTTool(BaseTool):
             # runs of this specialist did; claim_citations shifts it onto the turn.
             self.run_counter[0] = 0
         extract = self._last_ai_text if router else self._extract_last_message_content
+        run_config = self._config_with_collector(collector) if collector is not None else None
 
         if stream_writer is None or not hasattr(self.react_agent, "astream"):
-            result = await self.react_agent.ainvoke({"messages": messages})
+            result = await self.react_agent.ainvoke({"messages": messages}, config=run_config)
             # Structured output (output parser, #284): surface the parsed schema
             # instead of the last AI message when the agent graph produced one.
             if isinstance(result, dict) and result.get("structured_response") is not None:
@@ -2049,6 +2074,7 @@ class IACTTool(BaseTool):
         structured_response: Any = None
         async for mode, chunk in self.react_agent.astream(
             {"messages": messages},
+            config=run_config,
             stream_mode=["updates", "custom"],
         ):
             if mode == "updates" and isinstance(chunk, dict):

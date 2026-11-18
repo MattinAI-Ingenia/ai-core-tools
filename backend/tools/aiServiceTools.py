@@ -267,6 +267,9 @@ def _build_custom_llm(ai_service, temperature):
         default_headers=headers or None,
         http_client=httpx.Client(verify=False),
         http_async_client=httpx.AsyncClient(verify=False),
+        # Without this, ChatOpenAI skips stream_options.include_usage on non-OpenAI
+        # endpoints and every streamed call (router specialists, chat) records no tokens.
+        stream_usage=True,
     )
     logger.info(f"Service: {service}")
     return service
