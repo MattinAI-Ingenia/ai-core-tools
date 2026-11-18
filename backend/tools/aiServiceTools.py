@@ -149,6 +149,9 @@ def _build_openai_llm(ai_service, temperature):
         # already expect. Only for OpenAI itself: a custom endpoint is an OpenAI-compatible
         # gateway, and those speak /v1/chat/completions but not necessarily /v1/responses.
         use_responses_api=base_url is None,
+        # Streamed chat/completions (a custom endpoint) reports no usage unless asked; the
+        # Responses API reports it on its own.
+        stream_usage=True,
     )
 
 
@@ -179,6 +182,7 @@ def _build_openrouter_llm(ai_service, temperature):
         api_key=ai_service.api_key,
         base_url=base_url,
         default_headers=default_headers,
+        stream_usage=True,
     )
 
 

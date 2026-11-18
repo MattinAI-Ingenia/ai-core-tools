@@ -64,3 +64,23 @@ class TestOpenAITemperature:
         llm = _build_openai_llm(_ai_service(model=model), temperature=0.7)
 
         assert llm._get_request_payload([("user", "hi")])["temperature"] == 0.7
+
+
+class TestStreamUsageByDefault:
+    """Every OpenAI-compatible service must report token usage on streamed calls.
+
+    ChatOpenAI leaves stream_options.include_usage off outside api.openai.com, so streamed
+    router/chat turns recorded no tokens. The Responses API (OpenAI itself) reports it unasked."""
+
+    @pytest.mark.parametrize("builder, endpoint", [
+        ("_build_custom_llm", "http://vllm:8000"),
+        ("_build_openrouter_llm", None),
+        ("_build_openai_llm", "https://gateway.example.com/v1"),
+        ("_build_openai_llm", None),
+    ])
+    def test_openai_compatible_builders_request_usage(self, builder, endpoint):
+        import tools.aiServiceTools as module
+
+        llm = getattr(module, builder)(_ai_service(endpoint=endpoint), 0.2)
+
+        assert llm._should_stream_usage() is True
