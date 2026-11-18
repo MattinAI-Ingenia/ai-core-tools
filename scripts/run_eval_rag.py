@@ -52,7 +52,14 @@ BACKEND_CONTAINER = os.environ.get("EVAL_RAG_BACKEND_CONTAINER", "docker-backend
 # local model's tokens are free, so this is a deliberate upper bound, not an
 # exact figure. Matched against the agent's synthesis-model description
 # (see introspect_config) by substring, longest/most-specific key first.
+# (input, output[, cached input]) in USD per 1M tokens. The cached-input price is
+# informational: agent_execution_event does not record cached tokens, so the cost
+# below stays an upper bound that charges every input token at the full rate.
+# gpt-6-luna / gpt-6.1-terra: same list prices as backend/tools/pricing/openai_pricing.py
+# (Standard tier, <=272K context); cached prices from getdeploying.com / pricepertoken.com.
 PRICING_PER_1M = {
+    "gpt-6.1-terra": (1.00, 5.00, 0.05),
+    "gpt-6-luna": (0.10, 0.50, 0.01),
     "gpt-5.4": (2.50, 15.00),
     "gpt-5": (1.25, 10.00),
     "gpt-4.1": (2.00, 8.00),
@@ -79,10 +86,16 @@ def resolve_pricing(model_description: str | None) -> tuple[float, float, str]:
     desc = (model_description or "").lower()
     for key in sorted(PRICING_PER_1M, key=len, reverse=True):
         if key in desc:
-            i, o = PRICING_PER_1M[key]
+            i, o = PRICING_PER_1M[key][:2]
             return i, o, key
-    i, o = PRICING_PER_1M["gpt-5.4"]
+    i, o = PRICING_PER_1M["gpt-5.4"][:2]
     return i, o, f"UNKNOWN_MODEL_FALLBACK_TO_gpt-5.4(raw='{model_description}')"
+
+
+def cached_input_per_1m(matched_key: str) -> float | None:
+    """Cached-input price of a model matched by resolve_pricing, None when not listed."""
+    price = PRICING_PER_1M.get(matched_key)
+    return price[2] if price and len(price) > 2 else None
 
 
 _MONITORING_LINE_RE = re.compile(
@@ -747,7 +760,10 @@ def main() -> int:
         "coste_estimado": {
             "total_tokens": total_tokens,
             "cost_usd_upper_bound": round(total_cost, 4),
-            "pricing_used": {"model_matched": pricing_key, "input_per_1m": input_per_1m, "output_per_1m": output_per_1m},
+            "pricing_used": {
+                "model_matched": pricing_key, "input_per_1m": input_per_1m, "output_per_1m": output_per_1m,
+                "cached_input_per_1m": cached_input_per_1m(pricing_key),
+            },
             "nota": (
                 "Upper bound: suma tokens de TODOS los modelos usados en cada "
                 "llamada (incluye el modelo local de keywords, que es gratis) y "
