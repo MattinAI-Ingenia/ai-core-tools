@@ -84,3 +84,31 @@ class TestStreamUsageByDefault:
         llm = getattr(module, builder)(_ai_service(endpoint=endpoint), 0.2)
 
         assert llm._should_stream_usage() is True
+
+
+class TestCustomModelParams:
+    """A Custom service can fix top_p and reasoning_effort in its extra_config JSON."""
+
+    def test_extra_config_reaches_the_request(self):
+        from tools.aiServiceTools import _build_custom_llm
+
+        service = _ai_service(endpoint="http://vllm:8000")
+        service.extra_config = '{"top_p": 0.95, "reasoning_effort": "max", "other": 1}'
+
+        payload = _build_custom_llm(service, 1.0)._get_request_payload([("user", "hi")])
+
+        assert payload["top_p"] == 0.95
+        assert payload["reasoning_effort"] == "max"
+        assert payload["temperature"] == 1.0
+        assert "other" not in payload
+
+    @pytest.mark.parametrize("raw", [None, "", "not json", "[1]", '{"aws_region": "eu-west-1"}'])
+    def test_nothing_is_added_without_the_settings(self, raw):
+        from tools.aiServiceTools import _build_custom_llm
+
+        service = _ai_service(endpoint="http://vllm:8000")
+        service.extra_config = raw
+
+        payload = _build_custom_llm(service, 0.7)._get_request_payload([("user", "hi")])
+
+        assert "top_p" not in payload and "reasoning_effort" not in payload

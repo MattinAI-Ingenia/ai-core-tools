@@ -1,3 +1,4 @@
+import json
 from sqlalchemy.orm import Session
 from models.ai_service import AIService, ProviderEnum
 from repositories.ai_service_repository import AIServiceRepository
@@ -35,6 +36,17 @@ class AIServiceInUseError(Exception):
 
 
 class AIServiceService:
+
+    @staticmethod
+    def _merge_extra_config(existing, bedrock_json):
+        """extra_config JSON: the Bedrock fields from the form on top of the keys it does not manage."""
+        try:
+            kept = json.loads(existing or "{}")
+        except (TypeError, ValueError):
+            kept = {}
+        kept = {k: v for k, v in (kept if isinstance(kept, dict) else {}).items() if k not in ("aws_access_key_id", "aws_region")}
+        merged = {**kept, **json.loads(bedrock_json or "{}")}
+        return json.dumps(merged) if merged else None
 
     @staticmethod
     def _to_list_item(
@@ -180,10 +192,11 @@ class AIServiceService:
             service.api_key = service_data.api_key
         service.endpoint = service_data.base_url  # Store base_url in endpoint
         service.supports_video = service_data.supports_video
-        # Persist provider-specific identifiers (AWS Bedrock) as JSON.
-        service.extra_config = build_extra_config(
-            service_data.aws_access_key_id,
-            service_data.aws_region,
+        # Persist provider-specific identifiers (AWS Bedrock) as JSON. Keys the form does not
+        # manage (top_p, reasoning_effort of a Custom service) survive an edit.
+        service.extra_config = AIServiceService._merge_extra_config(
+            service.extra_config,
+            build_extra_config(service_data.aws_access_key_id, service_data.aws_region),
         )
         AIServiceService.apply_lifecycle_fields(
             service, service_data, actor_id

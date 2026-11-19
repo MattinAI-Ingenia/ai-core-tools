@@ -248,6 +248,22 @@ def build_ollama_auth_headers(api_key: str | None, endpoint: str | None) -> dict
     return headers
 
 
+# Sampling/reasoning settings a Custom service may carry in its extra_config JSON, e.g.
+# {"top_p": 0.95, "reasoning_effort": "max"}. Anything else in extra_config is ignored here.
+_CUSTOM_MODEL_PARAMS = ("top_p", "reasoning_effort")
+
+
+def _custom_model_params(ai_service) -> dict:
+    """top_p / reasoning_effort set on the service, as ChatOpenAI kwargs (empty when unset)."""
+    try:
+        extra = json.loads(getattr(ai_service, "extra_config", None) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(extra, dict):
+        return {}
+    return {k: extra[k] for k in _CUSTOM_MODEL_PARAMS if extra.get(k) is not None}
+
+
 def _build_custom_llm(ai_service, temperature):
     """OpenAI-compatible endpoint (vLLM / SGLang / Ollama's /v1 API).
 
@@ -274,6 +290,7 @@ def _build_custom_llm(ai_service, temperature):
         # Without this, ChatOpenAI skips stream_options.include_usage on non-OpenAI
         # endpoints and every streamed call (router specialists, chat) records no tokens.
         stream_usage=True,
+        **_custom_model_params(ai_service),
     )
     logger.info(f"Service: {service}")
     return service
