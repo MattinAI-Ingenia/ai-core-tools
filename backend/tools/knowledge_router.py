@@ -36,8 +36,7 @@ Each specialist tool's description says which knowledge it covers.
 - Use a single specialist only when the question explicitly restricts itself to that specialist's knowledge (it names its domain, language, product line...). Call that specialist's tool once with the user's question; its answer is shown to the user as-is.
 - Otherwise (a general question, nothing restricts it, or it spans several specialists), call `query_specialists` ONCE with the names of every relevant specialist (include all of them when unsure), then write the final answer from their replies.
 - Your final answer must include the findings of EVERY specialist that answered, in one section per specialist (named after its knowledge area). Never drop a specialist's documents or conclusions because another specialist reached a similar one: if they agree, say so and still list each one's documents.
-- Never call two specialist tools one after another for the same question; use `query_specialists` instead.
-- Keep every [N](cite://N) citation exactly as the specialists wrote it, next to the claim it supports. Never invent, renumber or drop citations.
+- Never call two specialist tools one after another for the same question; use `query_specialists` instead.- Keep every [N](cite://N) citation exactly as the specialists wrote it, next to the claim it supports. Never invent, renumber or drop citations.
 </knowledge_router>"""
 
 # [n](cite://n), also with the full-width brackets some models emit (【n】).
@@ -119,6 +118,10 @@ def create_query_specialists_tool(specialists: List[Any], lock: asyncio.Lock) ->
                     merged = merge_lightrag_graph(merged, graph)
         if unknown:
             parts.append(f"(ignored unknown specialists: {', '.join(unknown)}. Valid: {valid_names})")
+        # The specialists are now consulted: a later call to one of them (return_direct) would end the
+        # turn with that single answer and drop the others. Their output goes back to the model instead.
+        for t in specialists:
+            t.return_direct = False
         return "\n\n".join(parts), graph_artifact(merged)
 
     return StructuredTool.from_function(

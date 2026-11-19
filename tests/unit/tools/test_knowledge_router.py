@@ -75,12 +75,12 @@ class _CitingReactAgent:
             cites += f"[{self.stray_cite}](cite://{self.stray_cite})"
         return tool_msg, AIMessage(content=f"Answer {cites}")
 
-    async def ainvoke(self, payload):
+    async def ainvoke(self, payload, config=None):
         await asyncio.sleep(self.delay)
         tool_msg, final = self._turn()
         return {"messages": [*payload["messages"], tool_msg, final]}
 
-    async def astream(self, _payload, stream_mode=None):
+    async def astream(self, _payload, config=None, stream_mode=None):
         await asyncio.sleep(self.delay)
         tool_msg, final = self._turn()
         yield ("updates", {"tools": {"messages": [tool_msg]}})
@@ -188,14 +188,14 @@ from tools.knowledge_router import create_query_specialists_tool
 
 
 class _BrokenReactAgent:
-    async def ainvoke(self, _payload):
+    async def ainvoke(self, _payload, config=None):
         raise RuntimeError("down")
 
 
 class _PlainReactAgent:
     """Specialist without LightRAG: answers, no artifact."""
 
-    async def ainvoke(self, payload):
+    async def ainvoke(self, payload, config=None):
         return {"messages": [*payload["messages"], AIMessage(content="plain answer")]}
 
 
@@ -402,7 +402,7 @@ class _FailsOnceAfterRetrieving(_CitingReactAgent):
         super().__init__(chunk_ids)
         self.failed = False
 
-    async def ainvoke(self, payload):
+    async def ainvoke(self, payload, config=None):
         if not self.failed:
             self.failed = True
             self.cell[0] += len(self.chunk_ids)
@@ -444,7 +444,7 @@ def test_rebase_citations_drops_markers_outside_the_valid_range():
 class _EmptyFinalReactAgent:
     """Final AI message comes back empty after a retrieval ran."""
 
-    async def ainvoke(self, payload):
+    async def ainvoke(self, payload, config=None):
         tool_msg = ToolMessage(content="RAW CONTEXT [1] (source: x)", name="retrieve", tool_call_id="c")
         return {"messages": [*payload["messages"], tool_msg, AIMessage(content="")]}
 
@@ -556,3 +556,85 @@ def test_routing_instruction_requires_every_specialists_findings_in_the_final_an
     assert "EVERY specialist" in text
     assert "one section per specialist" in text
     assert "Never drop" in text
+
+
+# === A specialist called after query_specialists must not end the turn with its single answer ===
+
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+
+class _ReplayModel(BaseChatModel):
+    """Chat model that replays a fixed list of AI messages, one per model call."""
+
+    script: list
+    cursor: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        message = self.script[self.cursor]
+        self.cursor += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _tool_call(name, args, call_id):
+    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
+
+
+def _fan_out_graph(script, specialists):
+    tools = [*specialists, create_query_specialists_tool(specialists, asyncio.Lock())]
+    return create_agent(model=_ReplayModel(script=script), tools=tools)
+
+
+@pytest.mark.asyncio
+async def test_fan_out_turns_every_specialist_into_a_normal_tool(no_writer):
+    offset, lock = [0], asyncio.Lock()
+    es = _router_tool("ES", _CitingReactAgent(["a"]), offset, lock, silo_id=7)
+    it = _router_tool("IT", _CitingReactAgent(["b"]), offset, lock, silo_id=9, silo_name="Manuali IT")
+    query = create_query_specialists_tool([es, it], lock)
+    assert es.return_direct and it.return_direct
+
+    await query.coroutine(["ES", "IT"], "q")
+
+    assert not es.return_direct and not it.return_direct
+
+
+@pytest.mark.asyncio
+async def test_single_specialist_alone_still_answers_directly(no_writer):
+    """No fan-out: the question restricted itself to one specialist, its answer reaches the user as-is."""
+    offset, lock = [0], asyncio.Lock()
+    es = _router_tool("ES", _CitingReactAgent(["a"]), offset, lock, silo_id=7)
+    it = _router_tool("IT", _CitingReactAgent(["b"]), offset, lock, silo_id=9, silo_name="Manuali IT")
+    graph = _fan_out_graph([_tool_call("IT", {"query": "q"}, "c1"), AIMessage(content="MODEL REWRITE")], [es, it])
+
+    result = await graph.ainvoke({"messages": [HumanMessage(content="q")]})
+
+    assert result["messages"][-1].content == "Answer [1](cite://1)"  # the specialist's text, not the model's
+
+
+@pytest.mark.asyncio
+async def test_specialist_after_fan_out_does_not_replace_the_final_answer(no_writer):
+    """The reported failure: all specialists consulted, then one called again and its answer shown alone."""
+    offset, lock = [0], asyncio.Lock()
+    es = _router_tool("ES", _CitingReactAgent(["a"]), offset, lock, silo_id=7)
+    it = _router_tool("IT", _CitingReactAgent(["b"]), offset, lock, silo_id=9, silo_name="Manuali IT")
+    graph = _fan_out_graph(
+        [
+            _tool_call("query_specialists", {"especialistas": ["ES", "IT"], "pregunta": "q"}, "c1"),
+            _tool_call("IT", {"query": "q again"}, "c2"),
+            AIMessage(content="FINAL: ES and IT together"),
+        ],
+        [es, it],
+    )
+
+    result = await graph.ainvoke({"messages": [HumanMessage(content="q")]})
+
+    assert result["messages"][-1].content == "FINAL: ES and IT together"
