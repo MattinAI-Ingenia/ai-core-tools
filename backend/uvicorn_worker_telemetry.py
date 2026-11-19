@@ -9,6 +9,7 @@ per death. Runs in the master process — wired by the backend Dockerfile CMD
 """
 
 import logging
+import os
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -29,6 +30,10 @@ def install() -> bool:
             logger.warning("Worker death telemetry: uvicorn Process API changed; not installed")
             return False
 
+        # uvicorn 0.35 hardcodes the 5s ping timeout (no CLI flag); a worker whose event
+        # loop is busy longer than that is killed mid-request. Raise it via env.
+        ping_s = float(os.environ.get("UVICORN_WORKER_PING_TIMEOUT", "5"))
+        mp.Process.is_alive.__defaults__ = (ping_s,)
         _kill, _join = mp.Process.kill, mp.Process.join
 
         def kill(self):
@@ -46,7 +51,7 @@ def install() -> bool:
                 return  # graceful exits (incl. shutdown-time terminate) stay silent
             detail = f"signal {-code}" if code < 0 else f"code {code}"
             cause = (
-                "killed by master watchdog (no pong in 5s)"
+                f"killed by master watchdog (no pong in {ping_s:g}s)"
                 if getattr(self, "killed_by_master", False)
                 else "exited on its own"
             )

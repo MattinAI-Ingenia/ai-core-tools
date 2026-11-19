@@ -7,6 +7,7 @@ All external dependencies are mocked — no LLM, MCP server or database is touch
 """
 
 import json
+import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -705,3 +706,20 @@ async def test_run_subagent_records_tokens_with_its_own_collector():
 
     collector = record.call_args.args[4]
     assert isinstance(collector, AgentMetricsCollector)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc, calls, expect", [
+    (httpx.RemoteProtocolError("peer closed connection"), 2, "ok"),
+    (httpx.ReadTimeout("slow"), 1, "Error executing agent tool"),
+])
+async def test_arun_retries_once_only_on_dropped_connection(exc, calls, expect):
+    agent = _make_agent("Retry Agent")
+    with patch("tools.agentTools.get_llm", return_value=MagicMock()):
+        tool = agentTools.IACTTool(agent)
+    tool.react_agent = object()
+    run = AsyncMock(side_effect=[exc, ("ok", None)])
+    with patch.object(agentTools.IACTTool, "run_subagent", run):
+        result = await tool._arun("q")
+    assert run.await_count == calls
+    assert expect in result

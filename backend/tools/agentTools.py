@@ -34,6 +34,8 @@ from services.agent_metrics_collector import AgentMetricsCollector, METRICS_SUB_
 from tools.system_one_tool import IACTSystemOneTool
 import json
 import asyncio
+import httpx
+import openai
 import re
 import json
 import time
@@ -65,6 +67,8 @@ from tools.sandbox import (
 from tools.sandbox.factory import SandboxProviderUnavailableError, SandboxServiceRetiredError
 
 logger = get_logger(__name__)
+
+_DROPPED_CONNECTION = (httpx.RemoteProtocolError, httpx.ReadError, openai.APIConnectionError)
 
 MCP_TOOLS_TIMEOUT = 10  # seconds to wait for MCP servers to respond
 
@@ -2112,6 +2116,16 @@ class IACTTool(BaseTool):
             graph = tag_graph_with_silo(graph, self.agent.silo_id, self.silo_name)
         return rebase_citations(text, delta, valid=count), graph
 
+    async def _run_subagent_retrying(self, query: str) -> Tuple[str, Optional[dict]]:
+        # ponytail: one retry, only for a dropped model connection (the gateway cutting a
+        # stream); timeouts and everything else fail as before. A retry may repeat the
+        # partial stream events of the first attempt.
+        try:
+            return await self.run_subagent(query)
+        except _DROPPED_CONNECTION as e:
+            logger.warning(f"Agent tool {self.name}: model connection dropped ({e!r}), retrying once")
+            return await self.run_subagent(query)
+
     async def _arun(self, query: str, *args, **kwargs):
         """Asynchronous execution of the agent tool"""
         if self.react_agent is None and self.deferred_error is None:
@@ -2125,10 +2139,10 @@ class IACTTool(BaseTool):
                 self._record_metrics(query, datetime.utcnow(), None, self.deferred_error)
                 raise self.deferred_error
             if self.citation_offset is None:
-                text, _ = await self.run_subagent(query)
+                text, _ = await self._run_subagent_retrying(query)
                 return text
             async with self.citation_lock:
-                text, graph = await self.run_subagent(query)
+                text, graph = await self._run_subagent_retrying(query)
                 text, graph = self.claim_citations(text, graph)
             return text, graph_artifact(graph)
         except ServiceRetiredError as e:

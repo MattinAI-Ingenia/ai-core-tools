@@ -154,6 +154,7 @@ services:
       # ----------------------------------------------------------------------
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       UVICORN_LIMIT_CONCURRENCY: ${UVICORN_LIMIT_CONCURRENCY:-100}
+      UVICORN_WORKER_PING_TIMEOUT: ${UVICORN_WORKER_PING_TIMEOUT:-30}
       # Pools de conexiones a Postgres, POR worker (ver .env.example).
       DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
