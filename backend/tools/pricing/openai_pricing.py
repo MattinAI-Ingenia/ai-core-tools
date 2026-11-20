@@ -70,6 +70,12 @@ class OpenAIPricingProvider(PricingProvider):
         "gpt-3.5-turbo":    (0.50,    1.50),
     }
 
+    # Cached-input list prices (same source); only the models we have the figure for.
+    _CACHED_INPUT_PRICES = {
+        "gpt-6.1-terra": 0.05,
+        "gpt-6-luna":    0.01,
+    }
+
     _EMBEDDING_PRICES = {
         "text-embedding-3-small":  0.02,
         "text-embedding-3-large":  0.13,
@@ -79,6 +85,9 @@ class OpenAIPricingProvider(PricingProvider):
     def fetch_llm_pricing(self) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
         """Return known OpenAI LLM pricing."""
         return self._LLM_PRICES.copy()
+
+    def fetch_cached_input_pricing(self) -> Dict[str, float]:
+        return self._CACHED_INPUT_PRICES.copy()
 
     def fetch_embedding_pricing(self) -> Dict[str, float]:
         """Return known OpenAI embedding pricing."""

@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
+from services.agent_metrics_collector import cached_input_tokens
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -96,8 +97,8 @@ def _turn_messages(result: Any) -> list:
     return list(messages)
 
 
-def _usage_from_messages(messages: list) -> tuple[Optional[int], Optional[int], Optional[int], int, Optional[str]]:
-    """Sum token usage over the turn's AI messages -> (input, output, total, llm_calls, model)."""
+def _usage_from_messages(messages: list) -> tuple[Optional[int], Optional[int], Optional[int], int, Optional[str], Optional[int]]:
+    """Sum token usage over the turn's AI messages -> (input, output, total, llm_calls, model, cached input)."""
     ai_messages = [m for m in messages if getattr(m, "type", None) == "ai"]
     usages = [m.usage_metadata for m in ai_messages if getattr(m, "usage_metadata", None)]
     model = None
@@ -107,11 +108,11 @@ def _usage_from_messages(messages: list) -> tuple[Optional[int], Optional[int], 
         if model:
             break
     if not usages:
-        return None, None, None, len(ai_messages), model
+        return None, None, None, len(ai_messages), model, None
     inp = sum(u.get("input_tokens") or 0 for u in usages)
     out = sum(u.get("output_tokens") or 0 for u in usages)
     total = sum(u.get("total_tokens") or 0 for u in usages) or inp + out
-    return inp, out, total, len(ai_messages), model
+    return inp, out, total, len(ai_messages), model, sum(cached_input_tokens(u) for u in usages)
 
 
 def build_metrics_payload(*, event_id, fresh_agent, user_context, started_at,
@@ -128,9 +129,10 @@ def build_metrics_payload(*, event_id, fresh_agent, user_context, started_at,
     if collector is not None and collector.llm_calls > 0:
         input_tokens, output_tokens, total_tokens = collector.token_usage()
         llm_calls, model = collector.llm_calls, collector.model_name
+        cached_tokens = collector.cached_input_tokens if input_tokens is not None else None
     else:
         # No collector, or no LLM callbacks reached it: derive from the turn's messages.
-        input_tokens, output_tokens, total_tokens, llm_calls, model = _usage_from_messages(messages)
+        input_tokens, output_tokens, total_tokens, llm_calls, model, cached_tokens = _usage_from_messages(messages)
 
     response_chars = None
     for msg in reversed(messages):
@@ -164,6 +166,7 @@ def build_metrics_payload(*, event_id, fresh_agent, user_context, started_at,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+        "cached_input_tokens": cached_tokens,
         "tool_calls": [
             {"tool_name": tc["tool_name"], "tool_type": tc["tool_type"], "status": tc["status"]}
             for tc in tool_calls[:20]
@@ -232,6 +235,7 @@ async def persist_metrics_payload(payload: dict[str, Any]) -> None:
             input_tokens=event_data.get('input_tokens'),
             output_tokens=event_data.get('output_tokens'),
             total_tokens=event_data.get('total_tokens'),
+            cached_input_tokens=event_data.get('cached_input_tokens'),
             summarization_calls=event_data.get('summarization_calls') or 0,
             summarization_input_tokens=event_data.get('summarization_input_tokens') or 0,
             summarization_output_tokens=event_data.get('summarization_output_tokens') or 0,

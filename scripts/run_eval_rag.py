@@ -53,8 +53,9 @@ BACKEND_CONTAINER = os.environ.get("EVAL_RAG_BACKEND_CONTAINER", "docker-backend
 # exact figure. Matched against the agent's synthesis-model description
 # (see introspect_config) by substring, longest/most-specific key first.
 # (input, output[, cached input]) in USD per 1M tokens. The cached-input price is
-# informational: agent_execution_event does not record cached tokens, so the cost
-# below stays an upper bound that charges every input token at the full rate.
+# informational here: this script reads tokens from the container log, which has no cached
+# count, so its cost stays an upper bound at the full input rate. agent_execution_event does
+# record cached_input_tokens: scripts/agent_cost.sql prices them with the catalog.
 # gpt-6-luna / gpt-6.1-terra: same list prices as backend/tools/pricing/openai_pricing.py
 # (Standard tier, <=272K context); cached prices from getdeploying.com / pricepertoken.com.
 PRICING_PER_1M = {

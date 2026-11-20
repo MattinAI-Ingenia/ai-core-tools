@@ -14,6 +14,7 @@ from langchain_core.documents import Document
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from services.agent_metrics_collector import METRICS_RUNS_SUB_AGENTS_KEY
 from tools.streaming_utils import merge_lightrag_graph
 from utils.logger import get_logger
 
@@ -133,4 +134,5 @@ def create_query_specialists_tool(specialists: List[Any], lock: asyncio.Lock) ->
         ),
         args_schema=_QuerySpecialistsInput,
         response_format="content_and_artifact",
+        metadata={METRICS_RUNS_SUB_AGENTS_KEY: True},
     )

@@ -84,11 +84,18 @@ class TestTokenExtraction:
         event = _make_payload(result=result)['event']
         assert (event['input_tokens'], event['output_tokens']) == (10, 5)
 
+    def test_sums_cached_input_tokens_when_the_provider_reports_them(self):
+        cached = AIMessage(content="r", usage_metadata={'input_tokens': 100, 'output_tokens': 5, 'total_tokens': 105,
+                                                          'input_token_details': {'cache_read': 90}})
+        result = {'messages': [HumanMessage(content="q"), cached, self._ai(50, 5)]}
+        assert _make_payload(result=result)['event']['cached_input_tokens'] == 90
+
     def test_missing_usage_metadata(self):
         result = {'messages': [HumanMessage(content="q"), AIMessage(content="text")]}
         event = _make_payload(result=result)['event']
         assert event['input_tokens'] is None
         assert event['total_tokens'] is None
+        assert event['cached_input_tokens'] is None
         assert event['llm_calls'] == 1
 
     def test_empty_messages_list(self):
@@ -102,6 +109,7 @@ class TestCollectorPayload:
         collector = AgentMetricsCollector()
         collector.llm_calls, collector._usage_seen = 3, True
         collector.input_tokens, collector.output_tokens, collector.total_tokens = 30, 12, 42
+        collector.cached_input_tokens = 20
         collector._models["claude-sonnet-5"] += 3
         collector.tool_calls.append({
             "tool_name": "retrieve_from_knowledge_base", "tool_type": "RETRIEVER", "sub_agent_id": None,
@@ -112,6 +120,7 @@ class TestCollectorPayload:
         event = payload['event']
         assert (event['llm_calls'], event['total_tokens'], event['model_name']) == (3, 42, "claude-sonnet-5")
         assert event['time_to_first_token_ms'] == 800
+        assert event['cached_input_tokens'] == 20
         assert payload['tool_calls'][0]['tool_type'] == "RETRIEVER"
         assert event['tool_calls'] == [
             {"tool_name": "retrieve_from_knowledge_base", "tool_type": "RETRIEVER", "status": "SUCCESS"}

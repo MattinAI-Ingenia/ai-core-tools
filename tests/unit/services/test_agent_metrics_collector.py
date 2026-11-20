@@ -9,9 +9,11 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 
 from services.agent_metrics_collector import (
+    METRICS_RUNS_SUB_AGENTS_KEY,
     METRICS_SUB_AGENT_ID_KEY,
     METRICS_TOOL_TYPE_KEY,
     AgentMetricsCollector,
+    cached_input_tokens,
 )
 
 
@@ -94,6 +96,42 @@ async def test_excludes_calls_made_inside_a_sub_agent():
     assert collector.model_name == "root-model"
     assert [c["tool_name"] for c in collector.tool_calls] == ["helper_agent"]
     assert collector.tool_calls[0]["sub_agent_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_excludes_calls_made_by_a_tool_that_runs_sub_agents():
+    # query_specialists runs the specialists itself (not as AGENT tools): their tokens are their own events'.
+    collector = AgentMetricsCollector()
+    config = {"callbacks": [collector]}
+    inner_llm = _llm(1000, 1000, "sub-model")
+
+    async def fan_out(q: str) -> str:
+        await inner_llm.ainvoke(q)
+        return "merged"
+
+    await _llm(10, 5, "root-model").ainvoke("root", config=config)
+    await _tool("query_specialists", fan_out, **{METRICS_RUNS_SUB_AGENTS_KEY: True}).ainvoke({"q": "x"}, config=config)
+
+    assert collector.llm_calls == 1
+    assert collector.token_usage() == (10, 5, 15)
+    assert collector.tool_calls[0]["tool_type"] == "BUILTIN"
+
+
+@pytest.mark.asyncio
+async def test_sums_cached_input_tokens_from_either_usage_shape():
+    collector = AgentMetricsCollector()
+    config = {"callbacks": [collector]}
+    langchain_shape = GenericFakeChatModel(messages=iter([AIMessage(
+        content="ok",
+        usage_metadata={"input_tokens": 100, "output_tokens": 1, "total_tokens": 101, "input_token_details": {"cache_read": 80}},
+    )]))
+    await langchain_shape.ainvoke("a", config=config)
+    await _llm(50, 1, "m").ainvoke("b", config=config)  # provider reports no cache details
+
+    assert collector.token_usage() == (150, 2, 152)
+    assert collector.cached_input_tokens == 80
+    assert cached_input_tokens({"prompt_tokens": 9, "prompt_tokens_details": {"cached_tokens": 7}}) == 7
+    assert cached_input_tokens({"input_tokens": 9}) == 0
 
 
 def test_no_usage_reported_yields_none():

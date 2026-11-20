@@ -17,6 +17,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 # METRICS_TOOL_TYPE_KEY values are AgentToolCallType names.
 METRICS_TOOL_TYPE_KEY = "mattin_tool_type"
 METRICS_SUB_AGENT_ID_KEY = "mattin_sub_agent_id"
+# Set on a non-AGENT tool that runs sub-agents itself (query_specialists): their LLM calls are theirs, not ours.
+METRICS_RUNS_SUB_AGENTS_KEY = "mattin_runs_sub_agents"
 
 MAX_TOOL_CALLS = 200
 _ERROR_MESSAGE_MAX = 2000
@@ -37,6 +39,7 @@ class AgentMetricsCollector(BaseCallbackHandler):
         self.input_tokens = 0
         self.output_tokens = 0
         self.total_tokens = 0
+        self.cached_input_tokens = 0  # part of input_tokens the provider served from its prompt cache
         self._usage_seen = False
         self._models: Counter[str] = Counter()
         self.tool_calls: list[dict[str, Any]] = []
@@ -96,6 +99,7 @@ class AgentMetricsCollector(BaseCallbackHandler):
             out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
             self.input_tokens += inp
             self.output_tokens += out
+            self.cached_input_tokens += cached_input_tokens(usage)
             self.total_tokens += usage.get("total_tokens") or (inp + out)
         metadata = getattr(message, "response_metadata", None) or {}
         model = metadata.get("model_name") or metadata.get("model") or (response.llm_output or {}).get("model_name")
@@ -113,7 +117,7 @@ class AgentMetricsCollector(BaseCallbackHandler):
         self._track(run_id, parent_run_id)
         metadata = metadata or {}
         tool_type = metadata.get(METRICS_TOOL_TYPE_KEY) or "BUILTIN"
-        if tool_type == "AGENT":
+        if tool_type == "AGENT" or metadata.get(METRICS_RUNS_SUB_AGENTS_KEY):
             self._agent_tool_runs.add(run_id)
         if self._is_nested(run_id):
             return
@@ -155,6 +159,12 @@ def _first_message(response: Any) -> Any:
         return response.generations[0][0].message
     except (AttributeError, IndexError, TypeError):
         return None
+
+
+def cached_input_tokens(usage: dict) -> int:
+    """Input tokens served from the provider's prompt cache, from either usage shape."""
+    details = usage.get("input_token_details") or usage.get("prompt_tokens_details") or {}
+    return details.get("cache_read") or details.get("cached_tokens") or 0
 
 
 def _llm_output_usage(response: Any) -> Optional[dict]:

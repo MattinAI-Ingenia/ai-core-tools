@@ -50,6 +50,7 @@ class PricingCacheManager:
         for provider in PricingCacheManager.PROVIDERS:
             try:
                 llm_pricing, emb_pricing = provider.fetch_all()
+                cached_pricing = provider.fetch_cached_input_pricing()
 
                 # Update LLM pricing
                 for model_name, (input_price, output_price) in llm_pricing.items():
@@ -59,6 +60,7 @@ class PricingCacheManager:
                         provider=provider.provider_name,
                         input_price_per_1m=input_price,
                         output_price_per_1m=output_price,
+                        cached_input_price_per_1m=cached_pricing.get(model_name),
                         embedding_price_per_1m=None,
                         source=f"{provider.provider_name}_api",
                     )
@@ -100,6 +102,7 @@ class PricingCacheManager:
         provider: str,
         input_price_per_1m: Optional[float] = None,
         output_price_per_1m: Optional[float] = None,
+        cached_input_price_per_1m: Optional[float] = None,
         embedding_price_per_1m: Optional[float] = None,
         source: str = "unknown",
         currency: str = "USD",
@@ -115,6 +118,7 @@ class PricingCacheManager:
             provider=provider,
             input_price_per_1m=input_price_per_1m,
             output_price_per_1m=output_price_per_1m,
+            cached_input_price_per_1m=cached_input_price_per_1m,
             embedding_price_per_1m=embedding_price_per_1m,
             last_updated=datetime.utcnow(),
             source=source,
@@ -125,6 +129,7 @@ class PricingCacheManager:
             set_={
                 "input_price_per_1m": stmt.excluded.input_price_per_1m if input_price_per_1m else PricingCatalog.input_price_per_1m,
                 "output_price_per_1m": stmt.excluded.output_price_per_1m if output_price_per_1m else PricingCatalog.output_price_per_1m,
+                "cached_input_price_per_1m": stmt.excluded.cached_input_price_per_1m if cached_input_price_per_1m else PricingCatalog.cached_input_price_per_1m,
                 "embedding_price_per_1m": stmt.excluded.embedding_price_per_1m if embedding_price_per_1m else PricingCatalog.embedding_price_per_1m,
                 "last_updated": stmt.excluded.last_updated,
                 "source": stmt.excluded.source,

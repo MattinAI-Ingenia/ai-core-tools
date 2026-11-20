@@ -28,6 +28,9 @@ class PricingCatalog(Base):
     # LLM output pricing (per 1 million tokens in specified currency)
     output_price_per_1m: float | None = Column(Float, nullable=True)
 
+    # Price of input tokens read from the provider's prompt cache (per 1 million tokens); NULL = not known
+    cached_input_price_per_1m: float | None = Column(Float, nullable=True)
+
     # Embedding pricing (per 1 million tokens in specified currency, input only)
     embedding_price_per_1m: float | None = Column(Float, nullable=True)
 

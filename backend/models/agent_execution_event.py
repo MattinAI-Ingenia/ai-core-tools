@@ -78,6 +78,7 @@ class AgentExecutionEvent(Base):
     input_tokens = Column(Integer, nullable=True)
     output_tokens = Column(Integer, nullable=True)
     total_tokens = Column(Integer, nullable=True)
+    cached_input_tokens = Column(Integer, nullable=True)  # part of input_tokens read from the provider's prompt cache
     # System One agents: calls to the summarizing LLM (and what they used), apart from the server's own tokens above.
     summarization_calls = Column(Integer, nullable=False, default=0, server_default='0')
     summarization_input_tokens = Column(Integer, nullable=False, default=0, server_default='0')

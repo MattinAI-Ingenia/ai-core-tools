@@ -33,6 +33,10 @@ class PricingProvider(ABC):
         """
         pass
 
+    def fetch_cached_input_pricing(self) -> Dict[str, float]:
+        """Model name → cached-input USD per 1M tokens, for the models whose price is known."""
+        return {}
+
     @abstractmethod
     def fetch_embedding_pricing(self) -> Dict[str, float]:
         """Fetch embedding service pricing for this provider.
