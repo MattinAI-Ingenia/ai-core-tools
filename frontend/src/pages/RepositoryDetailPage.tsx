@@ -182,6 +182,9 @@ const RepositoryDetailPage: React.FC = () => {
   const [deleteAllError, setDeleteAllError] = useState<string | null>(null);
   const [deletingResource, setDeletingResource] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Failed delete attempts on the open modal; capped so a non-deletable (e.g. legacy LightRAG) file can't be spammed.
+  const [deleteFailures, setDeleteFailures] = useState(0);
+  const MAX_DELETE_FAILURES = 3;
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [resourceToMove, setResourceToMove] = useState<Resource | null>(null);
   const [moveToFolderId, setMoveToFolderId] = useState<number | null>(null);
@@ -839,6 +842,7 @@ const RepositoryDetailPage: React.FC = () => {
   const handleDeleteResource = (resource: Resource) => {
     setResourceToDelete(resource);
     setDeleteError(null);
+    setDeleteFailures(0);
     setShowDeleteModal(true);
   };
 
@@ -882,6 +886,7 @@ const RepositoryDetailPage: React.FC = () => {
     } catch (err) {
       console.error('Error deleting resource:', err);
       setDeleteError(err instanceof Error && err.message ? err.message : 'Failed to delete file');
+      setDeleteFailures((n) => n + 1);
     } finally {
       setDeletingResource(false);
     }
@@ -1630,7 +1635,7 @@ const RepositoryDetailPage: React.FC = () => {
             </button>
             <button
               onClick={confirmDeleteResource}
-              disabled={deletingResource}
+              disabled={deletingResource || deleteFailures >= MAX_DELETE_FAILURES}
               className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {deletingResource ? 'Deleting…' : 'Delete'}
