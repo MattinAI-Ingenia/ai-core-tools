@@ -5,11 +5,27 @@ from langchain_azure_ai.embeddings import AzureAIEmbeddingsModel
 from huggingface_hub import InferenceClient
 from models.embedding_service import EmbeddingProvider
 from utils.azure_endpoint import normalize_azure_openai_endpoint
+from utils.config import Config
 from utils.logger import get_logger
 import json
 import os
 
 logger = get_logger(__name__)
+
+# Client-side request timeout for every embedding client, so a provider that never answers eventually frees the worker
+# thread. Generous on purpose (bulk indexing batches on Ollama / local HuggingFace can take a while) and configurable
+# with AICT_EMBEDDING_REQUEST_TIMEOUT_SECONDS. Retries are NOT overridden: each library keeps its own default.
+# Applied to every provider class whose constructor takes a timeout (OpenAI, MistralAI, HuggingFace InferenceClient,
+# Ollama httpx client, Bedrock botocore config). NOT applied to Azure AI Inference and Google GenAI embeddings: their
+# LangChain classes expose no timeout parameter.
+EMBEDDING_REQUEST_TIMEOUT_ENV = "AICT_EMBEDDING_REQUEST_TIMEOUT_SECONDS"
+EMBEDDING_REQUEST_TIMEOUT_DEFAULT_SECONDS = 120
+
+
+def get_embedding_request_timeout() -> int:
+    """Return the embedding client timeout in seconds (read at client build time)."""
+    return Config.get_int_env_var(EMBEDDING_REQUEST_TIMEOUT_ENV, default=EMBEDDING_REQUEST_TIMEOUT_DEFAULT_SECONDS)
+
 
 class HuggingFaceEmbeddingsAdapter:
     def __init__(self, client):
@@ -50,20 +66,23 @@ def _build_openai_embeddings(embedding_service, model_id):
         api_key=embedding_service.api_key,
         base_url=endpoint,
         check_embedding_ctx_length=endpoint is None,
+        timeout=get_embedding_request_timeout(),
     )
 
 
 def _build_mistral_embeddings(embedding_service, model_id):
     return MistralAIEmbeddings(
         model=model_id,
-        api_key=embedding_service.api_key
+        api_key=embedding_service.api_key,
+        timeout=get_embedding_request_timeout(),
     )
 
 
 def _build_huggingface_embeddings(embedding_service, model_id):
     client = InferenceClient(
         model=embedding_service.endpoint,
-        api_key=embedding_service.api_key
+        api_key=embedding_service.api_key,
+        timeout=get_embedding_request_timeout(),
     )
     return HuggingFaceEmbeddingsAdapter(client)
 
@@ -74,6 +93,7 @@ def _build_ollama_embeddings(embedding_service, model_id):
         base_url=embedding_service.endpoint,
         client_kwargs={
             "verify": False,
+            "timeout": get_embedding_request_timeout(),
             "headers": {
                 "Authorization": f"Bearer {embedding_service.api_key}"
             }
@@ -137,7 +157,16 @@ def _build_bedrock_embeddings(embedding_service, model_id):
     from tools.aws_bedrock_utils import resolve_bedrock_credentials
 
     creds = resolve_bedrock_credentials(embedding_service)
-    kwargs = {"model_id": model_id, **creds}
+    from botocore.config import Config
+
+    kwargs = {
+        "model_id": model_id,
+        **creds,
+        "config": Config(
+            connect_timeout=get_embedding_request_timeout(),
+            read_timeout=get_embedding_request_timeout(),
+        ),
+    }
 
     endpoint_raw = (embedding_service.endpoint or "").strip()
     if endpoint_raw:

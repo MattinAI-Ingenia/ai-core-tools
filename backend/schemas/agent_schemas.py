@@ -240,6 +240,28 @@ class RagConfigFieldsMixin(BaseModel):
         return validated
 
 
+class ExposedChatFiltersMixin(BaseModel):
+    """Shared ``exposed_chat_filters`` field + validator.
+
+    Agent-level (not silo-scoped): a whitelist of metadata field NAMES the
+    designer allows end users to pick a value for as chat-time dropdown
+    filters. Distinct from ``rag_fixed_filters`` (admin-pinned, always
+    applied on every retrieval) — this is just a whitelist of names the
+    Playground/Marketplace chat UI may surface as end-user-selectable
+    dropdowns. Doesn't require a silo since an orchestrator often has none
+    of its own — its candidate fields are unioned from its attached
+    subagents' silos too.
+    """
+    exposed_chat_filters: Optional[List[str]] = []
+
+    @field_validator("exposed_chat_filters")
+    @classmethod
+    def validate_exposed_chat_filters(cls, v: Optional[List[str]]) -> List[str]:
+        if not v:
+            return []
+        return list(dict.fromkeys(s.strip() for s in v if isinstance(s, str) and s.strip()))
+
+
 class RuntimeSearchParamsSchema(BaseModel):
     """Bounds for caller-supplied runtime search params on the public chat API.
 
@@ -377,6 +399,7 @@ class AgentDetailSchema(BaseModel):
     # Informational: the deployment's CHUNK_TOP_K effective value, shown in the
     # UI when rag_chunk_top_k is left unset. Not part of what gets saved.
     rag_chunk_top_k_deployment_default: int = 30
+    exposed_chat_filters: List[str] = []
     # A2A (Agent2Agent protocol) configuration (step_009, FR-3)
     a2a_enabled: bool = False
     a2a_card_visibility: Literal["public", "api_key"] = "public"
@@ -391,7 +414,7 @@ class AgentDetailSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class CreateUpdateAgentSchema(RagConfigFieldsMixin, A2AAgentFieldsMixin):
+class CreateUpdateAgentSchema(RagConfigFieldsMixin, ExposedChatFiltersMixin, A2AAgentFieldsMixin):
     """Schema for creating or updating an agent"""
     name: str
     description: Optional[str] = ""
@@ -615,3 +638,9 @@ class PublicAgentsResponseSchema(BaseModel):
 class PublicAgentResponseSchema(BaseModel):
     """Single agent response for public API"""
     agent: PublicAgentDetailSchema
+
+
+class PublicChatFilterFieldSchema(BaseModel):
+    """Distinct values for one chat-time metadata filter field, public API."""
+    field_name: str
+    values: List[str]

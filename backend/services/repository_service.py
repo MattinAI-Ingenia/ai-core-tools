@@ -1,4 +1,4 @@
-from models.repository import Repository
+from models.repository import PLAYGROUND_MEDIA_REPO_TYPE, Repository
 from models.resource import Resource
 from models.output_parser import OutputParser
 from models.embedding_service import EmbeddingService
@@ -30,6 +30,7 @@ logger = get_logger(__name__)
 LIGHTRAG_VECTOR_DB_TYPES = ('PGVECTOR', 'QDRANT')
 
 _REPOSITORY_NOT_FOUND = "Repository not found"
+_RESERVED_TYPE = "This repository type is reserved"
 
 # Fields of UpdateRepositorySchema that belong to the silo, not the repository
 # row. Which of them a given silo will actually accept is decided downstream by
@@ -154,7 +155,9 @@ class RepositoryService:
             'transcription_service_id': transcription_service_id,
             'video_ai_service_id': video_ai_service_id,
         }
-        silo = silo_service.create_or_update_silo(silo_data, SiloType.REPO, db)
+        silo = silo_service.create_or_update_silo(
+            silo_data, SiloType.REPO, db, enforce_quota=repository.type != PLAYGROUND_MEDIA_REPO_TYPE
+        )
 
         # Now create the repository with the silo_id
         repository.silo_id = silo.silo_id
@@ -609,6 +612,8 @@ class RepositoryService:
                         f"Supported values: {', '.join(LIGHTRAG_VECTOR_DB_TYPES)}"
                     ),
                 )
+        if repo_data.type == PLAYGROUND_MEDIA_REPO_TYPE:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_RESERVED_TYPE)
 
         repo = Repository()
         repo.app_id = app_id
@@ -659,6 +664,9 @@ class RepositoryService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=_REPOSITORY_NOT_FOUND,
             )
+
+        if repo_data.type == PLAYGROUND_MEDIA_REPO_TYPE:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_RESERVED_TYPE)
 
         repo.name = repo_data.name
         if repo_data.type is not None:

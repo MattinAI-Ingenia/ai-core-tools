@@ -81,6 +81,7 @@ function loadModal() {
           jsxs: (type, props) => ({ type, props }),
         },
         'lucide-react': { X: 'X' },
+        'react-i18next': { useTranslation: () => ({ t: (key) => key }) },
       };
       assert.ok(name in modules, `Unexpected dependency: ${name}`);
       return modules[name];

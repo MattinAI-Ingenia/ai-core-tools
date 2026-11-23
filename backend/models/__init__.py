@@ -41,6 +41,8 @@ from .subscription import Subscription, SubscriptionTier, BillingStatus
 from .tier_config import TierConfig
 from .usage_record import UsageRecord
 from .user_credential import UserCredential
+from .user_avatar import UserAvatar
+from .app_image import AppImage
 from .pricing_catalog import PricingCatalog
 from .indexing_metric import IndexingMetric
 from .entity_type_inference_job import EntityTypeInferenceJob
@@ -48,6 +50,7 @@ from .entity_name_variant import EntityNameVariant
 from .refresh_token import RefreshToken
 from .scheduled_task import ScheduledTask, ScheduledTaskRun
 from .a2a_context_link import A2AContextLink
+from .internal_chat import ConversationTurn, ChatUserDefault, ChatConversationState
 from .output_delivery import OutputArtifact, OutputDestination, ScheduledTaskOutputBinding, OutputDelivery, OutputDeliveryAttempt
 
 __all__ = [
@@ -66,6 +69,8 @@ __all__ = [
     'TierConfig',
     'UsageRecord',
     'UserCredential',
+    'UserAvatar',
+    'AppImage',
     'PricingCatalog',
     'IndexingMetric',
     'EntityTypeInferenceJob',
@@ -78,6 +83,7 @@ __all__ = [
     'AgentExecutionEvent',
     'AgentToolCall',
     'A2AContextLink',
+    'ConversationTurn', 'ChatUserDefault', 'ChatConversationState',
     'AgentSystemOneAnswer',
     'SystemOneAgent',
 ]

@@ -8,6 +8,7 @@ import pytest
 
 def _make_agent():
     return SimpleNamespace(
+        is_internal_chat=False,
         agent_id=7,
         type="agent",
         ai_service=None,
@@ -107,6 +108,7 @@ async def test_create_agent_passes_parent_sandbox_to_agent_tools(tmp_path):
         attached_files=None,
         user_message=None,
         max_tool_calls=None,
+        caller_filter={},
     )
 
 
