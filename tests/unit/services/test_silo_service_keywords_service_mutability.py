@@ -45,7 +45,10 @@ def _call(existing_silo: MagicMock, extra: dict):
         **extra,
     }
     mock_db = MagicMock()
-    with patch("services.silo_service.SiloService.get_silo", return_value=existing_silo):
+    # Ownership/retirement of the LLM roles is covered in test_service_retired_assignment.py.
+    with patch("services.silo_service.SiloService.get_silo", return_value=existing_silo), \
+            patch("services.silo_service.SiloService._checked_ai_service_id",
+                  side_effect=lambda _db, _app, service_id, *_a, **_k: service_id):
         return SiloService.create_or_update_silo(data, db=mock_db)
 
 

@@ -174,6 +174,27 @@ class TestSiloAssignment:
         with pytest.raises(ValidationError, match="retired"):
             SiloService.apply_media_services(silo, None, 2, 10, self._media_db(_svc(2, retired=True)))
 
+    def _lightrag_update(self, service, **extra):
+        silo = _silo()
+        silo.extract_service_id = silo.indexing_service_id = 1
+        silo.keywords_service_id = 1
+        with patch("services.silo_service.SiloService.get_silo", return_value=silo):
+            SiloService.create_or_update_silo(_silo_data(**extra), db=self._media_db(service))
+        return silo
+
+    @pytest.mark.parametrize("field", ["extract_service_id", "indexing_service_id", "keywords_service_id"])
+    def test_lightrag_llm_of_another_app_rejected(self, field):
+        with pytest.raises(ValidationError, match="not found"):
+            self._lightrag_update(_svc(2, app_id=99), **{field: 2})
+
+    def test_lightrag_llm_change_to_retired_rejected(self):
+        with pytest.raises(ValidationError, match="retired"):
+            self._lightrag_update(_svc(2, retired=True), extract_service_id=2)
+
+    def test_lightrag_llm_unchanged_retired_and_system_accepted(self):
+        assert self._lightrag_update(_svc(1, retired=True), extract_service_id=1).extract_service_id == 1
+        assert self._lightrag_update(_svc(2, app_id=None), keywords_service_id=2).keywords_service_id == 2
+
     def test_media_service_unchanged_retired_accepted(self):
         silo = _silo(transcription=2, video=2)
         SiloService.apply_media_services(silo, 2, 2, 10, self._media_db(_svc(2, retired=True)))
