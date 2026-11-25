@@ -16,15 +16,16 @@ interface SiloGraphViewProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function toNvlNodes(nodes: GraphNode[], typeColoring: boolean): NvlNode[] {
+function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, selectedIds: Set<string>): NvlNode[] {
     return nodes.map(n => ({
         id: n.id,
         captions: [{ value: n.id }],
         color: typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
+        selected: selectedIds.has(n.id),
     }));
 }
 
-function toNvlRels(edges: GraphEdge[], nodes: GraphNode[]): NvlRelationship[] {
+function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<string>): NvlRelationship[] {
     const nodeIds = new Set(nodes.map(n => n.id));
     return edges
         .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
@@ -39,6 +40,7 @@ function toNvlRels(edges: GraphEdge[], nodes: GraphNode[]): NvlRelationship[] {
                 to: e.target,
                 captions: label ? [{ value: label }] : [],
                 color: '#94a3b8',
+                selected: selectedIds.has(e.id),
             };
         });
 }
@@ -242,8 +244,28 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
 
     const nodes = graphData?.nodes ?? [];
     const edges = graphData?.edges ?? [];
-    const nvlNodes = toNvlNodes(nodes, typeColoring);
-    const nvlRels = toNvlRels(edges, nodes);
+    // Highlight: clicked node → itself + its neighbors + incident edges;
+    // clicked edge → itself + its two endpoints.
+    const highlightNodes = new Set<string>();
+    const highlightEdges = new Set<string>();
+    if (selectedNode) {
+        highlightNodes.add(selectedNode.id);
+        for (const e of edges) {
+            if (e.source === selectedNode.id) {
+                highlightNodes.add(e.target);
+                highlightEdges.add(e.id);
+            } else if (e.target === selectedNode.id) {
+                highlightNodes.add(e.source);
+                highlightEdges.add(e.id);
+            }
+        }
+    } else if (selectedEdge) {
+        highlightNodes.add(selectedEdge.source);
+        highlightNodes.add(selectedEdge.target);
+        highlightEdges.add(selectedEdge.id);
+    }
+    const nvlNodes = toNvlNodes(nodes, typeColoring, highlightNodes);
+    const nvlRels = toNvlRels(edges, nodes, highlightEdges);
     const isEmpty = nvlNodes.length === 0;
     const entityTypes = graphData?.entity_types ?? [];
     const atCap = nodes.length >= Math.min(graphData?.max_nodes ?? maxNodesRef.current, sliderMax);
