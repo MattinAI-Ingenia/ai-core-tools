@@ -4,7 +4,7 @@ import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
 import { apiService } from '../../services/api';
-import { NEUTRAL_COLOR, PARTIAL_COLOR, colorForType } from '../../utils/entityTypeColors';
+import { NEUTRAL_COLOR, PARTIAL_COLOR, PRIMARY_COLOR, colorForType } from '../../utils/entityTypeColors';
 import type { GraphNode, GraphEdge, SiloGraphData } from '../../utils/siloGraphUtils';
 import { mergeGraphData } from '../../utils/siloGraphUtils';
 import GraphDetailPanel from './GraphDetailPanel';
@@ -16,16 +16,19 @@ interface SiloGraphViewProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, selectedIds: Set<string>): NvlNode[] {
+function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, selectedIds: Set<string>, primaryIds: Set<string>): NvlNode[] {
     return nodes.map(n => ({
         id: n.id,
         captions: [{ value: n.id }],
-        color: typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
+        // The clicked node (or clicked edge's endpoints) gets its own color so
+        // it stands out from the palette and from its merely-highlighted
+        // neighbors (which keep their type color + selection ring).
+        color: primaryIds.has(n.id) ? PRIMARY_COLOR : typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
         selected: selectedIds.has(n.id),
     }));
 }
 
-function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<string>): NvlRelationship[] {
+function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<string>, primaryIds: Set<string>): NvlRelationship[] {
     const nodeIds = new Set(nodes.map(n => n.id));
     return edges
         .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
@@ -39,7 +42,7 @@ function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<stri
                 from: e.source,
                 to: e.target,
                 captions: label ? [{ value: label }] : [],
-                color: '#94a3b8',
+                color: primaryIds.has(e.id) ? PRIMARY_COLOR : '#94a3b8',
                 selected: selectedIds.has(e.id),
             };
         });
@@ -245,10 +248,14 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const nodes = graphData?.nodes ?? [];
     const edges = graphData?.edges ?? [];
     // Highlight: clicked node → itself + its neighbors + incident edges;
-    // clicked edge → itself + its two endpoints.
+    // clicked edge → itself + its two endpoints. The pointed element gets the
+    // primary color; the rest keep their colors with a selection ring.
     const highlightNodes = new Set<string>();
     const highlightEdges = new Set<string>();
+    const primaryNodes = new Set<string>();
+    const primaryEdges = new Set<string>();
     if (selectedNode) {
+        primaryNodes.add(selectedNode.id);
         highlightNodes.add(selectedNode.id);
         for (const e of edges) {
             if (e.source === selectedNode.id) {
@@ -260,12 +267,15 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             }
         }
     } else if (selectedEdge) {
+        primaryNodes.add(selectedEdge.source);
+        primaryNodes.add(selectedEdge.target);
+        primaryEdges.add(selectedEdge.id);
         highlightNodes.add(selectedEdge.source);
         highlightNodes.add(selectedEdge.target);
         highlightEdges.add(selectedEdge.id);
     }
-    const nvlNodes = toNvlNodes(nodes, typeColoring, highlightNodes);
-    const nvlRels = toNvlRels(edges, nodes, highlightEdges);
+    const nvlNodes = toNvlNodes(nodes, typeColoring, highlightNodes, primaryNodes);
+    const nvlRels = toNvlRels(edges, nodes, highlightEdges, primaryEdges);
     const isEmpty = nvlNodes.length === 0;
     const entityTypes = graphData?.entity_types ?? [];
     const atCap = nodes.length >= Math.min(graphData?.max_nodes ?? maxNodesRef.current, sliderMax);

@@ -27,6 +27,10 @@ export const PARTIAL_COLOR = '#94a3b8'; // slate-400
 export const RING_CITED = '#22c55e'; // green-500
 export const RING_RETRIEVED = '#6366f1'; // indigo-500
 
+/** Fill of the element the user clicked (selected node / clicked edge) —
+ *  deliberately NOT in TYPE_PALETTE so it can't be mistaken for a type. */
+export const PRIMARY_COLOR = '#facc15'; // yellow-400
+
 /** FNV-1a over the UTF-16 code units — stable across sessions and silos. */
 function fnv1a(text: string): number {
   let hash = 0x811c9dc5;

@@ -8,7 +8,7 @@ import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship } from '..
 import OpenPdfButton from './OpenPdfButton';
 import { groupChunksById } from '../../utils/groupChunksById';
 import { bubbleNodeFill, bubbleNodeIcon, fromCitedChunk } from '../../utils/bubbleGraphStyle';
-import { PARTIAL_COLOR, RING_CITED, colorForType } from '../../utils/entityTypeColors';
+import { PARTIAL_COLOR, RING_CITED, PRIMARY_COLOR, colorForType } from '../../utils/entityTypeColors';
 import { splitSourceIds } from '../../utils/siloGraphUtils';
 import type { GraphSourceDoc } from '../../utils/siloGraphUtils';
 import { apiService } from '../../services/api';
@@ -33,18 +33,18 @@ interface Props {
 // cited/retrieved marks are RINGS (overlayIcon) when type coloring is on, and
 // the old green/indigo FILL when it is off.
 
-function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>, typeColoring: boolean, selectedIds: Set<string>): NvlNode[] {
+function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>, typeColoring: boolean, selectedIds: Set<string>, primaryIds: Set<string>): NvlNode[] {
   return entities.map((e) => ({
     id: String(e.id),
     captions: [{ value: String(e.name ?? e.id) }],
-    color: bubbleNodeFill(e, typeColoring, cited),
+    color: primaryIds.has(String(e.id)) ? PRIMARY_COLOR : bubbleNodeFill(e, typeColoring, cited),
     // NVL has no native outline — the ring rides along as an overlayIcon.
     overlayIcon: bubbleNodeIcon(e, cited, typeColoring),
     selected: selectedIds.has(String(e.id)),
   }));
 }
 
-function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Set<string>, selectedIds: Set<string>): NvlRelationship[] {
+function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Set<string>, selectedIds: Set<string>, primaryIds: Set<string>): NvlRelationship[] {
   return rels
     .filter((r) => r.source && r.target && nodeIds.has(String(r.source)) && nodeIds.has(String(r.target)))
     .map((r) => {
@@ -54,7 +54,7 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Se
         from: String(r.source),
         to: String(r.target),
         captions: label ? [{ value: label }] : [],
-        color: fromCitedChunk(r.source_id, cited) ? RING_CITED : PARTIAL_COLOR,
+        color: primaryIds.has(String(r.id)) ? PRIMARY_COLOR : fromCitedChunk(r.source_id, cited) ? RING_CITED : PARTIAL_COLOR,
         selected: selectedIds.has(String(r.id)),
       };
     });
@@ -173,7 +173,10 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
     // clicked relationship → itself + its two endpoints.
     const highlightNodes = new Set<string>();
     const highlightEdges = new Set<string>();
+    const primaryNodes = new Set<string>();
+    const primaryEdges = new Set<string>();
     if (selectedEntity) {
+      primaryNodes.add(String(selectedEntity.id));
       highlightNodes.add(String(selectedEntity.id));
       for (const r of relationships) {
         if (String(r.source) === String(selectedEntity.id)) {
@@ -185,13 +188,16 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
         }
       }
     } else if (selectedRel) {
+      primaryNodes.add(String(selectedRel.source));
+      primaryNodes.add(String(selectedRel.target));
+      primaryEdges.add(String(selectedRel.id));
       highlightNodes.add(String(selectedRel.source));
       highlightNodes.add(String(selectedRel.target));
       highlightEdges.add(String(selectedRel.id));
     }
-    const nodes = toNvlNodes(entities, citedSet, typeColoring, highlightNodes);
+    const nodes = toNvlNodes(entities, citedSet, typeColoring, highlightNodes, primaryNodes);
     const ids = new Set(nodes.map((n) => n.id));
-    return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids, citedSet, highlightEdges) };
+    return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids, citedSet, highlightEdges, primaryEdges) };
   }, [entities, relationships, citedSet, typeColoring, selectedEntity, selectedRel]);
 
   // Count only the relationships actually drawn (both endpoints present) so the
