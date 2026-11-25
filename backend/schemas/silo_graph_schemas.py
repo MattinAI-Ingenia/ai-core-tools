@@ -33,6 +33,21 @@ class GraphEntityType(BaseModel):
     count: int
 
 
+class GraphSource(BaseModel):
+    """One source document (+page) a graph node/edge was extracted from."""
+
+    chunk_id: str
+    resource_id: Optional[int] = None
+    page: Optional[int] = None
+    file_name: Optional[str] = None
+
+
+class GraphSourcesResponse(BaseModel):
+    """Payload of GET /{silo_id}/graph/sources."""
+
+    sources: List[GraphSource] = []
+
+
 class SiloGraphResponse(BaseModel):
     """Full graph payload returned by the GET /{silo_id}/graph endpoint."""
 

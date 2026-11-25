@@ -887,6 +887,43 @@ def get_silo_graph_neighbors(
     )
 
 
+@silos_router.get("/{silo_id}/graph/sources")
+def get_silo_graph_sources(
+    app_id: int,
+    silo_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    ids: str = Query(..., min_length=1),
+):
+    """Resolve chunk ids (a node/edge's ``source_id``, SEP-joined) to the
+    source documents + pages they were extracted from. Max 100 ids.
+
+    - **409 Conflict**: silo is not a LightRAG silo.
+    - **422 Unprocessable Entity**: more than 100 ids requested.
+    """
+    from services.silo_graph_sources_service import SiloGraphSourcesService
+    from schemas.silo_graph_schemas import GraphSourcesResponse, GraphSource
+
+    chunk_ids = [c.strip() for c in ids.split(",") if c.strip()]
+    if len(chunk_ids) > SiloGraphSourcesService.MAX_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Too many chunk ids requested (max {SiloGraphSourcesService.MAX_IDS}).",
+        )
+
+    silo = _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if getattr(silo, "vector_db_type", None) != "LIGHTRAG":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge graph is only available for LightRAG silos.",
+        )
+
+    sources = SiloGraphSourcesService.resolve_sources(silo_id, chunk_ids, db)
+    return GraphSourcesResponse(sources=[GraphSource(**s) for s in sources])
+
+
 @silos_router.get("/{silo_id}/resources/{resource_id}/file")
 def download_silo_resource(
     app_id: int,
