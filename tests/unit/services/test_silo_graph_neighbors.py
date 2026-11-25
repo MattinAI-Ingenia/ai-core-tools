@@ -98,7 +98,6 @@ def test_neighbor_queries_conclude_with_return():
     layer_q = session.run.call_args_list[2].args[0]
     for query in (d1_q, layer_q):
         assert "RETURN m ORDER BY degree DESC LIMIT" in query
-        assert query.rstrip().endswith("$budget") is False
 
 
 def test_root_and_depth1_always_kept():

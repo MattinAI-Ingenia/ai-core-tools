@@ -29,7 +29,7 @@ class _FakeNode:
 
 
 def _run_cypher_graph(*, max_nodes=200, max_edges=1000, total_nodes=5000, total_edges=20000,
-                      entity_types=None, type_counts=None):
+                      entity_types=None, type_counts=None, search=None):
     """Drive ``_cypher_graph`` with a mocked driver, one fake node, no edges
     (edge *rows* aren't under test here — the LIMIT argument passed to the
     edge query is)."""
@@ -48,7 +48,7 @@ def _run_cypher_graph(*, max_nodes=200, max_edges=1000, total_nodes=5000, total_
     with patch.object(SiloGraphService, "_neo4j_driver", return_value=driver):
         result = SiloGraphService._cypher_graph(
             workspace="silo_1", max_nodes=max_nodes, max_edges=max_edges,
-            entity_types=entity_types, search=None,
+            entity_types=entity_types, search=search,
         )
     return result, session
 
