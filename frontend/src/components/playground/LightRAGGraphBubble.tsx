@@ -3,9 +3,11 @@ import { createPortal } from 'react-dom';
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
-import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship, LightRAGChunk } from '../../types/streaming';
+import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship } from '../../types/streaming';
 import OpenPdfButton from './OpenPdfButton';
 import { groupChunksById } from '../../utils/groupChunksById';
+import { bubbleNodeFill, bubbleNodeIcon, fromCitedChunk } from '../../utils/bubbleGraphStyle';
+import { PARTIAL_COLOR, RING_CITED } from '../../utils/entityTypeColors';
 
 interface Props {
   graphData: LightRAGGraphData;
@@ -21,30 +23,17 @@ interface Props {
   chunkNumbers?: number[];
 }
 
-// LightRAG joins the chunk ids an entity/relationship was extracted from with
-// this separator inside `source_id`.
-const GRAPH_FIELD_SEP = '<SEP>';
-const COLOR_USED = '#22c55e';       // green-500  — from a cited chunk
-const COLOR_RETRIEVED = '#6366f1';  // indigo-500 — retrieved into the subgraph
-const COLOR_PARTIAL = '#94a3b8';    // slate-400  — partial node / non-cited edge
+// Node/edge styling lives in utils/bubbleGraphStyle (pure, tested) — the
+// cited/retrieved marks are RINGS (overlayIcon) when type coloring is on, and
+// the old green/indigo FILL when it is off.
 
-// True when any chunk the element was extracted from is among the cited chunks.
-function fromCitedChunk(sourceId: string | undefined, cited: Set<string>): boolean {
-  if (!sourceId || cited.size === 0) return false;
-  return sourceId.split(GRAPH_FIELD_SEP).some((id) => cited.has(id.trim()));
-}
-
-function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>): NvlNode[] {
+function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>, typeColoring: boolean): NvlNode[] {
   return entities.map((e) => ({
     id: String(e.id),
     captions: [{ value: String(e.name ?? e.id) }],
-    // partial = relationship endpoint LightRAG truncated from the entity list
-    // (muted gray); green if it came from a cited chunk; else plain retrieved blue.
-    color: e.partial
-      ? COLOR_PARTIAL
-      : fromCitedChunk(e.source_id, cited)
-        ? COLOR_USED
-        : COLOR_RETRIEVED,
+    color: bubbleNodeFill(e, typeColoring, cited),
+    // NVL has no native outline — the ring rides along as an overlayIcon.
+    overlayIcon: bubbleNodeIcon(e, cited, typeColoring),
   }));
 }
 
@@ -58,7 +47,7 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Se
         from: String(r.source),
         to: String(r.target),
         captions: label ? [{ value: label }] : [],
-        color: fromCitedChunk(r.source_id, cited) ? COLOR_USED : COLOR_PARTIAL,
+        color: fromCitedChunk(r.source_id, cited) ? RING_CITED : PARTIAL_COLOR,
       };
     });
 }
@@ -69,6 +58,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const [openChunk, setOpenChunk] = useState<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number; placement: 'top' | 'bottom' } | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<LightRAGEntity | null>(null);
+  const [typeColoring, setTypeColoring] = useState(true);
   const popoverRef = useRef<HTMLDivElement>(null);
 
   // Close the (portal-rendered) chunk popover on outside scroll/resize, since
@@ -142,10 +132,10 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const hasCited = citedSet.size > 0;
 
   const { nvlNodes, nvlRels } = useMemo(() => {
-    const nodes = toNvlNodes(entities, citedSet);
+    const nodes = toNvlNodes(entities, citedSet, typeColoring);
     const ids = new Set(nodes.map((n) => n.id));
     return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids, citedSet) };
-  }, [entities, relationships, citedSet]);
+  }, [entities, relationships, citedSet, typeColoring]);
 
   // Count only the relationships actually drawn (both endpoints present) so the
   // header matches the canvas instead of LightRAG's raw relationship total.
@@ -245,16 +235,30 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
               </div>
             )}
             {(entityCount > 0 || relCount > 0) && (
-              <button
-                onClick={() => setModalOpen(true)}
-                className="inline-flex items-center gap-1.5 text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200 font-medium transition-colors"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14" />
-                </svg>
-                View subgraph
-              </button>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <button
+                  onClick={() => setModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200 font-medium transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14" />
+                  </svg>
+                  View subgraph
+                </button>
+                <label
+                  className="inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400"
+                  title="Color nodes by entity type; when off, cited nodes are green and retrieved ones indigo"
+                >
+                  <input
+                    type="checkbox"
+                    checked={typeColoring}
+                    onChange={(e) => setTypeColoring(e.target.checked)}
+                    className="accent-indigo-600"
+                  />
+                  Color by type
+                </label>
+              </div>
             )}
           </div>
         )}
