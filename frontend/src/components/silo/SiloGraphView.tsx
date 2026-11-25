@@ -16,19 +16,16 @@ interface SiloGraphViewProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, selectedIds: Set<string>, primaryIds: Set<string>): NvlNode[] {
+function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, selectedIds: Set<string>): NvlNode[] {
     return nodes.map(n => ({
         id: n.id,
         captions: [{ value: n.id }],
-        // The clicked node (or clicked edge's endpoints) gets its own color so
-        // it stands out from the palette and from its merely-highlighted
-        // neighbors (which keep their type color + selection ring).
-        color: primaryIds.has(n.id) ? PRIMARY_COLOR : typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
+        color: typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
         selected: selectedIds.has(n.id),
     }));
 }
 
-function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<string>, primaryIds: Set<string>): NvlRelationship[] {
+function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<string>): NvlRelationship[] {
     const nodeIds = new Set(nodes.map(n => n.id));
     return edges
         .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
@@ -42,7 +39,7 @@ function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<stri
                 from: e.source,
                 to: e.target,
                 captions: label ? [{ value: label }] : [],
-                color: primaryIds.has(e.id) ? PRIMARY_COLOR : '#94a3b8',
+                color: '#94a3b8',
                 selected: selectedIds.has(e.id),
             };
         });
@@ -225,6 +222,12 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const nvlOptions: NvlOptions = {
         layout: 'forceDirected',
         allowDynamicMinZoom: true,
+        // Selection ring AROUND the element (fill untouched) — bright yellow so
+        // the clicked node/edge stands out from the type palette.
+        styling: {
+            selectedBorderColor: PRIMARY_COLOR,
+            selectedInnerBorderColor: PRIMARY_COLOR,
+        },
     };
 
     if (loading) {
@@ -248,14 +251,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const nodes = graphData?.nodes ?? [];
     const edges = graphData?.edges ?? [];
     // Highlight: clicked node → itself + its neighbors + incident edges;
-    // clicked edge → itself + its two endpoints. The pointed element gets the
-    // primary color; the rest keep their colors with a selection ring.
+    // clicked edge → itself + its two endpoints. NVL draws a colored ring
+    // AROUND selected elements (fill colors stay untouched).
     const highlightNodes = new Set<string>();
     const highlightEdges = new Set<string>();
-    const primaryNodes = new Set<string>();
-    const primaryEdges = new Set<string>();
     if (selectedNode) {
-        primaryNodes.add(selectedNode.id);
         highlightNodes.add(selectedNode.id);
         for (const e of edges) {
             if (e.source === selectedNode.id) {
@@ -267,15 +267,12 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             }
         }
     } else if (selectedEdge) {
-        primaryNodes.add(selectedEdge.source);
-        primaryNodes.add(selectedEdge.target);
-        primaryEdges.add(selectedEdge.id);
         highlightNodes.add(selectedEdge.source);
         highlightNodes.add(selectedEdge.target);
         highlightEdges.add(selectedEdge.id);
     }
-    const nvlNodes = toNvlNodes(nodes, typeColoring, highlightNodes, primaryNodes);
-    const nvlRels = toNvlRels(edges, nodes, highlightEdges, primaryEdges);
+    const nvlNodes = toNvlNodes(nodes, typeColoring, highlightNodes);
+    const nvlRels = toNvlRels(edges, nodes, highlightEdges);
     const isEmpty = nvlNodes.length === 0;
     const entityTypes = graphData?.entity_types ?? [];
     const atCap = nodes.length >= Math.min(graphData?.max_nodes ?? maxNodesRef.current, sliderMax);
