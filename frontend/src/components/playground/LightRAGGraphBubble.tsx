@@ -8,7 +8,7 @@ import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship } from '..
 import OpenPdfButton from './OpenPdfButton';
 import { groupChunksById } from '../../utils/groupChunksById';
 import { bubbleNodeFill, bubbleNodeIcon, fromCitedChunk } from '../../utils/bubbleGraphStyle';
-import { PARTIAL_COLOR, RING_CITED, PRIMARY_COLOR, colorForType } from '../../utils/entityTypeColors';
+import { PARTIAL_COLOR, RING_CITED, PRIMARY_COLOR, HIGHLIGHT_BLUE, colorForType, typeRingIcon } from '../../utils/entityTypeColors';
 import { splitSourceIds } from '../../utils/siloGraphUtils';
 import type { GraphSourceDoc } from '../../utils/siloGraphUtils';
 import { apiService } from '../../services/api';
@@ -33,18 +33,21 @@ interface Props {
 // cited/retrieved marks are RINGS (overlayIcon) when type coloring is on, and
 // the old green/indigo FILL when it is off.
 
-function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>, typeColoring: boolean, selectedIds: Set<string>): NvlNode[] {
+function toNvlNodes(entities: LightRAGEntity[], cited: Set<string>, typeColoring: boolean, chosenIds: Set<string>, neighborIds: Set<string>): NvlNode[] {
   return entities.map((e) => ({
     id: String(e.id),
     captions: [{ value: String(e.name ?? e.id) }],
     color: bubbleNodeFill(e, typeColoring, cited),
-    // NVL has no native outline — the ring rides along as an overlayIcon.
-    overlayIcon: bubbleNodeIcon(e, cited, typeColoring),
-    selected: selectedIds.has(String(e.id)),
+    // Chosen → yellow NVL selection ring; adjacent → blue ring overlay
+    // (replaces the cited/retrieved ring while the selection is active).
+    overlayIcon: neighborIds.has(String(e.id))
+      ? typeRingIcon(HIGHLIGHT_BLUE)
+      : chosenIds.has(String(e.id)) ? undefined : bubbleNodeIcon(e, cited, typeColoring),
+    selected: chosenIds.has(String(e.id)),
   }));
 }
 
-function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Set<string>, selectedIds: Set<string>): NvlRelationship[] {
+function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Set<string>, chosenIds: Set<string>, neighborIds: Set<string>): NvlRelationship[] {
   return rels
     .filter((r) => r.source && r.target && nodeIds.has(String(r.source)) && nodeIds.has(String(r.target)))
     .map((r) => {
@@ -54,8 +57,8 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Se
         from: String(r.source),
         to: String(r.target),
         captions: label ? [{ value: label }] : [],
-        color: fromCitedChunk(r.source_id, cited) ? RING_CITED : PARTIAL_COLOR,
-        selected: selectedIds.has(String(r.id)),
+        color: neighborIds.has(String(r.id)) ? HIGHLIGHT_BLUE : fromCitedChunk(r.source_id, cited) ? RING_CITED : PARTIAL_COLOR,
+        selected: chosenIds.has(String(r.id)),
       };
     });
 }
@@ -171,27 +174,29 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const { nvlNodes, nvlRels } = useMemo(() => {
     // Highlight: clicked node → itself + its neighbors + incident edges;
     // clicked relationship → itself + its two endpoints.
-    const highlightNodes = new Set<string>();
-    const highlightEdges = new Set<string>();
+    const chosenNodes = new Set<string>();
+    const chosenEdges = new Set<string>();
+    const neighborNodes = new Set<string>();
+    const neighborEdges = new Set<string>();
     if (selectedEntity) {
-      highlightNodes.add(String(selectedEntity.id));
+      chosenNodes.add(String(selectedEntity.id));
       for (const r of relationships) {
         if (String(r.source) === String(selectedEntity.id)) {
-          highlightNodes.add(String(r.target));
-          highlightEdges.add(String(r.id));
+          neighborNodes.add(String(r.target));
+          neighborEdges.add(String(r.id));
         } else if (String(r.target) === String(selectedEntity.id)) {
-          highlightNodes.add(String(r.source));
-          highlightEdges.add(String(r.id));
+          neighborNodes.add(String(r.source));
+          neighborEdges.add(String(r.id));
         }
       }
     } else if (selectedRel) {
-      highlightNodes.add(String(selectedRel.source));
-      highlightNodes.add(String(selectedRel.target));
-      highlightEdges.add(String(selectedRel.id));
+      chosenEdges.add(String(selectedRel.id));
+      neighborNodes.add(String(selectedRel.source));
+      neighborNodes.add(String(selectedRel.target));
     }
-    const nodes = toNvlNodes(entities, citedSet, typeColoring, highlightNodes);
+    const nodes = toNvlNodes(entities, citedSet, typeColoring, chosenNodes, neighborNodes);
     const ids = new Set(nodes.map((n) => n.id));
-    return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids, citedSet, highlightEdges) };
+    return { nvlNodes: nodes, nvlRels: toNvlRels(relationships, ids, citedSet, chosenEdges, neighborEdges) };
   }, [entities, relationships, citedSet, typeColoring, selectedEntity, selectedRel]);
 
   // Count only the relationships actually drawn (both endpoints present) so the

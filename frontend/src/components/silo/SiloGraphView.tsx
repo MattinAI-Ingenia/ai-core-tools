@@ -4,7 +4,7 @@ import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
 import { apiService } from '../../services/api';
-import { NEUTRAL_COLOR, PARTIAL_COLOR, PRIMARY_COLOR, colorForType } from '../../utils/entityTypeColors';
+import { HIGHLIGHT_BLUE, NEUTRAL_COLOR, PARTIAL_COLOR, PRIMARY_COLOR, colorForType, typeRingIcon } from '../../utils/entityTypeColors';
 import type { GraphNode, GraphEdge, SiloGraphData } from '../../utils/siloGraphUtils';
 import { mergeGraphData } from '../../utils/siloGraphUtils';
 import GraphDetailPanel from './GraphDetailPanel';
@@ -16,16 +16,19 @@ interface SiloGraphViewProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, selectedIds: Set<string>): NvlNode[] {
+function toNvlNodes(nodes: GraphNode[], typeColoring: boolean, chosenIds: Set<string>, neighborIds: Set<string>): NvlNode[] {
     return nodes.map(n => ({
         id: n.id,
         captions: [{ value: n.id }],
         color: typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
-        selected: selectedIds.has(n.id),
+        // Chosen element → yellow NVL selection ring; adjacent ones → blue ring
+        // drawn as an overlayIcon (NVL only supports ONE selected color).
+        selected: chosenIds.has(n.id),
+        overlayIcon: neighborIds.has(n.id) ? typeRingIcon(HIGHLIGHT_BLUE) : undefined,
     }));
 }
 
-function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<string>): NvlRelationship[] {
+function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], chosenIds: Set<string>, neighborIds: Set<string>): NvlRelationship[] {
     const nodeIds = new Set(nodes.map(n => n.id));
     return edges
         .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
@@ -39,8 +42,8 @@ function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], selectedIds: Set<stri
                 from: e.source,
                 to: e.target,
                 captions: label ? [{ value: label }] : [],
-                color: '#94a3b8',
-                selected: selectedIds.has(e.id),
+                color: neighborIds.has(e.id) ? HIGHLIGHT_BLUE : '#94a3b8',
+                selected: chosenIds.has(e.id),
             };
         });
 }
@@ -250,29 +253,27 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
 
     const nodes = graphData?.nodes ?? [];
     const edges = graphData?.edges ?? [];
-    // Highlight: clicked node → itself + its neighbors + incident edges;
-    // clicked edge → itself + its two endpoints. NVL draws a colored ring
-    // AROUND selected elements (fill colors stay untouched).
-    const highlightNodes = new Set<string>();
-    const highlightEdges = new Set<string>();
+    // Highlight: clicked node → yellow ring on it, blue rings on its neighbors,
+    // blue incident edges; clicked edge → yellow on it, blue on its endpoints.
+    const chosenNodes = new Set<string>();
+    const chosenEdges = new Set<string>();
+    const neighborNodes = new Set<string>();
+    const neighborEdges = new Set<string>();
     if (selectedNode) {
-        highlightNodes.add(selectedNode.id);
+        chosenNodes.add(selectedNode.id);
         for (const e of edges) {
-            if (e.source === selectedNode.id) {
-                highlightNodes.add(e.target);
-                highlightEdges.add(e.id);
-            } else if (e.target === selectedNode.id) {
-                highlightNodes.add(e.source);
-                highlightEdges.add(e.id);
+            if (e.source === selectedNode.id || e.target === selectedNode.id) {
+                neighborNodes.add(e.source === selectedNode.id ? e.target : e.source);
+                neighborEdges.add(e.id);
             }
         }
     } else if (selectedEdge) {
-        highlightNodes.add(selectedEdge.source);
-        highlightNodes.add(selectedEdge.target);
-        highlightEdges.add(selectedEdge.id);
+        chosenEdges.add(selectedEdge.id);
+        neighborNodes.add(selectedEdge.source);
+        neighborNodes.add(selectedEdge.target);
     }
-    const nvlNodes = toNvlNodes(nodes, typeColoring, highlightNodes);
-    const nvlRels = toNvlRels(edges, nodes, highlightEdges);
+    const nvlNodes = toNvlNodes(nodes, typeColoring, chosenNodes, neighborNodes);
+    const nvlRels = toNvlRels(edges, nodes, chosenEdges, neighborEdges);
     const isEmpty = nvlNodes.length === 0;
     const entityTypes = graphData?.entity_types ?? [];
     const atCap = nodes.length >= Math.min(graphData?.max_nodes ?? maxNodesRef.current, sliderMax);

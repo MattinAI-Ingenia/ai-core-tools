@@ -31,6 +31,10 @@ export const RING_RETRIEVED = '#6366f1'; // indigo-500
  *  deliberately NOT in TYPE_PALETTE so it can't be mistaken for a type. */
 export const PRIMARY_COLOR = '#facc15'; // yellow-400
 
+/** Ring around the elements ADJACENT to the selection (neighbors / endpoints),
+ *  so they read as highlighted without stealing the yellow from the chosen one. */
+export const HIGHLIGHT_BLUE = '#3b82f6'; // blue-500
+
 /** FNV-1a over the UTF-16 code units — stable across sessions and silos. */
 function fnv1a(text: string): number {
   let hash = 0x811c9dc5;
