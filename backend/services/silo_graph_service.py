@@ -174,25 +174,19 @@ class SiloGraphService:
             edge["source"] = name_map.get(edge["source"], edge["source"])
             edge["target"] = name_map.get(edge["target"], edge["target"])
 
-        # Merge display-id collisions (first occurrence wins — nodes are
-        # degree-ordered) and drop edges made visually identical by the merge.
-        canonical_of = {}
+        # Colliding nodes share the same display id by construction — the first
+        # occurrence wins (nodes are degree-ordered); edges need no remap, only
+        # a dedup of the pairs the merge made identical.
         merged_nodes = []
         seen_ids = set()
         for node in graph["nodes"]:
             if node["id"] in seen_ids:
-                canonical = node.get("properties", {}).get("entity_id") or node["id"]
-                canonical_of[canonical] = node["id"]
                 continue
             seen_ids.add(node["id"])
-            canonical = node.get("properties", {}).get("entity_id") or node["id"]
-            canonical_of[canonical] = node["id"]
             merged_nodes.append(node)
         deduped_edges = []
         seen_edges = set()
         for edge in graph["edges"]:
-            edge["source"] = canonical_of.get(edge["source"], edge["source"])
-            edge["target"] = canonical_of.get(edge["target"], edge["target"])
             key = (edge["source"], edge["target"], edge["type"])
             if key in seen_edges:
                 continue
