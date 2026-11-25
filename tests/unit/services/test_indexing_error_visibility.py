@@ -227,8 +227,18 @@ class TestServiceWarnings:
             embedding_service=broken,
             transcription_service=SimpleNamespace(last_error=None),
             video_ai_service=broken,  # same service twice: reported once
+            extract_service=None, indexing_service=None,
         )
         assert SiloService.service_warnings(silo) == ["key rejected"]
+
+    def test_lightrag_extract_llm_error_is_reported(self):
+        from services.silo_service import SiloService
+        ok = SimpleNamespace(last_error=None)
+        silo = SimpleNamespace(
+            embedding_service=ok, transcription_service=None, video_ai_service=None,
+            extract_service=None, indexing_service=SimpleNamespace(last_error="quota exhausted"),  # legacy column
+        )
+        assert SiloService.service_warnings(silo) == ["quota exhausted"]
 
     def test_no_silo_no_warnings(self):
         from services.silo_service import SiloService

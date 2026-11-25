@@ -101,15 +101,20 @@ class CreateSiloSchema(BaseModel):
 
 
 class UpdateSiloSchema(BaseModel):
-    """Schema for updating an existing silo. vector_db_type, embedding_service_id,
-    extract/vlm/indexing_service_id, chunking, lightrag_language, and
-    lightrag_entity_types are immutable after creation. keywords_service_id is
-    query-time only and stays editable."""
+    """Schema for updating an existing silo. vector_db_type, embedding_service_id and
+    chunking are immutable after creation; vlm_service_id is creation-only (enforced in
+    SiloService.create_or_update_silo). keywords_service_id and the LightRAG
+    extract/indexing service are editable at any time."""
     name: str
     description: Optional[str] = None
     type: Optional[str] = None
     output_parser_id: Optional[int] = None
     keywords_service_id: Optional[int] = None
+    # LightRAG EXTRACT role LLM (legacy alias indexing_service_id): editable at any
+    # time — it only shapes extraction of documents indexed from now on. Omitted
+    # keeps the current value.
+    extract_service_id: Optional[int] = None
+    indexing_service_id: Optional[int] = None
     # Editable only until the silo's first successful index (enforced in
     # SiloService.create_or_update_silo via is_lightrag_config_locked) — this
     # is the window that lets a human infer/confirm the entity types from the

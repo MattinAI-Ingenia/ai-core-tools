@@ -2248,7 +2248,7 @@ class IACTTool(BaseTool):
         output of a ToolMessage, say): the answer goes straight to the user."""
         for msg in reversed(result.get("messages") or []) if isinstance(result, dict) else []:
             if getattr(msg, "type", None) == "ai":
-                return str(msg.content) if msg.content else ""
+                return msg.text  # content may be a block list (Responses API): .text drops reasoning blocks
         return ""
 
     @staticmethod

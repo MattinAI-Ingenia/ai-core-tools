@@ -4,7 +4,9 @@ from services.folder_service import FolderService
 from typing import List, Tuple, Optional
 from datetime import datetime
 import os
-from services.silo_service import SiloService, LIGHTRAG_SILO_BUSY_DETAIL, lightrag_silo_lock
+from services.silo_service import (
+    SiloService, LIGHTRAG_SILO_BUSY_DETAIL, ensure_lightrag_services_reachable, lightrag_silo_lock,
+)
 from utils.logger import get_logger
 from utils.service_lifecycle import ServiceRetiredError
 from sqlalchemy import func, text
@@ -313,6 +315,7 @@ class ResourceService:
 
         _repo = ResourceRepository.get_repository_by_id(db, repository_id)
         silo_id = _repo.silo_id if _repo and _repo.silo_id else 0
+        ensure_lightrag_services_reachable(_repo.silo if _repo else None)
         lock_conn = silo_indexing_lock.acquire(silo_id) if silo_id else None
         if silo_id and lock_conn is None:
             logger.warning(
@@ -1413,6 +1416,7 @@ class ResourceService:
 
         repo = ResourceRepository.get_repository_by_id(db, repository_id)
         silo_id = repo.silo_id if repo and repo.silo_id else 0
+        ensure_lightrag_services_reachable(repo.silo if repo else None)
 
         from services import silo_indexing_lock
 
@@ -1692,6 +1696,7 @@ class ResourceService:
                 file/row step failed and the row still exists, 404 if the row is gone.
             ServiceRetiredError: if the silo's service is retired (mapped to 409 SERVICE_RETIRED).
         """
+        ensure_lightrag_services_reachable(resource.repository.silo)
         with lightrag_silo_lock(silo_id, f"delete resource {resource.resource_id}"):
             # Legacy docs would survive a res{N} delete while the API says success.
             if SiloService.has_legacy_lightrag_documents(resource):

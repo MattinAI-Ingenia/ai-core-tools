@@ -297,8 +297,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
         lightrag_entity_types: sanitizeEntityTypesList(formData.lightrag_entity_types),
       };
       const payload = isEditing
-        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi,
-              extract_service_id: _esi2, lightrag_language: _lang,
+        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, lightrag_language: _lang,
               lightrag_entity_extract_max_gleaning: _gleaning,
               lightrag_max_source_ids_per_entity: _maxEnt,
               lightrag_max_source_ids_per_relation: _maxRel,
@@ -474,7 +473,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
                         onChange={handleChange}
                         required={required}
                         className="w-full px-3 py-2 border border-line rounded-lg bg-surface text-fg focus:outline-none focus:ring-2 focus:ring-focus disabled:bg-surface-hover disabled:text-fg-tertiary dark:border-line-dark dark:bg-surface-dark dark:text-fg-dark"
-                        disabled={isSubmitting || (isEditing && role !== 'keywords')}
+                        disabled={isSubmitting || (isEditing && role === 'vlm')}
                       >
                         <option value="">{placeholder}</option>
                         {aiServices.map((service: AIServiceOption) => (
@@ -484,7 +483,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
                         ))}
                       </select>
                       <p className="mt-1 text-sm text-fg-tertiary dark:text-fg-tertiary-dark">{helper}</p>
-                      {isEditing && role !== 'keywords' && (
+                      {isEditing && role === 'vlm' && (
                         <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
                           <Info className="w-3.5 h-3.5 shrink-0" />
                           Cannot be changed after a silo is created.
