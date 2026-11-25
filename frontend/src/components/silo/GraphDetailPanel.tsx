@@ -15,7 +15,8 @@ interface GraphDetailPanelProps {
   atCap: boolean;
   onClose: () => void;
   onSelectNode: (nodeId: string) => void;
-  onExpandNeighbors: (nodeId: string) => Promise<number>; // returns # of added nodes
+  /** Returns # of added nodes, 0 = none added, null = the fetch failed. */
+  onExpandNeighbors: (nodeId: string) => Promise<number | null>; // returns # of added nodes
   onCenter: (nodeId: string, depth: number) => void;
 }
 
@@ -75,7 +76,8 @@ const GraphDetailPanel: React.FC<GraphDetailPanelProps> = ({
     }
     setExpandState('busy');
     const added = await onExpandNeighbors(selectedNode!.id);
-    setExpandState(added > 0 ? 'idle' : 'no-new');
+    // null = the fetch itself failed (already surfaced by the parent view)
+    setExpandState(added == null ? 'idle' : added > 0 ? 'idle' : 'no-new');
   };
 
   return (

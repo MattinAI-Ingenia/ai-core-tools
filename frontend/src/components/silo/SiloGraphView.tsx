@@ -75,7 +75,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     search: searchQuery || undefined,
                     entityTypes: types && types.size > 0 ? Array.from(types) : undefined,
                 })) as SiloGraphData;
-                setGraphData(data);
+                setGraphData({ ...data, max_nodes: maxNodesRef.current });
                 // Slider tops out at DEFAULT_MAX_NODES regardless of how big the
                 // graph really is — the renderer chokes well before that on a
                 // large silo, so there is no "show me everything" option.
@@ -103,7 +103,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     }, [fetchGraph]);
 
     const expandNeighbors = useCallback(
-        async (nodeId: string): Promise<number> => {
+        async (nodeId: string): Promise<number | null> => {
             const before = new Set((graphData?.nodes ?? []).map(n => n.id));
             try {
                 const data = (await apiService.getSiloGraphNeighbors(appId, siloId, {
@@ -118,8 +118,16 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                 const added = merged.nodes.length - before.size;
                 setGraphData(merged);
                 return added;
-            } catch {
-                return 0;
+            } catch (err: unknown) {
+                const status = (err as { status?: number })?.status;
+                if (status === 503) {
+                    setError('Neo4j is not available. Check your configuration.');
+                } else if (status === 404) {
+                    setError('That node is no longer in the graph. Refresh to reload it.');
+                } else {
+                    setError('Failed to load neighbors.');
+                }
+                return null;
             }
         },
         [appId, siloId, graphData],
@@ -135,7 +143,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     depth,
                     maxNodes: maxNodesRef.current,
                 })) as SiloGraphData;
-                setGraphData(data);
+                setGraphData({ ...data, max_nodes: maxNodesRef.current });
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
                 if (status === 404) {
@@ -281,7 +289,9 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                             <button
                                 key={type}
                                 onClick={() => toggleType(type)}
-                                title={active ? `Showing only ${type} — click to clear` : `Filter by ${type}`}
+                                title={active
+                                    ? `Filtering by ${activeTypes.size} ${activeTypes.size === 1 ? 'type' : 'types'} — click to remove this one`
+                                    : `Filter by ${type}`}
                                 className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs border transition-colors ${active
                                     ? 'border-transparent text-white'
                                     : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}

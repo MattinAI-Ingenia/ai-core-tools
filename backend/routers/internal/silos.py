@@ -785,7 +785,7 @@ def get_silo_graph(
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
     max_nodes: int = Query(default=200, ge=1, le=1000),
     max_edges: int = Query(default=1000, ge=1, le=5000),
-    entity_types: Optional[str] = Query(default=None),
+    entity_types: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
 ):
     """Return the knowledge graph for a LightRAG silo.
@@ -809,7 +809,7 @@ def get_silo_graph(
             silo_id=silo_id,
             max_nodes=max_nodes,
             max_edges=max_edges,
-            entity_types=[t.strip() for t in entity_types.split(",") if t.strip()] if entity_types else None,
+            entity_types=entity_types or None,
             search=search,
             db=db,
         )

@@ -2585,9 +2585,9 @@ class ApiService {
   ) {
     const qs = new URLSearchParams();
     if (params.maxNodes !== undefined) qs.set('max_nodes', String(params.maxNodes));
-    // The backend takes a single comma-separated `entity_types` param —
-    // repeated params would silently keep only the last value (Starlette).
-    if (params.entityTypes?.length) qs.set('entity_types', params.entityTypes.join(','));
+    // Repeated params — FastAPI collects them into List[str] (types are free-form
+    // LLM output and may themselves contain commas, so no delimiter encoding).
+    for (const type of params.entityTypes ?? []) qs.append('entity_types', type);
     if (params.search) qs.set('search', params.search);
     const query = qs.toString() ? `?${qs.toString()}` : '';
     return this.request(`/internal/apps/${appId}/silos/${siloId}/graph${query}`);

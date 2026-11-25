@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mergeGraphData, neighborsOf, splitSourceIds } from '../siloGraphUtils';
-import type { GraphNode, GraphEdge, SiloGraphData } from '../../components/silo/graphTypes';
+import type { GraphNode, GraphEdge, SiloGraphData } from '../siloGraphUtils';
 
 function node(id: string, entityType: string | null = null): GraphNode {
   return { id, labels: [], properties: { entity_id: id, entity_type: entityType }, entity_type: entityType };
@@ -58,6 +58,17 @@ describe('mergeGraphData', () => {
 
     expect(merged.nodes).toHaveLength(2);
     expect(merged.edges).toEqual([]); // 'c' could not be added, so its edge is dropped
+  });
+
+  it('keeps the cap when the base payload has no max_nodes (backend responses do not)', () => {
+    // A payload without max_nodes would otherwise make the cap NaN — disabled.
+    const base = { ...data([node('a')], []), max_nodes: undefined as unknown as number };
+    const incoming = data(
+      Array.from({ length: 250 }, (_, i) => node(`n${i}`)),
+      [],
+    );
+
+    expect(mergeGraphData(base, incoming).nodes).toHaveLength(200);
   });
 });
 

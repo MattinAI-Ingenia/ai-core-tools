@@ -79,10 +79,13 @@ class SiloGraphSourcesService:
         deduped: List[Dict[str, Any]] = []
         seen: set = set()
         for entry in entries:
-            key = (entry["file_name"], entry["page"])
-            if key in seen:
-                continue
-            seen.add(key)
+            # Unknown sources (no file_name) are never merged — two distinct
+            # documents must not collapse into one "Unknown source" chip.
+            key = (entry["file_name"], entry["page"]) if entry["file_name"] else None
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
             deduped.append(entry)
         return deduped
 

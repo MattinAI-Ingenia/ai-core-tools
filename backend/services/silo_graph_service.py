@@ -290,7 +290,15 @@ class SiloGraphService:
                     node_q += cls._build_search_clause(search, params)
                     params["search"] = search
                 if entity_types:
-                    node_q += "AND n.entity_type IN $types " if search else "WHERE n.entity_type IN $types "
+                    # "Other" (counts map NULL/'' to it) must also match untyped
+                    # nodes, or its chip would filter the graph down to nothing.
+                    node_q += (
+                        "AND (n.entity_type IN $types OR "
+                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = ''))) "
+                        if search else
+                        "WHERE (n.entity_type IN $types OR "
+                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = ''))) "
+                    )
                     params["types"] = entity_types
 
                 node_q += (
@@ -405,36 +413,50 @@ class SiloGraphService:
                 nodes.append(root_node)
                 node_ids.add(root_node["id"])
 
-                # Depth 1: unlimited — locality always beats the node cap.
+                # Depth 1: bounded by the remaining budget too — an unbounded
+                # hub fetch (10k+ neighbors) would blow the payload, the edge
+                # `IN` list and the NVL render. Offered > kept → truncated.
                 d1_q = (
                     f"MATCH (n:`{workspace}`)-[]-(m:`{workspace}`) "
                     "WHERE n.entity_id = $root AND m.entity_id IS NOT NULL "
                     "WITH DISTINCT m, size([(m)-[]-() | 1]) AS degree "
-                    "ORDER BY degree DESC RETURN m"
+                    "ORDER BY degree DESC LIMIT $budget"
                 )
-                for rec in neo_session.run(d1_q, root=root):
+                budget = max_nodes - len(nodes)
+                d1_offered = 0
+                for rec in neo_session.run(d1_q, root=root, budget=budget):
                     node = _node_dict(rec["m"])
                     # Cypher already excluded chunk nodes; the client-side check
                     # keeps the entity-only contract even with a misbehaving store.
                     if not node["properties"].get("entity_id") or node["id"] in node_ids:
                         continue
+                    d1_offered += 1
                     nodes.append(node)
                     node_ids.add(node["id"])
+                truncated = truncated or d1_offered >= budget
 
-                budget = max_nodes - len(nodes)
-                if depth >= 2 and budget > 0:
-                    deeper_q = (
-                        f"MATCH (n:`{workspace}`)-[*2..{depth}]-(m:`{workspace}`) "
-                        "WHERE n.entity_id = $root AND m.entity_id IS NOT NULL "
+                # Deeper layers, one hop at a time from the entity frontier:
+                # per-layer LIMITs keep the work bounded (a single `*2..N`
+                # match would enumerate every path before LIMIT — O(d^N) from
+                # a hub), and chunk-mediation can never sneak an edge-less
+                # entity in because each hop only links entity to entity.
+                frontier = list(node_ids)
+                for _ in range(1, depth):
+                    remaining = max_nodes - len(nodes)
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    layer_q = (
+                        f"MATCH (n:`{workspace}`)-[]-(m:`{workspace}`) "
+                        "WHERE n.entity_id IN $frontier AND m.entity_id IS NOT NULL "
                         "AND NOT m.entity_id IN $known "
                         "WITH DISTINCT m, size([(m)-[]-() | 1]) AS degree "
                         "ORDER BY degree DESC LIMIT $budget"
                     )
-                    deeper_recs = list(neo_session.run(
-                        deeper_q, root=root, known=list(node_ids), budget=budget,
-                    ))
                     offered = 0
-                    for rec in deeper_recs:
+                    for rec in neo_session.run(
+                        layer_q, frontier=frontier, known=list(node_ids), budget=remaining,
+                    ):
                         node = _node_dict(rec["m"])
                         if not node["properties"].get("entity_id") or node["id"] in node_ids:
                             continue
@@ -443,8 +465,13 @@ class SiloGraphService:
                             continue
                         nodes.append(node)
                         node_ids.add(node["id"])
-                    # More deeper entity nodes offered than fit → truncated
-                    truncated = truncated or offered > budget
+                    # The layer query hit its LIMIT and kept everything it
+                    # offered → more nodes exist beyond the cap.
+                    truncated = truncated or offered >= remaining
+                    frontier = [
+                        n["properties"]["entity_id"]
+                        for n in nodes[-offered:] if n["properties"].get("entity_id")
+                    ] or frontier
 
                 edges = cls._fetch_induced_edges(neo_session, workspace, node_ids, max_edges)
         finally:

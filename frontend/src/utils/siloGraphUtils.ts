@@ -57,7 +57,9 @@ export function splitSourceIds(sourceId: string | undefined | null): string[] {
 export function mergeGraphData(base: SiloGraphData, incoming: SiloGraphData): SiloGraphData {
   const nodes = [...base.nodes];
   const ids = new Set(nodes.map((n) => n.id));
-  const cap = Math.max(base.max_nodes, nodes.length);
+  // Backend responses carry no max_nodes — default keeps the cap effective
+  // (Math.max with undefined would yield NaN and disable the cap entirely).
+  const cap = Math.max(base.max_nodes ?? 200, nodes.length);
   for (const node of incoming.nodes) {
     if (ids.has(node.id) || nodes.length >= cap) continue;
     ids.add(node.id);
