@@ -11,17 +11,9 @@ is impossible by construction.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
-
-# Labels cannot be parameterized in a Cypher MATCH — they are interpolated
-# into a backtick-quoted label expression, so any backtick in the query param
-# breaks out of it and can append arbitrary Cypher (cross-tenant reads, or
-# DETACH DELETE across every workspace). Entity-type labels are identifiers,
-# so this whitelist covers the real ones and rejects everything else.
-_NODE_LABEL_RE = re.compile(r"^[A-Za-z0-9_\- ]{1,64}$")
 
 
 class SiloGraphService:
@@ -66,9 +58,8 @@ class SiloGraphService:
         silo_id: int,
         max_nodes: int = 200,
         max_edges: int = 1000,
-        max_depth: int = 2,
-        node_label: Optional[str] = None,
         search: Optional[str] = None,
+        entity_types: Optional[List[str]] = None,
         db=None,
     ) -> Dict[str, Any]:
         """Fetch the knowledge graph for *silo_id* and return a dict matching
@@ -82,17 +73,13 @@ class SiloGraphService:
 
         Raises:
             RuntimeError: When Neo4j is unreachable or not configured.
-            ValueError: When ``node_label`` is not a valid Cypher label.
         """
-        if node_label and not _NODE_LABEL_RE.fullmatch(node_label):
-            raise ValueError(f"Invalid node_label: {node_label!r}")
-
         workspace = cls._workspace_name(silo_id)
         graph = cls._cypher_graph(
             workspace=workspace,
             max_nodes=max_nodes,
             max_edges=max_edges,
-            node_label=node_label,
+            entity_types=entity_types,
             search=search,
         )
 
@@ -168,8 +155,8 @@ class SiloGraphService:
         workspace: str,
         max_nodes: int,
         max_edges: int,
-        node_label: Optional[str],
-        search: Optional[str],
+        entity_types: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Query Neo4j directly scoped to the workspace label.
 
@@ -202,19 +189,31 @@ class SiloGraphService:
                 edge_count_record = neo_session.run(edge_count_q).single()
                 total_edges = edge_count_record["total"] if edge_count_record else 0
 
+                # --- Per-type counts (for the legend/filter chips) ---
+                type_counts: List[Dict[str, Any]] = []
+                type_count_q = (
+                    f"MATCH (n:`{workspace}`) WHERE n.entity_id IS NOT NULL "
+                    "RETURN n.entity_type AS type, count(*) AS count ORDER BY count DESC"
+                )
+                for record in neo_session.run(type_count_q):
+                    type_counts.append({
+                        "type": record["type"] or "Other",
+                        "count": record["count"],
+                    })
+
                 # --- Nodes ---
-                # LightRAG tags every node with the workspace as a label.
-                # When an additional entity-type label filter is requested,
-                # both labels must match (workspace AND entity_type).
-                if node_label:
-                    node_q = f"MATCH (n:`{workspace}`:`{node_label}`) "
-                else:
-                    node_q = f"MATCH (n:`{workspace}`) "
+                # LightRAG stores the workspace as a label and the entity type
+                # as a PROPERTY (n.entity_type), so the type filter is a
+                # parameterized WHERE — never a Cypher label interpolation.
+                node_q = f"MATCH (n:`{workspace}`) "
 
                 params: Dict[str, Any] = {"limit": max_nodes}
                 if search:
                     node_q += cls._build_search_clause(search, params)
                     params["search"] = search
+                if entity_types:
+                    node_q += "AND n.entity_type IN $types " if search else "WHERE n.entity_type IN $types "
+                    params["types"] = entity_types
 
                 node_q += (
                     "WITH n, size([(n)-[]-() | 1]) AS degree "
@@ -234,6 +233,7 @@ class SiloGraphService:
                         # Expose only the non-workspace labels for the UI
                         "labels": [lb for lb in n.labels if lb != workspace] or list(n.labels),
                         "properties": props,
+                        "entity_type": props.get("entity_type"),
                     })
                     node_ids.add(nid)
 
@@ -273,6 +273,7 @@ class SiloGraphService:
         return {
             "nodes": nodes,
             "edges": edges,
+            "entity_types": type_counts,
             "node_count": len(nodes),
             "edge_count": len(edges),
             "total_nodes": total_nodes,

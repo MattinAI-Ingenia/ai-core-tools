@@ -28,7 +28,8 @@ class _FakeNode:
         return self._data.items()
 
 
-def _run_cypher_graph(*, max_nodes=200, max_edges=1000, total_nodes=5000, total_edges=20000):
+def _run_cypher_graph(*, max_nodes=200, max_edges=1000, total_nodes=5000, total_edges=20000,
+                      entity_types=None, type_counts=None):
     """Drive ``_cypher_graph`` with a mocked driver, one fake node, no edges
     (edge *rows* aren't under test here — the LIMIT argument passed to the
     edge query is)."""
@@ -36,8 +37,9 @@ def _run_cypher_graph(*, max_nodes=200, max_edges=1000, total_nodes=5000, total_
     session.run.side_effect = [
         MagicMock(single=lambda: {"total": total_nodes}),  # total node count
         MagicMock(single=lambda: {"total": total_edges}),  # total edge count
-        [{"n": _FakeNode("bt-duo")}],  # node fetch
-        [],  # edge fetch
+        list(type_counts or []),                            # per-type counts
+        [{"n": _FakeNode("bt-duo")}],                       # node fetch
+        [],                                                 # edge fetch
     ]
     driver = MagicMock()
     driver.session.return_value.__enter__.return_value = session
@@ -46,9 +48,57 @@ def _run_cypher_graph(*, max_nodes=200, max_edges=1000, total_nodes=5000, total_
     with patch.object(SiloGraphService, "_neo4j_driver", return_value=driver):
         result = SiloGraphService._cypher_graph(
             workspace="silo_1", max_nodes=max_nodes, max_edges=max_edges,
-            node_label=None, search=None,
+            entity_types=entity_types, search=None,
         )
     return result, session
+
+
+def test_entity_type_filter_uses_property_param():
+    """Types are a PROPERTY (n.entity_type), not Neo4j labels: the query must
+    bind the types as a parameter and must never interpolate one into a label."""
+    _, session = _run_cypher_graph(entity_types=["Machine", "Maquinaria@ES"])
+
+    node_call = session.run.call_args_list[-2]
+    assert node_call.kwargs["types"] == ["Machine", "Maquinaria@ES"]
+    query = node_call.args[0]
+    assert "n.entity_type IN $types" in query
+    assert "`Machine`" not in query
+    assert "`Maquinaria@ES`" not in query
+
+
+def test_type_counts_returned():
+    result, _ = _run_cypher_graph(
+        type_counts=[{"type": "Machine", "count": 5}, {"type": "Person", "count": 2}],
+    )
+
+    assert result["entity_types"] == [
+        {"type": "Machine", "count": 5},
+        {"type": "Person", "count": 2},
+    ]
+
+
+def test_node_carries_entity_type():
+    class _TypedNode(_FakeNode):
+        def __init__(self):
+            super().__init__("bt-duo")
+            self._data["entity_type"] = "Machine"
+
+    session = MagicMock()
+    session.run.side_effect = [
+        MagicMock(single=lambda: {"total": 10}),
+        MagicMock(single=lambda: {"total": 20}),
+        [],
+        [{"n": _TypedNode()}],
+        [],
+    ]
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value = session
+    driver.session.return_value.__exit__.return_value = False
+
+    with patch.object(SiloGraphService, "_neo4j_driver", return_value=driver):
+        result = SiloGraphService._cypher_graph(workspace="silo_1", max_nodes=200, max_edges=1000)
+
+    assert result["nodes"][0]["entity_type"] == "Machine"
 
 
 def test_edge_query_is_capped_by_max_edges_not_a_multiple_of_max_nodes():
@@ -74,6 +124,7 @@ def test_truncated_when_edge_limit_is_hit_even_if_nodes_are_not():
     session.run.side_effect = [
         MagicMock(single=lambda: {"total": 5}),
         MagicMock(single=lambda: {"total": 50_000}),
+        [],
         [{"n": _FakeNode("hub")}],
         [
             {"src": "hub", "tgt": f"n{i}", "rel_type": "RELATED", "rid": i, "props": {}}
@@ -86,7 +137,7 @@ def test_truncated_when_edge_limit_is_hit_even_if_nodes_are_not():
 
     with patch.object(SiloGraphService, "_neo4j_driver", return_value=driver):
         result = SiloGraphService._cypher_graph(
-            workspace="silo_1", max_nodes=200, max_edges=3, node_label=None, search=None,
+            workspace="silo_1", max_nodes=200, max_edges=3,
         )
 
     assert result["truncated"] is True

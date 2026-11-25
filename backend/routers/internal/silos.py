@@ -785,8 +785,7 @@ def get_silo_graph(
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
     max_nodes: int = Query(default=200, ge=1, le=1000),
     max_edges: int = Query(default=1000, ge=1, le=5000),
-    max_depth: int = Query(default=2, ge=1, le=5),
-    node_label: Optional[str] = Query(default=None),
+    entity_types: Optional[str] = Query(default=None),
     search: Optional[str] = Query(default=None),
 ):
     """Return the knowledge graph for a LightRAG silo.
@@ -795,7 +794,7 @@ def get_silo_graph(
     - **503 Service Unavailable**: Neo4j is unreachable or not configured.
     """
     from services.silo_graph_service import SiloGraphService
-    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge
+    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge, GraphEntityType
 
     silo = _validate_silo_app_ownership(silo_id, app_id, db)
 
@@ -810,13 +809,10 @@ def get_silo_graph(
             silo_id=silo_id,
             max_nodes=max_nodes,
             max_edges=max_edges,
-            max_depth=max_depth,
-            node_label=node_label,
+            entity_types=[t.strip() for t in entity_types.split(",") if t.strip()] if entity_types else None,
             search=search,
             db=db,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -826,6 +822,7 @@ def get_silo_graph(
     return SiloGraphResponse(
         nodes=[GraphNode(**n) for n in data["nodes"]],
         edges=[GraphEdge(**e) for e in data["edges"]],
+        entity_types=[GraphEntityType(**t) for t in data["entity_types"]],
         node_count=data["node_count"],
         edge_count=data["edge_count"],
         total_nodes=data["total_nodes"],
