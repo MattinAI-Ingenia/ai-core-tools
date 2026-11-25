@@ -118,7 +118,9 @@ class FakeChatModel(BaseChatModel):
 
     def bind_tools(self, tools, **kwargs):
         names = [getattr(t, "name", None) or t.get("name") or t["function"]["name"] for t in tools]
-        self.rec.bound_tools.setdefault(self.service_id, []).append(names)
+        # create_agent binds once per model call; skip agentTools' build-time pre-bind (parallel_tool_calls=False)
+        if "parallel_tool_calls" not in kwargs:
+            self.rec.bound_tools.setdefault(self.service_id, []).append(names)
         return self
 
 
