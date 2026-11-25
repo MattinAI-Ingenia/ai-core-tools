@@ -297,11 +297,11 @@ class SiloGraphService:
                     node_q += (
                         "AND (n.entity_type IN $types OR "
                         "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = '' "
-                        "OR n.entity_type NOT IN $top))) "
+                        "OR NOT n.entity_type IN $top))) "
                         if search else
                         "WHERE (n.entity_type IN $types OR "
                         "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = '' "
-                        "OR n.entity_type NOT IN $top))) "
+                        "OR NOT n.entity_type IN $top))) "
                     )
                     params["types"] = entity_types
                     params["top"] = [tc["type"] for tc in type_counts if tc["type"] != "Other"]

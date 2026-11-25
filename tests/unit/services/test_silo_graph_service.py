@@ -78,7 +78,7 @@ def test_other_filter_matches_untyped_nodes():
     query = call.args[0]
     assert "'Other' IN $types" in query
     assert "n.entity_type IS NULL" in query
-    assert "n.entity_type NOT IN $top" in query
+    assert "NOT n.entity_type IN $top" in query
     assert call.kwargs["top"] == ["Machine", "t1"]
 
 
