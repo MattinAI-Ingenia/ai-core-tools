@@ -5,28 +5,26 @@ No provider is ever called. What is REAL and what is HAND-WRITTEN:
 REAL (LangChain / provider-SDK code, offline):
   * the model object is a thin SUBCLASS of the real LangChain class the product builds in ``tools/aiServiceTools.py``
     (``ChatOpenAI(use_responses_api=True)``, ``ChatAnthropic``, ``ChatMistralAI``, ``AzureAIChatCompletionsModel``,
-    ``ChatGoogleGenerativeAI``, ``ChatOllama`` for "Custom"), so ``isinstance`` / ``_llm_type`` / ``profile`` /
+    ``ChatGoogleGenerativeAI``, ``ChatOpenAI`` on chat completions for "Custom"), so ``isinstance`` / ``_llm_type`` / ``profile`` /
     ``_get_ls_params`` are the real ones and ``tools.middleware.history_normalizer.model_family`` detects the fake exactly
     as it detects the real class (asserted in ``TestSimulatorFidelity``). Only ``_generate`` / ``_stream`` (and their async
     twins) and ``bind_tools`` are replaced;
   * the REQUEST side: what a provider receives is run through that provider's own message converter
     (``ChatOpenAI._get_request_payload`` / ``ChatAnthropic._get_request_payload`` / ``ChatMistralAI._create_message_dicts``
-    / ``langchain_azure_ai ... to_inference_message`` / ``ChatGoogleGenerativeAI._prepare_request`` /
-    ``ChatOllama._chat_params``). Whatever the converter raises for a message list is what the fake raises;
+    / ``langchain_azure_ai ... to_inference_message`` / ``ChatGoogleGenerativeAI._prepare_request``; Custom:
+    ``ChatOpenAI._get_request_payload`` on chat completions). Whatever the converter raises for a message list is what the fake raises;
   * the RESPONSE side: the AIMessage a provider "answers" is produced by the provider's own response parser from a
     canned raw response built with the provider SDK types (``ChatAnthropic._format_output`` on an ``anthropic.types.Message``,
     ``_construct_lc_result_from_responses_api`` on an ``openai.types.responses.Response``,
     ``ChatMistralAI._create_chat_result``, ``from_inference_message``, ``_response_to_result`` on a ``google.genai``
-    response, ``_get_tool_calls_from_response`` of langchain_ollama), so content block shapes, ``additional_kwargs``,
+    response, ``ChatOpenAI._create_chat_result`` on an ``openai.types.chat.ChatCompletion``), so content block shapes, ``additional_kwargs``,
     ``response_metadata``, tool-call ids and ``usage_metadata`` are the ones the adapters really produce.
 
 HAND-WRITTEN (labelled ``sim rule`` / ``test_sim_rule_*`` in the tests):
-  * canned raw payloads (texts, ids, token counts, reasoning text); Ollama's ``response_metadata`` (the real parser is
-    inline in ``_iterate_over_stream``); the streaming chunking;
+  * canned raw payloads (texts, ids, token counts, reasoning text); the streaming chunking;
   * API-level invariants the converters do not check: ``check_tool_pairing`` (orphan tool call / tool message);
     ``check_mistral_payload`` and ``check_azure_payload`` (Mistral and Azure converters FORWARD foreign content blocks to
     the wire, so the fake checks the converter OUTPUT against the content-item types of the installed SDK models);
-    ``check_ollama_images`` (Ollama ``images`` take base64 data, not URLs);
   * the capability / context-window rejections (no vision, no tool calling, context_length_exceeded) and the injected
     provider errors, emulated as ``ProviderRejected`` at CALL time (``_receive``), which is where real servers answer 4xx.
 
@@ -42,7 +40,8 @@ blocks, only text / tool_use); Google WITHOUT ``include_thoughts`` (no ``thought
 signatures: ``extras.signature`` on text blocks and ``__gemini_function_call_thought_signatures__`` in additional_kwargs of
 function-call messages); OpenAI through the Responses API when it has no custom endpoint (``reasoning`` / ``message`` /
 ``function_call`` blocks; reasoning models return ``reasoning`` items, here with the empty summary that is returned when none
-is requested); Mistral / Azure / Custom (Ollama) return plain string content. ``reply(..., shape="today")`` builds those;
+is requested); Mistral / Azure / Custom (OpenAI-compatible chat completions on ``<endpoint>/v1``, never the Responses
+API) return plain string content. ``reply(..., shape="today")`` builds those;
 ``shape="full"`` (the default, used by the unit tests) also builds shapes that are NOT produced today (Anthropic ``thinking``,
 Google ``thinking`` blocks) because they are one config flag away.
 """
@@ -50,7 +49,6 @@ import base64
 import copy
 import itertools
 import json
-import re
 import types
 import warnings
 from dataclasses import dataclass, field
@@ -109,7 +107,7 @@ def _real_class(provider: str):
     elif provider == "Google":
         from langchain_google_genai import ChatGoogleGenerativeAI as cls
     elif provider == "Custom":
-        from langchain_ollama import ChatOllama as cls
+        from langchain_openai import ChatOpenAI as cls
     else:
         raise ValueError(provider)
     return cls
@@ -125,7 +123,8 @@ def _real_kwargs(provider: str) -> dict:
         "Azure": {"model": name, "credential": "x", "endpoint": "https://example.invalid/models",
                   "api_version": "2024-05-01-preview"},
         "Google": {"model": name, "api_key": "x"},
-        "Custom": {"model": name, "base_url": "http://example.invalid"},
+        # prod: base_url always ends in /v1 => chat completions, never the Responses API
+        "Custom": {"model": name, "api_key": "x", "base_url": "http://example.invalid/v1", "stream_usage": True},
     }[provider]
 
 
@@ -145,7 +144,7 @@ def check_tool_pairing(messages: list[BaseMessage]) -> None:
     """Sim rule (hand-written; the converters do not enforce it): no orphan tool call, no orphan tool message.
 
     OpenAI chat/Responses: "an assistant message with tool_calls must be followed by tool messages responding to each
-    tool_call_id"; Anthropic: every ``tool_use`` needs its ``tool_result`` in the next user turn; Mistral/Azure/Ollama
+    tool_call_id"; Anthropic: every ``tool_use`` needs its ``tool_result`` in the next user turn; Mistral/Azure/Custom
     follow the OpenAI chat contract; Google needs the function response after the function call.
     The tool messages must directly follow their call.
     """
@@ -221,23 +220,12 @@ def check_azure_payload(inference_messages: list) -> None:
         _check_content_items(dict(message).get("content"), AZURE_CONTENT_ITEMS, "Azure")
 
 
-_BASE64 = re.compile(r"^[A-Za-z0-9+/=\s]*$")
-
-
-def check_ollama_images(ollama_messages: list) -> None:
-    """Sim rule: the Ollama chat API takes ``images`` as base64 data (API docs); a URL is not decodable."""
-    for message in ollama_messages:
-        for image in (message.get("images") if isinstance(message, dict) else getattr(message, "images", None)) or []:
-            if not isinstance(image, str) or not _BASE64.match(image):
-                raise ProviderRejected("Ollama: images must be base64 data, got a URL / non-base64 string")
-
-
 def validate_for(provider: str, messages: list[BaseMessage]) -> None:
     """Raise what ``provider`` would raise for these messages: its converter's exception or a ProviderRejected."""
     check_tool_pairing(messages)
     payload = copy.deepcopy(messages)
     real = real_model(provider)
-    if provider in ("OpenAI", "Anthropic"):
+    if provider in ("OpenAI", "Anthropic", "Custom"):  # Custom: the chat-completions converter of ChatOpenAI
         real._get_request_payload(payload)
     elif provider == "MistralAI":
         check_mistral_payload(real._create_message_dicts(payload, None)[0])
@@ -247,8 +235,6 @@ def validate_for(provider: str, messages: list[BaseMessage]) -> None:
         check_azure_payload(to_inference_message(payload))
     elif provider == "Google":
         real._prepare_request(payload)
-    elif provider == "Custom":
-        check_ollama_images(real._chat_params(payload)["messages"])
 
 
 # ------------------------------------------------------------------ response side: what a provider produces
@@ -372,25 +358,30 @@ def _google(n, text, tool_call, reasoning, shape):
     return _response_to_result(raw).generations[0].message
 
 
-def _ollama(n, text, tool_call, reasoning, shape):
-    from langchain_ollama.chat_models import _get_tool_calls_from_response
+def _openai_chat(n, text, tool_call, reasoning, shape):
+    from openai.types.chat import ChatCompletion
 
-    response = {"message": {"tool_calls": [{"function": {"name": tool_call[0], "arguments": tool_call[1]}}]}} if tool_call else {}
-    return AIMessage(
-        content=text,
-        tool_calls=_get_tool_calls_from_response(response),
-        response_metadata={
-            "model": MODEL_NAMES["Custom"], "created_at": "2025-01-01T00:00:00Z", "done": True, "done_reason": "stop",
-            "total_duration": 1000, "load_duration": 10, "prompt_eval_count": 11, "prompt_eval_duration": 100,
-            "eval_count": 7, "eval_duration": 100, "model_name": MODEL_NAMES["Custom"], "model_provider": "ollama",
-        },
-        usage_metadata={"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
-    )
+    message: dict[str, Any] = {"role": "assistant", "content": text}
+    if tool_call:
+        message["tool_calls"] = [{
+            "id": f"call_{n:016d}", "type": "function",
+            "function": {"name": tool_call[0], "arguments": json.dumps(tool_call[1])}}]
+    raw = ChatCompletion.model_validate({
+        "id": f"chatcmpl-{n}", "object": "chat.completion", "created": 1, "model": MODEL_NAMES["Custom"],
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if tool_call else "stop"}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    })
+    result = real_model("Custom")._create_chat_result(raw)
+    message = result.generations[0].message
+    # what BaseChatModel._generate_with_cache merges into response_metadata (model_provider, model_name, finish_reason)
+    message.response_metadata = {**result.llm_output, **result.generations[0].generation_info, **message.response_metadata}
+    message.id = raw.id
+    return message
 
 
 _BUILDERS = {
     "OpenAI": _openai, "Anthropic": _anthropic, "MistralAI": _mistral, "Azure": _azure, "Google": _google,
-    "Custom": _ollama,
+    "Custom": _openai_chat,
 }
 
 
@@ -423,7 +414,7 @@ class Sim:
     windows: dict = field(default_factory=dict)  # service_id -> max_input_tokens (None: model without profile)
     enforce_window: set = field(default_factory=set)  # service ids that reject an input above their window
     no_vision: set = field(default_factory=set)  # reject image blocks at call time
-    no_tools: set = field(default_factory=set)  # reject a call that has tools bound, at CALL time (real Ollama / Azure)
+    no_tools: set = field(default_factory=set)  # reject a call that has tools bound, at CALL time (real vLLM / Azure)
     no_tools_at_bind: set = field(default_factory=set)  # bind_tools itself raises NotImplementedError (not what real ones do)
     call_tool: dict = field(default_factory=dict)  # service_id -> tool name to call when it is bound
     reasoning: bool = True

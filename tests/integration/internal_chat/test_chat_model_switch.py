@@ -80,7 +80,6 @@ REJECT_VISION = "ProviderRejected: this model does not accept image input"
 REJECT_TOOLS = "ProviderRejected: this model does not support tool calling"
 REJECT_MAIN = "ProviderRejected: injected provider error (main call)"
 REJECT_SUMMARY = "ProviderRejected: injected provider error (summary call)"
-REJECT_OLLAMA_URL = "ProviderRejected: Ollama: images must be base64 data, got a URL / non-base64 string"
 
 pytestmark = pytest.mark.integration
 
@@ -383,8 +382,8 @@ class TestSimulatorFidelity:
         azure = reply("Azure", "hi", tool)
         assert azure.content == "hi" and azure.tool_calls[0]["id"].startswith("call_az")
         custom = reply("Custom", "hi", tool)
-        assert custom.content == "hi" and custom.response_metadata["model_provider"] == "ollama"
-        assert custom.response_metadata["done_reason"] == "stop" and len(custom.tool_calls[0]["id"]) == 36  # uuid4
+        assert custom.content == "hi" and custom.response_metadata["model_provider"] == "openai"
+        assert custom.response_metadata["finish_reason"] == "tool_calls" and custom.tool_calls[0]["id"].startswith("call_")
 
     def test_replies_in_the_shape_production_produces_today(self):
         tool = ("retriever_silo_1", {"query": "q"})
@@ -420,9 +419,6 @@ class TestSimulatorFidelity:
     @pytest.mark.parametrize("target,source,exc,match", [
         # Constraints of the REAL converters of B for what the provider A produced.
         ("Google", "OpenAI", KeyError, "reasoning"),                   # langchain_google_genai: block["reasoning"] lookup
-        ("Custom", "OpenAI", ValueError, "Unsupported message content type"),     # langchain_ollama: unknown block type
-        ("Custom", "Anthropic", ValueError, "Unsupported message content type"),  # ``thinking`` / ``tool_use`` blocks
-        ("Custom", "Google", ValueError, "Unsupported message content type"),     # ``thinking`` block
     ])
     def test_the_real_converter_of_b_raises_on_foreign_blocks(self, target, source, exc, match):
         message = reply(source, "answer", reasoning=True)
@@ -438,13 +434,6 @@ class TestSimulatorFidelity:
         with pytest.raises(ProviderRejected, match=pattern):
             validate_for(target, [HumanMessage("q"), reply(source, "a", reasoning=True), HumanMessage("n")])
         validate_for(target, [HumanMessage("q"), HumanMessage([{"type": "text", "text": "ok"}]), AIMessage("fine")])
-
-    def test_sim_rule_ollama_images_must_be_base64(self):
-        url = HumanMessage([{"type": "text", "text": "d"}, {"type": "image_url", "image_url": {"url": "https://h/x.png"}}])
-        with pytest.raises(ProviderRejected, match="images must be base64"):
-            validate_for("Custom", [url])
-        data = HumanMessage([{"type": "text", "text": "d"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}])
-        validate_for("Custom", [data])
 
 
 # ------------------------------------------------------------------ 1: provider switch matrix
@@ -1055,13 +1044,7 @@ class TestCapabilityDifferences:
         monkeypatch.setattr("langchain_google_genai._image_utils.requests.get", fake_get)
         return fetched
 
-    @pytest.mark.parametrize("b", [
-        pytest.param(p, marks=pytest.mark.xfail(
-            strict=True, raises=ProductFinding, reason=(
-                "Finding: with AICT_BASE_URL set the Chat sends a signed http URL as the image block; the Ollama converter "
-                "puts any URL into ``images`` (base64 expected), so a Custom/Ollama model rejects the turn. Hand-written sim "
-                "rule (Ollama API takes base64). Smallest fix: inline the image as base64 for the Custom provider."))
-        ) if p == "Custom" else p for p in PROVIDERS])
+    @pytest.mark.parametrize("b", PROVIDERS)
     def test_a_signed_url_image_in_the_history(self, client, world, sim, signed_urls, b):
         first = self._image_turn(client, world, sim, "OpenAI")
         assert first.ok, first.error
@@ -1069,7 +1052,6 @@ class TestCapabilityDifferences:
                       for blk in m.content if isinstance(blk, dict) and blk.get("type") == "image_url"]
         assert url_blocks and url_blocks[0]["image_url"]["url"].startswith("https://aict.invalid/static/")
         second = go(client, world, "and now?", selection(sim.ids[b]), first.cid)
-        raise_finding_if_rejected(second, sim, sim.ids[b], REJECT_OLLAMA_URL)
         assert second.ok, second.error
         received = sim.main_calls(sim.ids[b])[0].messages
         assert any(has_image_block(m) for m in received)
@@ -1112,7 +1094,7 @@ class TestCapabilityDifferences:
         first = go(client, world, "use the tool", selection(sim.ids["OpenAI"], silo=sim.silo))
         assert first.ok, first.error
         B = sim.ids["Custom"]
-        sim.no_tools.add(B)  # real Ollama / Azure: bind succeeds, the server answers 4xx when the call carries tools
+        sim.no_tools.add(B)  # real vLLM / Azure: bind succeeds, the server answers 4xx when the call carries tools
         second = go(client, world, "plain follow-up", selection(B), first.cid)
         assert not second.ok and ERROR_TEXT in second.error + second.body
         assert sim.bind_attempts[-1] == (B, [BASE_TOOL]), "only the always-on base tool was offered"
@@ -1136,7 +1118,7 @@ class TestCapabilityDifferences:
         assert [r.turn_index for r in turn_rows(db, first.cid)] == [1]
 
     def test_a_bind_time_refusal_is_contained_too(self, client, db, world, sim):
-        """Not what real Ollama/Azure do (they refuse at call time, above); kept for a client that raises in bind_tools."""
+        """Not what real vLLM/Azure do (they refuse at call time, above); kept for a client that raises in bind_tools."""
         sim.reasoning = False
         first = go(client, world, "q", selection(sim.ids["OpenAI"]))
         assert first.ok, first.error
