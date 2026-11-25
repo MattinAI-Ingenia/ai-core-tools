@@ -66,6 +66,16 @@ def test_entity_type_filter_uses_property_param():
     assert "`Maquinaria@ES`" not in query
 
 
+def test_other_filter_matches_untyped_nodes():
+    """The 'Other' chip (counts map NULL/'' entity_type to it) must match
+    untyped nodes in the filter too — otherwise it empties the graph."""
+    _, session = _run_cypher_graph(entity_types=["Machine", "Other"])
+
+    query = session.run.call_args_list[-2].args[0]
+    assert "'Other' IN $types" in query
+    assert "n.entity_type IS NULL" in query
+
+
 def test_type_counts_returned():
     result, _ = _run_cypher_graph(
         type_counts=[{"type": "Machine", "count": 5}, {"type": "Person", "count": 2}],

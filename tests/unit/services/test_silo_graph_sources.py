@@ -67,6 +67,16 @@ def test_unknown_id_yields_none():
     ]
 
 
+def test_unknown_sources_not_merged_into_one():
+    """Two distinct unresolvable documents must not collapse into one chip."""
+    db = MagicMock()
+    db.execute.return_value.mappings.return_value.all.return_value = []
+
+    result = SiloGraphSourcesService.resolve_sources(1, ["doc-a", "doc-b"], db)
+
+    assert len(result) == 2
+
+
 def test_dedup_same_doc_page():
     """Two chunk ids from the same document page collapse to one chip."""
     db = _db_with_names({7: "manual.pdf"})
