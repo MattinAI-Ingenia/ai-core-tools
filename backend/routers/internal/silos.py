@@ -831,6 +831,62 @@ def get_silo_graph(
     )
 
 
+@silos_router.get("/{silo_id}/graph/neighbors")
+def get_silo_graph_neighbors(
+    app_id: int,
+    silo_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    node_id: str = Query(..., min_length=1),
+    depth: int = Query(default=1, ge=1, le=3),
+    max_nodes: int = Query(default=200, ge=1, le=1000),
+):
+    """Return the entity subgraph rooted at one node (expand / center-here).
+
+    - **404 Not Found**: the canonical id has no entity node.
+    - **409 Conflict**: silo is not a LightRAG silo.
+    - **503 Service Unavailable**: Neo4j is unreachable or not configured.
+    """
+    from services.silo_graph_service import SiloGraphService
+    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge, GraphEntityType
+
+    silo = _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if getattr(silo, "vector_db_type", None) != "LIGHTRAG":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge graph is only available for LightRAG silos.",
+        )
+
+    try:
+        data = SiloGraphService.get_node_neighbors(
+            silo_id=silo_id,
+            node_id=node_id,
+            depth=depth,
+            max_nodes=max_nodes,
+            db=db,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        )
+
+    return SiloGraphResponse(
+        nodes=[GraphNode(**n) for n in data["nodes"]],
+        edges=[GraphEdge(**e) for e in data["edges"]],
+        entity_types=[GraphEntityType(**t) for t in data["entity_types"]],
+        node_count=data["node_count"],
+        edge_count=data["edge_count"],
+        total_nodes=data["total_nodes"],
+        total_edges=data["total_edges"],
+        truncated=data["truncated"],
+    )
+
+
 @silos_router.get("/{silo_id}/resources/{resource_id}/file")
 def download_silo_resource(
     app_id: int,
