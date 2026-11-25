@@ -1,8 +1,10 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
-from services.silo_service import SiloService
+from services.silo_service import LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL, SiloService
 
 
 @pytest.fixture
@@ -71,6 +73,17 @@ class TestUpdateDocsMetadata:
             )
 
         assert updated == 4
+
+    def test_lightrag_silo_is_refused_with_409(self, vector_store, cache_invalidate):
+        exists, get_by_id = _patch_silo(silo=SimpleNamespace(silo_id=7, vector_db_type="LIGHTRAG"))
+        with exists, get_by_id, pytest.raises(HTTPException) as exc:
+            SiloService.update_docs_metadata(
+                silo_id=7, filter_metadata={"a": 1}, metadata_updates={"a": 2}, db=MagicMock(),
+            )
+
+        assert exc.value.status_code == 409
+        assert exc.value.detail == LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL
+        vector_store.update_documents_metadata.assert_not_called()
 
 
 class TestGetMetadataFieldValuesValidation:

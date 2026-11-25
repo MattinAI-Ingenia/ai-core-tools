@@ -62,6 +62,10 @@ LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL = (
     "Reindexing a single file is not supported in a LightRAG silo: it would not replace the file's content in the "
     "knowledge graph. Delete the file and upload it again, or use 'Delete all files' and resume indexing."
 )
+LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL = (
+    "Updating document metadata in bulk is not supported in a LightRAG silo: it would not be reflected in the "
+    "knowledge graph, so nothing was changed."
+)
 
 # LightRAG extraction output tokens per call (min, avg, max) for models measured on
 # real indexing (indexing_metric, provider-reported). Others use the generic default.
@@ -3072,6 +3076,7 @@ class SiloService:
         Returns:
             Number of documents updated
         """
+        ensure_not_lightrag(SiloRepository.get_by_id(silo_id, db), LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL)
         logger.info(
             f"Updating metadata in silo {silo_id} with filter: {filter_metadata} "
             f"(replace={replace})"
