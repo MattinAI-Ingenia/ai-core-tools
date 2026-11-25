@@ -4,13 +4,6 @@ import type { LightRAGChunk, LightRAGGraphData } from '../types/streaming';
 // `source_id` with — kept in sync with LightRAGGraphBubble.
 const GRAPH_FIELD_SEP = '<SEP>';
 
-export interface CitedGraph {
-  graph: LightRAGGraphData;
-  /** Display number (1..X, citation order) of each chunk in graph.data.chunks —
-   *  matches the renumbered [N] badges MessageContent renders. */
-  chunkNumbers: number[];
-}
-
 /** Extract the "cited evidence" view of a turn's LightRAG payload: only the
  *  chunks the answer cited ([N](cite://N)), in first-citation order, plus the
  *  entities/relationships extracted from them. Endpoints of cited relationships
@@ -19,7 +12,7 @@ export interface CitedGraph {
 export function buildCitedGraph(
   graph: LightRAGGraphData,
   citedChunkIds: string[],
-): CitedGraph | null {
+): LightRAGGraphData | null {
   if (citedChunkIds.length === 0) return null;
   const data = graph.data ?? {};
   const chunks = data.chunks ?? [];
@@ -45,18 +38,15 @@ export function buildCitedGraph(
   });
 
   return {
-    graph: {
-      ...graph,
-      data: {
-        ...data,
-        chunks: citedIds.map((id) => byId.get(id)!),
-        relationships,
-        entities: (data.entities ?? []).filter(
-          (e) => fromCited(e.source_id) || endpointIds.has(String(e.id)),
-        ),
-      },
+    ...graph,
+    data: {
+      ...data,
+      chunks: citedIds.map((id) => byId.get(id)!),
+      relationships,
+      entities: (data.entities ?? []).filter(
+        (e) => fromCited(e.source_id) || endpointIds.has(String(e.id)),
+      ),
     },
-    chunkNumbers: citedIds.map((_, i) => i + 1),
   };
 }
 

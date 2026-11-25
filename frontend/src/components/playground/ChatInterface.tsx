@@ -1176,16 +1176,17 @@ function ChatInterface({
                             siloId={siloId}
                           />
                         </div>
-                        {citedGraph && (
+                        {citedGraph && splitGraphBySilo(citedGraph).map((g) => (
                           <LightRAGGraphBubble
-                            graphData={citedGraph.graph}
+                            key={`cited-${g.siloId ?? 'all'}`}
+                            graphData={g.graph}
                             citedChunkIds={citedChunkIds}
                             appId={appId}
-                            siloId={siloId}
-                            title="Fuentes citadas"
-                            chunkNumbers={citedGraph.chunkNumbers}
+                            siloId={g.siloId ?? siloId}
+                            title={g.siloName ? `Fuentes citadas · ${g.siloName}` : 'Fuentes citadas'}
+                            chunkNumbers={g.graph.data?.chunks?.map((c) => (c.id ? numbering.numberByChunkId.get(c.id) ?? 0 : 0)) ?? []}
                           />
-                        )}
+                        ))}
                         {msgTimestamps.length > 0 &&
                           readyVideoMedias.map((media) => {
                             const streamUrl = videoStreamUrls[media.media_id];
