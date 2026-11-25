@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
+import type NVL from '@neo4j-nvl/base';
 import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship } from '../../types/streaming';
 import OpenPdfButton from './OpenPdfButton';
 import { groupChunksById } from '../../utils/groupChunksById';
@@ -68,6 +69,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const [entitySourcesLoading, setEntitySourcesLoading] = useState(false);
   const [typeColoring, setTypeColoring] = useState(true);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const nvlRef = useRef<NVL>(null);
 
   // Close the (portal-rendered) chunk popover on outside scroll/resize, since
   // its fixed coordinates would otherwise drift away from the chip. Scrolling
@@ -187,6 +189,8 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const mouseEventCallbacks: MouseEventCallbacks = {
     onNodeClick: (node: NvlNode) => {
       setSelectedRel(null);
+      // Recentre the view on the clicked node (also a zoom-to-fit on it).
+      nvlRef.current?.fit([node.id]);
       const original = entities.find((e) => String(e.id) === node.id) ?? null;
       setSelectedEntity((prev) => (prev?.id === node.id ? null : original));
     },
@@ -412,6 +416,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
               {nvlNodes.length > 0 ? (
                 <>
                   <InteractiveNvlWrapper
+                    ref={nvlRef}
                     nodes={nvlNodes}
                     rels={nvlRels}
                     nvlOptions={nvlOptions}
