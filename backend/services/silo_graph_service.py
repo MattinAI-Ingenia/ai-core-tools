@@ -449,7 +449,7 @@ class SiloGraphService:
                     f"MATCH (n:`{workspace}`)-[]-(m:`{workspace}`) "
                     "WHERE n.entity_id = $root AND m.entity_id IS NOT NULL "
                     "WITH DISTINCT m, size([(m)-[]-() | 1]) AS degree "
-                    "ORDER BY degree DESC LIMIT $budget"
+                    "RETURN m ORDER BY degree DESC LIMIT $budget"
                 )
                 budget = max_nodes - len(nodes)
                 d1_offered = 0
@@ -480,7 +480,7 @@ class SiloGraphService:
                         "WHERE n.entity_id IN $frontier AND m.entity_id IS NOT NULL "
                         "AND NOT m.entity_id IN $known "
                         "WITH DISTINCT m, size([(m)-[]-() | 1]) AS degree "
-                        "ORDER BY degree DESC LIMIT $budget"
+                        "RETURN m ORDER BY degree DESC LIMIT $budget"
                     )
                     offered = 0
                     for rec in neo_session.run(

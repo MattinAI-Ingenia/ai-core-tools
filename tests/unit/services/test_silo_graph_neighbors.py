@@ -85,6 +85,22 @@ def test_incoming_display_name_canonicalized():
     assert result["nodes"][0]["id"] == "canon(MCF-40)"
 
 
+def test_neighbor_queries_conclude_with_return():
+    """Regression: `... WITH ... ORDER BY ... LIMIT` (no RETURN) is invalid
+    Cypher — this Neo4j rejects it and the center/expand view 500s."""
+    root = _FakeNode("canon(root)")
+    session = MagicMock()
+    session.run.side_effect = [[{"n": root}], [], [], []]
+
+    _, session = _run_get_node_neighbors(session, node_id="root", depth=2, max_nodes=10)
+
+    d1_q = session.run.call_args_list[1].args[0]
+    layer_q = session.run.call_args_list[2].args[0]
+    for query in (d1_q, layer_q):
+        assert "RETURN m ORDER BY degree DESC LIMIT" in query
+        assert query.rstrip().endswith("$budget") is False
+
+
 def test_root_and_depth1_always_kept():
     """Locality guarantee: root + ALL depth-1 neighbors stay; the node cap
     only trims deeper layers (500 offered → budget-kept here)."""
