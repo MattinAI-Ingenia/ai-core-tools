@@ -30,7 +30,6 @@ from services.agent_cache_service import CheckpointerCacheService
 from langchain_core.documents import Document
 import langsmith as ls
 from langchain_core.tools import StructuredTool
-from services.agent_metrics_collector import METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
 import copy
 from dataclasses import dataclass
 from tools.system_one_tool import IACTSystemOneTool
@@ -39,7 +38,6 @@ import asyncio
 import httpx
 import openai
 import re
-import json
 import time
 import uuid
 from services.agent_metrics_collector import AgentMetricsCollector, METRICS_SUB_AGENT_ID_KEY, METRICS_TOOL_TYPE_KEY
@@ -2445,8 +2443,7 @@ class IACTTool(BaseTool):
                 text, graph = await self._run_subagent_retrying(query)
                 text, graph = self.claim_citations(text, graph)
             return text, graph_artifact(graph)
-        except ServiceRetiredError as e:
-            error = e
+        except ServiceRetiredError:
             raise
         except Exception as e:
             logger.error(f"Error executing agent tool {self.name} (async): {str(e)}")
