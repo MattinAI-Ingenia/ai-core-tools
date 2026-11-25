@@ -347,17 +347,27 @@ class SiloGraphService:
 
     TYPE_CHIP_LIMIT = 10
 
+    # Junk type names the extraction LLM invents beyond the silo's configured
+    # vocabulary — folded into the "Other" bucket so they don't waste chips.
+    _JUNK_TYPE_NAMES = frozenset({"other", "otro", "autre", "altro", "unknown"})
+
     @classmethod
     def _cap_type_counts(cls, type_counts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Keep the legend usable: the extraction LLM invents type variants
-        beyond the silo's configured vocabulary (``other``, ``UNKNOWN``,
-        per-language drift...), so show only the top types and bucket the
-        rest into ``Other``."""
-        top = type_counts[:cls.TYPE_CHIP_LIMIT]
-        rest = sum(tc["count"] for tc in type_counts[cls.TYPE_CHIP_LIMIT:])
-        if rest > 0:
-            top.append({"type": "Other", "count": rest})
-        return top
+        (``other``, ``UNKNOWN``, per-language drift...) — those fold into
+        ``Other`` along with every type beyond the top-N chips."""
+        folded: List[Dict[str, Any]] = []
+        other_count = 0
+        for tc in type_counts:
+            if tc["type"] and tc["type"].lower() in cls._JUNK_TYPE_NAMES:
+                other_count += tc["count"]
+            else:
+                folded.append(tc)
+        other_count += sum(tc["count"] for tc in folded[cls.TYPE_CHIP_LIMIT:])
+        if other_count > 0:
+            folded = folded[:cls.TYPE_CHIP_LIMIT]
+            folded.append({"type": "Other", "count": other_count})
+        return folded
 
     @staticmethod
     def _fetch_induced_edges(neo_session, workspace: str, node_ids: set, max_edges: int) -> List[Dict]:

@@ -82,6 +82,24 @@ def test_other_filter_matches_untyped_nodes():
     assert call.kwargs["top"] == ["Machine", "t1"]
 
 
+def test_junk_type_names_folded_into_other():
+    """'other'/'UNKNOWN' (LLM-invented, but frequent) must not waste chips —
+    they fold into the 'Other' bucket together with the rare types."""
+    counts = [
+        {"type": "Machine", "count": 9},
+        {"type": "other", "count": 4},
+        {"type": "UNKNOWN", "count": 2},
+        {"type": "t1", "count": 1},
+    ]
+    result, _ = _run_cypher_graph(type_counts=counts)
+
+    assert result["entity_types"] == [
+        {"type": "Machine", "count": 9},
+        {"type": "t1", "count": 1},
+        {"type": "Other", "count": 6},
+    ]
+
+
 def test_type_counts_capped_to_top_ten():
     """The extraction LLM invents type variants — the legend shows only the
     top 10 types and buckets the rest into 'Other'."""
