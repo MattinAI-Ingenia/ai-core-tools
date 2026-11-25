@@ -22,15 +22,7 @@ def _forwarded(**overrides) -> dict:
     return forwarded
 
 
-def test_router_forwards_extract_service_id():
+def test_router_forwards_extract_and_alias_and_omitted_is_none():
     assert _forwarded(extract_service_id=42)["extract_service_id"] == 42
-
-
-def test_router_forwards_indexing_service_id_alias():
     assert _forwarded(indexing_service_id=42)["indexing_service_id"] == 42
-
-
-def test_omitted_fields_are_none():
-    payload = _forwarded()
-    assert payload["extract_service_id"] is None
-    assert payload["indexing_service_id"] is None
+    assert _forwarded()["extract_service_id"] is None
