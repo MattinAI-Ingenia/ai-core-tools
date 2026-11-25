@@ -104,27 +104,6 @@ const GraphDetailPanel: React.FC<GraphDetailPanelProps> = ({
         </button>
       </div>
 
-      {/* Properties (full list, scrollable panel) */}
-      {(() => {
-        const props = isNode
-          ? selectedNode!.properties
-          : { type: relation!.type, ...relation!.properties };
-        const entries = Object.entries(props).filter(([k]) => k !== 'workspace');
-        if (entries.length === 0) return null;
-        return (
-          <div className="border-t border-gray-100 dark:border-gray-700 pt-2 space-y-1">
-            {entries.map(([k, v]) =>
-              v == null || String(v) === '' ? null : (
-                <div key={k} className="flex gap-1">
-                  <span className="text-gray-500 dark:text-gray-400 shrink-0">{k}:</span>
-                  <span className="text-gray-800 dark:text-gray-200 break-all whitespace-pre-wrap">{String(v)}</span>
-                </div>
-              ),
-            )}
-          </div>
-        );
-      })()}
-
       {/* Connections (loaded neighbors) */}
       {isNode && connections.length > 0 && (
         <div className="border-t border-gray-100 dark:border-gray-700 pt-2">
@@ -143,45 +122,6 @@ const GraphDetailPanel: React.FC<GraphDetailPanelProps> = ({
               </button>
             ))}
           </div>
-        </div>
-      )}
-
-      {/* Source documents */}
-      {(sourcesLoading || (sources && sources.length > 0)) && (
-        <div className="border-t border-gray-100 dark:border-gray-700 pt-2">
-          <p className="text-gray-500 dark:text-gray-400 mb-1">Source documents</p>
-          {sourcesLoading ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400" />
-          ) : (
-            <div className="flex flex-wrap gap-1">
-              {(sources ?? []).map((s) => {
-                const label = s.file_name
-                  ? s.page != null
-                    ? `${s.file_name} (p. ${s.page})`
-                    : s.file_name
-                  : 'Unknown source';
-                const openable = s.resource_id != null && s.page != null;
-                return openable ? (
-                  <button
-                    key={s.chunk_id}
-                    onClick={() => openSourcePdf(appId, siloId, s.resource_id!, s.page!)}
-                    title={`Open ${s.file_name} at page ${s.page}`}
-                    className="max-w-full truncate rounded-full bg-green-50 dark:bg-green-900/40 text-green-700 dark:text-green-300 px-1.5 py-0.5 hover:bg-green-100 dark:hover:bg-green-900/60"
-                  >
-                    {label}
-                  </button>
-                ) : (
-                  <span
-                    key={s.chunk_id}
-                    title="Source file not available"
-                    className="max-w-full truncate rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 px-1.5 py-0.5"
-                  >
-                    {label}
-                  </span>
-                );
-              })}
-            </div>
-          )}
         </div>
       )}
 
@@ -231,6 +171,67 @@ const GraphDetailPanel: React.FC<GraphDetailPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* Source documents */}
+      {(sourcesLoading || (sources && sources.length > 0)) && (
+        <div className="border-t border-gray-100 dark:border-gray-700 pt-2">
+          <p className="text-gray-500 dark:text-gray-400 mb-1">Source documents</p>
+          {sourcesLoading ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400" />
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {(sources ?? []).map((s) => {
+                const label = s.file_name
+                  ? s.page != null
+                    ? `${s.file_name} (p. ${s.page})`
+                    : s.file_name
+                  : 'Unknown source';
+                const openable = s.resource_id != null && s.page != null;
+                return openable ? (
+                  <button
+                    key={s.chunk_id}
+                    onClick={() => openSourcePdf(appId, siloId, s.resource_id!, s.page!)}
+                    title={`Open ${s.file_name} at page ${s.page}`}
+                    className="max-w-full truncate rounded-full bg-green-50 dark:bg-green-900/40 text-green-700 dark:text-green-300 px-1.5 py-0.5 hover:bg-green-100 dark:hover:bg-green-900/60"
+                  >
+                    {label}
+                  </button>
+                ) : (
+                  <span
+                    key={s.chunk_id}
+                    title="Source file not available"
+                    className="max-w-full truncate rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 px-1.5 py-0.5"
+                  >
+                    {label}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Properties (full list, scrollable panel — at the bottom: the user
+          cares about connections, controls and sources before the raw dump) */}
+      {(() => {
+        const props = isNode
+          ? selectedNode!.properties
+          : { type: relation!.type, ...relation!.properties };
+        const entries = Object.entries(props).filter(([k]) => k !== 'workspace');
+        if (entries.length === 0) return null;
+        return (
+          <div className="border-t border-gray-100 dark:border-gray-700 pt-2 space-y-1">
+            {entries.map(([k, v]) =>
+              v == null || String(v) === '' ? null : (
+                <div key={k} className="flex gap-1">
+                  <span className="text-gray-500 dark:text-gray-400 shrink-0">{k}:</span>
+                  <span className="text-gray-800 dark:text-gray-200 break-all whitespace-pre-wrap">{String(v)}</span>
+                </div>
+              ),
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 };

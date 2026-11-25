@@ -4,7 +4,7 @@ import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
 import { apiService } from '../../services/api';
-import { NEUTRAL_COLOR, colorForType } from '../../utils/entityTypeColors';
+import { NEUTRAL_COLOR, PARTIAL_COLOR, colorForType } from '../../utils/entityTypeColors';
 import type { GraphNode, GraphEdge, SiloGraphData } from '../../utils/siloGraphUtils';
 import { mergeGraphData } from '../../utils/siloGraphUtils';
 import GraphDetailPanel from './GraphDetailPanel';
@@ -54,7 +54,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
-    const DEFAULT_MAX_NODES = 200;
+    const DEFAULT_MAX_NODES = 50;
     const [sliderValue, setSliderValue] = useState(DEFAULT_MAX_NODES);
     const [sliderMax, setSliderMax] = useState(DEFAULT_MAX_NODES);
     const maxNodesRef = useRef(DEFAULT_MAX_NODES);
@@ -285,6 +285,9 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                 <div className="flex items-center gap-1.5 flex-wrap px-3 pb-2 shrink-0">
                     {entityTypes.map(({ type, count }) => {
                         const active = activeTypes.has(type);
+                        // "Other" groups untyped + rare types — render it in the
+                        // untyped gray, not a palette color.
+                        const chipColor = type === 'Other' ? PARTIAL_COLOR : colorForType(type);
                         return (
                             <button
                                 key={type}
@@ -295,11 +298,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                                 className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs border transition-colors ${active
                                     ? 'border-transparent text-white'
                                     : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
-                                style={active ? { background: colorForType(type) } : undefined}
+                                style={active ? { background: chipColor } : undefined}
                             >
                                 <span
                                     className="w-2.5 h-2.5 rounded-full shrink-0"
-                                    style={{ background: colorForType(type) }}
+                                    style={{ background: chipColor }}
                                     aria-hidden="true"
                                 />
                                 {type} · {count}

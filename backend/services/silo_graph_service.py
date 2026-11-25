@@ -278,6 +278,7 @@ class SiloGraphService:
                         "type": record["type"] or "Other",
                         "count": record["count"],
                     })
+                type_counts = cls._cap_type_counts(type_counts)
 
                 # --- Nodes ---
                 # LightRAG stores the workspace as a label and the entity type
@@ -290,16 +291,20 @@ class SiloGraphService:
                     node_q += cls._build_search_clause(search, params)
                     params["search"] = search
                 if entity_types:
-                    # "Other" (counts map NULL/'' to it) must also match untyped
+                    # "Other" (counts map NULL/'' to it, plus every type beyond
+                    # the top-10 chip cap) must match untyped AND rare-typed
                     # nodes, or its chip would filter the graph down to nothing.
                     node_q += (
                         "AND (n.entity_type IN $types OR "
-                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = ''))) "
+                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = '' "
+                        "OR n.entity_type NOT IN $top))) "
                         if search else
                         "WHERE (n.entity_type IN $types OR "
-                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = ''))) "
+                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = '' "
+                        "OR n.entity_type NOT IN $top))) "
                     )
                     params["types"] = entity_types
+                    params["top"] = [tc["type"] for tc in type_counts if tc["type"] != "Other"]
 
                 node_q += (
                     "WITH n, size([(n)-[]-() | 1]) AS degree "
@@ -339,6 +344,20 @@ class SiloGraphService:
             "total_edges": total_edges,
             "truncated": truncated,
         }
+
+    TYPE_CHIP_LIMIT = 10
+
+    @classmethod
+    def _cap_type_counts(cls, type_counts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep the legend usable: the extraction LLM invents type variants
+        beyond the silo's configured vocabulary (``other``, ``UNKNOWN``,
+        per-language drift...), so show only the top types and bucket the
+        rest into ``Other``."""
+        top = type_counts[:cls.TYPE_CHIP_LIMIT]
+        rest = sum(tc["count"] for tc in type_counts[cls.TYPE_CHIP_LIMIT:])
+        if rest > 0:
+            top.append({"type": "Other", "count": rest})
+        return top
 
     @staticmethod
     def _fetch_induced_edges(neo_session, workspace: str, node_ids: set, max_edges: int) -> List[Dict]:
@@ -482,8 +501,9 @@ class SiloGraphService:
         for node in nodes:
             t = node["entity_type"] or "Other"
             counts[t] = counts.get(t, 0) + 1
-        type_counts = [{"type": t, "count": c} for t, c in
-                       sorted(counts.items(), key=lambda kv: -kv[1])]
+        type_counts = cls._cap_type_counts([
+            {"type": t, "count": c} for t, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        ])
         return {
             "nodes": nodes,
             "edges": edges,

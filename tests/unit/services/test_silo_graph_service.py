@@ -69,11 +69,28 @@ def test_entity_type_filter_uses_property_param():
 def test_other_filter_matches_untyped_nodes():
     """The 'Other' chip (counts map NULL/'' entity_type to it) must match
     untyped nodes in the filter too — otherwise it empties the graph."""
-    _, session = _run_cypher_graph(entity_types=["Machine", "Other"])
+    _, session = _run_cypher_graph(
+        entity_types=["Machine", "Other"],
+        type_counts=[{"type": "Machine", "count": 5}, {"type": "t1", "count": 1}],
+    )
 
-    query = session.run.call_args_list[-2].args[0]
+    call = session.run.call_args_list[-2]
+    query = call.args[0]
     assert "'Other' IN $types" in query
     assert "n.entity_type IS NULL" in query
+    assert "n.entity_type NOT IN $top" in query
+    assert call.kwargs["top"] == ["Machine", "t1"]
+
+
+def test_type_counts_capped_to_top_ten():
+    """The extraction LLM invents type variants — the legend shows only the
+    top 10 types and buckets the rest into 'Other'."""
+    counts = [{"type": f"t{i}", "count": 20 - i} for i in range(15)]
+    result, _ = _run_cypher_graph(type_counts=counts)
+
+    chips = result["entity_types"]
+    assert [c["type"] for c in chips] == [f"t{i}" for i in range(10)] + ["Other"]
+    assert chips[-1] == {"type": "Other", "count": sum(c["count"] for c in counts[10:])}
 
 
 def test_type_counts_returned():
