@@ -128,3 +128,6 @@ docker/utilities/*/hf_cache/
 
 # Subidas de repositorios en local (runtime). Nunca al repo.
 /backend/app/repositories/
+
+# SDD workspaces (superpowers)
+.superpowers/

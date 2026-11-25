@@ -13,6 +13,7 @@ class GraphNode(BaseModel):
     id: str
     labels: List[str] = []
     properties: Dict[str, Any] = {}
+    entity_type: Optional[str] = None
 
 
 class GraphEdge(BaseModel):
@@ -25,11 +26,34 @@ class GraphEdge(BaseModel):
     properties: Dict[str, Any] = {}
 
 
+class GraphEntityType(BaseModel):
+    """One entity type present in the graph, with its node count."""
+
+    type: str
+    count: int
+
+
+class GraphSource(BaseModel):
+    """One source document (+page) a graph node/edge was extracted from."""
+
+    chunk_id: str
+    resource_id: Optional[int] = None
+    page: Optional[int] = None
+    file_name: Optional[str] = None
+
+
+class GraphSourcesResponse(BaseModel):
+    """Payload of GET /{silo_id}/graph/sources."""
+
+    sources: List[GraphSource] = []
+
+
 class SiloGraphResponse(BaseModel):
     """Full graph payload returned by the GET /{silo_id}/graph endpoint."""
 
     nodes: List[GraphNode] = []
     edges: List[GraphEdge] = []
+    entity_types: List[GraphEntityType] = []
     node_count: int = 0
     edge_count: int = 0
     total_nodes: int = 0

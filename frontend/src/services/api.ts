@@ -2716,15 +2716,34 @@ class ApiService {
   async getSiloGraph(
     appId: number,
     siloId: number,
-    params: { maxNodes?: number; maxDepth?: number; nodeLabel?: string; search?: string } = {},
+    params: { maxNodes?: number; search?: string; entityTypes?: string[] } = {},
   ) {
     const qs = new URLSearchParams();
     if (params.maxNodes !== undefined) qs.set('max_nodes', String(params.maxNodes));
-    if (params.maxDepth !== undefined) qs.set('max_depth', String(params.maxDepth));
-    if (params.nodeLabel) qs.set('node_label', params.nodeLabel);
+    // Repeated params — FastAPI collects them into List[str] (types are free-form
+    // LLM output and may themselves contain commas, so no delimiter encoding).
+    for (const type of params.entityTypes ?? []) qs.append('entity_types', type);
     if (params.search) qs.set('search', params.search);
     const query = qs.toString() ? `?${qs.toString()}` : '';
     return this.request(`/internal/apps/${appId}/silos/${siloId}/graph${query}`);
+  }
+
+  async getSiloGraphNeighbors(
+    appId: number,
+    siloId: number,
+    params: { nodeId: string; depth: number; maxNodes?: number },
+  ) {
+    const qs = new URLSearchParams({
+      node_id: params.nodeId,
+      depth: String(params.depth),
+    });
+    if (params.maxNodes !== undefined) qs.set('max_nodes', String(params.maxNodes));
+    return this.request(`/internal/apps/${appId}/silos/${siloId}/graph/neighbors?${qs.toString()}`);
+  }
+
+  async getSiloGraphSources(appId: number, siloId: number, chunkIds: string[]) {
+    const qs = new URLSearchParams({ ids: chunkIds.join(',') });
+    return this.request(`/internal/apps/${appId}/silos/${siloId}/graph/sources?${qs.toString()}`);
   }
 
   async getSiloResourceFile(appId: number, siloId: number, resourceId: number, _isRetryAfterRefresh = false): Promise<Blob> {

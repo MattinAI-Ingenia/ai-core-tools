@@ -786,8 +786,7 @@ def get_silo_graph(
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
     max_nodes: int = Query(default=200, ge=1, le=1000),
     max_edges: int = Query(default=1000, ge=1, le=5000),
-    max_depth: int = Query(default=2, ge=1, le=5),
-    node_label: Optional[str] = Query(default=None),
+    entity_types: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
 ):
     """Return the knowledge graph for a LightRAG silo.
@@ -796,7 +795,7 @@ def get_silo_graph(
     - **503 Service Unavailable**: Neo4j is unreachable or not configured.
     """
     from services.silo_graph_service import SiloGraphService
-    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge
+    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge, GraphEntityType
 
     silo = _validate_silo_app_ownership(silo_id, app_id, db)
 
@@ -811,13 +810,10 @@ def get_silo_graph(
             silo_id=silo_id,
             max_nodes=max_nodes,
             max_edges=max_edges,
-            max_depth=max_depth,
-            node_label=node_label,
+            entity_types=entity_types or None,
             search=search,
             db=db,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -827,12 +823,106 @@ def get_silo_graph(
     return SiloGraphResponse(
         nodes=[GraphNode(**n) for n in data["nodes"]],
         edges=[GraphEdge(**e) for e in data["edges"]],
+        entity_types=[GraphEntityType(**t) for t in data["entity_types"]],
         node_count=data["node_count"],
         edge_count=data["edge_count"],
         total_nodes=data["total_nodes"],
         total_edges=data["total_edges"],
         truncated=data["truncated"],
     )
+
+
+@silos_router.get("/{silo_id}/graph/neighbors")
+def get_silo_graph_neighbors(
+    app_id: int,
+    silo_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    node_id: str = Query(..., min_length=1),
+    depth: int = Query(default=1, ge=1, le=3),
+    max_nodes: int = Query(default=200, ge=1, le=1000),
+):
+    """Return the entity subgraph rooted at one node (expand / center-here).
+
+    - **404 Not Found**: the canonical id has no entity node.
+    - **409 Conflict**: silo is not a LightRAG silo.
+    - **503 Service Unavailable**: Neo4j is unreachable or not configured.
+    """
+    from services.silo_graph_service import SiloGraphService
+    from schemas.silo_graph_schemas import SiloGraphResponse, GraphNode, GraphEdge, GraphEntityType
+
+    silo = _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if getattr(silo, "vector_db_type", None) != "LIGHTRAG":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge graph is only available for LightRAG silos.",
+        )
+
+    try:
+        data = SiloGraphService.get_node_neighbors(
+            silo_id=silo_id,
+            node_id=node_id,
+            depth=depth,
+            max_nodes=max_nodes,
+            db=db,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        )
+
+    return SiloGraphResponse(
+        nodes=[GraphNode(**n) for n in data["nodes"]],
+        edges=[GraphEdge(**e) for e in data["edges"]],
+        entity_types=[GraphEntityType(**t) for t in data["entity_types"]],
+        node_count=data["node_count"],
+        edge_count=data["edge_count"],
+        total_nodes=data["total_nodes"],
+        total_edges=data["total_edges"],
+        truncated=data["truncated"],
+    )
+
+
+@silos_router.get("/{silo_id}/graph/sources")
+def get_silo_graph_sources(
+    app_id: int,
+    silo_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+    ids: str = Query(..., min_length=1),
+):
+    """Resolve chunk ids (a node/edge's ``source_id``, SEP-joined) to the
+    source documents + pages they were extracted from. Max 100 ids.
+
+    - **409 Conflict**: silo is not a LightRAG silo.
+    - **422 Unprocessable Entity**: more than 100 ids requested.
+    """
+    from services.silo_graph_sources_service import SiloGraphSourcesService
+    from schemas.silo_graph_schemas import GraphSourcesResponse, GraphSource
+
+    chunk_ids = [c.strip() for c in ids.split(",") if c.strip()]
+    if len(chunk_ids) > SiloGraphSourcesService.MAX_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Too many chunk ids requested (max {SiloGraphSourcesService.MAX_IDS}).",
+        )
+
+    silo = _validate_silo_app_ownership(silo_id, app_id, db)
+
+    if getattr(silo, "vector_db_type", None) != "LIGHTRAG":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge graph is only available for LightRAG silos.",
+        )
+
+    sources = SiloGraphSourcesService.resolve_sources(silo_id, chunk_ids, db)
+    return GraphSourcesResponse(sources=[GraphSource(**s) for s in sources])
 
 
 @silos_router.get("/{silo_id}/resources/{resource_id}/file")

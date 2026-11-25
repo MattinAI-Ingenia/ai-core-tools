@@ -11,17 +11,13 @@ is impossible by construction.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from tools.vector_stores.lightrag.entity_name_normalization import (
+    canonicalize_entity_name,
+)
 
-# Labels cannot be parameterized in a Cypher MATCH — they are interpolated
-# into a backtick-quoted label expression, so any backtick in the query param
-# breaks out of it and can append arbitrary Cypher (cross-tenant reads, or
-# DETACH DELETE across every workspace). Entity-type labels are identifiers,
-# so this whitelist covers the real ones and rejects everything else.
-_NODE_LABEL_RE = re.compile(r"^[A-Za-z0-9_\- ]{1,64}$")
+logger = logging.getLogger(__name__)
 
 
 class SiloGraphService:
@@ -66,9 +62,8 @@ class SiloGraphService:
         silo_id: int,
         max_nodes: int = 200,
         max_edges: int = 1000,
-        max_depth: int = 2,
-        node_label: Optional[str] = None,
         search: Optional[str] = None,
+        entity_types: Optional[List[str]] = None,
         db=None,
     ) -> Dict[str, Any]:
         """Fetch the knowledge graph for *silo_id* and return a dict matching
@@ -82,17 +77,13 @@ class SiloGraphService:
 
         Raises:
             RuntimeError: When Neo4j is unreachable or not configured.
-            ValueError: When ``node_label`` is not a valid Cypher label.
         """
-        if node_label and not _NODE_LABEL_RE.fullmatch(node_label):
-            raise ValueError(f"Invalid node_label: {node_label!r}")
-
         workspace = cls._workspace_name(silo_id)
         graph = cls._cypher_graph(
             workspace=workspace,
             max_nodes=max_nodes,
             max_edges=max_edges,
-            node_label=node_label,
+            entity_types=entity_types,
             search=search,
         )
 
@@ -101,33 +92,111 @@ class SiloGraphService:
         names = {n["id"] for n in graph["nodes"]}
         for edge in graph["edges"]:
             names.update((edge["source"], edge["target"]))
-        if db is not None and names:
-            try:
-                from repositories.entity_name_variant_repository import (
-                    EntityNameVariantRepository,
-                )
-                name_map = EntityNameVariantRepository.best_variant_map(
-                    silo_id, sorted(names), db
-                )
-            except Exception as exc:  # noqa: WPS433 - rendering must not fail here
-                logger.warning(
-                    "Failed to resolve graph display names for silo %d: %s",
-                    silo_id, exc,
-                )
-                name_map = {}
-        else:
-            name_map = {}
-        if name_map:
-            for node in graph["nodes"]:
-                node["id"] = name_map.get(node["id"], node["id"])
-                props = node.get("properties")
-                if isinstance(props, dict) and props.get("entity_id"):
-                    props["entity_id"] = name_map.get(props["entity_id"], props["entity_id"])
-            for edge in graph["edges"]:
-                edge["source"] = name_map.get(edge["source"], edge["source"])
-                edge["target"] = name_map.get(edge["target"], edge["target"])
+        cls._rewrite_display(graph, silo_id, names, db)
 
         return graph
+
+    @classmethod
+    def get_node_neighbors(
+        cls,
+        silo_id: int,
+        node_id: str,
+        depth: int,
+        max_nodes: int = 200,
+        max_edges: int = 1000,
+        db=None,
+    ) -> Dict[str, Any]:
+        """Fetch the subgraph rooted at one entity node (expand/center).
+
+        The frontend only knows DISPLAY ids (``get_silo_graph`` rewrites them),
+        so *node_id* is canonicalized before the root lookup. The root and its
+        depth-1 neighbors are always kept; ``max_nodes`` only trims deeper
+        layers. Raises :class:`LookupError` when the canonical id has no
+        entity node (router maps it to 404).
+        """
+        workspace = cls._workspace_name(silo_id)
+        graph = cls._cypher_neighbors(
+            workspace=workspace,
+            root=canonicalize_entity_name(node_id),
+            depth=depth,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+        )
+        names = {n["id"] for n in graph["nodes"]}
+        for edge in graph["edges"]:
+            names.update((edge["source"], edge["target"]))
+        cls._rewrite_display(graph, silo_id, names, db)
+        return graph
+
+    # ------------------------------------------------------------------
+    # Display rewrite (shared by every graph response)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _rewrite_display(
+        cls,
+        graph: Dict[str, Any],
+        silo_id: int,
+        names: set,
+        db,
+    ) -> None:
+        """Rewrite canonical node ids to their best display variants in place.
+
+        After rewriting, two distinct canonical ids can collide on the same
+        display variant — NVL breaks on duplicate node ids, so the colliding
+        nodes are merged (nodes arrive ordered by degree DESC: the first one
+        wins) and their edges are kept, remapped onto the surviving id.
+        """
+        if db is None or not names:
+            return
+        try:
+            from repositories.entity_name_variant_repository import (
+                EntityNameVariantRepository,
+            )
+            name_map = EntityNameVariantRepository.best_variant_map(
+                silo_id, sorted(names), db
+            )
+        except Exception as exc:  # noqa: WPS433 - rendering must not fail here
+            logger.warning(
+                "Failed to resolve graph display names for silo %d: %s",
+                silo_id, exc,
+            )
+            return
+        if not name_map:
+            return
+
+        for node in graph["nodes"]:
+            node["id"] = name_map.get(node["id"], node["id"])
+            props = node.get("properties")
+            if isinstance(props, dict) and props.get("entity_id"):
+                props["entity_id"] = name_map.get(props["entity_id"], props["entity_id"])
+        for edge in graph["edges"]:
+            edge["source"] = name_map.get(edge["source"], edge["source"])
+            edge["target"] = name_map.get(edge["target"], edge["target"])
+
+        # Colliding nodes share the same display id by construction — the first
+        # occurrence wins (nodes are degree-ordered); edges need no remap, only
+        # a dedup of the pairs the merge made identical.
+        merged_nodes = []
+        seen_ids = set()
+        for node in graph["nodes"]:
+            if node["id"] in seen_ids:
+                continue
+            seen_ids.add(node["id"])
+            merged_nodes.append(node)
+        deduped_edges = []
+        seen_edges = set()
+        for edge in graph["edges"]:
+            key = (edge["source"], edge["target"], edge["type"])
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            deduped_edges.append(edge)
+        if len(merged_nodes) != len(graph["nodes"]):
+            graph["nodes"] = merged_nodes
+            graph["edges"] = deduped_edges
+            graph["node_count"] = len(merged_nodes)
+            graph["edge_count"] = len(deduped_edges)
 
     # ------------------------------------------------------------------
     # Direct Cypher query
@@ -148,10 +217,6 @@ class SiloGraphService:
           folded term. Skipped when the fold is empty (``"-"``, etc.)
           because ``CONTAINS ""`` matches everything.
         """
-        from tools.vector_stores.lightrag.entity_name_normalization import (
-            canonicalize_entity_name,
-        )
-
         conditions = [
             "toLower(n.entity_id) CONTAINS toLower($search)",
             "toLower(n.description) CONTAINS toLower($search)",
@@ -168,8 +233,8 @@ class SiloGraphService:
         workspace: str,
         max_nodes: int,
         max_edges: int,
-        node_label: Optional[str],
-        search: Optional[str],
+        entity_types: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Query Neo4j directly scoped to the workspace label.
 
@@ -202,19 +267,44 @@ class SiloGraphService:
                 edge_count_record = neo_session.run(edge_count_q).single()
                 total_edges = edge_count_record["total"] if edge_count_record else 0
 
+                # --- Per-type counts (for the legend/filter chips) ---
+                type_counts: List[Dict[str, Any]] = []
+                type_count_q = (
+                    f"MATCH (n:`{workspace}`) WHERE n.entity_id IS NOT NULL "
+                    "RETURN n.entity_type AS type, count(*) AS count ORDER BY count DESC"
+                )
+                for record in neo_session.run(type_count_q):
+                    type_counts.append({
+                        "type": record["type"] or "Other",
+                        "count": record["count"],
+                    })
+                type_counts = cls._cap_type_counts(type_counts)
+
                 # --- Nodes ---
-                # LightRAG tags every node with the workspace as a label.
-                # When an additional entity-type label filter is requested,
-                # both labels must match (workspace AND entity_type).
-                if node_label:
-                    node_q = f"MATCH (n:`{workspace}`:`{node_label}`) "
-                else:
-                    node_q = f"MATCH (n:`{workspace}`) "
+                # LightRAG stores the workspace as a label and the entity type
+                # as a PROPERTY (n.entity_type), so the type filter is a
+                # parameterized WHERE — never a Cypher label interpolation.
+                node_q = f"MATCH (n:`{workspace}`) "
 
                 params: Dict[str, Any] = {"limit": max_nodes}
                 if search:
                     node_q += cls._build_search_clause(search, params)
                     params["search"] = search
+                if entity_types:
+                    # "Other" (counts map NULL/'' to it, plus every type beyond
+                    # the top-10 chip cap) must match untyped AND rare-typed
+                    # nodes, or its chip would filter the graph down to nothing.
+                    node_q += (
+                        "AND (n.entity_type IN $types OR "
+                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = '' "
+                        "OR NOT n.entity_type IN $top))) "
+                        if search else
+                        "WHERE (n.entity_type IN $types OR "
+                        "('Other' IN $types AND (n.entity_type IS NULL OR n.entity_type = '' "
+                        "OR NOT n.entity_type IN $top))) "
+                    )
+                    params["types"] = entity_types
+                    params["top"] = [tc["type"] for tc in type_counts if tc["type"] != "Other"]
 
                 node_q += (
                     "WITH n, size([(n)-[]-() | 1]) AS degree "
@@ -234,38 +324,12 @@ class SiloGraphService:
                         # Expose only the non-workspace labels for the UI
                         "labels": [lb for lb in n.labels if lb != workspace] or list(n.labels),
                         "properties": props,
+                        "entity_type": props.get("entity_type"),
                     })
                     node_ids.add(nid)
 
                 # --- Edges between fetched nodes ---
-                # Match relationships where BOTH endpoints are in the fetched node set
-                # to prevent dangling relationships that crash the renderer.
-                if node_ids:
-                    edge_q = (
-                        f"MATCH (a:`{workspace}`)-[r]->(b) "
-                        "WHERE a.entity_id IN $ids AND b.entity_id IN $ids "
-                        "RETURN a.entity_id AS src, b.entity_id AS tgt, "
-                        "type(r) AS rel_type, id(r) AS rid, properties(r) AS props "
-                        "LIMIT $limit"
-                    )
-                    edge_result = neo_session.run(
-                        edge_q,
-                        ids=list(node_ids),
-                        limit=max_edges,
-                    )
-                    for rec in edge_result:
-                        src = str(rec["src"] or "")
-                        tgt = str(rec["tgt"] or "")
-                        if not src or not tgt:
-                            continue
-                        rel_props = dict(rec["props"] or {})
-                        edges.append({
-                            "id": str(rec["rid"]),
-                            "source": src,
-                            "target": tgt,
-                            "type": str(rec["rel_type"]),
-                            "properties": rel_props,
-                        })
+                edges = cls._fetch_induced_edges(neo_session, workspace, node_ids, max_edges)
         finally:
             driver.close()
 
@@ -273,9 +337,190 @@ class SiloGraphService:
         return {
             "nodes": nodes,
             "edges": edges,
+            "entity_types": type_counts,
             "node_count": len(nodes),
             "edge_count": len(edges),
             "total_nodes": total_nodes,
             "total_edges": total_edges,
+            "truncated": truncated,
+        }
+
+    TYPE_CHIP_LIMIT = 10
+
+    # Junk type names the extraction LLM invents beyond the silo's configured
+    # vocabulary — folded into the "Other" bucket so they don't waste chips.
+    _JUNK_TYPE_NAMES = frozenset({"other", "otro", "autre", "altro", "unknown"})
+
+    @classmethod
+    def _cap_type_counts(cls, type_counts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep the legend usable: the extraction LLM invents type variants
+        (``other``, ``UNKNOWN``, per-language drift...) — those fold into
+        ``Other`` along with every type beyond the top-N chips."""
+        folded: List[Dict[str, Any]] = []
+        other_count = 0
+        for tc in type_counts:
+            if tc["type"] and tc["type"].lower() in cls._JUNK_TYPE_NAMES:
+                other_count += tc["count"]
+            else:
+                folded.append(tc)
+        other_count += sum(tc["count"] for tc in folded[cls.TYPE_CHIP_LIMIT:])
+        if other_count > 0:
+            folded = folded[:cls.TYPE_CHIP_LIMIT]
+            folded.append({"type": "Other", "count": other_count})
+        return folded
+
+    @staticmethod
+    def _fetch_induced_edges(neo_session, workspace: str, node_ids: set, max_edges: int) -> List[Dict]:
+        """Edges whose BOTH endpoints are in the fetched node set (prevents
+        dangling relationships that crash the renderer). Chunk nodes are
+        excluded by requiring entity_id on both endpoints."""
+        edges: List[Dict] = []
+        if not node_ids:
+            return edges
+        edge_q = (
+            f"MATCH (a:`{workspace}`)-[r]->(b) "
+            "WHERE a.entity_id IN $ids AND b.entity_id IN $ids "
+            "RETURN a.entity_id AS src, b.entity_id AS tgt, "
+            "type(r) AS rel_type, id(r) AS rid, properties(r) AS props "
+            "LIMIT $limit"
+        )
+        edge_result = neo_session.run(edge_q, ids=list(node_ids), limit=max_edges)
+        for rec in edge_result:
+            src = str(rec["src"] or "")
+            tgt = str(rec["tgt"] or "")
+            if not src or not tgt:
+                continue
+            rel_props = dict(rec["props"] or {})
+            edges.append({
+                "id": str(rec["rid"]),
+                "source": src,
+                "target": tgt,
+                "type": str(rec["rel_type"]),
+                "properties": rel_props,
+            })
+        return edges
+
+    # ------------------------------------------------------------------
+    # Rooted (expand / center) query
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _cypher_neighbors(
+        cls,
+        workspace: str,
+        root: str,
+        depth: int,
+        max_nodes: int,
+        max_edges: int,
+    ) -> Dict[str, Any]:
+        """Subgraph rooted at one entity: root + all depth-1 neighbors always,
+        deeper layers capped by the remaining budget (highest degree first)."""
+        driver = cls._neo4j_driver()
+        nodes: List[Dict] = []
+        node_ids = set()
+        truncated = False
+        try:
+            with driver.session() as neo_session:
+                root_recs = list(neo_session.run(
+                    f"MATCH (n:`{workspace}`) WHERE n.entity_id = $root "
+                    "AND n.entity_id IS NOT NULL RETURN n LIMIT 1",
+                    root=root,
+                ))
+                if not root_recs:
+                    raise LookupError(f"Node not found: {root}")
+
+                def _node_dict(n) -> Dict[str, Any]:
+                    props = dict(n.items())
+                    return {
+                        "id": str(n.get("entity_id") or n.get("entity_name") or n.element_id),
+                        "labels": [lb for lb in n.labels if lb != workspace] or list(n.labels),
+                        "properties": props,
+                        "entity_type": props.get("entity_type"),
+                    }
+
+                root_node = _node_dict(root_recs[0]["n"])
+                nodes.append(root_node)
+                node_ids.add(root_node["id"])
+
+                # Depth 1: bounded by the remaining budget too — an unbounded
+                # hub fetch (10k+ neighbors) would blow the payload, the edge
+                # `IN` list and the NVL render. Offered > kept → truncated.
+                d1_q = (
+                    f"MATCH (n:`{workspace}`)-[]-(m:`{workspace}`) "
+                    "WHERE n.entity_id = $root AND m.entity_id IS NOT NULL "
+                    "WITH DISTINCT m, size([(m)-[]-() | 1]) AS degree "
+                    "RETURN m ORDER BY degree DESC LIMIT $budget"
+                )
+                budget = max_nodes - len(nodes)
+                d1_offered = 0
+                for rec in neo_session.run(d1_q, root=root, budget=budget):
+                    node = _node_dict(rec["m"])
+                    # Cypher already excluded chunk nodes; the client-side check
+                    # keeps the entity-only contract even with a misbehaving store.
+                    if not node["properties"].get("entity_id") or node["id"] in node_ids:
+                        continue
+                    d1_offered += 1
+                    nodes.append(node)
+                    node_ids.add(node["id"])
+                truncated = truncated or d1_offered >= budget
+
+                # Deeper layers, one hop at a time from the entity frontier:
+                # per-layer LIMITs keep the work bounded (a single `*2..N`
+                # match would enumerate every path before LIMIT — O(d^N) from
+                # a hub), and chunk-mediation can never sneak an edge-less
+                # entity in because each hop only links entity to entity.
+                frontier = list(node_ids)
+                for _ in range(1, depth):
+                    remaining = max_nodes - len(nodes)
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    layer_q = (
+                        f"MATCH (n:`{workspace}`)-[]-(m:`{workspace}`) "
+                        "WHERE n.entity_id IN $frontier AND m.entity_id IS NOT NULL "
+                        "AND NOT m.entity_id IN $known "
+                        "WITH DISTINCT m, size([(m)-[]-() | 1]) AS degree "
+                        "RETURN m ORDER BY degree DESC LIMIT $budget"
+                    )
+                    offered = 0
+                    for rec in neo_session.run(
+                        layer_q, frontier=frontier, known=list(node_ids), budget=remaining,
+                    ):
+                        node = _node_dict(rec["m"])
+                        if not node["properties"].get("entity_id") or node["id"] in node_ids:
+                            continue
+                        offered += 1
+                        if len(nodes) >= max_nodes:
+                            continue
+                        nodes.append(node)
+                        node_ids.add(node["id"])
+                    # The layer query hit its LIMIT and kept everything it
+                    # offered → more nodes exist beyond the cap.
+                    truncated = truncated or offered >= remaining
+                    frontier = [
+                        n["properties"]["entity_id"]
+                        for n in nodes[-offered:] if n["properties"].get("entity_id")
+                    ] or frontier
+
+                edges = cls._fetch_induced_edges(neo_session, workspace, node_ids, max_edges)
+        finally:
+            driver.close()
+
+        type_counts: List[Dict[str, Any]] = []
+        counts: Dict[str, int] = {}
+        for node in nodes:
+            t = node["entity_type"] or "Other"
+            counts[t] = counts.get(t, 0) + 1
+        type_counts = cls._cap_type_counts([
+            {"type": t, "count": c} for t, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        ])
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "entity_types": type_counts,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
             "truncated": truncated,
         }

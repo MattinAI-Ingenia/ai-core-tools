@@ -1,48 +1,15 @@
-"""Unit tests for the graph explorer's display mapping and node_label guard.
+"""Unit tests for the graph explorer's display mapping.
 
-Two review findings:
-- the explorer must render the same DISPLAY names as the playground bubble
-  (canonical merge key → most-mentioned variant) or the two graph surfaces
-  diverge after reindex;
-- `node_label` is interpolated into a backtick-quoted Cypher label expression
-  (labels cannot be parameterized) — it must be whitelisted before use or a
-  crafted value can break out into arbitrary Cypher.
+The explorer must render the same DISPLAY names as the playground bubble
+(canonical merge key → most-mentioned variant) or the two graph surfaces
+diverge after reindex.
+
+(The old node_label whitelist guard was removed with the label filter itself:
+entity types are a Neo4j PROPERTY now, so the filter is parameterized and
+cannot inject Cypher.)
 """
 
-import pytest
-
 from services.silo_graph_service import SiloGraphService
-
-
-class TestNodeLabelGuard:
-    @pytest.fixture(autouse=True)
-    def _failing_driver(self, monkeypatch):
-        """Make the Neo4j path fail deterministically so guard precedence is observable."""
-        monkeypatch.setattr(
-            SiloGraphService, "_neo4j_driver",
-            classmethod(lambda cls: (_ for _ in ()).throw(RuntimeError("Neo4j is unreachable"))),
-        )
-
-    @pytest.mark.parametrize("label", [
-        "x`) MATCH (m) DETACH DELETE m //",
-        "equipment` DETACH DELETE n //",
-        "e; MATCH (m) RETURN m",
-        "a" * 65,
-    ])
-    def test_invalid_labels_rejected_before_any_cypher(self, label):
-        with pytest.raises(ValueError):
-            SiloGraphService.get_silo_graph(14, node_label=label)
-
-    @pytest.mark.parametrize("label", ["equipment", "Espacio Con Tilos", "Part-01", "a" * 64])
-    def test_plausible_labels_reach_the_driver(self, label):
-        # Passes the whitelist → the (failing) driver raises RuntimeError,
-        # NOT ValueError — proving the guard let it through.
-        with pytest.raises(RuntimeError):
-            SiloGraphService.get_silo_graph(14, node_label=label)
-
-    def test_empty_label_treated_as_absent(self):
-        with pytest.raises(RuntimeError):
-            SiloGraphService.get_silo_graph(14, node_label="")
 
 
 class TestDisplayMap:
