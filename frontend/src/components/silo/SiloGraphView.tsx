@@ -62,6 +62,9 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const [sliderValue, setSliderValue] = useState(DEFAULT_MAX_NODES);
     const [sliderMax, setSliderMax] = useState(DEFAULT_MAX_NODES);
     const maxNodesRef = useRef(DEFAULT_MAX_NODES);
+    // The centered node (center-here view) — slider/refresh re-issue the
+    // centering instead of falling back to the whole-silo graph.
+    const centeredRef = useRef<{ id: string; depth: number } | null>(null);
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
     const [activeTypes, setActiveTypes] = useState<Set<string>>(new Set());
@@ -74,6 +77,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             setSelectedNode(null);
             setSelectedEdge(null);
             try {
+                centeredRef.current = null;
                 setNotice(null);
                 const data = (await apiService.getSiloGraph(appId, siloId, {
                     maxNodes: maxNodesRef.current,
@@ -146,6 +150,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     depth,
                     maxNodes: maxNodesRef.current,
                 })) as SiloGraphData;
+                centeredRef.current = { id: nodeId, depth };
                 setGraphData({ ...data, max_nodes: maxNodesRef.current });
                 // A truncated result means the node cap dominated: raising the
                 // depth can't add nodes, so say so instead of silently
@@ -178,6 +183,17 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
         }
         setActiveTypes(next);
         fetchGraph(search, next);
+    };
+
+    // Slider / refresh: keep the centered view if one is active — re-issue the
+    // centering with the new node budget instead of the whole-silo graph.
+    const reloadView = () => {
+        const centered = centeredRef.current;
+        if (centered) {
+            centerOnNode(centered.id, centered.depth);
+        } else {
+            fetchGraph(search, activeTypes);
+        }
     };
 
     // NVL interaction callbacks
@@ -264,11 +280,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                         onChange={e => setSliderValue(Number(e.target.value))}
                         onMouseUp={e => {
                             maxNodesRef.current = Number((e.target as HTMLInputElement).value);
-                            fetchGraph(search, activeTypes);
+                            reloadView();
                         }}
                         onPointerUp={e => {
                             maxNodesRef.current = Number((e.target as HTMLInputElement).value);
-                            fetchGraph(search, activeTypes);
+                            reloadView();
                         }}
                         className="flex-1 accent-indigo-600"
                     />
@@ -284,7 +300,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     Color by type
                 </label>
                 <button
-                    onClick={() => fetchGraph(search, activeTypes)}
+                    onClick={() => reloadView()}
                     className="p-2 text-gray-500 hover:text-indigo-600 border border-gray-200 rounded"
                     title="Refresh"
                 >
