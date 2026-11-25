@@ -1,35 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Loader2, RefreshCw, Search, X } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw, Search } from 'lucide-react';
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
 import { apiService } from '../../services/api';
-
-// ── API types ────────────────────────────────────────────────────────────────
-
-interface GraphNode {
-    id: string;
-    labels: string[];
-    properties: Record<string, unknown>;
-}
-
-interface GraphEdge {
-    id: string;
-    source: string;
-    target: string;
-    type: string;
-    properties: Record<string, unknown>;
-}
-
-interface SiloGraphData {
-    nodes: GraphNode[];
-    edges: GraphEdge[];
-    node_count: number;
-    edge_count: number;
-    total_nodes: number;
-    total_edges: number;
-    truncated: boolean;
-}
+import { NEUTRAL_COLOR, colorForType } from '../../utils/entityTypeColors';
+import type { GraphNode, GraphEdge, SiloGraphData } from '../../utils/siloGraphUtils';
+import { mergeGraphData } from '../../utils/siloGraphUtils';
+import GraphDetailPanel from './GraphDetailPanel';
 
 interface SiloGraphViewProps {
     appId: number;
@@ -38,11 +16,11 @@ interface SiloGraphViewProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function toNvlNodes(nodes: GraphNode[]): NvlNode[] {
+function toNvlNodes(nodes: GraphNode[], typeColoring: boolean): NvlNode[] {
     return nodes.map(n => ({
         id: n.id,
         captions: [{ value: n.id }],
-        color: '#6366f1',
+        color: typeColoring ? colorForType(n.entity_type) : NEUTRAL_COLOR,
     }));
 }
 
@@ -68,7 +46,7 @@ function toNvlRels(edges: GraphEdge[], nodes: GraphNode[]): NvlRelationship[] {
 // ── Component ────────────────────────────────────────────────────────────────
 
 /**
- * Knowledge graph viewer for a LightRAG silo, powered by @neo4j-nvl/react.
+ * Knowledge graph explorer for a LightRAG silo, powered by @neo4j-nvl/react.
  * Falls back gracefully when Neo4j is unreachable (503) or silo is non-LightRAG (409).
  */
 const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
@@ -81,18 +59,21 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const [sliderMax, setSliderMax] = useState(DEFAULT_MAX_NODES);
     const maxNodesRef = useRef(DEFAULT_MAX_NODES);
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-    const lastMouse = useRef({ x: 0, y: 0 });
+    const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
+    const [activeTypes, setActiveTypes] = useState<Set<string>>(new Set());
+    const [typeColoring, setTypeColoring] = useState(true);
 
     const fetchGraph = useCallback(
-        async (searchQuery = '') => {
+        async (searchQuery = '', types: Set<string> | null = null) => {
             setLoading(true);
             setError(null);
             setSelectedNode(null);
+            setSelectedEdge(null);
             try {
                 const data = (await apiService.getSiloGraph(appId, siloId, {
                     maxNodes: maxNodesRef.current,
-                    maxDepth: 2,
                     search: searchQuery || undefined,
+                    entityTypes: types && types.size > 0 ? Array.from(types) : undefined,
                 })) as SiloGraphData;
                 setGraphData(data);
                 // Slider tops out at DEFAULT_MAX_NODES regardless of how big the
@@ -121,13 +102,81 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
         fetchGraph();
     }, [fetchGraph]);
 
+    const expandNeighbors = useCallback(
+        async (nodeId: string): Promise<number> => {
+            const before = new Set((graphData?.nodes ?? []).map(n => n.id));
+            try {
+                const data = (await apiService.getSiloGraphNeighbors(appId, siloId, {
+                    nodeId,
+                    depth: 1,
+                    maxNodes: maxNodesRef.current,
+                })) as SiloGraphData;
+                const merged = mergeGraphData(
+                    graphData ?? { nodes: [], edges: [], entity_types: [], node_count: 0, edge_count: 0, total_nodes: 0, total_edges: 0, truncated: false, max_nodes: maxNodesRef.current },
+                    data,
+                );
+                const added = merged.nodes.length - before.size;
+                setGraphData(merged);
+                return added;
+            } catch {
+                return 0;
+            }
+        },
+        [appId, siloId, graphData],
+    );
+
+    const centerOnNode = useCallback(
+        async (nodeId: string, depth: number) => {
+            setSelectedNode(null);
+            setSelectedEdge(null);
+            try {
+                const data = (await apiService.getSiloGraphNeighbors(appId, siloId, {
+                    nodeId,
+                    depth,
+                    maxNodes: maxNodesRef.current,
+                })) as SiloGraphData;
+                setGraphData(data);
+            } catch (err: unknown) {
+                const status = (err as { status?: number })?.status;
+                if (status === 404) {
+                    setError('That node is no longer in the graph. Refresh to reload it.');
+                } else if (status === 503) {
+                    setError('Neo4j is not available. Check your configuration.');
+                } else {
+                    setError('Failed to load graph data.');
+                }
+            }
+        },
+        [appId, siloId],
+    );
+
+    const toggleType = (type: string) => {
+        const next = new Set(activeTypes);
+        if (next.has(type)) {
+            next.delete(type);
+        } else {
+            next.add(type);
+        }
+        setActiveTypes(next);
+        fetchGraph(search, next);
+    };
+
     // NVL interaction callbacks
     const mouseEventCallbacks: MouseEventCallbacks = {
         onNodeClick: (node: NvlNode) => {
             const original = graphData?.nodes.find(n => n.id === node.id) ?? null;
+            setSelectedEdge(null);
             setSelectedNode(prev => (prev?.id === node.id ? null : original));
         },
-        onCanvasClick: () => setSelectedNode(null),
+        onRelationshipClick: (rel: NvlRelationship) => {
+            const original = graphData?.edges.find(e => e.id === rel.id) ?? null;
+            setSelectedNode(null);
+            setSelectedEdge(prev => (prev?.id === rel.id ? null : original));
+        },
+        onCanvasClick: () => {
+            setSelectedNode(null);
+            setSelectedEdge(null);
+        },
         onPan: true,
         onZoom: true,
         onDrag: true,
@@ -158,9 +207,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
 
     const nodes = graphData?.nodes ?? [];
     const edges = graphData?.edges ?? [];
-    const nvlNodes = toNvlNodes(nodes);
+    const nvlNodes = toNvlNodes(nodes, typeColoring);
     const nvlRels = toNvlRels(edges, nodes);
     const isEmpty = nvlNodes.length === 0;
+    const entityTypes = graphData?.entity_types ?? [];
+    const atCap = nodes.length >= Math.min(graphData?.max_nodes ?? maxNodesRef.current, sliderMax);
 
     return (
         <div className="flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: 500 }}>
@@ -172,7 +223,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                         type="text"
                         value={search}
                         onChange={e => setSearch(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && fetchGraph(search)}
+                        onKeyDown={e => e.key === 'Enter' && fetchGraph(search, activeTypes)}
                         placeholder="Filter entities…"
                         className="pl-8 pr-3 py-1.5 text-sm border border-gray-300 rounded w-full focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
@@ -188,18 +239,27 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                         onChange={e => setSliderValue(Number(e.target.value))}
                         onMouseUp={e => {
                             maxNodesRef.current = Number((e.target as HTMLInputElement).value);
-                            fetchGraph(search);
+                            fetchGraph(search, activeTypes);
                         }}
                         onPointerUp={e => {
                             maxNodesRef.current = Number((e.target as HTMLInputElement).value);
-                            fetchGraph(search);
+                            fetchGraph(search, activeTypes);
                         }}
                         className="flex-1 accent-indigo-600"
                     />
                     <span className="w-10 text-right tabular-nums">{sliderValue}</span>
                 </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300" title="Color nodes by entity type">
+                    <input
+                        type="checkbox"
+                        checked={typeColoring}
+                        onChange={e => setTypeColoring(e.target.checked)}
+                        className="accent-indigo-600"
+                    />
+                    Color by type
+                </label>
                 <button
-                    onClick={() => fetchGraph(search)}
+                    onClick={() => fetchGraph(search, activeTypes)}
                     className="p-2 text-gray-500 hover:text-indigo-600 border border-gray-200 rounded"
                     title="Refresh"
                 >
@@ -211,6 +271,44 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     {graphData?.truncated && ' · (truncated)'}
                 </span>
             </div>
+
+            {/* Legend = type filter */}
+            {entityTypes.length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap px-3 pb-2 shrink-0">
+                    {entityTypes.map(({ type, count }) => {
+                        const active = activeTypes.has(type);
+                        return (
+                            <button
+                                key={type}
+                                onClick={() => toggleType(type)}
+                                title={active ? `Showing only ${type} — click to clear` : `Filter by ${type}`}
+                                className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs border transition-colors ${active
+                                    ? 'border-transparent text-white'
+                                    : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                                style={active ? { background: colorForType(type) } : undefined}
+                            >
+                                <span
+                                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                                    style={{ background: colorForType(type) }}
+                                    aria-hidden="true"
+                                />
+                                {type} · {count}
+                            </button>
+                        );
+                    })}
+                    {activeTypes.size > 0 && (
+                        <button
+                            onClick={() => {
+                                setActiveTypes(new Set());
+                                fetchGraph(search, new Set());
+                            }}
+                            className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200"
+                        >
+                            All
+                        </button>
+                    )}
+                </div>
+            )}
 
             {graphData?.truncated && (
                 <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
@@ -236,46 +334,25 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     />
                 )}
 
-                {/* Node detail panel */}
-                {selectedNode && (
-                    <div className="absolute top-3 right-3 bg-white shadow-md border border-gray-200 rounded p-3 text-xs max-w-[260px] space-y-1.5 z-10">
-                        <div className="flex items-start justify-between gap-2">
-                            <span className="font-semibold text-gray-800 break-all" title={selectedNode.id}>
-                                {selectedNode.id}
-                            </span>
-                            <button
-                                onClick={() => setSelectedNode(null)}
-                                className="text-gray-400 hover:text-gray-600 shrink-0 mt-0.5"
-                            >
-                                <X className="w-3 h-3" />
-                            </button>
-                        </div>
-                        {selectedNode.labels.length > 0 && (
-                            <div className="flex flex-wrap gap-1">
-                                {selectedNode.labels.map(l => (
-                                    <span key={l} className="bg-indigo-100 text-indigo-700 rounded px-1.5 py-0.5">
-                                        {l}
-                                    </span>
-                                ))}
-                            </div>
-                        )}
-                        {Object.keys(selectedNode.properties).length > 0 && (
-                            <div className="border-t border-gray-100 pt-1.5 space-y-1">
-                                {Object.entries(selectedNode.properties)
-                                    .filter(([k]) => k !== 'workspace')
-                                    .slice(0, 8)
-                                    .map(([k, v]) => (
-                                        <div key={k} className="flex gap-1">
-                                            <span className="text-gray-500 shrink-0">{k}:</span>
-                                            <span className="text-gray-800 break-all">
-                                                {String(v).length > 60 ? String(v).slice(0, 58) + '…' : String(v)}
-                                            </span>
-                                        </div>
-                                    ))}
-                            </div>
-                        )}
-                    </div>
-                )}
+                <GraphDetailPanel
+                    appId={appId}
+                    siloId={siloId}
+                    selectedNode={selectedNode}
+                    selectedEdge={selectedEdge}
+                    edges={edges}
+                    atCap={atCap}
+                    onClose={() => {
+                        setSelectedNode(null);
+                        setSelectedEdge(null);
+                    }}
+                    onSelectNode={(nodeId) => {
+                        const next = graphData?.nodes.find(n => n.id === nodeId) ?? null;
+                        setSelectedNode(next);
+                        setSelectedEdge(null);
+                    }}
+                    onExpandNeighbors={expandNeighbors}
+                    onCenter={centerOnNode}
+                />
             </div>
         </div>
     );
