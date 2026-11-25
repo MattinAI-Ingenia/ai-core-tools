@@ -378,6 +378,59 @@ def lightrag_silo_lock(silo_id: int, action: str):
         silo_indexing_lock.release(conn, silo_id)
 
 
+# How long a pre-flight test call may take before the service counts as unreachable.
+LIGHTRAG_PREFLIGHT_TIMEOUT_SECONDS = 30
+
+
+def ensure_lightrag_services_reachable(silo: Optional[Silo]) -> None:
+    """Before a LightRAG ingest or delete, make one test call to the silo's extract LLM and one
+    to its embedding service, so a revoked key, an exhausted quota or a vanished model is
+    reported up front (503 naming the service) instead of freezing the run halfway.
+
+    A failure whose fix is on the service (key, quota) is also stored on it (``last_error``),
+    which the repository page shows. A retired service raises ``ServiceRetiredError`` (409).
+    """
+    if silo is None or _resolve_vector_db_type(silo) != 'LIGHTRAG':
+        return
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout  # noqa: PLC0415
+    from models.ai_service import AIService  # noqa: PLC0415
+    from tools.aiServiceTools import create_llm_from_service, get_embedding  # noqa: PLC0415
+
+    checks = (
+        (AIService, silo.extract_service or silo.indexing_service, "Extract AI service",
+         lambda s: create_llm_from_service(s, temperature=0).invoke("Hello"),
+         " Select another Extract AI service in the repository settings or fix this one."),
+        (EmbeddingService, silo.embedding_service, "Embedding service",
+         lambda s: get_embedding("ping", s), ""),
+    )
+    for model, service, role, call, hint in checks:
+        if service is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail=f"This repository has no {role}. Select one in the repository settings.")
+        label = f"{role} '{service.name}'"
+        # ponytail: a hung call keeps its worker thread until the client's own timeout; only the request is freed.
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            pool.submit(call, service).result(timeout=LIGHTRAG_PREFLIGHT_TIMEOUT_SECONDS)
+        except ServiceRetiredError:
+            raise
+        except FuturesTimeout:
+            logger.warning("LightRAG pre-flight: %s timed out for silo %s", label, silo.silo_id)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=(
+                f"{label} did not answer within {LIGHTRAG_PREFLIGHT_TIMEOUT_SECONDS} seconds. Nothing was changed.{hint}"
+            ))
+        except Exception as exc:
+            logger.warning("LightRAG pre-flight: %s failed for silo %s", label, silo.silo_id, exc_info=True)
+            error = classify_provider_error(exc, label, step=f"Test call to {label}")
+            ServiceHealthService.record_failure(model, service, error)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail=f"{error.message} Nothing was changed.{hint}")
+        else:
+            ServiceHealthService.record_success(model, service)
+        finally:
+            pool.shutdown(wait=False)
+
+
 def _end_read_transaction_before_lightrag(session: Optional[Session]) -> None:
     """End a session's read-only transaction before any LightRAG storage work.
 
@@ -1288,8 +1341,9 @@ class SiloService:
             # vlm is set on creation only — immutable after, since changing it
             # mid-way would mix entities/pages extracted with different vision
             # models in the same graph.
+            check_ai_service = functools.partial(SiloService._checked_ai_service_id, session, silo_data['app_id'])
             if not silo_id and silo_data.get('vlm_service_id'):
-                silo.vlm_service_id = silo_data['vlm_service_id']
+                silo.vlm_service_id = check_ai_service(silo_data['vlm_service_id'], "VLM AI service", None)
 
             # extract_service_id (and its legacy alias indexing_service_id) is
             # editable at any time, unlike vlm_service_id: it only shapes
@@ -1298,11 +1352,16 @@ class SiloService:
             # columns are kept in sync — indexing_service_id is a plain alias.
             extract_value = silo_data.get('extract_service_id') or silo_data.get('indexing_service_id')
             if extract_value:
+                extract_value = check_ai_service(
+                    extract_value, "Extract AI service", silo.extract_service_id or silo.indexing_service_id
+                )
                 silo.extract_service_id = extract_value
                 silo.indexing_service_id = extract_value
 
             if silo_data.get('keywords_service_id'):
-                silo.keywords_service_id = silo_data['keywords_service_id']
+                silo.keywords_service_id = check_ai_service(
+                    silo_data['keywords_service_id'], "Keywords AI service", silo.keywords_service_id
+                )
 
             if silo_data.get('source_label_fields') is not None:  # "" clears it
                 silo.source_label_fields = silo_data['source_label_fields'].strip() or None
@@ -1415,7 +1474,10 @@ class SiloService:
         """Recorded failures (rejected key, exhausted quota) of the services this silo indexes with."""
         if not silo:
             return []
-        services = (silo.embedding_service, silo.transcription_service, silo.video_ai_service)
+        services = (
+            silo.embedding_service, silo.transcription_service, silo.video_ai_service,
+            silo.extract_service or silo.indexing_service,
+        )
         warnings = []
         for service in services:
             if service is not None and service.last_error and service.last_error not in warnings:
@@ -1458,24 +1520,7 @@ class SiloService:
         Both are AIServices of the app (or system services). The video service must
         support video input. None clears a service.
         """
-        from models.ai_service import AIService
-
-        def _check(
-            service_id: Optional[int], label: str, current_id: Optional[int], needs_video: bool = False
-        ) -> Optional[int]:
-            if not service_id:
-                return None
-            service = db.query(AIService).filter(AIService.service_id == int(service_id)).first()
-            if service is None or (service.app_id is not None and service.app_id != app_id):
-                raise ValidationError(f"{label} {service_id} not found")
-            if needs_video and not service.supports_video:
-                raise ValidationError(f"{label} {service_id} does not support video")
-            try:
-                ensure_assignable(service, current_id, label, SERVICE_KIND_AI)
-            except RetiredServiceAssignmentError as exc:
-                raise ValidationError(str(exc)) from exc
-            return service.service_id
-
+        _check = functools.partial(SiloService._checked_ai_service_id, db, app_id)
         # Both checks run before either field is assigned, so a rejection changes nothing.
         new_transcription = _check(transcription_service_id, "Transcription service", silo.transcription_service_id)
         new_video = _check(
@@ -1483,6 +1528,31 @@ class SiloService:
         )
         silo.transcription_service_id = new_transcription
         silo.video_ai_service_id = new_video
+
+    @staticmethod
+    def _checked_ai_service_id(
+        db: Session, app_id: int, service_id: Optional[int], label: str, current_id: Optional[int],
+        needs_video: bool = False,
+    ) -> Optional[int]:
+        """``service_id`` if it is an AIService of this app (or a system one) that may be assigned.
+
+        Same message for a missing and another app's service, so ids of other tenants can't be probed.
+        A retired service is refused unless it is already the current one.
+        """
+        from models.ai_service import AIService
+
+        if not service_id:
+            return None
+        service = db.query(AIService).filter(AIService.service_id == int(service_id)).first()
+        if service is None or (service.app_id is not None and service.app_id != int(app_id)):
+            raise ValidationError(f"{label} {service_id} not found")
+        if needs_video and not service.supports_video:
+            raise ValidationError(f"{label} {service_id} does not support video")
+        try:
+            ensure_assignable(service, current_id, label, SERVICE_KIND_AI)
+        except RetiredServiceAssignmentError as exc:
+            raise ValidationError(str(exc)) from exc
+        return service.service_id
 
     @staticmethod
     def _update_silo(silo: Silo, data: dict):

@@ -216,6 +216,25 @@ class TestCreateResources:
         )
         assert resp.status_code in (401, 403, 404)
 
+    def test_retired_service_returns_409(self, client, fake_app, fake_repository, fake_api_key):
+        """The LightRAG pre-flight raises ServiceRetiredError synchronously; not a 500."""
+        import io
+        from utils.service_lifecycle import ServiceRetiredError
+
+        err = ServiceRetiredError(
+            MagicMock(service_id=1, end_of_service_at=datetime(2020, 1, 1), deprecation_notice=None), "ai"
+        )
+        with patch(
+            "routers.public.v1.resources.ResourceService.upload_resources_to_repository", side_effect=err,
+        ):
+            resp = client.post(
+                resources_url(fake_app.app_id, fake_repository.repository_id),
+                files={"files": ("test.pdf", io.BytesIO(b"x"), "application/pdf")},
+                headers=api_headers(fake_api_key.key),
+            )
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "SERVICE_RETIRED"
+
 
 # ---------------------------------------------------------------------------
 # Delete resource

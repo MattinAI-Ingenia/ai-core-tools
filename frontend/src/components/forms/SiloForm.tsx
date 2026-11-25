@@ -295,8 +295,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
         lightrag_entity_types: sanitizeEntityTypesList(formData.lightrag_entity_types),
       };
       const payload = isEditing
-        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, indexing_service_id: _isi,
-              extract_service_id: _esi2, lightrag_language: _lang,
+        ? (({ vector_db_type: _vdb, embedding_service_id: _esi, lightrag_language: _lang,
               lightrag_entity_extract_max_gleaning: _gleaning,
               lightrag_max_source_ids_per_entity: _maxEnt,
               lightrag_max_source_ids_per_relation: _maxRel,
@@ -520,7 +519,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                       onChange={handleChange}
                       required={required}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
-                      disabled={isSubmitting || (isEditing && role !== 'keywords')}
+                      disabled={isSubmitting || (isEditing && role === 'vlm')}
                     >
                       <option value="">{placeholder}</option>
                       {aiServices.map((service: AIServiceOption) => (
@@ -530,7 +529,7 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                       ))}
                     </select>
                     <p className="mt-1 text-sm text-gray-500">{helper}</p>
-                    {isEditing && role !== 'keywords' && (
+                    {isEditing && role === 'vlm' && (
                       <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
                         <Info className="w-3.5 h-3.5 shrink-0" />
                         Cannot be changed after a silo is created.

@@ -345,8 +345,11 @@ async def upload_resources(
     
     logger.info(f"Upload resources endpoint called - app_id: {app_id}, repository_id: {repository_id}, files_count: {len(files)}, folder_id: {folder_id} (type: {type(folder_id)}), user_id: {user_id}")
     
-    # Use ResourceService to handle the business logic
-    result = ResourceService.upload_resources_to_repository(
+    # Use ResourceService to handle the business logic. The service is sync and
+    # starts with the LightRAG service pre-flight (up to two provider calls), so
+    # it must not run on the event loop (same pattern as the delete routes).
+    result = await asyncio.to_thread(
+        ResourceService.upload_resources_to_repository,
         app_id=app_id,
         repository_id=repository_id,
         files=files,
@@ -701,7 +704,8 @@ async def confirm_csv_import_rows(
     role: Annotated[AppRole, Depends(require_min_role("editor"))],
 ):
     _validate_repository_app_ownership(repository_id, app_id, db)
-    result = confirm_rows(import_job_id, body.row_ids, db)
+    # Sync; create_multiple_resources starts with the LightRAG pre-flight. Off the event loop.
+    result = await asyncio.to_thread(confirm_rows, import_job_id, body.row_ids, db)
     return ConfirmRowsResponseSchema(**result)
 
 
@@ -1134,7 +1138,8 @@ async def resume_indexing(
     """
     _validate_repository_app_ownership(repository_id, app_id, db)
 
-    session_id, resumed = ResourceService.resume_indexing(db, repository_id)
+    # Sync service with the LightRAG pre-flight at its start; off the event loop.
+    session_id, resumed = await asyncio.to_thread(ResourceService.resume_indexing, db, repository_id)
     return {"session_id": session_id, "resumed": resumed}
 
 

@@ -25,6 +25,7 @@ def _resource(db_type="LIGHTRAG"):
 def _run(resource, graph, lock="conn", delete_ok=True, row_exists=False, legacy=False):
     """Run the public delete with mocks; return (result_or_exc, mocks)."""
     with patch.object(ResourceService, "get_repository_resource", return_value=resource), \
+            patch("services.resource_service.ensure_lightrag_services_reachable"), \
             patch("services.silo_indexing_lock.acquire", return_value=lock) as acquire, \
             patch("services.silo_indexing_lock.release") as release, \
             patch("services.resource_service.SiloService.has_legacy_lightrag_documents",
@@ -132,3 +133,16 @@ def test_delete_resource_from_silo_flag():
             repo.get_by_id.return_value = res
             assert ResourceService.delete_resource(3, MagicMock(), delete_file=False, delete_from_silo=flag)
             assert silo_del.call_count == calls
+
+
+def test_unreachable_service_is_refused_before_the_lock():
+    unreachable = HTTPException(status_code=503, detail="Extract AI service 'x' rejected its credentials")
+    with patch.object(ResourceService, "get_repository_resource", return_value=_resource()), \
+            patch("services.resource_service.ensure_lightrag_services_reachable", side_effect=unreachable), \
+            patch("services.silo_indexing_lock.acquire") as acquire, \
+            patch("services.resource_service.SiloService.delete_lightrag_resource_document") as graph:
+        with pytest.raises(HTTPException) as exc:
+            ResourceService.delete_resource_from_repository(1, 2, 3, MagicMock())
+    assert exc.value.status_code == 503
+    acquire.assert_not_called()
+    graph.assert_not_called()

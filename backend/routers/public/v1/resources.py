@@ -85,7 +85,9 @@ async def create_multiple_resources(
     validate_repository_ownership(db, repo_id, app_id)
 
     try:
-        result = ResourceService.upload_resources_to_repository(
+        # Sync service with the LightRAG pre-flight at its start; off the event loop.
+        result = await asyncio.to_thread(
+            ResourceService.upload_resources_to_repository,
             app_id=app_id,
             repository_id=repo_id,
             files=files,
@@ -99,7 +101,7 @@ async def create_multiple_resources(
             failed_files=result.get("failed_files", []),
             indexing_failures=result.get("indexing_failures", []),
         )
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error creating resources: {str(e)}")
