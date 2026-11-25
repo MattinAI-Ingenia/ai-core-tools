@@ -12,6 +12,8 @@ interface GraphDetailPanelProps {
   selectedNode: GraphNode | null;
   selectedEdge: GraphEdge | null;
   edges: GraphEdge[];
+  /** Loaded graph nodes — used to color/jump to an edge's endpoints. */
+  nodes?: GraphNode[];
   atCap: boolean;
   onClose: () => void;
   onSelectNode: (nodeId: string) => void;
@@ -28,8 +30,8 @@ const DEPTH_OPTIONS = [1, 2, 3];
  * documents (clickable → PDF at page), and the expand / center-here controls.
  */
 const GraphDetailPanel: React.FC<GraphDetailPanelProps> = ({
-  appId, siloId, selectedNode, selectedEdge, edges, atCap,
-  onClose, onSelectNode, onExpandNeighbors, onCenter,
+  appId, siloId, selectedNode, selectedEdge, edges, nodes = [],
+  atCap, onClose, onSelectNode, onExpandNeighbors, onCenter,
 }) => {
   const [sources, setSources] = useState<GraphSourceDoc[] | null>(null);
   const [sourcesLoading, setSourcesLoading] = useState(false);
@@ -103,6 +105,41 @@ const GraphDetailPanel: React.FC<GraphDetailPanelProps> = ({
           <X className="w-3.5 h-3.5" />
         </button>
       </div>
+
+      {/* Connects (edge only): clickable chips for the two joined nodes */}
+      {!isNode && (
+        <div className="border-t border-gray-100 dark:border-gray-700 pt-2">
+          <p className="text-gray-500 dark:text-gray-400 mb-1">Connects</p>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[relation!.source, relation!.target].map((endpoint, i) => {
+              const node = nodes.find((n) => n.id === endpoint);
+              return (
+                <React.Fragment key={`${endpoint}-${i}`}>
+                  {i > 0 && <span className="text-gray-400">→</span>}
+                  {node ? (
+                    <button
+                      onClick={() => onSelectNode(node.id)}
+                      title={node.id}
+                      className="inline-flex items-center gap-1 max-w-full truncate rounded-full bg-gray-50 dark:bg-gray-700/60 text-gray-700 dark:text-gray-200 px-1.5 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ background: colorForType(node.entity_type) }}
+                        aria-hidden="true"
+                      />
+                      {node.id.slice(0, 24)}
+                    </button>
+                  ) : (
+                    <span className="rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 px-1.5 py-0.5">
+                      {endpoint?.slice(0, 24)}
+                    </span>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Connections (loaded neighbors) */}
       {isNode && connections.length > 0 && (

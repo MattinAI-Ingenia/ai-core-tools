@@ -354,6 +354,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     selectedNode={selectedNode}
                     selectedEdge={selectedEdge}
                     edges={edges}
+                    nodes={graphData?.nodes ?? []}
                     atCap={atCap}
                     onClose={() => {
                         setSelectedNode(null);
