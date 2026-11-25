@@ -536,7 +536,8 @@ class AgentStreamingService:
                         )
                     ) as stream:
                         async for mode, chunk in stream:
-                            if mode == "messages":
+                            # Chat turns stream tokens immediately (generic path below).
+                            if mode == "messages" and not chat_turn:
                                 # Buffer tokens instead of emitting immediately so we can
                                 # discard them if this message turns out to have tool_calls.
                                 if not (isinstance(chunk, tuple) and len(chunk) == 2):
@@ -653,8 +654,7 @@ class AgentStreamingService:
                                     elif event["type"] == "_lightrag_graph":
                                         lightrag_graph_data = merge_lightrag_graph(lightrag_graph_data, event["data"])
                                         continue
-                                    else:
-                                        yield AgentStreamEvent(event["type"], event["data"])
+                                    yield AgentStreamEvent(event["type"], event["data"])
 
                     # Flush any remaining buffered tokens (e.g. final message with no
                     # tool_calls that never triggered an updates confirmation).
