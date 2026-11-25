@@ -7,7 +7,12 @@ import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship } from '..
 import OpenPdfButton from './OpenPdfButton';
 import { groupChunksById } from '../../utils/groupChunksById';
 import { bubbleNodeFill, bubbleNodeIcon, fromCitedChunk } from '../../utils/bubbleGraphStyle';
-import { PARTIAL_COLOR, RING_CITED } from '../../utils/entityTypeColors';
+import { PARTIAL_COLOR, RING_CITED, colorForType } from '../../utils/entityTypeColors';
+import { splitSourceIds } from '../../utils/siloGraphUtils';
+import type { GraphSourceDoc } from '../../utils/siloGraphUtils';
+import { apiService } from '../../services/api';
+import { openSourcePdf } from '../../utils/openSourcePdf';
+import { Loader2 } from 'lucide-react';
 
 interface Props {
   graphData: LightRAGGraphData;
@@ -58,6 +63,9 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const [openChunk, setOpenChunk] = useState<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number; placement: 'top' | 'bottom' } | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<LightRAGEntity | null>(null);
+  const [selectedRel, setSelectedRel] = useState<LightRAGRelationship | null>(null);
+  const [entitySources, setEntitySources] = useState<GraphSourceDoc[] | null>(null);
+  const [entitySourcesLoading, setEntitySourcesLoading] = useState(false);
   const [typeColoring, setTypeColoring] = useState(true);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -83,6 +91,31 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
 
   const POPOVER_WIDTH = 384; // w-96
   const POPOVER_MAX_HEIGHT = 320;
+
+  // Source documents of the selected entity — best-effort: a failed lookup
+  // just hides the chips (same as the silo graph's detail panel).
+  useEffect(() => {
+    setEntitySources(null);
+    const silo = selectedEntity?.silo_id ?? siloId;
+    const ids = splitSourceIds(selectedEntity?.source_id);
+    if (!selectedEntity || !appId || !silo || ids.length === 0) return;
+    setEntitySourcesLoading(true);
+    let cancelled = false;
+    apiService
+      .getSiloGraphSources(appId, silo, ids)
+      .then((data: { sources: GraphSourceDoc[] }) => {
+        if (!cancelled) setEntitySources(data.sources);
+      })
+      .catch(() => {
+        /* best-effort */
+      })
+      .finally(() => {
+        if (!cancelled) setEntitySourcesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEntity?.id, appId, siloId]);
 
   const toggleChunk = (idx: number, e: React.MouseEvent<HTMLButtonElement>) => {
     if (openChunk === idx) {
@@ -153,10 +186,19 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
   const nvlOptions: NvlOptions = { layout: 'forceDirected', allowDynamicMinZoom: true };
   const mouseEventCallbacks: MouseEventCallbacks = {
     onNodeClick: (node: NvlNode) => {
+      setSelectedRel(null);
       const original = entities.find((e) => String(e.id) === node.id) ?? null;
       setSelectedEntity((prev) => (prev?.id === node.id ? null : original));
     },
-    onCanvasClick: () => setSelectedEntity(null),
+    onRelationshipClick: (rel: NvlRelationship) => {
+      setSelectedEntity(null);
+      const original = relationships.find((r) => String(r.id) === String(rel.id)) ?? null;
+      setSelectedRel((prev) => (prev?.id === original?.id ? null : original));
+    },
+    onCanvasClick: () => {
+      setSelectedEntity(null);
+      setSelectedRel(null);
+    },
     onPan: true,
     onZoom: true,
     onDrag: true,
@@ -377,35 +419,146 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                     style={{ width: '100%', height: '100%' }}
                   />
 
-                  {selectedEntity && (
-                    <div className="absolute top-3 right-3 bg-white dark:bg-gray-800 shadow-md border border-gray-200 dark:border-gray-700 rounded p-3 text-xs max-w-[260px] space-y-1.5 z-10">
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-semibold text-gray-800 dark:text-gray-100 break-all" title={String(selectedEntity.name ?? selectedEntity.id)}>
-                          {String(selectedEntity.name ?? selectedEntity.id)}
-                        </span>
-                        <button
-                          onClick={() => setSelectedEntity(null)}
-                          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0 mt-0.5"
-                          aria-label="Close details"
-                        >
-                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      </div>
-                      <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5 space-y-1">
-                        {Object.entries(selectedEntity)
-                          .filter(([k, v]) => k !== 'id' && k !== 'name' && v != null && String(v) !== '')
-                          .slice(0, 8)
-                          .map(([k, v]) => (
-                            <div key={k} className="flex gap-1">
-                              <span className="text-gray-500 dark:text-gray-400 shrink-0">{k}:</span>
-                              <span className="text-gray-800 dark:text-gray-200 break-all">
-                                {String(v).length > 60 ? String(v).slice(0, 58) + '…' : String(v)}
+                  {(selectedEntity || selectedRel) && (
+                    <div className="absolute top-3 right-3 bg-white dark:bg-gray-800 shadow-md border border-gray-200 dark:border-gray-700 rounded p-3 text-xs max-w-[280px] max-h-[85%] overflow-y-auto space-y-1.5 z-10">
+                      {selectedEntity ? (
+                        <>
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full shrink-0"
+                                style={{ background: colorForType(selectedEntity.entity_type as string | undefined) }}
+                                aria-hidden="true"
+                              />
+                              <span className="font-semibold text-gray-800 dark:text-gray-100 break-all" title={String(selectedEntity.name ?? selectedEntity.id)}>
+                                {String(selectedEntity.name ?? selectedEntity.id)}
                               </span>
+                            </span>
+                            <button
+                              onClick={() => setSelectedEntity(null)}
+                              className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0 mt-0.5"
+                              aria-label="Close details"
+                            >
+                              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+                          <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5 space-y-1">
+                            {Object.entries(selectedEntity)
+                              .filter(([k, v]) => k !== 'id' && k !== 'name' && v != null && String(v) !== '')
+                              .slice(0, 8)
+                              .map(([k, v]) => (
+                                <div key={k} className="flex gap-1">
+                                  <span className="text-gray-500 dark:text-gray-400 shrink-0">{k}:</span>
+                                  <span className="text-gray-800 dark:text-gray-200 break-all">
+                                    {String(v).length > 60 ? String(v).slice(0, 58) + '…' : String(v)}
+                                  </span>
+                                </div>
+                              ))}
+                          </div>
+                          {(entitySourcesLoading || (entitySources && entitySources.length > 0)) && (
+                            <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5">
+                              <p className="text-gray-500 dark:text-gray-400 mb-1">Source documents</p>
+                              {entitySourcesLoading ? (
+                                <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                  {(entitySources ?? []).map((s) => {
+                                    const label = s.file_name
+                                      ? s.page != null
+                                        ? `${s.file_name} (p. ${s.page})`
+                                        : s.file_name
+                                      : 'Unknown source';
+                                    const openable = s.resource_id != null && s.page != null && appId != null;
+                                    return openable ? (
+                                      <button
+                                        key={s.chunk_id}
+                                        onClick={() => openSourcePdf(appId!, selectedEntity.silo_id ?? siloId!, s.resource_id!, s.page!)}
+                                        title={`Open ${s.file_name} at page ${s.page}`}
+                                        className="max-w-full truncate rounded-full bg-green-50 dark:bg-green-900/40 text-green-700 dark:text-green-300 px-1.5 py-0.5 hover:bg-green-100 dark:hover:bg-green-900/60"
+                                      >
+                                        {label}
+                                      </button>
+                                    ) : (
+                                      <span
+                                        key={s.chunk_id}
+                                        title="Source file not available"
+                                        className="max-w-full truncate rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 px-1.5 py-0.5"
+                                      >
+                                        {label}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </div>
-                          ))}
-                      </div>
+                          )}
+                        </>
+                      ) : (
+                        (() => {
+                          const rel = selectedRel!;
+                          const endpoints = [rel.source, rel.target]
+                            .map((id) => entities.find((e) => String(e.id) === String(id)))
+                            .filter((e): e is LightRAGEntity => !!e);
+                          return (
+                            <>
+                              <div className="flex items-start justify-between gap-2">
+                                <span className="font-semibold text-gray-800 dark:text-gray-100 break-all">
+                                  {String(rel.type ?? rel.keywords ?? rel.description ?? 'relationship')}
+                                </span>
+                                <button
+                                  onClick={() => setSelectedRel(null)}
+                                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0 mt-0.5"
+                                  aria-label="Close details"
+                                >
+                                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                  </svg>
+                                </button>
+                              </div>
+                              <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5 space-y-1">
+                                <p className="text-gray-500 dark:text-gray-400">Connects</p>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {endpoints.map((e, i) => (
+                                    <React.Fragment key={String(e.id)}>
+                                      {i > 0 && <span className="text-gray-400">→</span>}
+                                      <button
+                                        onClick={() => {
+                                          setSelectedRel(null);
+                                          setSelectedEntity(e);
+                                        }}
+                                        title={String(e.name ?? e.id)}
+                                        className="inline-flex items-center gap-1 max-w-full truncate rounded-full bg-gray-50 dark:bg-gray-700/60 text-gray-700 dark:text-gray-200 px-1.5 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-700"
+                                      >
+                                        <span
+                                          className="w-2 h-2 rounded-full shrink-0"
+                                          style={{ background: colorForType(e.entity_type as string | undefined) }}
+                                          aria-hidden="true"
+                                        />
+                                        {String(e.name ?? e.id).slice(0, 24)}
+                                      </button>
+                                    </React.Fragment>
+                                  ))}
+                                </div>
+                              </div>
+                              <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5 space-y-1">
+                                {Object.entries(rel)
+                                  .filter(([k, v]) => !['id', 'source', 'target', 'type', 'source_id', 'silo_id', 'silo_name'].includes(k) && v != null && String(v) !== '')
+                                  .slice(0, 8)
+                                  .map(([k, v]) => (
+                                    <div key={k} className="flex gap-1">
+                                      <span className="text-gray-500 dark:text-gray-400 shrink-0">{k}:</span>
+                                      <span className="text-gray-800 dark:text-gray-200 break-all">
+                                        {String(v).length > 60 ? String(v).slice(0, 58) + '…' : String(v)}
+                                      </span>
+                                    </div>
+                                  ))}
+                              </div>
+                            </>
+                          );
+                        })()
+                      )}
                     </div>
                   )}
                 </>
