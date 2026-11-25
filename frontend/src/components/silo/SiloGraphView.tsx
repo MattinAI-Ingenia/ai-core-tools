@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Loader2, RefreshCw, Search } from 'lucide-react';
+import { AlertTriangle, Info, Loader2, RefreshCw, Search } from 'lucide-react';
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
 import type { Node as NvlNode, NvlOptions, Relationship as NvlRelationship } from '@neo4j-nvl/base';
@@ -53,6 +53,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
     const [graphData, setGraphData] = useState<SiloGraphData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [notice, setNotice] = useState<string | null>(null);
     const [search, setSearch] = useState('');
     const DEFAULT_MAX_NODES = 50;
     // Slider ceiling — the renderer chokes well beyond this on a large silo,
@@ -73,6 +74,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             setSelectedNode(null);
             setSelectedEdge(null);
             try {
+                setNotice(null);
                 const data = (await apiService.getSiloGraph(appId, siloId, {
                     maxNodes: maxNodesRef.current,
                     search: searchQuery || undefined,
@@ -145,6 +147,14 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     maxNodes: maxNodesRef.current,
                 })) as SiloGraphData;
                 setGraphData({ ...data, max_nodes: maxNodesRef.current });
+                // A truncated result means the node cap dominated: raising the
+                // depth can't add nodes, so say so instead of silently
+                // returning an identical view.
+                setNotice(
+                    data.truncated
+                        ? `Showing the most connected ${data.nodes.length} nodes around "${nodeId}" (node cap). A higher depth won't add more — raise the Nodes slider or use a more specific entity.`
+                        : null,
+                );
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
                 if (status === 404) {
@@ -224,6 +234,12 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
 
     return (
         <div className="flex flex-col" style={{ height: 'calc(100vh - 200px)', minHeight: 500 }}>
+            {notice && (
+                <div className="flex items-center gap-2 p-2 bg-indigo-50 dark:bg-indigo-900/30 border-b border-indigo-100 dark:border-indigo-900 text-indigo-700 dark:text-indigo-300 text-xs shrink-0">
+                    <Info className="w-4 h-4 shrink-0" />
+                    <span>{notice}</span>
+                </div>
+            )}
             {/* Toolbar */}
             <div className="flex items-center gap-2 flex-wrap p-3 shrink-0">
                 <div className="relative flex-1 min-w-[200px]">
