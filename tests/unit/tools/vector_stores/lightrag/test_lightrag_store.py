@@ -645,6 +645,16 @@ def test_get_distinct_metadata_values_returns_empty(store):
     assert result == []
 
 
+def test_get_distinct_metadata_values_accepts_interface_kwargs(store):
+    # SiloService.get_metadata_field_values always passes these.
+    result = store.get_distinct_metadata_values(
+        "silo_1", "source", prefix=None, limit=10,
+        filter_metadata={"a": 1}, contains="x", after="y", raise_errors=True,
+    )
+
+    assert result == []
+
+
 # ---------------------------------------------------------------------------
 # _lightrag_doc_id / chunk-id → (resource_id, page) round trip
 #

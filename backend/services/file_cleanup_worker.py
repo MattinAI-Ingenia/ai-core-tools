@@ -218,6 +218,50 @@ def _purge_abandoned_import_jobs() -> int:
     return removed
 
 
+ORPHAN_TEMP_REPO_BATCH = 20
+ORPHAN_TEMP_REPO_GRACE_MINUTES = 15
+
+
+def sweep_orphan_chat_temp_repositories(batch: int = ORPHAN_TEMP_REPO_BATCH, session_factory=None) -> int:
+    """Remove App Chat temp repositories (silo, vectors, parser) whose conversation no longer has their session.
+
+    A temp repository is named ``_playground_{agent_id}_{session_id}``. One whose internal-chat agent has no
+    conversation with that session is unreachable (a late upload after a delete/reset, a failed cleanup). Only the
+    hidden internal-chat agent's repositories are swept: for ordinary agents a missing conversation can also mean a
+    transient state (marketplace / API sessions) that this rule is not proven safe for. Bounded batch, repositories
+    older than a grace period only, ids only in the log. ``session_factory`` is for tests. Returns how many were removed.
+    """
+    from datetime import datetime, timedelta
+
+    from db.database import SessionLocal
+    from models.repository import Repository
+    from repositories.internal_chat_repository import InternalChatAgentRepository
+    from services.repository_service import RepositoryService
+
+    removed = 0
+    with (session_factory or SessionLocal)() as db:
+        # Repository.create_date is written with datetime.now() (server local time), so the grace threshold uses
+        # the same clock; utcnow_naive() would be off by the UTC offset on a non-UTC server.
+        ids = InternalChatAgentRepository.list_orphan_temp_repository_ids(
+            db, datetime.now() - timedelta(minutes=ORPHAN_TEMP_REPO_GRACE_MINUTES), batch
+        )
+        for repository_id in ids:
+            try:
+                repo = db.get(Repository, repository_id)
+                if repo is not None:
+                    RepositoryService.delete_repository(repo, db)
+                    removed += 1
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                logger.error(
+                    "file_cleanup_worker: could not remove orphan chat temp repository %s (%s)",
+                    repository_id, type(exc).__name__,
+                )
+    if removed:
+        logger.info("file_cleanup_worker: removed %d orphan chat temp repositor(y/ies)", removed)
+    return removed
+
+
 def _run_one_sweep_sync() -> None:
     """Single pass over both ephemeral and persistent trees (blocking)."""
     cfg = _config()
@@ -258,7 +302,13 @@ def _run_one_sweep_sync() -> None:
 
     imports_purged = _purge_abandoned_import_jobs()
 
-    if ephemeral_removed or uploads_removed or blob_ingest_staging_removed or persistent_removed or imports_purged:
+    try:
+        sweep_orphan_chat_temp_repositories()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("file_cleanup_worker: orphan chat temp repository sweep failed (%s)", type(exc).__name__)
+
+    if (ephemeral_removed or uploads_removed or blob_ingest_staging_removed
+            or persistent_removed or imports_purged):
         logger.info(
             "file_cleanup_worker: removed %d ephemeral, %d upload, %d blob-ingest-staging, "
             "%d persistent file(s), %d abandoned import job(s)",

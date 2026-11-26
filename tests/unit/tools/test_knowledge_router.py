@@ -276,7 +276,7 @@ def _router_agent(is_router: bool, silo_id):
         agent_id=1, type="agent", ai_service=None, enable_code_interpreter=False,
         has_memory=False, memory_max_tokens=None, memory_max_messages=None,
         memory_summarize_threshold=None, output_parser_id=None, server_tools=[],
-        tool_associations=[SimpleNamespace(tool=SimpleNamespace(type="agent"))],
+        tool_associations=[SimpleNamespace(tool=SimpleNamespace(type="agent", is_internal_chat=False))],
         silo_id=silo_id, silo=None, skill_associations=[], mcp_associations=[],
         system_prompt="You route.", is_knowledge_router=is_router,
     )

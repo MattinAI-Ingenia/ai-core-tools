@@ -345,7 +345,11 @@ class CheckpointerCacheService:
 
     @classmethod
     async def get_conversation_history_async(
-        cls, agent_id: int, session_id: str = "default", tool_answers: bool = False
+        cls,
+        agent_id: int,
+        session_id: str = "default",
+        tool_answers: bool = False,
+        include_message_ids: bool = False,
     ):
         """
         Retrieve conversation history from PostgreSQL checkpointer.
@@ -357,6 +361,8 @@ class CheckpointerCacheService:
                 return_direct specialist's ToolMessage: show it as the agent's reply.
                 Off otherwise, so a turn cut short after a tool ran never surfaces
                 raw tool output.
+            include_message_ids: add ``message_id`` (LangChain message id) to each entry. Off by
+                default so existing consumers (public API, marketplace) keep their payload.
 
         Returns:
             List of message dicts with role and content
@@ -444,6 +450,8 @@ class CheckpointerCacheService:
                             entry["lightrag_graph"] = pending_lightrag_graph
                         pending_lightrag_graph = None
                         pending_tool_answer = None
+                        if include_message_ids:
+                            entry["message_id"] = getattr(msg, "id", None)
                         history.append(entry)
 
                 if pending_tool_answer:

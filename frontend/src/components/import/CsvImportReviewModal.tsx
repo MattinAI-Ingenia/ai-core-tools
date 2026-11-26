@@ -3,7 +3,7 @@ import { Loader2, Trash2, UploadCloud } from 'lucide-react';
 import Modal from '../ui/Modal';
 import DataTable from '../ui/DataTable';
 import type { TableColumn } from '../ui/Table';
-import StatusBadge from '../StatusBadge';
+import { StatusBadge } from '../ui/Badge';
 import { apiService } from '../../services/api';
 import type { ImportJob, ImportJobRow } from '../../types/csvImport';
 import { useIngestionProgress } from '../../hooks/useIngestionProgress';
@@ -193,8 +193,18 @@ export function CsvImportReviewModal({
       render: (row) => (
         <div className="flex items-center gap-2">
           {row.status === 'FAILED'
-            ? <StatusBadge status={`Failed: ${row.failure_reason}`} />
-            : <StatusBadge status={row.status.toLowerCase()} />}
+            ? <StatusBadge status="error" customLabel={`Failed: ${row.failure_reason}`} />
+            : <StatusBadge
+                status={
+                  row.status.toLowerCase() === 'success'
+                    ? 'success'
+                    : row.status.toLowerCase() === 'failed'
+                      ? 'error'
+                      : row.status.toLowerCase() === 'pending' || row.status.toLowerCase() === 'running'
+                        ? 'processing'
+                        : 'inactive'
+                }
+              />}
           {row.status === 'FAILED' && (
             <button
               type="button"

@@ -1,5 +1,8 @@
+import Alert from '../ui/Alert';
+import { FormActions } from '../ui/FormActions';
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Info } from 'lucide-react';
 import { apiService } from '../../services/api';
 import {
@@ -9,9 +12,11 @@ import {
 } from '../../utils/lightragModelSpecs';
 import { LightRAGModelHints } from './LightRAGModelHints';
 import { LightRAGAdvancedSettings, sanitizeEntityTypesList } from './LightRAGAdvancedSettings';
-import { MediaServicesFields, type MediaAIServiceOption } from './MediaServicesFields';
-import { ServiceOptionStatus, ServiceSelectOptions, serviceStatusId } from '../ui/ServiceOptionStatus';
-import type { ServiceOptionLike } from '../../utils/serviceLifecycle';
+import { ServiceOptionStatus, serviceStatusId } from '../ui/ServiceOptionStatus';
+import { selectableServiceOptions, serviceOptionLabel, type ServiceOptionLike } from '../../utils/serviceLifecycle';
+import { MediaServicesFields } from './MediaServicesFields';
+import { FormField, FormSelect } from '../ui/FormField';
+import CardApp from '../ui/CardApp';
 
 interface VectorDbOption {
   code: string;
@@ -97,7 +102,8 @@ interface SiloFormProps {
   onCancel: () => void;
 }
 
-function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
+function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
+  const { t } = useTranslation('common');
   const { appId } = useParams();
   const [formData, setFormData] = useState<SiloFormData>({
     name: '',
@@ -127,12 +133,11 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
   const [embeddingServices, setEmbeddingServices] = useState<(ServiceOptionLike & { provider?: string; is_system?: boolean })[]>([]);
   const [vectorDbOptions, setVectorDbOptions] = useState<VectorDbOption[]>([]);
   const [aiServices, setAiServices] = useState<any[]>([]);
-  const [loadingFormData, setLoadingFormData] = useState(true);
 
   const isEditing = !!silo && silo.silo_id !== 0;
-  let submitButtonLabel = isEditing ? 'Update Silo' : 'Create Silo';
+  let submitButtonLabel = isEditing ? t('siloFormPage.actions.update') : t('siloFormPage.actions.create');
   if (isSubmitting) {
-    submitButtonLabel = 'Saving...';
+    submitButtonLabel = t('siloFormPage.actions.saving');
   }
 
   // Load form data (output parsers and embedding services)
@@ -194,7 +199,6 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
     if (!appId) return;
 
     try {
-      setLoadingFormData(true);
       setError(null);
 
       const appIdNumber = Number.parseInt(appId, 10);
@@ -224,11 +228,9 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
         }));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load form data');
+      setError(err instanceof Error ? err.message : t('siloFormPage.loadFormFailed'));
       console.error('Error loading form data:', err);
-    } finally {
-      setLoadingFormData(false);
-    }
+    } 
   }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -264,12 +266,12 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
 
     // Basic validation
     if (!formData.name.trim()) {
-      setError('Silo name is required');
+      setError(t('siloFormPage.validation.nameRequired'));
       return;
     }
 
     if (!isEditing && !formData.vector_db_type) {
-      setError('Database type selection is required');
+      setError(t('siloFormPage.validation.vectorDbRequired'));
       return;
     }
 
@@ -304,289 +306,240 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
         : { ...normalized, vector_db_type: normalized.vector_db_type!.toUpperCase() };
       await onSubmit(payload);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save silo');
+      setError(err instanceof Error ? err.message : t('siloFormPage.saveFailed'));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  if (loadingFormData) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-yellow-600"></div>
-        <span className="ml-2">Loading form data...</span>
-      </div>
-    );
-  }
-
+  
   return (
-    <div className="max-w-2xl mx-auto">
-      {/* Header */}
-      <div className="mb-6">
-        <h2 className="text-xl font-semibold text-gray-900">
-          {isEditing ? `Edit Silo: ${silo?.name}` : 'Create New Silo'}
-        </h2>
-        <p className="text-gray-600">
-          {isEditing
-            ? 'Update your silo configuration and settings.'
-            : 'Create a new silo for vector storage and semantic search.'
-          }
-        </p>
-      </div>
-
+    <div>
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-6">
-        <div className="bg-white shadow rounded-lg p-6">
+        <div className="">
           <div className="grid grid-cols-1 gap-6">
             {/* Silo Name */}
-            <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                Silo Name <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                id="name"
-                name="name"
-                value={formData.name}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                placeholder="Enter silo name"
-                disabled={isSubmitting}
-              />
-            </div>
-            <div>
-              <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-2">
-                Silo Description <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                id="description"
-                name="description"
-                value={formData.description || ''}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                placeholder="Enter silo description"
-                disabled={isSubmitting}
-              />
-            </div>
+            <FormField
+              label={t('siloFormPage.fields.name')}
+              id="name"
+              value={formData.name}
+              onChange={handleChange}
+              required
+              placeholder={t('siloFormPage.fields.namePlaceholder')}
+              disabled={isSubmitting}
+            />
+            <FormField
+              label={t('siloFormPage.fields.description')}
+              id="description"
+              value={formData.description || ''}
+              onChange={handleChange}
+              required
+              placeholder={t('siloFormPage.fields.descriptionPlaceholder')}
+              disabled={isSubmitting}
+            />
             {/* Metadata Definition (Output Parser) */}
             <div>
-              <label htmlFor="output_parser_id" className="block text-sm font-medium text-gray-700 mb-2">
-                Metadata Definition
-              </label>
-              <select
+              <FormSelect
+                label={t('siloFormPage.fields.metadataDefinition')}
                 id="output_parser_id"
-                name="output_parser_id"
                 value={formData.output_parser_id?.toString() || ''}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
+                options={[
+                  { value: '', label: t('siloFormPage.fields.noMetadataDefinition') },
+                  ...outputParsers.map((parser) => ({
+                    value: parser.parser_id,
+                    label: parser.name,
+                  })),
+                ]}
                 disabled={isSubmitting}
-              >
-                <option value="">No metadata definition</option>
-                {outputParsers.map((parser) => (
-                  <option key={parser.parser_id} value={parser.parser_id}>
-                    {parser.name}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-sm text-gray-500">
-                Optional: Define structured metadata for documents in this silo.
-              </p>
-            </div>
-
-            {/* Vector Database */}
-            <div>
-              <label htmlFor="vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
-                Database type <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="vector_db_type"
-                name="vector_db_type"
-                value={vectorDbOptions.length === 0 ? '' : formData.vector_db_type ?? ''}
-                onChange={handleChange}
-                required={!isEditing}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
-                disabled={isSubmitting || vectorDbOptions.length === 0 || isEditing}
-              >
-                {vectorDbOptions.length === 0 && <option value="">No database types available</option>}
-                {vectorDbOptions.map((option) => (
-                  <option key={option.code} value={option.code}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              {isEditing ? (
-                <p className="mt-1 text-sm text-gray-500 flex items-center gap-1">
-                  <Info className="w-3.5 h-3.5 shrink-0" />
-                  The database type cannot be changed after a silo is created.
-                </p>
-              ) : vectorDbOptions.length === 0 ? (
-                <p className="mt-1 text-sm text-red-600">
-                  No database types available. Configure a silo backend before proceeding.
-                </p>
-              ) : (
-                <p className="mt-1 text-sm text-gray-500">
-                  Required: Select the storage engine that will persist vectors for this silo.
-                </p>
-              )}
+                helpText={t('siloFormPage.help.metadataDefinition')}
+              />
             </div>
 
             {/* Embedding Service */}
             <div>
-              <label htmlFor="embedding_service_id" className="block text-sm font-medium text-gray-700 mb-2">
-                Embedding Service <span className="text-red-500">*</span>
-              </label>
-              <select
+              <FormSelect
+                label={t('siloFormPage.fields.embeddingService')}
                 id="embedding_service_id"
-                name="embedding_service_id"
                 value={formData.embedding_service_id?.toString() || ''}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+                options={[
+                  { value: '', label: t('siloFormPage.fields.selectEmbeddingService') },
+                  ...selectableServiceOptions(embeddingServices, silo?.embedding_service_id).map((service) => ({
+                    value: service.service_id,
+                    label: serviceOptionLabel(service, [
+                      service.is_system ? `[${t('siloFormPage.system')}]` : '',
+                      service.name,
+                      service.provider ? `(${service.provider})` : '',
+                    ].filter(Boolean).join(' ')),
+                  })),
+                ]}
                 disabled={isSubmitting || isEditing}
-                aria-describedby={serviceStatusId(embeddingServices, formData.embedding_service_id, 'embedding_service_id')}
-              >
-                <option value="">Select an embedding service</option>
-                <ServiceSelectOptions
-                  options={embeddingServices}
-                  savedValue={silo?.embedding_service_id}
-                  getLabel={(service) =>
-                    `${service.is_system ? `[System] ${service.name}` : service.name}${service.provider ? ` (${service.provider})` : ''}`}
-                />
-              </select>
+                ariaDescribedBy={serviceStatusId(embeddingServices, formData.embedding_service_id, 'embedding_service_id')}
+              />
               <ServiceOptionStatus selectId="embedding_service_id" options={embeddingServices} selectedId={formData.embedding_service_id} />
               {isEditing ? (
-                <p className="mt-1 text-sm text-amber-600">
-                  The embedding service cannot be changed after a silo is created.
+                <p className="mt-1 text-xs text-accent dark:text-accent-dark">
+                  {t('siloFormPage.help.embeddingServiceImmutable')}
                 </p>
               ) : (
-                <p className="mt-1 text-sm text-gray-500">
-                  Required: Choose the embedding service for vector generation.
+                <p className="mt-1 text-xs text-fg-tertiary dark:text-fg-tertiary-dark">
+                  {t('siloFormPage.help.embeddingServiceRequired')}
                 </p>
               )}
             </div>
-          </div>
-
-          {/* LightRAG Configuration — shown only when LIGHTRAG is selected */}
-          {formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
-            <div className="border-t border-gray-200 pt-6 mt-6 space-y-6">
-              <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">LightRAG Configuration</h3>
-
-              {/* Role-specific LLM configuration (LightRAG 2026.05).
-                  QUERY is the primary role — selecting it auto-fills EXTRACT
-                  and KEYWORDS. VLM is optional and must be multimodal. */}
-              {([
-                {
-                  field: 'extract_service_id' as RoleServiceField,
-                  role: 'extract' as LightRAGRole,
-                  label: 'Extract AI Service',
-                  required: true,
-                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier non-reasoning.',
-                  placeholder: 'Select an AI service for entity extraction',
-                },
-                {
-                  field: 'keywords_service_id' as RoleServiceField,
-                  role: 'keywords' as LightRAGRole,
-                  label: 'Keywords AI Service',
-                  required: true,
-                  helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
-                  placeholder: 'Select an AI service for keyword extraction',
-                },
-                {
-                  field: 'vlm_service_id' as RoleServiceField,
-                  role: 'vlm' as LightRAGRole,
-                  label: 'VLM AI Service (optional)',
-                  required: false,
-                  helper: 'Vision-language model for images/tables inside documents. MUST be multimodal — leave empty if your docs are text-only.',
-                  placeholder: '(none — text-only documents)',
-                },
-              ]).map(({ field, role, label, required, helper, placeholder }) => {
-                const value = formData[field];
-                const modelName = getServiceModelName(value);
-                const warning = role !== 'vlm' ? getRoleWarning(role, modelName) : null;
-                const blockingError = role === 'vlm' ? vlmBlockingError(modelName) : null;
-                return (
-                  <div key={field}>
-                    <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-2">
-                      {label}{required && <span className="text-red-500"> *</span>}
-                    </label>
-                    <select
-                      id={field}
-                      name={field}
-                      value={value?.toString() || ''}
-                      onChange={handleChange}
-                      required={required}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
-                      disabled={isSubmitting || (isEditing && role === 'vlm')}
-                    >
-                      <option value="">{placeholder}</option>
-                      {aiServices.map((service: AIServiceOption) => (
-                        <option key={service.service_id} value={service.service_id}>
-                          {service.is_system ? `[System] ${service.name}` : service.name}{service.provider ? ` (${service.provider})` : ''}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="mt-1 text-sm text-gray-500">{helper}</p>
-                    {isEditing && role === 'vlm' && (
-                      <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
-                        <Info className="w-3.5 h-3.5 shrink-0" />
-                        Cannot be changed after a silo is created.
-                      </p>
-                    )}
-                    <LightRAGModelHints role={role} />
-                    {warning && (
-                      <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
-                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span>{warning}</span>
-                      </div>
-                    )}
-                    {blockingError && (
-                      <div className="mt-2 flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
-                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span>{blockingError}</span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              <LightRAGAdvancedSettings
-                formData={formData}
-                onFieldChange={(field, value) => setFormData(prev => ({ ...prev, [field]: value }))}
-                disabled={isSubmitting}
-                locked={isEditing}
+            {/* Vector Database */}
+            <div>
+              <FormSelect
+                label={t('siloFormPage.fields.vectorDatabase')}
+                id="vector_db_type"
+                value={vectorDbOptions.length === 0 ? '' : formData.vector_db_type ?? ''}
+                onChange={handleChange}
+                required={!isEditing}
+                options={[
+                  ...(vectorDbOptions.length === 0
+                    ? [{ value: '', label: t('siloFormPage.fields.noVectorDatabases') }]
+                    : []),
+                  ...vectorDbOptions.map((option) => ({
+                    value: option.code,
+                    label: option.label,
+                  })),
+                ]}
+                disabled={isSubmitting || vectorDbOptions.length === 0 || isEditing}
+                helpText={isEditing ? (
+                  <span className="flex items-center gap-1 ">
+                    <Info className="w-3.5 h-3.5 shrink-0" />
+                    {t('siloFormPage.help.vectorDatabaseImmutable')}
+                  </span>
+                ) : vectorDbOptions.length === 0 ? (
+                  <span className="text-error dark:text-error-dark">
+                    {t('siloFormPage.help.configureVectorDatabase')}
+                  </span>
+                ) : (
+                  t('siloFormPage.help.vectorDatabaseRequired')
+                )}
               />
-
-              <div>
-                <label htmlFor="source_label_fields" className="block text-sm font-medium text-gray-700 mb-2">
-                  Source label fields
-                </label>
-                <input
-                  id="source_label_fields"
-                  type="text"
-                  value={formData.source_label_fields || ''}
-                  onChange={(e) => setFormData(prev => ({ ...prev, source_label_fields: e.target.value }))}
-                  placeholder="e.g. familia_en, tecnologia"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100"
-                  disabled={isSubmitting}
-                  aria-describedby="source_label_fields_help"
-                />
-                <p id="source_label_fields_help" className="mt-1 text-sm text-gray-500">
-                  Comma-separated metadata columns from the import CSV, shown next to every source the
-                  agent reads (e.g. the product a manual is about). Leave blank for no labels. Can be
-                  changed at any time.
-                </p>
-              </div>
-
             </div>
-          )}
 
+            {/* LightRAG Configuration — shown only when LIGHTRAG is selected */}
+            {isLightRAG && (
+              <div className="border-t border-line pt-6 mt-6 space-y-6 dark:border-line-dark">
+                <h3 className="text-sm font-semibold text-fg dark:text-fg-dark uppercase tracking-wider">LightRAG Configuration</h3>
+
+                {/* Role-specific LLM configuration (LightRAG 2026.05).
+                    QUERY is the primary role — selecting it auto-fills EXTRACT
+                    and KEYWORDS. VLM is optional and must be multimodal. */}
+                {([
+                  {
+                    field: 'extract_service_id' as RoleServiceField,
+                    role: 'extract' as LightRAGRole,
+                    label: 'Extract AI Service',
+                    required: true,
+                    helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier non-reasoning.',
+                    placeholder: 'Select an AI service for entity extraction',
+                  },
+                  {
+                    field: 'keywords_service_id' as RoleServiceField,
+                    role: 'keywords' as LightRAGRole,
+                    label: 'Keywords AI Service',
+                    required: true,
+                    helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
+                    placeholder: 'Select an AI service for keyword extraction',
+                  },
+                  {
+                    field: 'vlm_service_id' as RoleServiceField,
+                    role: 'vlm' as LightRAGRole,
+                    label: 'VLM AI Service (optional)',
+                    required: false,
+                    helper: 'Vision-language model for images/tables inside documents. MUST be multimodal — leave empty if your docs are text-only.',
+                    placeholder: '(none — text-only documents)',
+                  },
+                ]).map(({ field, role, label, required, helper, placeholder }) => {
+                  const value = formData[field];
+                  const modelName = getServiceModelName(value);
+                  const warning = role !== 'vlm' ? getRoleWarning(role, modelName) : null;
+                  const blockingError = role === 'vlm' ? vlmBlockingError(modelName) : null;
+                  return (
+                    <div key={field}>
+                      <label htmlFor={field} className="block text-sm font-medium text-fg dark:text-fg-dark mb-2">
+                        {label}{required && <span className="text-error">*</span>}
+                      </label>
+                      <select
+                        id={field}
+                        name={field}
+                        value={value?.toString() || ''}
+                        onChange={handleChange}
+                        required={required}
+                        className="w-full px-3 py-2 border border-line rounded-lg bg-surface text-fg focus:outline-none focus:ring-2 focus:ring-focus disabled:bg-surface-hover disabled:text-fg-tertiary dark:border-line-dark dark:bg-surface-dark dark:text-fg-dark"
+                        disabled={isSubmitting || (isEditing && role === 'vlm')}
+                      >
+                        <option value="">{placeholder}</option>
+                        {aiServices.map((service: AIServiceOption) => (
+                          <option key={service.service_id} value={service.service_id}>
+                            {service.is_system ? `[System] ${service.name}` : service.name}{service.provider ? ` (${service.provider})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="mt-1 text-sm text-fg-tertiary dark:text-fg-tertiary-dark">{helper}</p>
+                      {isEditing && role === 'vlm' && (
+                        <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
+                          <Info className="w-3.5 h-3.5 shrink-0" />
+                          Cannot be changed after a silo is created.
+                        </p>
+                      )}
+                      <LightRAGModelHints role={role} />
+                      {warning && (
+                        <div className="mt-2 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 dark:text-amber-200 dark:bg-amber-950/40 dark:border-amber-800">
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{warning}</span>
+                        </div>
+                      )}
+                      {blockingError && (
+                        <div className="mt-2 flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2 dark:text-red-300 dark:bg-red-950/40 dark:border-red-800">
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{blockingError}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <LightRAGAdvancedSettings
+                  formData={formData}
+                  onFieldChange={(field, value) => setFormData(prev => ({ ...prev, [field]: value }))}
+                  disabled={isSubmitting}
+                  locked={isEditing}
+                />
+
+                <div>
+                  <label htmlFor="source_label_fields" className="block text-sm font-medium text-fg dark:text-fg-dark mb-2">
+                    Source label fields
+                  </label>
+                  <input
+                    id="source_label_fields"
+                    type="text"
+                    value={formData.source_label_fields || ''}
+                    onChange={(e) => setFormData(prev => ({ ...prev, source_label_fields: e.target.value }))}
+                    placeholder="e.g. familia_en, tecnologia"
+                    className="w-full px-3 py-2 border border-line rounded-lg bg-surface text-fg focus:outline-none focus:ring-2 focus:ring-focus disabled:bg-surface-hover dark:border-line-dark dark:bg-surface-dark dark:text-fg-dark"
+                    disabled={isSubmitting}
+                    aria-describedby="source_label_fields_help"
+                  />
+                  <p id="source_label_fields_help" className="mt-1 text-sm text-fg-tertiary dark:text-fg-tertiary-dark">
+                    Comma-separated metadata columns from the import CSV, shown next to every source the
+                    agent reads (e.g. the product a manual is about). Leave blank for no labels. Can be
+                    changed at any time.
+                  </p>
+                </div>
+
+              </div>
+            )}
+          </div>
           {/* Media (video/audio) indexing */}
           {(silo?.ai_services?.length ?? 0) > 0 && (
-            <fieldset className="space-y-4 border-t border-gray-200 pt-6">
-              <legend className="text-sm font-semibold text-gray-900">Video and audio</legend>
+            <CardApp className="space-y-4 pt-6 mt-5" titulo={t('siloFormPage.media.title')}>
               <MediaServicesFields
                 scope="silo"
                 aiServices={silo?.ai_services ?? []}
@@ -597,71 +550,45 @@ function SiloForm({ silo, onSubmit, onCancel }: Readonly<SiloFormProps>) {
                 disabled={isSubmitting}
                 onChange={(field, value) => setFormData(prev => ({ ...prev, [field]: value }))}
               />
-            </fieldset>
+            </CardApp>
           )}
 
           {/* Error Message */}
           {error && (
-            <div className="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
-              <div className="flex">
-                <AlertTriangle className="w-4 h-4 text-yellow-500 mr-3 shrink-0" />
-                <div>
-                  <h3 className="text-sm font-medium text-red-800">Error</h3>
-                  <p className="text-sm text-red-600 mt-1">{error}</p>
-                </div>
-              </div>
-            </div>
+            <Alert type="error" message={error} />
           )}
 
           {/* Action Buttons */}
-          <div className="mt-6 flex items-center justify-between">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={isSubmitting}
-              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting || !!vlmError}
-              className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded-lg flex items-center"
-              title={vlmError ?? undefined}
-            >
-              {isSubmitting && (
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-              )}
-              {submitButtonLabel}
-            </button>
-          </div>
+          <FormActions
+            onCancel={onCancel}
+            isSubmitting={isSubmitting}
+            submitLabel={submitButtonLabel}
+            submittingLabel={t('siloFormPage.actions.saving')}
+            cancelLabel={t('siloFormPage.actions.cancel')}
+            submitDisabled={!!vlmError}
+            containerClassName="mt-6"
+          />
         </div>
       </form>
 
       {/* Info Section */}
-      <div className="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <div className="flex">
-          <div className="flex-shrink-0">
-            <Info className="w-4 h-4 text-blue-400" />
-          </div>
-          <div className="ml-3">
-            <h3 className="text-sm font-medium text-blue-800">
-              About Custom Silos
-            </h3>
-            <div className="mt-2 text-sm text-blue-700">
-              <p>
-                Custom silos are vector storage containers that enable semantic search and retrieval.
-                They store document embeddings and allow AI agents to find relevant information quickly.
-              </p>
-              <p className="mt-2">
-                <strong>Embedding Service:</strong> Required for converting text to vectors.
-                <br />
-                <strong>Metadata Definition:</strong> Optional structured data for filtering and organization.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
+      <Alert
+        type="info"
+        title={t('siloFormPage.about.title')}
+        className="mt-8"
+        message={(
+          <>
+            <p>
+              {t('siloFormPage.about.description')}
+            </p>
+            <p className="mt-2">
+              <span className="font-medium">{t('siloFormPage.fields.embeddingService')}:</span> {t('siloFormPage.about.embeddingService')}
+              <br />
+              <span className="font-medium">{t('siloFormPage.fields.metadataDefinition')}:</span> {t('siloFormPage.about.metadataDefinition')}
+            </p>
+          </>
+        )}
+      />
     </div>
   );
 }

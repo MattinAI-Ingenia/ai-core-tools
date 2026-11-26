@@ -3367,6 +3367,10 @@ class LightRAGStore(VectorStoreInterface):
         field: str,
         prefix: Optional[str] = None,
         limit: int = 100,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        contains: Optional[str] = None,
+        after: Optional[str] = None,
+        raise_errors: bool = False,
     ) -> List[str]:
         logger.debug(
             "LightRAGStore does not support get_distinct_metadata_values; "

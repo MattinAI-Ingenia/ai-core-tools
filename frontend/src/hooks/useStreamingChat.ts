@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { StreamEvent, ActiveTool, LightRAGGraphData, HitlPendingApproval, HitlResume } from '../types/streaming';
 import { getStreamingMessage } from '../i18n/streaming';
 import { randomId } from '../utils/randomId';
+import type { ChatTurnConfig, ChatTurnInfo } from '../types/appChat';
 
 function isCodeTool(toolName: string): boolean {
   return toolName === 'code_interpreter' || toolName.endsWith('_repl');
@@ -50,15 +51,21 @@ interface StreamResult {
   elapsedMs: number;
   /** Set when the turn paused for human approval (nothing to commit yet). */
   pendingApproval: HitlPendingApproval | null;
+  /** App Chat only: effective configuration of the turn (`done.turn`) and the `metadata` summary. */
+  turn?: ChatTurnInfo | null;
+  turnConfig?: ChatTurnConfig | null;
 }
 
 export class StreamingChatError extends Error {
   readonly elapsedMs: number;
+  /** Conversation the failed turn ran in (known once the `metadata` event arrived): it exists server-side. */
+  readonly conversationId: number | null;
 
-  constructor(message: string, elapsedMs: number) {
-    super(message);
+  constructor(message: string, elapsedMs: number, cause?: unknown, conversationId: number | null = null) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = 'StreamingChatError';
     this.elapsedMs = elapsedMs;
+    this.conversationId = conversationId;
   }
 }
 
@@ -302,6 +309,8 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       let approval: HitlPendingApproval | null = null;
       let errorMessage: string | null = null;
       let receivedDone = false;
+      let turn: ChatTurnInfo | null = null;
+      let turnConfig: ChatTurnConfig | null = null;
 
       const getElapsedMs = (): number => {
         const startedAt = streamStartedAtRef.current;
@@ -461,6 +470,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
                 if (metaSessionId) {
                   sessionId = metaSessionId;
                 }
+                turnConfig = (event.data as { turn_config?: ChatTurnConfig }).turn_config ?? turnConfig;
                 break;
               }
 
@@ -470,8 +480,10 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
                   files?: Array<{ file_id: string; filename: string; file_type: string }>;
                   conversation_id?: number;
                   lightrag_graph?: LightRAGGraphData | null;
+                  turn?: ChatTurnInfo | null;
                 };
                 receivedDone = true;
+                turn = doneData.turn ?? null;
                 finalResponse = doneData.response ?? contentRef.current;
                 finalFiles = doneData.files ?? [];
                 finalLightragGraph = doneData.lightrag_graph ?? null;
@@ -516,7 +528,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
         } else {
           const errMsg = err instanceof Error ? err.message : 'Streaming failed';
           setStreamError(errMsg);
-          throw new StreamingChatError(errMsg, getElapsedMs());
+          throw new StreamingChatError(errMsg, getElapsedMs(), err, conversationId);
         }
       } finally {
         elapsedMs = getElapsedMs();
@@ -546,6 +558,8 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
         lightragGraph: finalLightragGraph,
         elapsedMs,
         pendingApproval: approval,
+        turn,
+        turnConfig,
       };
     },
     [],

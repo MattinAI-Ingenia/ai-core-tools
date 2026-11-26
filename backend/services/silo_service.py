@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, object_session
 from utils.logger import get_logger
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from tools.pdf_loader import PdfLoader
 from tools.vector_store_factory import VectorStoreFactory
 from tools.vector_stores.vector_store_interface import VectorStoreInterface
 from models.indexing_metric import IndexingMetric
@@ -60,6 +61,10 @@ LIGHTRAG_UNSUPPORTED_DELETE_DETAIL = (
 LIGHTRAG_UNSUPPORTED_REINDEX_DETAIL = (
     "Reindexing a single file is not supported in a LightRAG silo: it would not replace the file's content in the "
     "knowledge graph. Delete the file and upload it again, or use 'Delete all files' and resume indexing."
+)
+LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL = (
+    "Updating document metadata in bulk is not supported in a LightRAG silo: it would not be reflected in the "
+    "knowledge graph, so nothing was changed."
 )
 
 # LightRAG extraction output tokens per call (min, avg, max) for models measured on
@@ -103,6 +108,12 @@ _MEASURED_CLOUD_TOK_PER_S = {
     'gpt-6-luna': (340.0, 215.0),
 }
 
+# Distinct metadata values are read straight from SQL — no embedding call and no
+# similarity ranking — so this is an enumeration and can afford a much higher cap
+# than a search. Callers use it to list what a silo holds for one target.
+DEFAULT_METADATA_VALUES_LIMIT = 1000
+MAX_METADATA_VALUES_LIMIT = 5000
+
 # Per-chunk marker stamping each indexing run; lets reindex delete only stale chunks.
 INDEX_BATCH_FIELD = 'index_batch'
 
@@ -124,6 +135,7 @@ class ResourceNotIndexableError(ResourceIndexingError, ValueError):
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
+_STRUCTURED_PDF_CHUNK_FIELD = "_aict_structured_pdf_chunk"
 
 logger = get_logger(__name__)
 
@@ -695,7 +707,9 @@ def _scale_k_per_100_chunks(k_per_100: int, silo: Any) -> int:
     return max(1, math.ceil(k_per_100 * chunk_count / 100))
 
 
-def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> tuple[dict, dict]:
+def resolve_search_params(
+    agent: Any, caller_search_params: Optional[dict], *, silo: Any = None
+) -> tuple[dict, dict]:
     """Materialize RAG precedence: caller > agent > system.
 
     Returns ``(search_params, pinned_filter)`` where:
@@ -718,7 +732,8 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
             site (e.g. the public API chat endpoint).
     """
     caller: dict = caller_search_params or {}
-    silo = getattr(agent, "silo", None)
+    # ``silo`` overrides ``agent.silo`` (flexible chat: per-turn silo, never set on the ORM agent).
+    silo = silo if silo is not None else getattr(agent, "silo", None)
 
     # ---- Tuning params (caller > agent > server_default) ----
     resolved: dict = {}
@@ -812,7 +827,13 @@ def resolve_search_params(agent: Any, caller_search_params: Optional[dict]) -> t
     raw_caller_filter = caller.get("filter") or {}
     if raw_caller_filter:
         try:
-            caller_clauses = [{"field": f, "op": "$eq", "value": v} for f, v in raw_caller_filter.items()]
+            from tools.vector_stores.metadata_filters import flat_filter_clause  # local import avoids cycles
+
+            caller_clauses = [
+                clause
+                for clause in (flat_filter_clause(f, v) for f, v in raw_caller_filter.items())
+                if clause is not None
+            ]
             caller_backend = _build_backend_filter(caller_clauses)
         except Exception as exc:
             logger.warning("resolve_search_params: failed to build caller filter: %s", exc)
@@ -970,9 +991,14 @@ class SiloService:
             session.close()
     
     @staticmethod
+    def is_temp_silo(silo_id: int, db: Session) -> bool:
+        """Whether ``silo_id`` is the hidden temp silo of a playground / Chat conversation (never user-addressable)."""
+        return SiloRepository.is_temp_silo(silo_id, db)
+
+    @staticmethod
     def get_silos_by_app_id(app_id: int, db: Session) -> List[Silo]:
         """
-        Retrieve all silos by app_id
+        Retrieve the user-visible silos by app_id (the hidden temp silos of conversations are excluded)
         """
         return SiloRepository.get_by_app_id(app_id, db)
 
@@ -1187,7 +1213,9 @@ class SiloService:
 
     @staticmethod
     @handle_database_errors("create_or_update_silo")
-    def create_or_update_silo(silo_data: dict, silo_type: Optional[SiloType] = None, db: Session = None) -> Silo:
+    def create_or_update_silo(
+        silo_data: dict, silo_type: Optional[SiloType] = None, db: Session = None, enforce_quota: bool = True
+    ) -> Silo:
         """
         Create a new silo or update an existing one
         
@@ -1195,6 +1223,7 @@ class SiloService:
             silo_data: Dictionary containing silo data
             silo_type: Optional silo type to set
             db: Database session to use
+            enforce_quota: False only for the hidden temp silos of conversations (never counted against the tier)
             
         Returns:
             Created or updated Silo instance
@@ -1282,7 +1311,7 @@ class SiloService:
             else:
                 # Enforce per-app silo limit before creation (SaaS mode only)
                 app_id = silo_data.get('app_id')
-                if app_id:
+                if app_id and enforce_quota:
                     from services.tier_enforcement_service import TierEnforcementService
                     TierEnforcementService.check_resource_limit(session, int(app_id), 'silos')
 
@@ -1706,16 +1735,20 @@ class SiloService:
     def _create_documents_for_indexing(silo_id: int, contents: List[dict]) -> List[Document]:
         """Split each content item into chunks and attach metadata.
 
-        File-upload callers pre-split via ``extract_documents_from_file`` before
-        calling ``index_multiple_content``, so chunks already ≤ CHUNK_SIZE produce
-        exactly one chunk per input item (idempotent).
+        Structured PDF chunks carry ``pdf_blocks`` and must remain intact even
+        when they exceed the ordinary target size. Other content is split normally.
         """
         splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         documents: List[Document] = []
         for item in contents:
+            metadata = dict(item.get('metadata', {}))
+            preserve_pdf_chunk = metadata.pop(_STRUCTURED_PDF_CHUNK_FIELD, False) is True
             # silo_id last — a caller-supplied key must not override the parameter.
-            base_metadata = {**(item.get('metadata', {})), "silo_id": silo_id}
-            chunks = splitter.split_text(item['content'])
+            base_metadata = {**metadata, "silo_id": silo_id}
+            if preserve_pdf_chunk:
+                chunks = [item['content']]
+            else:
+                chunks = splitter.split_text(item['content'])
             for chunk in chunks:
                 documents.append(Document(page_content=chunk, metadata=dict(base_metadata)))
         return documents
@@ -1778,7 +1811,7 @@ class SiloService:
             List[Document]: List of Document objects
         """
         from langchain_core.documents import Document
-        from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, TextLoader
+        from langchain_community.document_loaders import Docx2txtLoader, PyMuPDFLoader, TextLoader
 
         if base_metadata is None:
             base_metadata = {}
@@ -1790,8 +1823,13 @@ class SiloService:
         )
 
         # Determine file type and use appropriate loader
-        if file_extension == '.pdf':
+        if file_extension == '.pdf' and not split:
+            # LightRAG reads whole pages: the structured loader's short sections
+            # (headers, headings, table rows) would not survive the per-document
+            # noise filter below, and they would be lost before the page fold.
             loader = PyMuPDFLoader(file_path)
+        elif file_extension == '.pdf':
+            loader = PdfLoader(file_path, chunk_size=CHUNK_SIZE)
         elif file_extension == '.docx':
             loader = Docx2txtLoader(file_path)
         elif file_extension in ('.txt', '.md'):
@@ -1801,14 +1839,18 @@ class SiloService:
             raise ValueError(f"Unsupported file type: {file_extension}")
 
         pages = loader.load()
-        if split:
+        structured_pdf = file_extension == '.pdf' and getattr(loader, "structured", False)
+        if split and not structured_pdf:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             docs = text_splitter.split_documents(pages)
         else:
-            # LightRAG path: start from one Document per page (PDFs) / per file
-            # (DOCX, TXT, MD) so cleaning/filtering below runs per page. PDFs
-            # are then folded into a single whole-file Document with page
-            # markers further down; non-PDF sources are already one Document.
+            # LightRAG path (split=False) and structured PDFs alike: start from
+            # one Document per page (PDFs) / per file (DOCX, TXT, MD) so
+            # cleaning/filtering below runs per page. PDFs are then folded into
+            # a single whole-file Document with page markers further down
+            # (split=False only); non-PDF sources are already one Document. A
+            # structured PDF's chunks are already semantic sections, so they
+            # are never re-split.
             docs = pages
 
         # Clean known PDF extraction artifacts (e.g. @@@@, 64/64/64/...) from
@@ -1853,6 +1895,9 @@ class SiloService:
 
         for doc in docs:
             doc.metadata.update(base_metadata)
+            doc.metadata.pop(_STRUCTURED_PDF_CHUNK_FIELD, None)
+            if structured_pdf:
+                doc.metadata[_STRUCTURED_PDF_CHUNK_FIELD] = True
             # Only add page number if it exists (split=True PDFs still carry
             # per-chunk page metadata; DOCX/TXT/MD never do). split=False PDFs
             # return earlier above with page markers instead of this loop.
@@ -2134,6 +2179,9 @@ class SiloService:
                 message = "No text could be extracted from this file. It may be empty or a scanned document without a text layer."
                 SiloService._set_index_status(resource_with_relations, session, message)
                 raise ResourceNotIndexableError(message)
+
+            for doc in docs:
+                doc.metadata.pop(_STRUCTURED_PDF_CHUNK_FIELD, None)
 
             silo_id = resource_with_relations.repository.silo_id
             embedding_service = resource_with_relations.repository.silo.embedding_service
@@ -3078,6 +3126,70 @@ class SiloService:
         return doc_count
 
     @staticmethod
+    def update_docs_metadata(
+        silo_id: int,
+        filter_metadata: Dict[str, Any],
+        metadata_updates: Dict[str, Any],
+        db: Session,
+        replace: bool = False,
+    ) -> int:
+        """
+        Update the metadata of the documents matching a filter, in place.
+
+        Re-labelling documents without re-embedding them: the vectors and the
+        content are untouched, only ``cmetadata`` changes. Callers use it when a
+        label they indexed under is renamed upstream and the existing chunks must
+        follow, instead of paying a full re-index.
+
+        Args:
+            silo_id: ID of the silo
+            filter_metadata: Metadata filter dict (MongoDB-style, e.g., {"field": {"$eq": "value"}})
+            metadata_updates: Keys to write on the matched documents
+            db: Database session
+            replace: If True the metadata is replaced wholesale; by default the
+                updates are merged over the existing keys (idempotent)
+
+        Returns:
+            Number of documents updated
+        """
+        ensure_not_lightrag(SiloRepository.get_by_id(silo_id, db), LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL)
+        logger.info(
+            f"Updating metadata in silo {silo_id} with filter: {filter_metadata} "
+            f"(replace={replace})"
+        )
+
+        if not SiloService.check_silo_collection_exists(silo_id, db):
+            logger.warning(f"Collection for silo {silo_id} does not exist")
+            return 0
+
+        silo = SiloRepository.get_by_id(silo_id, db)
+        if not silo:
+            logger.error(f"Silo {silo_id} not found")
+            return 0
+
+        collection_name = COLLECTION_PREFIX + str(silo_id)
+        updated = _get_vector_store(silo).update_documents_metadata(
+            collection_name,
+            filter_metadata=filter_metadata,
+            metadata_updates=metadata_updates,
+            replace=replace,
+        )
+        logger.info(f"Successfully updated {updated} document(s) in silo {silo_id}")
+
+        # The metadata values feeding the UI filters are cached per silo; a
+        # rename changes them, so a stale cache would keep offering the old
+        # value in the dropdowns.
+        try:
+            from services.metadata_values_cache_service import MetadataValuesCacheService
+            MetadataValuesCacheService.invalidate(silo_id)
+        except Exception as _cache_exc:
+            logger.warning(
+                "metadata_values_cache: invalidation failed after update_docs_metadata for silo=%d: %s",
+                silo_id, _cache_exc,
+            )
+        return updated
+
+    @staticmethod
     def find_docs_in_collection(
         silo_id: int,
         query: str,
@@ -3616,18 +3728,25 @@ class SiloService:
         prefix: Optional[str] = None,
         limit: int = 100,
         db: Session = None,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        contains: Optional[str] = None,
+        after: Optional[str] = None,
+        raise_errors: bool = False,
     ) -> List[str]:
         """
         Return distinct values for a metadata field in the silo's vector collection.
-        Sorted alphabetically, filtered by optional case-insensitive prefix.
-        limit is clamped to 1–500.
+        Sorted alphabetically, filtered by optional case-insensitive prefix or
+        substring (``contains``) and by an optional PGVector-style metadata filter.
+        ``after`` pages with a keyset cursor (values strictly after it) and
+        ``raise_errors`` propagates store failures instead of returning [].
+        limit is clamped to 1–MAX_METADATA_VALUES_LIMIT.
         Raises ValueError for invalid field names, NotFoundError for missing silo.
         """
         import re
         if not field or not re.match(r'^[\w.\-]+$', field):
             raise ValueError(f"Invalid metadata field name: '{field}'")
 
-        limit = min(max(1, limit), 500)
+        limit = min(max(1, limit), MAX_METADATA_VALUES_LIMIT)
 
         silo = SiloRepository.get_by_id(silo_id, db)
         if not silo:
@@ -3636,6 +3755,8 @@ class SiloService:
         collection_name = COLLECTION_PREFIX + str(silo_id)
         return _get_vector_store(silo).get_distinct_metadata_values(
             collection_name, field, prefix=prefix, limit=limit,
+            filter_metadata=filter_metadata, contains=contains,
+            after=after, raise_errors=raise_errors,
         )
 
     @staticmethod

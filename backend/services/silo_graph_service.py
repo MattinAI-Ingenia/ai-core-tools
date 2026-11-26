@@ -118,6 +118,7 @@ class SiloGraphService:
         graph = cls._cypher_neighbors(
             workspace=workspace,
             root=canonicalize_entity_name(node_id),
+            raw=node_id,
             depth=depth,
             max_nodes=max_nodes,
             max_edges=max_edges,
@@ -412,6 +413,7 @@ class SiloGraphService:
         depth: int,
         max_nodes: int,
         max_edges: int,
+        raw: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Subgraph rooted at one entity: root + all depth-1 neighbors always,
         deeper layers capped by the remaining budget (highest degree first)."""
@@ -421,13 +423,19 @@ class SiloGraphService:
         truncated = False
         try:
             with driver.session() as neo_session:
+                # Silos indexed before name canonicalization store the raw
+                # name, so also accept the id as displayed; prefer the canonical
+                # match and continue from whatever id is actually stored.
+                roots = [root] if raw is None or raw == root else [root, raw]
                 root_recs = list(neo_session.run(
-                    f"MATCH (n:`{workspace}`) WHERE n.entity_id = $root "
-                    "AND n.entity_id IS NOT NULL RETURN n LIMIT 1",
+                    f"MATCH (n:`{workspace}`) WHERE n.entity_id IN $roots "
+                    "RETURN n ORDER BY n.entity_id = $root DESC LIMIT 1",
                     root=root,
+                    roots=roots,
                 ))
                 if not root_recs:
                     raise LookupError(f"Node not found: {root}")
+                root = str(root_recs[0]["n"].get("entity_id") or root)
 
                 def _node_dict(n) -> Dict[str, Any]:
                     props = dict(n.items())

@@ -8,7 +8,7 @@ import type { LightRAGGraphData, LightRAGEntity, LightRAGRelationship } from '..
 import OpenPdfButton from './OpenPdfButton';
 import { groupChunksById } from '../../utils/groupChunksById';
 import { bubbleNodeFill, bubbleNodeIcon, fromCitedChunk } from '../../utils/bubbleGraphStyle';
-import { PARTIAL_COLOR, RING_CITED, PRIMARY_COLOR, HIGHLIGHT_BLUE, colorForType, typeRingIcon } from '../../utils/entityTypeColors';
+import { PARTIAL_COLOR, RING_CITED, RING_RETRIEVED, PRIMARY_COLOR, HIGHLIGHT_BLUE, colorForType, typeRingIcon } from '../../utils/entityTypeColors';
 import { splitSourceIds } from '../../utils/siloGraphUtils';
 import type { GraphSourceDoc } from '../../utils/siloGraphUtils';
 import { apiService } from '../../services/api';
@@ -432,17 +432,17 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 border-b border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-300">
               {hasCited && (
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLOR_USED }} aria-hidden="true" />
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: RING_CITED }} aria-hidden="true" />
                   In cited sources
                 </span>
               )}
               <span className="inline-flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLOR_RETRIEVED }} aria-hidden="true" />
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: RING_RETRIEVED }} aria-hidden="true" />
                 Retrieved
               </span>
               {entities.some((e) => e.partial) && (
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: COLOR_PARTIAL }} aria-hidden="true" />
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: PARTIAL_COLOR }} aria-hidden="true" />
                   Partial (relationship endpoint)
                 </span>
               )}
