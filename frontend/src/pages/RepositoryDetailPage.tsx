@@ -493,24 +493,24 @@ const RepositoryDetailPage: React.FC = () => {
         selectedFolderId || undefined,
       );
 
+      const problems: string[] = [];
+      // Files rejected before upload
       if (result.failed_files && result.failed_files.length > 0) {
         const failedMessages = result.failed_files.map((failed: { filename: string; error: string }) =>
           `${failed.filename}: ${failed.error}`
         ).join('\n');
-
-        if (result.created_resources && result.created_resources.length > 0) {
-          setError(t('repositoryDetailPage.errors.someFilesFailed', { messages: failedMessages }));
-        } else {
-          setError(t('repositoryDetailPage.errors.uploadFailed', { messages: failedMessages }));
-        }
+        const allFailed = !result.created_resources || result.created_resources.length === 0;
+        problems.push(t(allFailed ? 'repositoryDetailPage.errors.uploadFailed' : 'repositoryDetailPage.errors.someFilesFailed', { messages: failedMessages }));
       }
-
       // Uploaded but not indexed (e.g. the embedding service rejected its API key)
       if (result.indexing_failures && result.indexing_failures.length > 0) {
         const indexingMessages = result.indexing_failures.map((failed: { filename: string; error: string }) =>
           `${failed.filename}: ${failed.error}`
         ).join('\n');
-        setError(t('repositoryDetailPage.errors.indexingFailed', { messages: indexingMessages }));
+        problems.push(t('repositoryDetailPage.errors.indexingFailed', { messages: indexingMessages }));
+      }
+      if (problems.length > 0) {
+        setError(problems.join('\n\n'));
       }
 
       // Start monitoring ingestion progress if the backend returned a session_id
@@ -916,7 +916,7 @@ const RepositoryDetailPage: React.FC = () => {
       setResourceToDelete(null);
     } catch (err) {
       console.error('Error deleting resource:', err);
-      setDeleteError(err instanceof Error && err.message ? err.message : 'Failed to delete file');
+      setDeleteError(err instanceof Error && err.message ? err.message : t('repositoryDetailPage.errors.deleteFile'));
       setDeleteFailures((n) => n + 1);
     } finally {
       setDeletingResource(false);
