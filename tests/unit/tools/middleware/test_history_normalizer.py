@@ -39,7 +39,7 @@ from tools.middleware.history_normalizer import (
 
 FAMILY = {
     "OpenAI": hn.OPENAI_RESPONSES, "Anthropic": hn.ANTHROPIC, "MistralAI": hn.MISTRALAI, "Azure": hn.AZURE_AI,
-    "Google": hn.GOOGLE_GENAI, "Custom": hn.OLLAMA,
+    "Google": hn.GOOGLE_GENAI, "Custom": hn.OPENAI_CHAT,  # Custom services are ChatOpenAI on chat completions
 }
 VARIANTS = ["plain", "tool", "tool_with_text", "reasoning_only"]
 PAIRS = [(a, b) for a in PROVIDERS for b in PROVIDERS]
@@ -112,8 +112,8 @@ class TestEveryOrderedProviderPair:
 
         validate_for(b, view(b, messages))
 
-    @pytest.mark.parametrize("a,b", [("OpenAI", "Custom"), ("OpenAI", "Google"), ("Anthropic", "Custom"),
-                                     ("Google", "Custom"), ("OpenAI", "Azure"), ("Anthropic", "Azure")])
+    # No Custom pair: Custom is ChatOpenAI on chat completions, whose converter accepts every raw history.
+    @pytest.mark.parametrize("a,b", [("OpenAI", "Google"), ("OpenAI", "Azure"), ("Anthropic", "Azure")])
     def test_the_raw_history_does_fail_there(self, a, b):
         """Guards the matrix against being vacuous: without the normaliser these pairs break."""
         failures = []
@@ -603,7 +603,7 @@ class TestRobustness:
 
         assert isinstance(bound, RunnableBinding)
         assert hn._unwrap(bound) is base
-        assert model_family(bound) == hn.OLLAMA
+        assert model_family(bound) == hn.OPENAI_CHAT
         assert hn._unwrap(base.with_retry()) is base
 
     def test_adapter_classes_are_resolved_once(self):
