@@ -467,7 +467,7 @@ const RepositoryDetailPage: React.FC = () => {
       setSiloEntityTypes({ mode: 'infer', types: entityTypes, locked: false });
       setShowEntityTypesModal(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save the entity types.');
+      setError(err instanceof Error ? err.message : t('lightrag.repositoryDetailPage.entityTypesSaveError'));
     }
   };
 
@@ -532,22 +532,22 @@ const RepositoryDetailPage: React.FC = () => {
   const handleAzureBlobIngested = (result: IngestAzureBlobsResult) => {
     const found = result.total_blobs;
     if (result.pending_blobs === 0) {
-      toast.success(`Azure Blob: ${found} file(s) found — everything is already up to date.`);
+      toast.success(t('lightrag.repositoryDetailPage.azure.upToDate', { count: found }));
     } else if (result.failed > 0) {
       const capNote = result.pending_blobs > AZURE_BLOB_SAMPLE_SIZE
-        ? ` (${AZURE_BLOB_SAMPLE_SIZE} at random per run — use Update for the rest)`
+        ? t('lightrag.repositoryDetailPage.azure.capNote', { sample: AZURE_BLOB_SAMPLE_SIZE })
         : '';
       toast.warning(
-        `Azure Blob: ${result.queued} file(s) loaded, ${result.failed} could not be indexed.${capNote}`,
+        t('lightrag.repositoryDetailPage.azure.partial', { count: result.queued, failed: result.failed, capNote }),
         { duration: 8000 },
       );
     } else if (result.pending_blobs > AZURE_BLOB_SAMPLE_SIZE) {
       toast.success(
-        `Azure Blob: ${found} file(s) found. Loading ${AZURE_BLOB_SAMPLE_SIZE} at random (validation cap). Use Update to pick up the rest.`,
+        t('lightrag.repositoryDetailPage.azure.capped', { found, sample: AZURE_BLOB_SAMPLE_SIZE }),
         { duration: 8000 },
       );
     } else {
-      toast.success(`Azure Blob: ${found} file(s) found. Loading ${result.queued} new/updated.`);
+      toast.success(t('lightrag.repositoryDetailPage.azure.loading', { count: found, queued: result.queued }));
     }
 
     if (result.session_id) {
@@ -588,7 +588,7 @@ const RepositoryDetailPage: React.FC = () => {
       handleAzureBlobIngested(result);
     } catch (err: any) {
       console.error('Error updating from Azure Blob:', err);
-      setError(err.message || 'Azure Blob update failed');
+      setError(err.message || t('lightrag.repositoryDetailPage.azure.updateFailed'));
     } finally {
       setAzureBlobRunning(false);
     }
@@ -623,7 +623,7 @@ const RepositoryDetailPage: React.FC = () => {
       setShowEstimateModal(true);
     } catch (err: any) {
       console.error('Error estimating upload:', err);
-      setError(err.message || 'Failed to estimate upload cost');
+      setError(err.message || t('lightrag.repositoryDetailPage.estimateFailed'));
       resetPendingUploadEstimate();
     } finally {
       setEstimatingUpload(false);
@@ -843,7 +843,7 @@ const RepositoryDetailPage: React.FC = () => {
     } catch (err) {
       setReindexNotice({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Could not resume the ingestion.',
+        text: err instanceof Error ? err.message : t('lightrag.repositoryDetailPage.resumeError'),
       });
     } finally {
       setResuming(false);
@@ -930,13 +930,13 @@ const RepositoryDetailPage: React.FC = () => {
       const result = await apiService.deleteAllResources(Number.parseInt(appId!), Number.parseInt(repositoryId!));
       await loadRepository();
       if (result.failed_count > 0) {
-        setDeleteAllError(`${result.failed_count} file(s) could not be deleted (${result.deleted_count} deleted). Please retry.`);
+        setDeleteAllError(t('lightrag.repositoryDetailPage.deleteAll.partialFailure', { count: result.failed_count, deleted: result.deleted_count }));
       } else {
         setShowDeleteAllModal(false);
       }
     } catch (err) {
       console.error('Error deleting all resources:', err);
-      setDeleteAllError(err instanceof Error && err.message ? err.message : 'Failed to delete all files');
+      setDeleteAllError(err instanceof Error && err.message ? err.message : t('lightrag.repositoryDetailPage.deleteAll.failed'));
       await loadRepository(); // a partial failure may have removed some files
     } finally {
       setDeletingAll(false);
@@ -1054,7 +1054,7 @@ const RepositoryDetailPage: React.FC = () => {
         />
         {!!repository.total_indexing_duration_seconds && (
           <p className="text-sm text-fg-tertiary dark:text-fg-tertiary-dark mt-1">
-            {formatDuration(repository.total_indexing_duration_seconds, 0)} total indexing time
+            {t('lightrag.repositoryDetailPage.totalIndexingTime', { duration: formatDuration(repository.total_indexing_duration_seconds, 0) })}
           </p>
         )}
         {(repository.transcription_service_id || repository.video_ai_service_id) && (
@@ -1124,7 +1124,7 @@ const RepositoryDetailPage: React.FC = () => {
       {estimatingUpload && (
         <Alert
           type="info"
-          message="Estimating LightRAG ingestion cost before upload..."
+          message={t('lightrag.repositoryDetailPage.estimatingCost')}
           className="mb-6"
         />
       )}
@@ -1164,13 +1164,12 @@ const RepositoryDetailPage: React.FC = () => {
               // ends (the discard step, or the liveness sweep if the run dies
               // first), not at the instant this click lands.
               const removed = stopped > 0
-                ? ` ${stopped} file(s) not started will be removed from the repository.` : '';
+                ? ` ${t('lightrag.repositoryDetailPage.notices.notStartedRemoved', { count: stopped })}` : '';
               setReindexNotice({
                 type: 'info',
                 text: mode === 'pause'
-                  ? 'Pausing. Files already in progress are dropped and redone on resume.'
-                  : `Cancelling — files already being indexed will finish.${removed}`
-                    + ' Nothing already indexed was deleted.',
+                  ? t('lightrag.repositoryDetailPage.notices.pausing')
+                  : `${t('lightrag.repositoryDetailPage.notices.cancelling')}${removed} ${t('lightrag.repositoryDetailPage.notices.nothingDeleted')}`,
               });
             }}
           />
@@ -1277,7 +1276,7 @@ const RepositoryDetailPage: React.FC = () => {
                     disabled={uploadDisabled}
                   />
                   <ButtonApp
-                    label="Import from CSV"
+                    label={t('lightrag.repositoryDetailPage.actions.importCsv')}
                     variant="secondary"
                     size="control"
                     onClick={() => {
@@ -1287,7 +1286,7 @@ const RepositoryDetailPage: React.FC = () => {
                     disabled={uploading || indexingInProgress}
                   />
                   <ButtonApp
-                    label="Load from Azure Blob"
+                    label={t('lightrag.repositoryDetailPage.actions.loadAzureBlob')}
                     variant="secondary"
                     size="control"
                     icon={<Cloud className="w-4 h-4" />}
@@ -1299,7 +1298,7 @@ const RepositoryDetailPage: React.FC = () => {
                   />
                   {repository?.azure_blob_source && (
                     <ButtonApp
-                      label="Update from Azure Blob"
+                      label={t('lightrag.repositoryDetailPage.actions.updateAzureBlob')}
                       variant="secondary"
                       size="control"
                       icon={<RefreshCw className="w-4 h-4" />}
@@ -1309,7 +1308,7 @@ const RepositoryDetailPage: React.FC = () => {
                     />
                   )}
                   <ButtonApp
-                    label="Delete All Files"
+                    label={t('lightrag.repositoryDetailPage.actions.deleteAll')}
                     variant="secondary"
                     size="control"
                     icon={<Trash2 className="w-4 h-4" />}
@@ -1439,10 +1438,10 @@ const RepositoryDetailPage: React.FC = () => {
                                   lock. The data says which one it is either way. */}
                               {resource.status === 'cancelled' && !resource.progress_done && (
                                 <span
-                                  title="Not started before Cancel landed — removed once the run finishes, not resumed."
+                                  title={t('lightrag.repositoryDetailPage.badges.cancelledTitle')}
                                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-gray-200 text-gray-600"
                                 >
-                                  <PauseCircle className="w-3 h-3" /> Cancelled
+                                  <PauseCircle className="w-3 h-3" /> {t('lightrag.repositoryDetailPage.badges.cancelled')}
                                 </span>
                               )}
                               {/* One badge for the remaining unfinished states. Outside a
@@ -1457,17 +1456,17 @@ const RepositoryDetailPage: React.FC = () => {
                                 || (resource.status === 'indexing' && !indexingInProgress)) && (
                                 indexingInProgress && resource.status === 'pending' ? (
                                   <span
-                                    title="Waiting its turn in the running ingestion."
+                                    title={t('lightrag.repositoryDetailPage.badges.queuedTitle')}
                                     className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700"
                                   >
-                                    Queued
+                                    {t('lightrag.repositoryDetailPage.badges.queued')}
                                   </span>
                                 ) : (
                                   <span
-                                    title={'Not fully indexed yet — "Resume indexing" picks this file up.'}
+                                    title={t('lightrag.repositoryDetailPage.badges.willResumeTitle')}
                                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
                                   >
-                                    <PauseCircle className="w-3 h-3" /> Will resume
+                                    <PauseCircle className="w-3 h-3" /> {t('lightrag.repositoryDetailPage.badges.willResume')}
                                   </span>
                                 )
                               )}
@@ -1476,7 +1475,7 @@ const RepositoryDetailPage: React.FC = () => {
                                   title={resource.error_message || undefined}
                                   className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700"
                                 >
-                                  Index failed
+                                  {t('lightrag.repositoryDetailPage.badges.indexFailed')}
                                 </span>
                               )}
                               {repository.vector_db_type === 'LIGHTRAG' &&
@@ -1492,7 +1491,7 @@ const RepositoryDetailPage: React.FC = () => {
                             </div>
                             {resource.status === 'error' && (
                               <p className="text-xs text-error dark:text-error-dark mt-1">
-                                {resource.error_message || 'Indexing failed.'}{canEdit ? ' Fix the cause, then reindex.' : ''}
+                                {resource.error_message || t('lightrag.repositoryDetailPage.badges.indexingFailed')}{canEdit ? ` ${t('lightrag.repositoryDetailPage.badges.fixAndReindex')}` : ''}
                               </p>
                             )}
                           </div>
@@ -1624,20 +1623,22 @@ const RepositoryDetailPage: React.FC = () => {
         onClose={resetPendingUploadEstimate}
         onConfirm={confirmEstimatedUpload}
         confirming={uploading}
-        confirmingLabel="Uploading..."
+        confirmingLabel={t('lightrag.repositoryDetailPage.estimate.uploading')}
         estimate={uploadEstimate}
-        description={`${pendingUploadFiles.length} file(s) selected${selectedFolderPath ? ` for ${selectedFolderPath}` : ' for repository root'}.`}
-        itemsHeading="Files to upload"
+        description={selectedFolderPath
+          ? t('lightrag.repositoryDetailPage.estimate.selectedForFolder', { count: pendingUploadFiles.length, path: selectedFolderPath })
+          : t('lightrag.repositoryDetailPage.estimate.selectedForRoot', { count: pendingUploadFiles.length })}
+        itemsHeading={t('lightrag.repositoryDetailPage.estimate.itemsHeading')}
         items={pendingUploadFiles.map((file) => ({
           key: `${file.name}-${file.size}-${file.lastModified}`,
           label: file.name,
-          meta: `${formatEstimateValue(file.size)} bytes`,
+          meta: t('lightrag.repositoryDetailPage.estimate.bytes', { size: formatEstimateValue(file.size) }),
         }))}
         gate={entityTypesGateRequired ? {
           required: true,
           done: entityTypesSettled,
-          label: 'Define entity types',
-          doneLabel: 'Review entity types',
+          label: t('lightrag.repositoryDetailPage.estimate.defineEntityTypes'),
+          doneLabel: t('lightrag.repositoryDetailPage.estimate.reviewEntityTypes'),
           onOpen: () => setShowEntityTypesModal(true),
         } : undefined}
       />
@@ -1667,7 +1668,7 @@ const RepositoryDetailPage: React.FC = () => {
           <p className="text-fg dark:text-fg-dark mb-6">
             {t('repositoryDetailPage.modals.deleteFile.message', { name: resourceToDelete?.name })}
           </p>
-          <p role="status" className="sr-only">{deletingResource ? 'Deleting file…' : ''}</p>
+          <p role="status" className="sr-only">{deletingResource ? t('lightrag.repositoryDetailPage.deleteAll.deletingFile') : ''}</p>
           {deleteError && (
             <div
               role="alert"
@@ -1703,13 +1704,13 @@ const RepositoryDetailPage: React.FC = () => {
       <Modal
         isOpen={showDeleteAllModal}
         onClose={() => setShowDeleteAllModal(false)}
-        title="Delete All Files"
+        title={t('lightrag.repositoryDetailPage.deleteAll.title')}
       >
         <div className="p-6">
           <p className="text-fg dark:text-fg-dark mb-6">
             {isLightRAG
-              ? `This deletes all ${repository.resources.length} files and ${repository.media.length} media files of this repository and clears the whole knowledge graph of its silo, including anything else indexed into it (for example content sent through the API). It cannot be recovered, and uploading the files again means paying the full LLM extraction cost again.`
-              : `Are you sure you want to delete all ${repository.resources.length} files in this repository? This action cannot be undone.`}
+              ? t('lightrag.repositoryDetailPage.deleteAll.confirmLightrag', { files: repository.resources.length, media: repository.media.length })
+              : t('lightrag.repositoryDetailPage.deleteAll.confirm', { count: repository.resources.length })}
           </p>
           {deleteAllError && (
             <div role="alert" className="mb-6 text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 dark:text-red-300 dark:bg-red-950/40 dark:border-red-800">
@@ -1725,7 +1726,7 @@ const RepositoryDetailPage: React.FC = () => {
               size="medium"
             />
             <ButtonApp
-              label={deletingAll ? 'Deleting…' : 'Delete All'}
+              label={deletingAll ? t('lightrag.repositoryDetailPage.deleteAll.deleting') : t('lightrag.repositoryDetailPage.deleteAll.button')}
               onClick={confirmDeleteAllResources}
               disabled={deletingAll}
               variant="dangerSolid"

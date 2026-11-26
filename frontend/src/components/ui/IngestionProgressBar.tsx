@@ -10,6 +10,7 @@
  */
 
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { AlertCircle, CheckCircle, Loader, PauseCircle, RefreshCw, StopCircle } from 'lucide-react';
 import { useIngestionProgress } from '../../hooks/useIngestionProgress';
 import ConfirmationModal from './ConfirmationModal';
@@ -48,6 +49,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
   onFailed,
   lastFailureMessage = null,
 }) => {
+  const { t } = useTranslation('common');
   const { progress, isConnected, isComplete, failedMessage, error } = useIngestionProgress(
     appId,
     repositoryId,
@@ -130,7 +132,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       {resuming
         ? <Loader className="w-4 h-4 animate-spin" />
         : <RefreshCw className="w-4 h-4" />}
-      {resuming ? 'Resuming…' : `Resume indexing (${resumable})`}
+      {resuming ? t('lightrag.ingestionProgressBar.resuming') : t('lightrag.ingestionProgressBar.resumeIndexing', { count: resumable })}
     </button>
   ) : null;
 
@@ -138,22 +140,16 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     <ConfirmationModal
       isOpen={confirmCancel}
       variant="warning"
-      title="Cancel indexing?"
-      confirmLabel="Cancel indexing"
-      cancelLabel="Keep indexing"
+      title={t('lightrag.ingestionProgressBar.cancelTitle')}
+      confirmLabel={t('lightrag.ingestionProgressBar.cancelConfirm')}
+      cancelLabel={t('lightrag.ingestionProgressBar.keepIndexing')}
       isLoading={stopState?.mode === 'cancel' && stopState.phase === 'stopping'}
       onCancel={() => setConfirmCancel(false)}
       onConfirm={() => {
         setConfirmCancel(false);
         requestStop('cancel');
       }}
-      message={
-        <>
-          Files already being indexed will finish. Files not started yet are
-          removed from the repository — you would need to upload them again.
-          Nothing already indexed is deleted.
-        </>
-      }
+      message={t('lightrag.ingestionProgressBar.cancelMessage')}
     />
   );
 
@@ -164,25 +160,25 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
         type="button"
         onClick={() => requestStop('pause')}
         disabled={busy('pause')}
-        title="Pause indexing. Files in progress are dropped and redone on resume; files not started are kept for later."
+        title={t('lightrag.ingestionProgressBar.pauseTooltip')}
         className={`${stopBtn} ${failed('pause')
           ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100'
           : 'text-amber-700 border-amber-300 bg-white hover:bg-amber-50'}`}
       >
         <PauseCircle className="w-4 h-4" />
-        {failed('pause') ? 'Retry pause' : busy('pause') ? 'Pausing…' : 'Pause'}
+        {failed('pause') ? t('lightrag.ingestionProgressBar.retryPause') : busy('pause') ? t('lightrag.ingestionProgressBar.pausing') : t('lightrag.ingestionProgressBar.pause')}
       </button>
       <button
         type="button"
         onClick={() => setConfirmCancel(true)}
         disabled={busy('cancel')}
-        title="Cancel indexing: finishes the files already started and removes the ones not started yet."
+        title={t('lightrag.ingestionProgressBar.cancelTooltip')}
         className={`${stopBtn} ${failed('cancel')
           ? 'text-red-700 border-red-400 bg-red-50 hover:bg-red-100'
           : 'text-red-700 border-red-300 bg-white hover:bg-red-50'}`}
       >
         <StopCircle className="w-4 h-4" />
-        {failed('cancel') ? 'Retry cancel' : busy('cancel') ? 'Cancelling…' : 'Cancel'}
+        {failed('cancel') ? t('lightrag.ingestionProgressBar.retryCancel') : busy('cancel') ? t('lightrag.ingestionProgressBar.cancelling') : t('cancel')}
       </button>
     </div>
   );
@@ -237,7 +233,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
           <div className="flex-1">
-            <p className="text-red-800 font-medium">Ingestion Failed</p>
+            <p className="text-red-800 font-medium">{t('lightrag.ingestionProgressBar.failedTitle')}</p>
             <p className="text-red-700 text-sm">{lastFailureMessage}</p>
           </div>
           {resumeButton}
@@ -248,19 +244,19 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-center gap-3">
         <PauseCircle className="w-5 h-5 text-amber-600 flex-shrink-0" />
         <p className="text-amber-800 font-medium flex-1">
-          Indexing stopped &mdash; {resumable} file(s) still unindexed.
+          {t('lightrag.ingestionProgressBar.stopped', { count: resumable })}
         </p>
         <button
           type="button"
           onClick={onResume}
           disabled={resuming}
-          title="Pick up an ingestion that was interrupted. Files already indexed are skipped; interrupted files are redone."
+          title={t('lightrag.ingestionProgressBar.resumeTooltip')}
           className={`${stopBtn} text-amber-700 border-amber-300 bg-white hover:bg-amber-50`}
         >
           {resuming
             ? <Loader className="w-4 h-4 animate-spin" />
             : <RefreshCw className="w-4 h-4" />}
-          {resuming ? 'Resuming…' : `Resume indexing (${resumable})`}
+          {resuming ? t('lightrag.ingestionProgressBar.resuming') : t('lightrag.ingestionProgressBar.resumeIndexing', { count: resumable })}
         </button>
       </div>
     );
@@ -272,7 +268,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
         <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
         <div className="flex-1">
-          <p className="text-red-800 font-medium">Ingestion Error</p>
+          <p className="text-red-800 font-medium">{t('lightrag.ingestionProgressBar.errorTitle')}</p>
           <p className="text-red-700 text-sm">{error}</p>
         </div>
       </div>
@@ -288,7 +284,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
           <div className="flex-1">
-            <p className="text-red-800 font-medium">Ingestion Failed</p>
+            <p className="text-red-800 font-medium">{t('lightrag.ingestionProgressBar.failedTitle')}</p>
             <p className="text-red-700 text-sm">{failedMessage}</p>
           </div>
           {resumeButton}
@@ -301,12 +297,12 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       return stopState?.mode === 'cancel' ? (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-3">
           <StopCircle className="w-5 h-5 text-red-600" />
-          <p className="text-red-800 font-medium">Ingestion cancelled</p>
+          <p className="text-red-800 font-medium">{t('lightrag.ingestionProgressBar.cancelled')}</p>
         </div>
       ) : (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-3">
           <CheckCircle className="w-5 h-5 text-green-600" />
-          <p className="text-green-800 font-medium">Indexing complete</p>
+          <p className="text-green-800 font-medium">{t('lightrag.ingestionProgressBar.indexingComplete')}</p>
         </div>
       );
     }
@@ -317,7 +313,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       return (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
           <Loader className="w-5 h-5 text-blue-600 animate-spin" />
-          <p className="text-blue-800 font-medium flex-1">Indexing in progress...</p>
+          <p className="text-blue-800 font-medium flex-1">{t('lightrag.ingestionProgressBar.inProgress')}</p>
           {stopControls}
         </div>
       );
@@ -325,7 +321,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
     return (
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
         <Loader className="w-5 h-5 text-blue-600 animate-spin" />
-        <p className="text-blue-800 font-medium flex-1">Connecting to indexing session...</p>
+        <p className="text-blue-800 font-medium flex-1">{t('lightrag.ingestionProgressBar.connecting')}</p>
         {stopControls}
       </div>
     );
@@ -363,8 +359,8 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
           )}
           <span className="font-medium text-gray-900">
             {failedMessage
-              ? 'Ingestion Failed'
-              : isComplete ? (cancelled ? 'Ingestion Cancelled' : 'Ingestion Complete') : 'Ingesting Documents'}
+              ? t('lightrag.ingestionProgressBar.failedTitle')
+              : isComplete ? (cancelled ? t('lightrag.ingestionProgressBar.cancelledTitle') : t('lightrag.ingestionProgressBar.completeTitle')) : t('lightrag.ingestionProgressBar.ingesting')}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -396,20 +392,20 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       <div className="grid grid-cols-2 gap-4 text-sm">
         {/* Chunks */}
         <div className="bg-gray-50 rounded p-2">
-          <p className="text-gray-600 text-xs">Chunks</p>
+          <p className="text-gray-600 text-xs">{t('lightrag.ingestionProgressBar.chunks')}</p>
           <p className="font-mono font-medium">
             {progress.processed_chunks}/{progress.total_chunks}
           </p>
           {progress.failed_chunks > 0 && (
             <p className="text-red-600 text-xs mt-1">
-              {progress.failed_chunks} failed
+              {t('lightrag.ingestionProgressBar.chunksFailed', { count: progress.failed_chunks })}
             </p>
           )}
         </div>
 
         {/* Time */}
         <div className="bg-gray-50 rounded p-2">
-          <p className="text-gray-600 text-xs">Time</p>
+          <p className="text-gray-600 text-xs">{t('lightrag.ingestionProgressBar.time')}</p>
           <p className="font-mono font-medium">
             {formatTime(progress.elapsed_seconds)}
             {throttledEstimates.remaining !== null &&
@@ -423,7 +419,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
           {throttledEstimates.remaining !== null &&
             throttledEstimates.remaining > 0 && (
               <p className="text-blue-600 text-xs mt-1">
-                ETA: {formatTime(throttledEstimates.remaining)}
+                {t('lightrag.ingestionProgressBar.eta', { time: formatTime(throttledEstimates.remaining) })}
               </p>
             )}
         </div>
@@ -432,7 +428,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       {/* Current chunk */}
       {progress.current_chunk_name && (
         <div className="bg-blue-50 rounded p-2 text-xs text-gray-700 truncate">
-          <span className="text-gray-600">Current: </span>
+          <span className="text-gray-600">{t('lightrag.ingestionProgressBar.current')} </span>
           <span className="font-mono">{progress.current_chunk_name}</span>
         </div>
       )}
@@ -441,7 +437,7 @@ export const IngestionProgressBar: React.FC<IngestionProgressBarProps> = ({
       {!isConnected && !isComplete && !failedMessage && (
         <div className="text-xs text-amber-600 flex items-center gap-1">
           <div className="w-2 h-2 rounded-full bg-amber-600 animate-pulse" />
-          Reconnecting...
+          {t('lightrag.ingestionProgressBar.reconnecting')}
         </div>
       )}
 

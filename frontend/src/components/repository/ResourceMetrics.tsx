@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Clock, Cpu, AlertCircle, Loader2, DollarSign } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { apiService } from '../../services/api';
 
 interface IndexingMetric {
@@ -69,6 +70,7 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
     resourceStatus,
     variant = 'inline',
 }) => {
+    const { t } = useTranslation('common');
     const [metric, setMetric] = useState<IndexingMetric | null>(null);
     const [loading, setLoading] = useState(true);
     const [noData, setNoData] = useState(false);
@@ -140,35 +142,35 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
         return (
             <span className="inline-flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 ml-2">
                 {isNoOpReindex(metric) && (
-                    <span title="LightRAG found this content already indexed under a different internal ID and skipped re-extracting it — not a failure, just no new work this run">
-                        already indexed, no new work
+                    <span title={t('lightrag.resourceMetrics.noOpTooltip')}>
+                        {t('lightrag.resourceMetrics.noOpInline')}
                     </span>
                 )}
                 {metric.total_tokens > 0 && (
-                    <span title={`LLM tokens: ${metric.prompt_tokens} in + ${metric.completion_tokens} out${metric.tokens_source === 'estimated' ? ' (estimated)' : ''}`}>
+                    <span title={t(metric.tokens_source === 'estimated' ? 'lightrag.resourceMetrics.llmTokensTooltipEstimated' : 'lightrag.resourceMetrics.llmTokensTooltip', { input: metric.prompt_tokens, output: metric.completion_tokens })}>
                         <Cpu className="w-3 h-3 inline mr-0.5" />
-                        {metric.total_tokens.toLocaleString()} LLM
+                        {t('lightrag.resourceMetrics.llmShort', { value: metric.total_tokens.toLocaleString() })}
                     </span>
                 )}
                 {(metric.embedding_tokens ?? 0) > 0 && (
-                    <span title={`Embedding tokens: ${metric.embedding_tokens!.toLocaleString()} (estimated)`}>
-                        {metric.embedding_tokens!.toLocaleString()} emb
+                    <span title={t('lightrag.resourceMetrics.embeddingTokensTooltip', { value: metric.embedding_tokens!.toLocaleString() })}>
+                        {t('lightrag.resourceMetrics.embShort', { value: metric.embedding_tokens!.toLocaleString() })}
                     </span>
                 )}
                 {metric.duration_seconds != null && (
-                    <span title="Indexing duration">
+                    <span title={t('lightrag.resourceMetrics.durationTooltip')}>
                         <Clock className="w-3 h-3 inline mr-0.5" />
                         {formatDuration(metric.duration_seconds, 1)}
                     </span>
                 )}
                 {metric.cost != null && (
-                    <span title={`Estimated cost (${metric.currency ?? 'USD'})`}>
+                    <span title={t('lightrag.resourceMetrics.costTooltip', { currency: metric.currency ?? 'USD' })}>
                         <DollarSign className="w-3 h-3 inline mr-0.5" />
                         {metric.cost < 0.001 ? '<$0.001' : `$${metric.cost.toFixed(4)}`}
                     </span>
                 )}
                 {metric.status === 'failed' && (
-                    <span title="Indexing failed">
+                    <span title={t('lightrag.resourceMetrics.failedTooltip')}>
                         <AlertCircle className="w-3 h-3 text-red-400" />
                     </span>
                 )}
@@ -179,62 +181,61 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
     // Panel variant — full detail card
     return (
         <div className="text-xs bg-gray-50 dark:bg-gray-800 rounded p-3 space-y-1.5 border border-gray-200 dark:border-gray-700">
-            <div className="font-semibold text-gray-600 dark:text-gray-300 mb-1">Indexing Metrics</div>
+            <div className="font-semibold text-gray-600 dark:text-gray-300 mb-1">{t('lightrag.resourceMetrics.panelTitle')}</div>
             {isNoOpReindex(metric) && (
                 <div className="text-gray-400 italic">
-                    Already indexed — LightRAG found this content under a different
-                    internal ID and made no new LLM/embedding calls.
+                    {t('lightrag.resourceMetrics.noOpPanel')}
                 </div>
             )}
             <div className="flex justify-between">
-                <span className="text-gray-500">Status</span>
+                <span className="text-gray-500">{t('lightrag.resourceMetrics.status')}</span>
                 <span className={metric.status === 'success' ? 'text-green-600' : 'text-red-500'}>
                     {metric.status}
                 </span>
             </div>
             <div className="flex justify-between">
-                <span className="text-gray-500">LLM tokens</span>
+                <span className="text-gray-500">{t('lightrag.resourceMetrics.llmTokens')}</span>
                 <span>
                     {metric.total_tokens.toLocaleString()}
                     {metric.tokens_source === 'estimated' && (
-                        <span className="ml-1 text-gray-400">(est.)</span>
+                        <span className="ml-1 text-gray-400">{t('lightrag.resourceMetrics.estShort')}</span>
                     )}
                 </span>
             </div>
             <div className="flex justify-between">
-                <span className="text-gray-500">LLM prompt / completion</span>
+                <span className="text-gray-500">{t('lightrag.resourceMetrics.promptCompletion')}</span>
                 <span>
                     {metric.prompt_tokens.toLocaleString()} / {metric.completion_tokens.toLocaleString()}
                 </span>
             </div>
             {(metric.embedding_tokens ?? 0) > 0 && (
                 <div className="flex justify-between">
-                    <span className="text-gray-500">Embedding tokens</span>
-                    <span>{metric.embedding_tokens!.toLocaleString()} <span className="text-gray-400">(est.)</span></span>
+                    <span className="text-gray-500">{t('lightrag.resourceMetrics.embeddingTokens')}</span>
+                    <span>{metric.embedding_tokens!.toLocaleString()} <span className="text-gray-400">{t('lightrag.resourceMetrics.estShort')}</span></span>
                 </div>
             )}
             <div className="flex justify-between">
-                <span className="text-gray-500">LLM calls</span>
+                <span className="text-gray-500">{t('lightrag.resourceMetrics.llmCalls')}</span>
                 <span>{metric.llm_calls}</span>
             </div>
             {metric.duration_seconds != null && (
                 <div className="flex justify-between">
-                    <span className="text-gray-500">Duration</span>
+                    <span className="text-gray-500">{t('lightrag.resourceMetrics.duration')}</span>
                     <span>{formatDuration(metric.duration_seconds, 2)}</span>
                 </div>
             )}
             <div className="flex justify-between">
-                <span className="text-gray-500">Estimated cost</span>
+                <span className="text-gray-500">{t('lightrag.resourceMetrics.estimatedCost')}</span>
                 <span>
                     {metric.cost != null
                         ? `${metric.cost < 0.0001 ? '<$0.0001' : `$${metric.cost.toFixed(6)}`} ${metric.currency ?? ''}`
-                        : <span className="text-gray-400">Pricing unavailable</span>
+                        : <span className="text-gray-400">{t('lightrag.resourceMetrics.pricingUnavailable')}</span>
                     }
                 </span>
             </div>
             {metric.model_name && (
                 <div className="flex justify-between">
-                    <span className="text-gray-500">LLM model</span>
+                    <span className="text-gray-500">{t('lightrag.resourceMetrics.llmModel')}</span>
                     <span className="truncate max-w-[60%]" title={metric.model_name}>
                         {metric.model_name}
                     </span>
@@ -242,7 +243,7 @@ const ResourceMetrics: React.FC<ResourceMetricsProps> = ({
             )}
             {metric.embedding_model_name && (
                 <div className="flex justify-between">
-                    <span className="text-gray-500">Embedding model</span>
+                    <span className="text-gray-500">{t('lightrag.resourceMetrics.embeddingModel')}</span>
                     <span className="truncate max-w-[60%]" title={metric.embedding_model_name}>
                         {metric.embedding_model_name}
                     </span>

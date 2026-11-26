@@ -14,6 +14,7 @@ import type { GraphSourceDoc } from '../../utils/siloGraphUtils';
 import { apiService } from '../../services/api';
 import { openSourcePdf } from '../../utils/openSourcePdf';
 import { Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface Props {
   graphData: LightRAGGraphData;
@@ -64,6 +65,7 @@ function toNvlRels(rels: LightRAGRelationship[], nodeIds: Set<string>, cited: Se
 }
 
 export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, siloId, title, chunkNumbers }: Props) {
+  const { t } = useTranslation('common');
   const [expanded, setExpanded] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [openChunk, setOpenChunk] = useState<number | null>(null);
@@ -270,8 +272,13 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
           <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300 flex-1">
             {title ? `${title} · ` : ''}
             {hasGraph
-              ? `Knowledge subgraph · ${entityCount} ${entityCount === 1 ? 'entity' : 'entities'} · ${relCount} ${relCount === 1 ? 'relationship' : 'relationships'}${chunkCount > 0 ? ` · ${chunkCount} ${chunkCount === 1 ? 'chunk' : 'chunks'}` : ''}`
-              : `${chunkCount} ${chunkCount === 1 ? 'chunk' : 'chunks'}`}
+              ? [
+                  t('lightrag.graphBubble.knowledgeSubgraph'),
+                  t('lightrag.graphBubble.entityCount', { count: entityCount }),
+                  t('lightrag.graphBubble.relationshipCount', { count: relCount }),
+                  ...(chunkCount > 0 ? [t('lightrag.graphBubble.chunkCount', { count: chunkCount })] : []),
+                ].join(' · ')
+              : t('lightrag.graphBubble.chunkCount', { count: chunkCount })}
           </span>
           <svg
             className={`w-4 h-4 text-indigo-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
@@ -290,13 +297,13 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                   const isCited = citedSet.has(c.id);
                   const srcLabel = c.file_path && c.file_path !== 'unknown_source'
                     ? c.file_path
-                    : 'Unknown source';
+                    : t('lightrag.graphBubble.unknownSource');
                   return (
                     <button
                       key={`${c.id ?? 'chunk'}-${idx}`}
                       onClick={(e) => toggleChunk(idx, e)}
                       aria-expanded={isOpen}
-                      title={isCited ? `${srcLabel} (citado en la respuesta)` : srcLabel}
+                      title={isCited ? t('lightrag.graphBubble.citedInAnswer', { source: srcLabel }) : srcLabel}
                       className={`inline-flex items-center gap-1 text-xs rounded-full px-2.5 py-1 transition-colors ${isOpen
                         ? isCited
                           ? 'bg-green-200 dark:bg-green-900/60 text-green-800 dark:text-green-200'
@@ -325,11 +332,11 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                     <circle cx="12" cy="12" r="3" />
                     <path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14" />
                   </svg>
-                  View subgraph
+                  {t('lightrag.graphBubble.viewSubgraph')}
                 </button>
                 <label
                   className="inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400"
-                  title="Color nodes by entity type; when off, cited nodes are green and retrieved ones indigo"
+                  title={t('lightrag.graphBubble.colorByTypeHint')}
                 >
                   <input
                     type="checkbox"
@@ -337,7 +344,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                     onChange={(e) => setTypeColoring(e.target.checked)}
                     className="accent-indigo-600"
                   />
-                  Color by type
+                  {t('lightrag.graphBubble.colorByType')}
                 </label>
               </div>
             )}
@@ -370,15 +377,15 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
               <span className="font-semibold text-gray-800 dark:text-gray-100 break-all" title={openGroup.chunk.file_path ?? ''}>
                 {openGroup.chunk.file_path && openGroup.chunk.file_path !== 'unknown_source'
                   ? openGroup.chunk.file_path
-                  : 'Unknown source'}
+                  : t('lightrag.graphBubble.unknownSource')}
                 {openNumbers.length > 0 && (
-                  <span className="ml-1 font-normal text-gray-400">· {openNumbers.length === 1 ? 'Chunk' : 'Chunks'} {openNumbers.join(', ')}</span>
+                  <span className="ml-1 font-normal text-gray-400">· {t('lightrag.graphBubble.chunkWord', { count: openNumbers.length })} {openNumbers.join(', ')}</span>
                 )}
               </span>
               <button
                 onClick={() => { setOpenChunk(null); setPopoverPos(null); }}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0"
-                aria-label="Close"
+                aria-label={t('close')}
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -387,7 +394,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
             </div>
             <div className="max-h-80 overflow-y-auto p-3">
               <p className="whitespace-pre-wrap leading-relaxed">
-                {openGroup.chunk.content ?? '(no content)'}
+                {openGroup.chunk.content ?? t('lightrag.graphBubble.noContent')}
               </p>
             </div>
             <OpenPdfButton
@@ -409,7 +416,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
           onClick={closeModal}
           role="dialog"
           aria-modal="true"
-          aria-label="Knowledge subgraph"
+          aria-label={t('lightrag.graphBubble.knowledgeSubgraph')}
         >
           <div
             className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-[90vw] h-[80vh] max-w-5xl flex flex-col overflow-hidden"
@@ -417,12 +424,12 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
               <span className="font-semibold text-gray-800 dark:text-gray-100 text-sm">
-                Knowledge subgraph · {entityCount} {entityCount === 1 ? 'entity' : 'entities'} · {relCount} {relCount === 1 ? 'relationship' : 'relationships'}
+                {t('lightrag.graphBubble.modalTitle', { entities: t('lightrag.graphBubble.entityCount', { count: entityCount }), relationships: t('lightrag.graphBubble.relationshipCount', { count: relCount }) })}
               </span>
               <button
                 onClick={closeModal}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
-                aria-label="Close"
+                aria-label={t('close')}
               >
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -433,17 +440,17 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
               {hasCited && (
                 <span className="inline-flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: RING_CITED }} aria-hidden="true" />
-                  In cited sources
+                  {t('lightrag.graphBubble.inCitedSources')}
                 </span>
               )}
               <span className="inline-flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: RING_RETRIEVED }} aria-hidden="true" />
-                Retrieved
+                {t('lightrag.graphBubble.retrieved')}
               </span>
               {entities.some((e) => e.partial) && (
                 <span className="inline-flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: PARTIAL_COLOR }} aria-hidden="true" />
-                  Partial (relationship endpoint)
+                  {t('lightrag.graphBubble.partial')}
                 </span>
               )}
             </div>
@@ -477,7 +484,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                             <button
                               onClick={() => setSelectedEntity(null)}
                               className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0 mt-0.5"
-                              aria-label="Close details"
+                              aria-label={t('lightrag.graphBubble.closeDetails')}
                             >
                               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -499,7 +506,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                           </div>
                           {(entitySourcesLoading || (entitySources && entitySources.length > 0)) && (
                             <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5">
-                              <p className="text-gray-500 dark:text-gray-400 mb-1">Source documents</p>
+                              <p className="text-gray-500 dark:text-gray-400 mb-1">{t('lightrag.graphBubble.sourceDocuments')}</p>
                               {entitySourcesLoading ? (
                                 <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
                               ) : (
@@ -507,15 +514,15 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                                   {(entitySources ?? []).map((s) => {
                                     const label = s.file_name
                                       ? s.page != null
-                                        ? `${s.file_name} (p. ${s.page})`
+                                        ? t('lightrag.graphBubble.fileWithPage', { file: s.file_name, page: s.page })
                                         : s.file_name
-                                      : 'Unknown source';
+                                      : t('lightrag.graphBubble.unknownSource');
                                     const openable = s.resource_id != null && s.page != null && appId != null;
                                     return openable ? (
                                       <button
                                         key={s.chunk_id}
                                         onClick={() => openSourcePdf(appId!, selectedEntity.silo_id ?? siloId!, s.resource_id!, s.page!)}
-                                        title={`Open ${s.file_name} at page ${s.page}`}
+                                        title={t('lightrag.graphBubble.openAtPage', { file: s.file_name, page: s.page })}
                                         className="max-w-full truncate rounded-full bg-green-50 dark:bg-green-900/40 text-green-700 dark:text-green-300 px-1.5 py-0.5 hover:bg-green-100 dark:hover:bg-green-900/60"
                                       >
                                         {label}
@@ -523,7 +530,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                                     ) : (
                                       <span
                                         key={s.chunk_id}
-                                        title="Source file not available"
+                                        title={t('lightrag.graphBubble.sourceUnavailable')}
                                         className="max-w-full truncate rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 px-1.5 py-0.5"
                                       >
                                         {label}
@@ -545,12 +552,12 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                             <>
                               <div className="flex items-start justify-between gap-2">
                                 <span className="font-semibold text-gray-800 dark:text-gray-100 break-all">
-                                  {String(rel.type ?? rel.keywords ?? rel.description ?? 'relationship')}
+                                  {String(rel.type ?? rel.keywords ?? rel.description ?? t('lightrag.graphBubble.relationship'))}
                                 </span>
                                 <button
                                   onClick={() => setSelectedRel(null)}
                                   className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0 mt-0.5"
-                                  aria-label="Close details"
+                                  aria-label={t('lightrag.graphBubble.closeDetails')}
                                 >
                                   <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -558,7 +565,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                                 </button>
                               </div>
                               <div className="border-t border-gray-100 dark:border-gray-700 pt-1.5 space-y-1">
-                                <p className="text-gray-500 dark:text-gray-400">Connects</p>
+                                <p className="text-gray-500 dark:text-gray-400">{t('lightrag.graphBubble.connects')}</p>
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   {endpoints.map((e, i) => (
                                     <React.Fragment key={String(e.id)}>
@@ -604,7 +611,7 @@ export default function LightRAGGraphBubble({ graphData, citedChunkIds, appId, s
                 </>
               ) : (
                 <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-                  No entities to display
+                  {t('lightrag.graphBubble.noEntities')}
                 </div>
               )}
             </div>

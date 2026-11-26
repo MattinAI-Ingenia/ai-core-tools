@@ -267,7 +267,7 @@ function SiloPlaygroundPage() {
           ariaLabel={t('siloPlayground.search')}
           tabs={[
             { id: 'search', label: t('siloPlayground.search') },
-            { id: 'graph', label: 'Knowledge Graph' },
+            { id: 'graph', label: t('lightrag.siloPlaygroundPage.knowledgeGraphTab') },
           ]}
           activeTab={activeTab}
           onChange={(tab) => setActiveTab(tab as 'search' | 'graph')}

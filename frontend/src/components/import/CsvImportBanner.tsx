@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import Alert from '../ui/Alert';
 import type { ImportJob } from '../../types/csvImport';
 
@@ -7,11 +8,12 @@ interface CsvImportBannerProps {
 }
 
 export function CsvImportBanner({ job, onReview }: Readonly<CsvImportBannerProps>) {
+  const { t } = useTranslation('common');
   const { total, downloaded, failed } = job.counts;
 
   if (job.status === 'DOWNLOADING') {
     const done = downloaded + failed;
-    return <Alert type="info" message={`Import in progress: ${done}/${total} completed`} className="mb-4" />;
+    return <Alert type="info" message={t('lightrag.csvImportBanner.inProgress', { done, total })} className="mb-4" />;
   }
 
   return (
@@ -20,8 +22,8 @@ export function CsvImportBanner({ job, onReview }: Readonly<CsvImportBannerProps
       className="mb-4"
       message={
         <span>
-          {`Import ready: ${downloaded} OK, ${failed} failed — `}
-          <button type="button" className="underline" onClick={onReview}>review</button>
+          {t('lightrag.csvImportBanner.ready', { downloaded, failed })}{' '}
+          <button type="button" className="underline" onClick={onReview}>{t('lightrag.csvImportBanner.review')}</button>
         </span>
       }
     />

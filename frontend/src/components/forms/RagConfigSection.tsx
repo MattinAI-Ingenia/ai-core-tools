@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { Info, Target, Trash2 } from 'lucide-react';
 import type { MetadataOperator, SearchFilterMetadataField } from '../playground/SearchFilters';
 import { randomId } from '../../utils/randomId';
@@ -45,9 +45,9 @@ interface RagConfigSectionProps {
   chunkTopKDeploymentDefault?: number;
 }
 
-const RAG_K_MODES: Array<{ value: RagKMode; label: string }> = [
-  { value: 'fixed', label: 'Fixed K' },
-  { value: 'per_100_chunks', label: 'K per 100 chunks' },
+const RAG_K_MODES: Array<{ value: RagKMode; labelKey: string }> = [
+  { value: 'fixed', labelKey: 'lightrag.ragConfigSection.kModeFixed' },
+  { value: 'per_100_chunks', labelKey: 'lightrag.ragConfigSection.kModePer100' },
 ];
 
 // Not a hard limit — just a heads-up that very high k increases latency/cost. Mirrors the
@@ -232,10 +232,10 @@ function RagConfigSection({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div>
           <FormSelect
-            label={isLightRAG ? 'Entities to retrieve' : t('agentFormPage.ragConfig.documentsToRetrieve')}
+            label={isLightRAG ? t('lightrag.ragConfigSection.entitiesToRetrieve') : t('agentFormPage.ragConfig.documentsToRetrieve')}
             id="rag_k_mode"
             value={value.rag_k_mode}
-            options={RAG_K_MODES.map((m) => ({ value: m.value, label: m.label }))}
+            options={RAG_K_MODES.map((m) => ({ value: m.value, label: t(m.labelKey) }))}
             onChange={(e) => onChange({ rag_k_mode: e.target.value as RagKMode })}
             className="mb-3"
           />
@@ -246,8 +246,8 @@ function RagConfigSection({
             value={ragKText}
             helpText={isLightRAG
               ? (value.rag_k_mode === 'per_100_chunks'
-                ? "Entities/relations fetched per 100 chunks indexed in the silo (LightRAG's top_k) — scales with knowledge-base size."
-                : "Number of entities/relations from the knowledge graph considered per search (LightRAG's top_k) — not text chunks.")
+                ? t('lightrag.ragConfigSection.kHelpPer100')
+                : t('lightrag.ragConfigSection.kHelpFixed'))
               : t('agentFormPage.ragConfig.documentsToRetrieveHelp')}
             onChange={(e) => handleRagKChange(e.target.value)}
             onBlur={handleRagKBlur}
@@ -255,7 +255,7 @@ function RagConfigSection({
           {value.rag_k > RAG_K_SOFT_MAX && (
             <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
               <Info className="w-3.5 h-3.5 shrink-0" />
-              High values increase latency and cost.
+              {t('lightrag.ragConfigSection.highValues')}
             </p>
           )}
         </div>
@@ -268,9 +268,9 @@ function RagConfigSection({
               min={1}
               value={chunkTopKText}
               placeholder={
-                chunkTopKDeploymentDefault != null ? `Default: ${chunkTopKDeploymentDefault}` : 'Deployment default'
+                chunkTopKDeploymentDefault != null ? t('lightrag.ragConfigSection.chunkTopKDefault', { value: chunkTopKDeploymentDefault }) : t('lightrag.ragConfigSection.chunkTopKDeploymentDefault')
               }
-              helpText={`Number of text chunks fetched per search (LightRAG's chunk_top_k). Empty uses the deployment's default (${chunkTopKDeploymentDefault != null ? `currently ${chunkTopKDeploymentDefault}` : 'CHUNK_TOP_K env setting'}).`}
+              helpText={t('lightrag.ragConfigSection.chunkTopKHelp', { current: chunkTopKDeploymentDefault != null ? t('lightrag.ragConfigSection.chunkTopKCurrently', { value: chunkTopKDeploymentDefault }) : t('lightrag.ragConfigSection.chunkTopKEnv') })}
               onChange={(e) => handleChunkTopKChange(e.target.value)}
               onBlur={handleChunkTopKBlur}
             />
@@ -300,26 +300,27 @@ function RagConfigSection({
         {isLightRAG ? (
           <div className="md:col-span-2">
             <FormSelect
-              label="LightRAG Query Mode"
+              label={t('lightrag.ragConfigSection.queryMode')}
               id="lightrag_query_mode"
               value={lightragQueryMode ?? 'skill-routed'}
               options={(lightragQueryModes ?? ['skill-routed', 'local', 'global', 'hybrid', 'mix', 'naive', 'bypass']).map((mode) => ({
                 value: mode,
-                label: mode === 'skill-routed' ? 'Skill-Routed (auto)' : mode === 'hybrid' ? `${mode} (default fallback)` : mode,
+                label: mode === 'skill-routed' ? t('lightrag.ragConfigSection.skillRouted') : mode === 'hybrid' ? t('lightrag.ragConfigSection.hybridDefault', { mode }) : mode,
               }))}
               onChange={(e) => onLightragQueryModeChange?.(e.target.value)}
             />
             <p className="text-xs text-fg-tertiary dark:text-fg-tertiary-dark mt-1">
-              skill-routed = agent picks mode per question · local = entity neighbors · global = community summaries ·
-              hybrid = local + global · mix = all strategies · naive = vector-only · bypass = skip retrieval
+              {t('lightrag.ragConfigSection.modeLegend')}
             </p>
             {(lightragQueryMode ?? 'skill-routed') === 'skill-routed' && (
               <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-start gap-2 dark:bg-purple-900/20 dark:border-purple-800">
                 <span className="text-purple-600 mt-0.5 text-sm">⚡</span>
                 <p className="text-xs text-purple-800 dark:text-purple-200">
-                  <span className="font-semibold">LightRAG Query Router</span> — the agent will automatically
-                  select the best retrieval strategy (local / global / hybrid / mix / naive) per question.
-                  A routing skill will be added to this agent on save.
+                  <Trans
+                    i18nKey="lightrag.ragConfigSection.routerBanner"
+                    t={t}
+                    components={{ strong: <span className="font-semibold" /> }}
+                  />
                 </p>
               </div>
             )}

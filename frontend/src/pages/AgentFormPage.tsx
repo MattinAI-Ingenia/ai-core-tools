@@ -714,8 +714,8 @@ function AgentFormPage() {
           : {}),
     }));
 
-    if (snapToHybrid) toast.info('Query mode switched to hybrid — save to apply.');
-    if (snapToSkillRouted) toast.info('Query mode switched to skill-routed — save to apply.');
+    if (snapToHybrid) toast.info(t('lightrag.agentFormPage.queryModeHybrid'));
+    if (snapToSkillRouted) toast.info(t('lightrag.agentFormPage.queryModeSkillRouted'));
   };
 
   const handleA2AChange = useCallback((patch: Partial<AgentA2AValue>) => {
@@ -1443,10 +1443,9 @@ function AgentFormPage() {
                             className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                           />
                           <div className="ml-3">
-                            <label htmlFor="is_knowledge_router" className="text-sm font-medium text-gray-900">Knowledge router</label>
+                            <label htmlFor="is_knowledge_router" className="text-sm font-medium text-gray-900">{t('lightrag.agentFormPage.knowledgeRouter')}</label>
                             <p className="text-xs text-gray-500">
-                              Routes each question to the specialist agent(s) whose description matches; a single
-                              specialist's answer is shown as-is. This agent's own silo is not used.
+                              {t('lightrag.agentFormPage.knowledgeRouterHelp')}
                             </p>
                           </div>
                         </div>
@@ -1911,7 +1910,7 @@ function AgentFormPage() {
                             skill.description,
                             skill.is_system ? t('agentFormPage.advanced.systemSkill') : undefined,
                             skill.is_enabled === false ? t('agentFormPage.advanced.disabledSkillHelp') : undefined,
-                            isRouterDisabled ? 'Requires a LightRAG silo' : undefined,
+                            isRouterDisabled ? t('lightrag.agentFormPage.routerRequiresSilo') : undefined,
                           ].filter(Boolean).join(' ') || undefined;
                           return (
                             <ButtonCard

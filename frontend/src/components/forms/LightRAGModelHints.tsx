@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { Lightbulb } from 'lucide-react';
 import type { LightRAGRole } from '../../utils/lightragModelSpecs';
 
@@ -46,12 +47,13 @@ const RECS: Partial<Record<LightRAGRole, { provider: string; model: string }[]>>
 };
 
 export function LightRAGModelHints({ role }: Readonly<{ role: LightRAGRole }>) {
+  const { t } = useTranslation('common');
   const recs = RECS[role];
   if (!recs) return null;
   return (
     <details className="mt-1 text-sm">
       <summary className="cursor-pointer select-none flex items-center gap-1 text-gray-500 hover:text-gray-700">
-        <Lightbulb className="w-3.5 h-3.5" /> Suggested models per provider
+        <Lightbulb className="w-3.5 h-3.5" /> {t('lightrag.modelHints.summary')}
       </summary>
       <ul className="mt-2 space-y-1 bg-gray-50 border border-gray-200 rounded p-3">
         {recs.map(({ provider, model }) => (

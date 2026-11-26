@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Info, Loader2, RefreshCw, Search } from 'lucide-react';
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react';
 import type { MouseEventCallbacks } from '@neo4j-nvl/react';
@@ -55,10 +56,12 @@ function toNvlRels(edges: GraphEdge[], nodes: GraphNode[], chosenIds: Set<string
  * Falls back gracefully when Neo4j is unreachable (503) or silo is non-LightRAG (409).
  */
 const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
+    const { t } = useTranslation('common');
     const [graphData, setGraphData] = useState<SiloGraphData | null>(null);
     const [loading, setLoading] = useState(true);
+    // `error` holds an i18n key (translated at render) so a language switch updates it.
     const [error, setError] = useState<string | null>(null);
-    const [notice, setNotice] = useState<string | null>(null);
+    const [notice, setNotice] = useState<{ count: number; node: string } | null>(null);
     const [search, setSearch] = useState('');
     const DEFAULT_MAX_NODES = 50;
     // Slider ceiling — the renderer chokes well beyond this on a large silo,
@@ -97,11 +100,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
                 if (status === 409) {
-                    setError('This silo does not use LightRAG and has no knowledge graph.');
+                    setError('lightrag.siloGraphView.errors.notLightrag');
                 } else if (status === 503) {
-                    setError('Neo4j is not available. Check your configuration.');
+                    setError('lightrag.siloGraphView.errors.neo4jUnavailable');
                 } else {
-                    setError('Failed to load graph data.');
+                    setError('lightrag.siloGraphView.errors.loadFailed');
                 }
             } finally {
                 setLoading(false);
@@ -133,11 +136,11 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
                 if (status === 503) {
-                    setError('Neo4j is not available. Check your configuration.');
+                    setError('lightrag.siloGraphView.errors.neo4jUnavailable');
                 } else if (status === 404) {
-                    setError('That node is no longer in the graph. Refresh to reload it.');
+                    setError('lightrag.siloGraphView.errors.nodeGone');
                 } else {
-                    setError('Failed to load neighbors.');
+                    setError('lightrag.siloGraphView.errors.neighborsFailed');
                 }
                 return null;
             }
@@ -160,19 +163,15 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                 // A truncated result means the node cap dominated: raising the
                 // depth can't add nodes, so say so instead of silently
                 // returning an identical view.
-                setNotice(
-                    data.truncated
-                        ? `Showing the most connected ${data.nodes.length} nodes around "${nodeId}" (node cap). A higher depth won't add more — raise the Nodes slider or use a more specific entity.`
-                        : null,
-                );
+                setNotice(data.truncated ? { count: data.nodes.length, node: nodeId } : null);
             } catch (err: unknown) {
                 const status = (err as { status?: number })?.status;
                 if (status === 404) {
-                    setError('That node is no longer in the graph. Refresh to reload it.');
+                    setError('lightrag.siloGraphView.errors.nodeGone');
                 } else if (status === 503) {
-                    setError('Neo4j is not available. Check your configuration.');
+                    setError('lightrag.siloGraphView.errors.neo4jUnavailable');
                 } else {
-                    setError('Failed to load graph data.');
+                    setError('lightrag.siloGraphView.errors.loadFailed');
                 }
             }
         },
@@ -237,7 +236,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
         return (
             <div className="flex items-center justify-center h-64 text-gray-500">
                 <Loader2 className="w-6 h-6 animate-spin mr-2" />
-                Loading knowledge graph…
+                {t('lightrag.siloGraphView.loading')}
             </div>
         );
     }
@@ -246,7 +245,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
         return (
             <div className="flex items-center gap-3 p-4 bg-yellow-50 border border-yellow-200 rounded text-yellow-800">
                 <AlertTriangle className="w-5 h-5 shrink-0" />
-                <span className="text-sm">{error}</span>
+                <span className="text-sm">{t(error)}</span>
             </div>
         );
     }
@@ -283,7 +282,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
             {notice && (
                 <div className="flex items-center gap-2 p-2 bg-indigo-50 dark:bg-indigo-900/30 border-b border-indigo-100 dark:border-indigo-900 text-indigo-700 dark:text-indigo-300 text-xs shrink-0">
                     <Info className="w-4 h-4 shrink-0" />
-                    <span>{notice}</span>
+                    <span>{t('lightrag.siloGraphView.nodeCapNotice', { count: notice.count, node: notice.node })}</span>
                 </div>
             )}
             {/* Toolbar */}
@@ -295,12 +294,12 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && fetchGraph(search, activeTypes)}
-                        placeholder="Filter entities…"
+                        placeholder={t('lightrag.siloGraphView.filterPlaceholder')}
                         className="pl-8 pr-3 py-1.5 text-sm border border-gray-300 rounded w-full focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                 </div>
                 <label className="flex items-center gap-2 text-xs text-gray-500 min-w-[180px]">
-                    <span className="shrink-0">Nodes</span>
+                    <span className="shrink-0">{t('lightrag.siloGraphView.nodes')}</span>
                     <input
                         type="range"
                         min={5}
@@ -320,26 +319,30 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                     />
                     <span className="w-10 text-right tabular-nums">{sliderValue}</span>
                 </label>
-                <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300" title="Color nodes by entity type">
+                <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300" title={t('lightrag.siloGraphView.colorByTypeHint')}>
                     <input
                         type="checkbox"
                         checked={typeColoring}
                         onChange={e => setTypeColoring(e.target.checked)}
                         className="accent-indigo-600"
                     />
-                    Color by type
+                    {t('lightrag.siloGraphView.colorByType')}
                 </label>
                 <button
                     onClick={() => reloadView()}
                     className="p-2 text-gray-500 hover:text-indigo-600 border border-gray-200 rounded"
-                    title="Refresh"
+                    title={t('lightrag.siloGraphView.refresh')}
                 >
                     <RefreshCw className="w-4 h-4" />
                 </button>
                 <span className="text-xs text-gray-400">
-                    showing {graphData?.node_count ?? 0} of {graphData?.total_nodes ?? 0} nodes ·{' '}
-                    {graphData?.edge_count ?? 0} of {graphData?.total_edges ?? 0} edges
-                    {graphData?.truncated && ' · (truncated)'}
+                    {t('lightrag.siloGraphView.showing', {
+                        nodes: graphData?.node_count ?? 0,
+                        totalNodes: graphData?.total_nodes ?? 0,
+                        edges: graphData?.edge_count ?? 0,
+                        totalEdges: graphData?.total_edges ?? 0,
+                    })}
+                    {graphData?.truncated && ` · ${t('lightrag.siloGraphView.truncatedSuffix')}`}
                 </span>
             </div>
 
@@ -356,8 +359,8 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                                 key={type}
                                 onClick={() => toggleType(type)}
                                 title={active
-                                    ? `Filtering by ${activeTypes.size} ${activeTypes.size === 1 ? 'type' : 'types'} — click to remove this one`
-                                    : `Filter by ${type}`}
+                                    ? t('lightrag.siloGraphView.filteringByTypes', { count: activeTypes.size })
+                                    : t('lightrag.siloGraphView.filterBy', { type })}
                                 className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs border transition-colors ${active
                                     ? 'border-transparent text-white'
                                     : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
@@ -380,7 +383,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                             }}
                             className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200"
                         >
-                            All
+                            {t('lightrag.siloGraphView.all')}
                         </button>
                     )}
                 </div>
@@ -388,7 +391,7 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
 
             {graphData?.truncated && (
                 <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
-                    Graph truncated to {graphData.node_count} nodes / {graphData.edge_count} edges. Use search to filter.
+                    {t('lightrag.siloGraphView.truncatedBanner', { nodes: graphData.node_count, edges: graphData.edge_count })}
                 </div>
             )}
 
@@ -397,8 +400,8 @@ const SiloGraphView: React.FC<SiloGraphViewProps> = ({ appId, siloId }) => {
                 {isEmpty ? (
                     <div className="flex items-center justify-center h-full text-gray-400 text-sm">
                         {search
-                            ? `No results for “${search}”. Try another search.`
-                            : 'No graph data indexed yet.'}
+                            ? t('lightrag.siloGraphView.noResults', { search })
+                            : t('lightrag.siloGraphView.noGraphData')}
                     </div>
                 ) : (
                     <InteractiveNvlWrapper

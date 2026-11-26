@@ -276,7 +276,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
     }
 
     if (isLightRAG && !formData.keywords_service_id) {
-      setError('Keywords AI Service is required for LightRAG silos');
+      setError(t('lightrag.siloForm.keywordsRequired'));
       return;
     }
 
@@ -426,7 +426,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
             {/* LightRAG Configuration — shown only when LIGHTRAG is selected */}
             {isLightRAG && (
               <div className="border-t border-line pt-6 mt-6 space-y-6 dark:border-line-dark">
-                <h3 className="text-sm font-semibold text-fg dark:text-fg-dark uppercase tracking-wider">LightRAG Configuration</h3>
+                <h3 className="text-sm font-semibold text-fg dark:text-fg-dark uppercase tracking-wider">{t('lightrag.siloForm.configTitle')}</h3>
 
                 {/* Role-specific LLM configuration (LightRAG 2026.05).
                     QUERY is the primary role — selecting it auto-fills EXTRACT
@@ -435,26 +435,26 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
                   {
                     field: 'extract_service_id' as RoleServiceField,
                     role: 'extract' as LightRAGRole,
-                    label: 'Extract AI Service',
+                    label: t('lightrag.serviceRoles.extract.label'),
                     required: true,
-                    helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier non-reasoning.',
-                    placeholder: 'Select an AI service for entity extraction',
+                    helper: t('lightrag.serviceRoles.extract.helper'),
+                    placeholder: t('lightrag.serviceRoles.extract.placeholder'),
                   },
                   {
                     field: 'keywords_service_id' as RoleServiceField,
                     role: 'keywords' as LightRAGRole,
-                    label: 'Keywords AI Service',
+                    label: t('lightrag.serviceRoles.keywords.label'),
                     required: true,
-                    helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
-                    placeholder: 'Select an AI service for keyword extraction',
+                    helper: t('lightrag.serviceRoles.keywords.helper'),
+                    placeholder: t('lightrag.serviceRoles.keywords.placeholder'),
                   },
                   {
                     field: 'vlm_service_id' as RoleServiceField,
                     role: 'vlm' as LightRAGRole,
-                    label: 'VLM AI Service (optional)',
+                    label: t('lightrag.serviceRoles.vlm.label'),
                     required: false,
-                    helper: 'Vision-language model for images/tables inside documents. MUST be multimodal — leave empty if your docs are text-only.',
-                    placeholder: '(none — text-only documents)',
+                    helper: t('lightrag.serviceRoles.vlm.helper'),
+                    placeholder: t('lightrag.serviceRoles.vlm.placeholder'),
                   },
                 ]).map(({ field, role, label, required, helper, placeholder }) => {
                   const value = formData[field];
@@ -478,7 +478,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
                         <option value="">{placeholder}</option>
                         {aiServices.map((service: AIServiceOption) => (
                           <option key={service.service_id} value={service.service_id}>
-                            {service.is_system ? `[System] ${service.name}` : service.name}{service.provider ? ` (${service.provider})` : ''}
+                            {service.is_system ? t('lightrag.serviceRoles.systemService', { name: service.name }) : service.name}{service.provider ? ` (${service.provider})` : ''}
                           </option>
                         ))}
                       </select>
@@ -486,7 +486,7 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
                       {isEditing && role === 'vlm' && (
                         <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
                           <Info className="w-3.5 h-3.5 shrink-0" />
-                          Cannot be changed after a silo is created.
+                          {t('lightrag.siloForm.vlmImmutable')}
                         </p>
                       )}
                       <LightRAGModelHints role={role} />
@@ -515,22 +515,20 @@ function SiloForm({ silo, onSubmit, onCancel}: Readonly<SiloFormProps>) {
 
                 <div>
                   <label htmlFor="source_label_fields" className="block text-sm font-medium text-fg dark:text-fg-dark mb-2">
-                    Source label fields
+                    {t('lightrag.siloForm.sourceLabelFields')}
                   </label>
                   <input
                     id="source_label_fields"
                     type="text"
                     value={formData.source_label_fields || ''}
                     onChange={(e) => setFormData(prev => ({ ...prev, source_label_fields: e.target.value }))}
-                    placeholder="e.g. familia_en, tecnologia"
+                    placeholder={t('lightrag.siloForm.sourceLabelPlaceholder')}
                     className="w-full px-3 py-2 border border-line rounded-lg bg-surface text-fg focus:outline-none focus:ring-2 focus:ring-focus disabled:bg-surface-hover dark:border-line-dark dark:bg-surface-dark dark:text-fg-dark"
                     disabled={isSubmitting}
                     aria-describedby="source_label_fields_help"
                   />
                   <p id="source_label_fields_help" className="mt-1 text-sm text-fg-tertiary dark:text-fg-tertiary-dark">
-                    Comma-separated metadata columns from the import CSV, shown next to every source the
-                    agent reads (e.g. the product a manual is about). Leave blank for no labels. Can be
-                    changed at any time.
+                    {t('lightrag.siloForm.sourceLabelHelp')}
                   </p>
                 </div>
 
