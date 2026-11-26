@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Loader2, Trash2, UploadCloud } from 'lucide-react';
 import Modal from '../ui/Modal';
 import DataTable from '../ui/DataTable';
@@ -26,6 +27,7 @@ interface CsvImportReviewModalProps {
 export function CsvImportReviewModal({
   appId, repositoryId, isLightRagRepository, siloId, job, isOpen, onClose, onJobUpdated, onIngestionStarted,
 }: Readonly<CsvImportReviewModalProps>) {
+  const { t } = useTranslation('common');
   const [selected, setSelected] = useState<Set<number>>(
     () => new Set(job.rows.filter((r) => r.status === 'DOWNLOADED').map((r) => r.id)),
   );
@@ -183,17 +185,17 @@ export function CsvImportReviewModal({
       ),
     },
     {
-      header: 'Link',
+      header: t('lightrag.csvImportReviewModal.link'),
       render: (row) => (
         <span className="block max-w-[220px] truncate" title={row.url}>{row.url}</span>
       ),
     },
     {
-      header: 'Status',
+      header: t('lightrag.csvImportReviewModal.status'),
       render: (row) => (
         <div className="flex items-center gap-2">
           {row.status === 'FAILED'
-            ? <StatusBadge status="error" customLabel={`Failed: ${row.failure_reason}`} />
+            ? <StatusBadge status="error" customLabel={t('lightrag.csvImportReviewModal.failed', { reason: row.failure_reason })} />
             : <StatusBadge
                 status={
                   row.status.toLowerCase() === 'success'
@@ -212,21 +214,21 @@ export function CsvImportReviewModal({
               disabled={retryingRowId === row.id}
               className="text-xs font-medium text-blue-600 hover:text-blue-800 underline disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {retryingRowId === row.id ? 'Retrying…' : 'Retry'}
+              {retryingRowId === row.id ? t('lightrag.csvImportReviewModal.retrying') : t('lightrag.csvImportReviewModal.retry')}
             </button>
           )}
         </div>
       ),
     },
     {
-      header: 'Metadata',
+      header: t('lightrag.csvImportReviewModal.metadata'),
       render: (row) => Object.entries(row.row_metadata).map(([k, v]) => `${k}: ${v}`).join(', '),
     },
   ];
 
   return (
     <>
-      <Modal isOpen={isOpen} onClose={onClose} title="Review CSV import" size="xlarge">
+      <Modal isOpen={isOpen} onClose={onClose} title={t('lightrag.csvImportReviewModal.title')} size="xlarge">
         <DataTable
           data={visibleRows}
           columns={columns}
@@ -238,7 +240,7 @@ export function CsvImportReviewModal({
             onClick={handleDiscardUnselected}
             className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 transition-colors"
           >
-            <Trash2 className="w-4 h-4" /> Discard unselected
+            <Trash2 className="w-4 h-4" /> {t('lightrag.csvImportReviewModal.discardUnselected')}
           </button>
           <button
             type="button"
@@ -247,8 +249,8 @@ export function CsvImportReviewModal({
             className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 disabled:hover:bg-green-600 transition-colors"
           >
             {estimating
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> Loading…</>
-              : <><UploadCloud className="w-4 h-4" /> Ingest selected</>}
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> {t('lightrag.csvImportReviewModal.loading')}</>
+              : <><UploadCloud className="w-4 h-4" /> {t('lightrag.csvImportReviewModal.ingestSelected')}</>}
           </button>
         </div>
       </Modal>
@@ -258,8 +260,8 @@ export function CsvImportReviewModal({
         onConfirm={doConfirm}
         confirming={confirming}
         estimate={costEstimate}
-        description={`${selected.size} document(s) selected for ingestion.`}
-        itemsHeading="Documents to ingest"
+        description={t('lightrag.csvImportReviewModal.selectedForIngestion', { count: selected.size })}
+        itemsHeading={t('lightrag.csvImportReviewModal.documentsToIngest')}
         items={Array.from(selected).map((rowId) => {
           const row = job.rows.find((r) => r.id === rowId);
           return { key: String(rowId), label: row?.url ?? String(rowId) };
@@ -267,8 +269,8 @@ export function CsvImportReviewModal({
         gate={entityTypesGateRequired ? {
           required: true,
           done: entityTypesSettled,
-          label: 'Define entity types',
-          doneLabel: 'Review entity types',
+          label: t('lightrag.csvImportReviewModal.defineEntityTypes'),
+          doneLabel: t('lightrag.csvImportReviewModal.reviewEntityTypes'),
           onOpen: () => setShowEntityTypesModal(true),
         } : undefined}
       />

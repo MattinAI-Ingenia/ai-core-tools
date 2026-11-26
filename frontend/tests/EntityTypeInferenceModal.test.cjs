@@ -60,6 +60,7 @@ function load() {
           jsx: (type, props) => ({ type, props }),
           jsxs: (type, props) => ({ type, props }),
         },
+        'react-i18next': { useTranslation: () => ({ t: (key) => key }), Trans: 'Trans' },
         '../ui/Modal': 'Modal',
         '../../services/api': { apiService },
         'lucide-react': { AlertTriangle: 'AlertTriangle', Loader2: 'Loader2' },
@@ -86,7 +87,7 @@ test('renders through the shared modal stack, not a hand-rolled overlay', () => 
   });
   assert.equal(view.type, 'Modal');
   assert.equal(view.props.isOpen, true);
-  assert.equal(view.props.title, 'Entity types');
+  assert.equal(view.props.title, 'lightrag.entityTypeInferenceModal.title');
   assert.equal(typeof view.props.onClose, 'function');
   // The action bar must be the pinned footer, not scrolled out of view.
   assert.ok(view.props.footer, 'footer prop missing');

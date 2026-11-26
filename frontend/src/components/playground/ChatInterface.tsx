@@ -1326,7 +1326,7 @@ function ChatInterface({
                               citedChunkIds={citedChunkIds}
                               appId={appId}
                               siloId={g.siloId ?? siloId}
-                              title={g.siloName ? `Fuentes citadas · ${g.siloName}` : 'Fuentes citadas'}
+                              title={g.siloName ? t('lightrag.chatInterface.citedSourcesWithSilo', { silo: g.siloName }) : t('lightrag.chatInterface.citedSources')}
                               chunkNumbers={g.graph.data?.chunks?.map((c) => (c.id ? numbering.numberByChunkId.get(c.id) ?? 0 : 0)) ?? []}
                             />
                           ))}

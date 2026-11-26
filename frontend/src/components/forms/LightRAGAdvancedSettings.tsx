@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { Info } from 'lucide-react';
 
 export interface LightRAGAdvancedSettingsData {
@@ -63,10 +64,11 @@ export function sanitizeEntityTypesList(value: string | undefined): string | und
 }
 
 function ImmutableNote() {
+  const { t } = useTranslation('common');
   return (
     <p className="mt-1 text-sm text-amber-600 flex items-center gap-1">
       <Info className="w-3.5 h-3.5 shrink-0" />
-      Cannot be changed after creation.
+      {t('lightrag.advancedSettings.immutable')}
     </p>
   );
 }
@@ -74,6 +76,7 @@ function ImmutableNote() {
 const inputClass = 'w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent disabled:bg-gray-100';
 
 export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, locked, forewarnImmutable }: Readonly<LightRAGAdvancedSettingsProps>) {
+  const { t } = useTranslation('common');
   const toInt = (value: string) => (value ? Number.parseInt(value, 10) : undefined);
   const showNote = locked || forewarnImmutable;
   // Unset means 'infer' for a silo being created; a silo saved before this
@@ -84,14 +87,14 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
   return (
     <details className="border-t border-gray-200 pt-6">
       <summary className="text-sm font-semibold text-gray-800 uppercase tracking-wider cursor-pointer select-none">
-        Advanced settings
+        {t('lightrag.advancedSettings.title')}
       </summary>
       <div className="mt-4 space-y-6">
 
         {/* Chunking Strategy */}
         <div>
           <label htmlFor="lightrag_chunk_strategy" className="block text-sm font-medium text-gray-700 mb-2">
-            Chunking strategy
+            {t('lightrag.advancedSettings.chunkStrategy')}
           </label>
           <select
             id="lightrag_chunk_strategy"
@@ -100,9 +103,9 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             className={inputClass}
             disabled={disabled}
           >
-            <option value="fixed_token">Fixed token (default)</option>
-            <option value="recursive_character">Recursive character</option>
-            <option value="semantic_vector">Semantic vector</option>
+            <option value="fixed_token">{t('lightrag.advancedSettings.strategyFixedToken')}</option>
+            <option value="recursive_character">{t('lightrag.advancedSettings.strategyRecursive')}</option>
+            <option value="semantic_vector">{t('lightrag.advancedSettings.strategySemantic')}</option>
             {/* Needs a .blocks.jsonl sidecar that only LightRAG's own document
                 parser produces (native: DOCX only today; PDF needs the mineru
                 or docling external engine, neither wired up here) — our
@@ -110,8 +113,8 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
                 never exists. Shown, not hidden, so it reads as "not yet" and
                 not "doesn't exist"; a native <select> cannot host an icon per
                 option, so the explanation lives in the title tooltip instead. */}
-            <option value="paragraph_semantic" disabled title="Not implemented yet — needs document-structure parsing (mineru/docling) this deployment does not have.">
-              Paragraph semantic (not implemented yet)
+            <option value="paragraph_semantic" disabled title={t('lightrag.advancedSettings.strategyParagraphTooltip')}>
+              {t('lightrag.advancedSettings.strategyParagraph')}
             </option>
           </select>
         </div>
@@ -119,7 +122,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label htmlFor="lightrag_chunk_token_size" className="block text-sm font-medium text-gray-700 mb-2">
-              Chunk token size
+              {t('lightrag.advancedSettings.chunkTokenSize')}
             </label>
             <input
               type="number"
@@ -134,7 +137,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
           </div>
           <div>
             <label htmlFor="lightrag_chunk_overlap_token_size" className="block text-sm font-medium text-gray-700 mb-2">
-              Overlap token size
+              {t('lightrag.advancedSettings.overlapTokenSize')}
             </label>
             <input
               type="number"
@@ -153,7 +156,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             query keyword extraction, LightRAG has no per-role override. */}
         <div>
           <label htmlFor="lightrag_language" className="block text-sm font-medium text-gray-700 mb-2">
-            Language
+            {t('lightrag.advancedSettings.language')}
           </label>
           <select
             id="lightrag_language"
@@ -163,21 +166,18 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             disabled={disabled || locked}
           >
             {LIGHTRAG_LANGUAGES.map((lang) => (
-              <option key={lang} value={lang}>{lang}</option>
+              <option key={lang} value={lang}>{t(`lightrag.advancedSettings.languages.${lang}`)}</option>
             ))}
           </select>
           <p className="mt-1 text-sm text-gray-500">
-            Output language for extracted entities and query keywords. If your
-            corpus isn't English, set this — otherwise keyword extraction may
-            translate query keywords away from your documents' language and
-            miss matches.
+            {t('lightrag.advancedSettings.languageHelp')}
           </p>
           {showNote && <ImmutableNote />}
         </div>
 
         <div>
           <label htmlFor="lightrag_entity_extract_max_gleaning" className="block text-sm font-medium text-gray-700 mb-2">
-            Entity extraction gleaning iterations
+            {t('lightrag.advancedSettings.gleaning')}
           </label>
           <input
             type="number"
@@ -190,8 +190,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             disabled={disabled || locked}
           />
           <p className="mt-1 text-sm text-gray-500">
-            Extra re-processing passes the entity-extraction pipeline runs during
-            indexing. 0 disables it (recommended default to start with).
+            {t('lightrag.advancedSettings.gleaningHelp')}
           </p>
           {showNote && <ImmutableNote />}
         </div>
@@ -200,7 +199,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label htmlFor="lightrag_max_source_ids_per_entity" className="block text-sm font-medium text-gray-700 mb-2">
-                Max source-ids per entity
+                {t('lightrag.advancedSettings.maxSourceEntity')}
               </label>
               <input
                 type="number"
@@ -214,7 +213,7 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             </div>
             <div>
               <label htmlFor="lightrag_max_source_ids_per_relation" className="block text-sm font-medium text-gray-700 mb-2">
-                Max source-ids per relation
+                {t('lightrag.advancedSettings.maxSourceRelation')}
               </label>
               <input
                 type="number"
@@ -228,14 +227,13 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
             </div>
           </div>
           <p className="mt-1 text-sm text-gray-500">
-            Max chunk-ids kept per entity/relation node in the graph (LightRAG default: 200).
-            Full provenance is preserved regardless — the cap only trims the node's own list.
+            {t('lightrag.advancedSettings.maxSourceHelp')}
           </p>
           {showNote && <ImmutableNote />}
         </div>
 
         <div>
-          <span className="block text-sm font-medium text-gray-700 mb-2">Entity types</span>
+          <span className="block text-sm font-medium text-gray-700 mb-2">{t('lightrag.advancedSettings.entityTypes')}</span>
           <div className="space-y-2 mb-3">
             <label className="flex items-start gap-2 text-sm text-gray-700">
               <input
@@ -247,10 +245,9 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
                 disabled={disabled || locked}
               />
               <span>
-                Infer from the documents
+                {t('lightrag.advancedSettings.modeInfer')}
                 <span className="block text-gray-500">
-                  Reads the cover page and table of contents of the uploaded documents
-                  and proposes the categories. You review and edit them before indexing.
+                  {t('lightrag.advancedSettings.modeInferHelp')}
                 </span>
               </span>
             </label>
@@ -264,10 +261,9 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
                 disabled={disabled || locked}
               />
               <span>
-                Write them yourself
+                {t('lightrag.advancedSettings.modeManual')}
                 <span className="block text-gray-500">
-                  Type the categories below, or leave blank to use the
-                  language-appropriate defaults.
+                  {t('lightrag.advancedSettings.modeManualHelp')}
                 </span>
               </span>
             </label>
@@ -312,12 +308,10 @@ export function LightRAGAdvancedSettings({ formData, onFieldChange, disabled, lo
                   disabled || locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-gray-50'
                 }`}
               >
-                Choose .txt file
+                {t('lightrag.advancedSettings.chooseFile')}
               </label>
               <p className="mt-1 text-sm text-gray-500">
-                Comma-separated entity categories LightRAG will use during extraction (e.g. Person, Organization, Location).
-                Leave blank to use the language-appropriate defaults shown above, or upload a .txt file with the same
-                comma-separated format. Locked after creation.
+                {t('lightrag.advancedSettings.entityTypesHelp')}
               </p>
             </>
           )}

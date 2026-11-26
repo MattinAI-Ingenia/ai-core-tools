@@ -406,7 +406,7 @@ function AgentsPage() {
           },
           {
             // One column for both kinds: an LLM agent's AI service, a System One agent's S1 service.
-            header: hasSystemOneAgents ? 'AI/S1 Service' : t('agentsPage.columns.aiService'),
+            header: hasSystemOneAgents ? t('lightrag.agentsPage.aiOrSystemOneService') : t('agentsPage.columns.aiService'),
             render: (agent) => {
               if (agent.type === 'system_one_agent') {
                 return agent.system_one_service ? (
@@ -415,7 +415,7 @@ function AgentsPage() {
                     <div className="text-xs text-fg-secondary dark:text-fg-secondary-dark">{agent.system_one_service.model} • System One</div>
                   </div>
                 ) : (
-                  <span className="text-fg-secondary dark:text-fg-secondary-dark italic text-sm">No System One service</span>
+                  <span className="text-fg-secondary dark:text-fg-secondary-dark italic text-sm">{t('lightrag.agentsPage.noSystemOneService')}</span>
                 );
               }
               return agent.ai_service ? (

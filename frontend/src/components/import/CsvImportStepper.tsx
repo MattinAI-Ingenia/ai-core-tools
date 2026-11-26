@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import Modal from '../ui/Modal';
 import { StepperContainer, type StepDefinition } from '../ui/Stepper';
 import { apiService } from '../../services/api';
@@ -12,12 +13,12 @@ interface CsvImportStepperProps {
   onImportStarted: (job: ImportJob) => void;
 }
 
-const STEPS: StepDefinition[] = [
-  { id: 'map', label: 'Upload & map columns' },
-  { id: 'starting', label: 'Starting import' },
-];
-
 export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImportStarted }: Readonly<CsvImportStepperProps>) {
+  const { t } = useTranslation('common');
+  const steps: StepDefinition[] = [
+    { id: 'map', label: t('lightrag.csvImportStepper.stepMap') },
+    { id: 'starting', label: t('lightrag.csvImportStepper.stepStarting') },
+  ];
   const [step, setStep] = useState(0);
   const [file, setFile] = useState<File | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
@@ -41,7 +42,7 @@ export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImpor
       setHeaders(parsedHeaders);
       setLinkColumn(parsedHeaders[0] ?? '');
     } catch {
-      setError('Could not read this CSV file.');
+      setError(t('lightrag.csvImportStepper.readError'));
     }
   };
 
@@ -55,7 +56,7 @@ export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImpor
       reset();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not start the import.');
+      setError(err instanceof Error ? err.message : t('lightrag.csvImportStepper.startError'));
       setStep(0);
     } finally {
       setIsSubmitting(false);
@@ -63,14 +64,14 @@ export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImpor
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={() => { reset(); onClose(); }} title="Import from CSV" size="medium">
+    <Modal isOpen={isOpen} onClose={() => { reset(); onClose(); }} title={t('lightrag.csvImportStepper.title')} size="medium">
       <StepperContainer
-        steps={STEPS}
+        steps={steps}
         currentStep={step}
         onNext={handleStart}
         onBack={() => setStep(0)}
         onCancel={() => { reset(); onClose(); }}
-        nextLabel="Start import"
+        nextLabel={t('lightrag.csvImportStepper.startImport')}
         nextDisabled={!file || !linkColumn || isSubmitting}
         showBack={false}
         isSubmitting={isSubmitting}
@@ -89,15 +90,15 @@ export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImpor
                 htmlFor="csv_import_file"
                 className="inline-block cursor-pointer px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
               >
-                Choose .csv file
+                {t('lightrag.csvImportStepper.chooseFile')}
               </label>
               <span className="text-sm text-gray-500 truncate">
-                {file ? file.name : 'No file selected'}
+                {file ? file.name : t('lightrag.csvImportStepper.noFile')}
               </span>
             </div>
             {headers.length > 0 && (
               <div>
-                <label className="block text-sm font-medium mb-1">Link column</label>
+                <label className="block text-sm font-medium mb-1">{t('lightrag.csvImportStepper.linkColumn')}</label>
                 <select
                   value={linkColumn}
                   onChange={(e) => setLinkColumn(e.target.value)}
@@ -108,14 +109,14 @@ export function CsvImportStepper({ appId, repositoryId, isOpen, onClose, onImpor
                   ))}
                 </select>
                 <p className="text-xs text-gray-500 mt-2">
-                  Any column you don't map manually will be imported as metadata, using its header row as the field name.
+                  {t('lightrag.csvImportStepper.metadataHint')}
                 </p>
               </div>
             )}
             {error && <p className="text-sm text-red-600">{error}</p>}
           </div>
         )}
-        {step === 1 && <p>Starting the import…</p>}
+        {step === 1 && <p>{t('lightrag.csvImportStepper.starting')}</p>}
       </StepperContainer>
     </Modal>
   );

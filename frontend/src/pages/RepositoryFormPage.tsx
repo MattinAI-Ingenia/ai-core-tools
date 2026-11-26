@@ -229,17 +229,17 @@ const RepositoryFormPage: React.FC = () => {
 
     if (isNewRepository && normalizedVectorDbType === 'LIGHTRAG') {
       if (!['PGVECTOR', 'QDRANT'].includes(normalizedLightRAGVectorDbType)) {
-        setError('LightRAG Database Type must be either PGVECTOR or QDRANT');
+        setError(t('lightrag.repositoryForm.dbTypeInvalid'));
         return;
       }
 
       const hasExtractLlm = formData.extract_service_id || formData.indexing_service_id;
       if (!hasExtractLlm) {
-        setError('LightRAG repositories require at least an Extract AI service');
+        setError(t('lightrag.repositoryForm.extractRequired'));
         return;
       }
       if (!formData.keywords_service_id) {
-        setError('Keywords AI Service is required for LightRAG repositories');
+        setError(t('lightrag.repositoryForm.keywordsRequired'));
         return;
       }
       // Block VLM if not multimodal
@@ -423,20 +423,19 @@ const RepositoryFormPage: React.FC = () => {
               indexed with was to query the database. Shown read-only instead. */}
           {formData.vector_db_type?.toUpperCase() === 'LIGHTRAG' && (
             <div className="border-t border-gray-200 pt-6 mt-6 space-y-6">
-              <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">LightRAG Configuration</h3>
+              <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wider">{t('lightrag.repositoryForm.configTitle')}</h3>
               {/* Distinct from the component's own note, which reads "cannot be
                   changed after creation" whether or not it already happened. */}
               {configLocked && (
                 <p className="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
-                  This corpus is already indexed, so the vector store and the
-                  extraction settings are read-only. The LLM services stay editable.
+                  {t('lightrag.repositoryForm.alreadyIndexed')}
                 </p>
               )}
 
               {/* LightRAG Database Type */}
               <div>
                 <label htmlFor="lightrag_vector_db_type" className="block text-sm font-medium text-gray-700 mb-2">
-                  LightRAG Database Type <span className="text-red-500">*</span>
+                  {t('lightrag.repositoryForm.dbType')} <span className="text-red-500">*</span>
                 </label>
                 {/* Locked after indexing: the embeddings live in whichever store
                     indexed them, so the backend refuses a switch outright. */}
@@ -457,7 +456,7 @@ const RepositoryFormPage: React.FC = () => {
                   <option value="PGVECTOR">PGVector</option>
                 </select>
                 <p className="text-sm text-gray-500 mt-1">
-                  Select the internal database backend used by LightRAG for this repository.
+                  {t('lightrag.repositoryForm.dbTypeHelp')}
                 </p>
               </div>
 
@@ -466,26 +465,26 @@ const RepositoryFormPage: React.FC = () => {
                 {
                   field: 'extract_service_id' as RoleServiceField,
                   role: 'extract' as LightRAGRole,
-                  label: 'Extract AI Service',
+                  label: t('lightrag.serviceRoles.extract.label'),
                   required: true,
-                  helper: 'LLM used to extract entities and relationships during indexing. Recommended: mid-tier non-reasoning.',
-                  placeholder: 'Select an AI service for entity extraction',
+                  helper: t('lightrag.serviceRoles.extract.helper'),
+                  placeholder: t('lightrag.serviceRoles.extract.placeholder'),
                 },
                 {
                   field: 'keywords_service_id' as RoleServiceField,
                   role: 'keywords' as LightRAGRole,
-                  label: 'Keywords AI Service',
+                  label: t('lightrag.serviceRoles.keywords.label'),
                   required: true,
-                  helper: 'LLM that extracts keywords from user queries. Latency-critical — pick a small fast model.',
-                  placeholder: 'Select an AI service for keyword extraction',
+                  helper: t('lightrag.serviceRoles.keywords.helper'),
+                  placeholder: t('lightrag.serviceRoles.keywords.placeholder'),
                 },
                 {
                   field: 'vlm_service_id' as RoleServiceField,
                   role: 'vlm' as LightRAGRole,
-                  label: 'VLM AI Service (optional)',
+                  label: t('lightrag.serviceRoles.vlm.label'),
                   required: false,
-                  helper: 'Vision-language model for images/tables inside documents. MUST be multimodal — leave empty if docs are text-only.',
-                  placeholder: '(none — text-only documents)',
+                  helper: t('lightrag.serviceRoles.vlm.helper'),
+                  placeholder: t('lightrag.serviceRoles.vlm.placeholder'),
                 },
               ]).map(({ field, role, label, required, helper, placeholder }) => {
                 const value = formData[field];
@@ -520,7 +519,7 @@ const RepositoryFormPage: React.FC = () => {
                       <option value="">{placeholder}</option>
                       {aiServices.map((service) => (
                         <option key={service.service_id} value={service.service_id}>
-                          {service.is_system ? '[System] ' : ''}{service.name}{service.provider ? ` (${service.provider})` : ''}
+                          {service.is_system ? t('lightrag.serviceRoles.systemService', { name: service.name }) : service.name}{service.provider ? ` (${service.provider})` : ''}
                         </option>
                       ))}
                     </select>

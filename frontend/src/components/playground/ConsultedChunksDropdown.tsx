@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface Props {
   /** Number of distinct consulted chunks, shown in the header. */
@@ -9,6 +10,7 @@ interface Props {
 /** Collapsible container holding the per-silo chunks + subgraphs LightRAG
  *  consulted for a turn, cited or not. */
 export default function ConsultedChunksDropdown({ count, children }: Props) {
+  const { t } = useTranslation('common');
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-2 border border-indigo-200 dark:border-indigo-700/50 rounded-xl overflow-hidden">
@@ -21,7 +23,7 @@ export default function ConsultedChunksDropdown({ count, children }: Props) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
         <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300 flex-1">
-          Chunks consultados{typeof count === 'number' && count > 0 ? ` · ${count}` : ''}
+          {t('lightrag.consultedChunks.title')}{typeof count === 'number' && count > 0 ? ` · ${count}` : ''}
         </span>
         <svg
           className={`w-4 h-4 text-indigo-400 transition-transform ${open ? 'rotate-180' : ''}`}

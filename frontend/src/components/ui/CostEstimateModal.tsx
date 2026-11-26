@@ -1,9 +1,10 @@
 import { Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import Modal from './Modal';
 import type { CostEstimationResult } from '../../pages/RepositoryDetailPage';
 
-export function formatEstimateValue(value: number | null | undefined) {
-  if (value == null) return 'Unavailable';
+export function formatEstimateValue(value: number | null | undefined, unavailable = 'Unavailable') {
+  if (value == null) return unavailable;
   return new Intl.NumberFormat().format(value);
 }
 
@@ -59,8 +60,10 @@ interface CostEstimateModalProps {
 }
 
 export default function CostEstimateModal({
-  isOpen, onClose, onConfirm, confirming, confirmingLabel = 'Confirming…', estimate, description, itemsHeading, items, gate,
+  isOpen, onClose, onConfirm, confirming, confirmingLabel, estimate, description, itemsHeading, items, gate,
 }: Readonly<CostEstimateModalProps>) {
+  const { t } = useTranslation('common');
+  const unavailable = t('lightrag.costEstimateModal.unavailable');
   const blocked = !!gate?.required && !gate.done;
   const footer = (
     <div className="w-full">
@@ -70,7 +73,7 @@ export default function CostEstimateModal({
           disabled={confirming}
           className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
         >
-          Cancel
+          {t('cancel')}
         </button>
         {gate?.required && (
           <button
@@ -92,67 +95,68 @@ export default function CostEstimateModal({
           className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
         >
           {confirming && <Loader2 className="w-4 h-4 animate-spin" />}
-          {confirming ? confirmingLabel : 'Confirm ingestion'}
+          {confirming ? (confirmingLabel ?? t('lightrag.costEstimateModal.confirming')) : t('lightrag.costEstimateModal.confirmIngestion')}
         </button>
       </div>
       {blocked && (
         <p className="mt-2 text-right text-sm text-amber-700">
-          Define the entity types before indexing — they cannot be changed afterwards.
+          {t('lightrag.costEstimateModal.defineEntityTypesFirst')}
         </p>
       )}
     </div>
   );
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Confirm LightRAG Ingestion" size="large" footer={footer}>
+    <Modal isOpen={isOpen} onClose={onClose} title={t('lightrag.costEstimateModal.title')} size="large" footer={footer}>
       <div className="space-y-5">
         <div>
           <p className="text-gray-700">
-            This will immediately start LightRAG indexing. Review the estimated ingestion cost before continuing.
+            {t('lightrag.costEstimateModal.intro')}
           </p>
           <p className="text-sm text-gray-500 mt-2">{description}</p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <p className="text-xs uppercase tracking-wide text-gray-500">Chunks</p>
-            <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(roundEstimateUp(estimate?.total_chunks))}</p>
+            <p className="text-xs uppercase tracking-wide text-gray-500">{t('lightrag.costEstimateModal.chunks')}</p>
+            <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(roundEstimateUp(estimate?.total_chunks), unavailable)}</p>
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <p className="text-xs uppercase tracking-wide text-gray-500">Chunk Size</p>
-            <p className="mt-1 text-lg font-semibold text-gray-900">{formatEstimateValue(estimate?.chunk_token_size)} tokens</p>
+            <p className="text-xs uppercase tracking-wide text-gray-500">{t('lightrag.costEstimateModal.chunkSize')}</p>
+            <p className="mt-1 text-lg font-semibold text-gray-900">{t('lightrag.costEstimateModal.tokensValue', { value: formatEstimateValue(estimate?.chunk_token_size, unavailable) })}</p>
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <p className="text-xs uppercase tracking-wide text-gray-500">LLM Tokens</p>
+            <p className="text-xs uppercase tracking-wide text-gray-500">{t('lightrag.costEstimateModal.llmTokens')}</p>
             <p className="mt-1 text-lg font-semibold text-gray-900">
               {formatEstimateValue(
                 roundEstimateUp(
                   (estimate?.estimated_input_tokens ?? 0) + (estimate?.estimated_output_tokens ?? 0)
-                )
+                ),
+                unavailable
               )}
             </p>
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <p className="text-xs uppercase tracking-wide text-gray-500">Embedding Tokens</p>
+            <p className="text-xs uppercase tracking-wide text-gray-500">{t('lightrag.costEstimateModal.embeddingTokens')}</p>
             <p className="mt-1 text-lg font-semibold text-gray-900">
-              {formatEstimateValue(roundEstimateUp(estimate?.estimated_embedding_tokens))}
+              {formatEstimateValue(roundEstimateUp(estimate?.estimated_embedding_tokens), unavailable)}
             </p>
           </div>
         </div>
 
         <p className="text-xs text-gray-500">
-          These are estimates. Actual cost depends on the number of entities extracted per chunk and may vary.
+          {t('lightrag.costEstimateModal.estimatesNote')}
         </p>
 
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
           <p>
-            Indexing model: <span className="font-medium">{estimate?.model_name || 'Unavailable'}</span>
+            {t('lightrag.costEstimateModal.indexingModel')}: <span className="font-medium">{estimate?.model_name || unavailable}</span>
           </p>
           <p className="mt-1">
-            Embedding model: <span className="font-medium">{estimate?.embedding_model_name || 'Unavailable'}</span>
+            {t('lightrag.costEstimateModal.embeddingModel')}: <span className="font-medium">{estimate?.embedding_model_name || unavailable}</span>
           </p>
           {(estimate?.estimated_indexing_time_min != null || estimate?.estimated_indexing_time_avg != null) && (
             <p className="mt-1">
-              Estimated indexing time:{' '}
+              {t('lightrag.costEstimateModal.estimatedIndexingTime')}:{' '}
               <span className="font-medium">
                 {estimate?.estimated_indexing_time_min != null
                   ? `${formatSeconds(estimate.estimated_indexing_time_min)} – ${formatSeconds(estimate.estimated_indexing_time_max)}`
@@ -162,7 +166,7 @@ export default function CostEstimateModal({
           )}
           {(estimate?.estimated_cost_min != null || estimate?.estimated_cost_max != null) ? (
             <p className="mt-1">
-              Estimated cost (LLM + embeddings):{' '}
+              {t('lightrag.costEstimateModal.estimatedCostWithEmbeddings')}:{' '}
               <span className="font-medium">
                 {estimate?.estimated_cost_min != null && estimate?.estimated_cost_max != null
                   ? estimate.estimated_cost_min === estimate.estimated_cost_max
@@ -173,14 +177,14 @@ export default function CostEstimateModal({
             </p>
           ) : (
             <p className="mt-1">
-              Estimated cost: <span className="font-medium">Unavailable</span>
+              {t('lightrag.costEstimateModal.estimatedCost')}: <span className="font-medium">{unavailable}</span>
             </p>
           )}
         </div>
 
         {estimate?.warnings?.length ? (
           <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
-            <h4 className="text-sm font-medium text-yellow-900">Warnings</h4>
+            <h4 className="text-sm font-medium text-yellow-900">{t('lightrag.costEstimateModal.warnings')}</h4>
             <ul className="mt-2 space-y-1 text-sm text-yellow-800 list-disc list-inside">
               {estimate.warnings.map((warning) => (
                 <li key={warning}>{warning}</li>

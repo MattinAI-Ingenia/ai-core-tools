@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import { apiService } from '../../services/api';
 import Modal from '../ui/Modal';
@@ -41,15 +42,6 @@ interface Props {
 
 const POLL_MS = 1500;
 
-const STAGE_LABEL: Record<InferenceJob['status'], string> = {
-  pending: 'Preparing…',
-  reading: 'Reading documents',
-  analysing: 'Proposing categories',
-  consolidating: 'Merging the ones that overlap',
-  done: 'Done',
-  failed: 'Failed',
-};
-
 /**
  * Runs entity-type inference and lets the user pick which categories to keep.
  *
@@ -60,6 +52,7 @@ const STAGE_LABEL: Record<InferenceJob['status'], string> = {
 export function EntityTypeInferenceModal({
   appId, siloId, aiServiceId, importJobId, files, onConfirm, onCancel,
 }: Props) {
+  const { t } = useTranslation('common');
   const [job, setJob] = useState<InferenceJob | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [extra, setExtra] = useState('');
@@ -98,16 +91,16 @@ export function EntityTypeInferenceModal({
           } catch (err) {
             if (cancelled) return;
             stopPolling();
-            setStartError(err instanceof Error ? err.message : 'Could not read the job progress.');
+            setStartError(err instanceof Error ? err.message : t('lightrag.entityTypeInferenceModal.progressFailed'));
           }
         }, POLL_MS);
       } catch (err) {
-        if (!cancelled) setStartError(err instanceof Error ? err.message : 'Could not start the analysis.');
+        if (!cancelled) setStartError(err instanceof Error ? err.message : t('lightrag.entityTypeInferenceModal.startFailed'));
       }
     })();
 
     return () => { cancelled = true; stopPolling(); };
-  }, [appId, siloId, aiServiceId, importJobId, files, stopPolling]);
+  }, [appId, siloId, aiServiceId, importJobId, files, stopPolling, t]);
 
   const toggle = (name: string) => {
     setSelected((current) => {
@@ -132,7 +125,7 @@ export function EntityTypeInferenceModal({
     <Modal
       isOpen
       onClose={onCancel}
-      title="Entity types"
+      title={t('lightrag.entityTypeInferenceModal.title')}
       size="medium"
       footer={
         <>
@@ -141,7 +134,7 @@ export function EntityTypeInferenceModal({
             onClick={onCancel}
             className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
-            Cancel
+            {t('cancel')}
           </button>
           <button
             type="button"
@@ -149,7 +142,7 @@ export function EntityTypeInferenceModal({
             disabled={chosen.length === 0}
             className="rounded-lg bg-yellow-500 px-4 py-2 text-sm font-medium text-white hover:bg-yellow-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Confirm {chosen.length > 0 ? `(${chosen.length})` : ''}
+            {t('confirm')} {chosen.length > 0 ? `(${chosen.length})` : ''}
           </button>
         </>
       }
@@ -157,8 +150,11 @@ export function EntityTypeInferenceModal({
       <p className="mb-4 flex items-start gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
         <span>
-          These categories shape the whole graph and <strong>cannot be changed
-          once anything is indexed</strong>. Review them before continuing.
+          <Trans
+            i18nKey="lightrag.entityTypeInferenceModal.warning"
+            t={t}
+            components={{ strong: <strong /> }}
+          />
         </span>
       </p>
 
@@ -169,13 +165,13 @@ export function EntityTypeInferenceModal({
       {(running || !job) && !error && (
         <div className="py-8 text-center">
           <Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin text-gray-400" />
-          <p className="text-sm text-gray-700">{STAGE_LABEL[job?.status ?? 'pending']}</p>
+          <p className="text-sm text-gray-700">{t(`lightrag.entityTypeInferenceModal.stage.${job?.status ?? 'pending'}`)}</p>
           {percent !== null && (
             <>
               <div className="mx-auto mt-3 h-2 w-64 overflow-hidden rounded-full bg-gray-200">
                 <div className="h-full bg-yellow-500 transition-all" style={{ width: `${percent}%` }} />
               </div>
-              <p className="mt-2 text-xs text-gray-500">{job!.done} of {job!.total} documents</p>
+              <p className="mt-2 text-xs text-gray-500">{t('lightrag.entityTypeInferenceModal.documentsProgress', { done: job!.done, total: job!.total })}</p>
             </>
           )}
         </div>
@@ -184,9 +180,9 @@ export function EntityTypeInferenceModal({
       {job?.status === 'done' && job.types && (
         <>
           <p className="mb-3 text-sm text-gray-600">
-            {job.types.length} categories proposed
-            {job.sampled ? ` from ${job.sampled} documents` : ''}. Untick the ones
-            you do not want.
+            {job.sampled
+              ? t('lightrag.entityTypeInferenceModal.proposedSampled', { count: job.types.length, sampled: job.sampled })
+              : t('lightrag.entityTypeInferenceModal.proposed', { count: job.types.length })}
           </p>
           <ul className="mb-4 space-y-2">
             {job.types.map((type) => (
@@ -203,7 +199,7 @@ export function EntityTypeInferenceModal({
                     <span className="block text-sm text-gray-600">{type.why}</span>
                     {type.examples.length > 0 && (
                       <span className="mt-1 block text-xs text-gray-500">
-                        Examples: {type.examples.join(', ')}
+                        {t('lightrag.entityTypeInferenceModal.examples', { examples: type.examples.join(', ') })}
                       </span>
                     )}
                   </span>
@@ -213,14 +209,14 @@ export function EntityTypeInferenceModal({
           </ul>
 
           <label htmlFor="extra-entity-types" className="mb-1 block text-sm font-medium text-gray-700">
-            Add your own (comma-separated)
+            {t('lightrag.entityTypeInferenceModal.addOwn')}
           </label>
           <input
             id="extra-entity-types"
             type="text"
             value={extra}
             onChange={(e) => setExtra(e.target.value)}
-            placeholder="Brand, Standard"
+            placeholder={t('lightrag.entityTypeInferenceModal.addOwnPlaceholder')}
             className="mb-4 w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-yellow-500"
           />
         </>

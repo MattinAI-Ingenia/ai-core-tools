@@ -111,7 +111,7 @@ export default function SearchControls({ siloId, value, onChange, disabled, isLi
 
       {isLightRAG ? (
         <FormSelect
-          label="Search Mode"
+          label={t('lightrag.searchControls.searchMode')}
           id="lightrag-mode-select"
           value={value.lightragQueryMode}
           disabled={disabled}

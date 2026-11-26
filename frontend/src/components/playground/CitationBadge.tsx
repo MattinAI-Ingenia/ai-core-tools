@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import type { LightRAGChunk } from '../../types/streaming';
 import OpenPdfButton from './OpenPdfButton';
 
@@ -23,6 +24,7 @@ const POPOVER_MAX_HEIGHT = 320;
  * instead of a dead link.
  */
 export default function CitationBadge({ index, chunk, appId, siloId }: Props) {
+  const { t } = useTranslation('common');
   const [pos, setPos] = useState<{ top: number; left: number; placement: 'top' | 'bottom' } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -46,7 +48,7 @@ export default function CitationBadge({ index, chunk, appId, siloId }: Props) {
     return <sup className="text-[0.7em] text-gray-400 dark:text-gray-500 mx-0.5">[{index}]</sup>;
   }
 
-  const srcLabel = chunk.file_path && chunk.file_path !== 'unknown_source' ? chunk.file_path : 'Unknown source';
+  const srcLabel = chunk.file_path && chunk.file_path !== 'unknown_source' ? chunk.file_path : t('lightrag.citationBadge.unknownSource');
 
   const toggle = (e: React.MouseEvent<HTMLButtonElement>) => {
     if (pos) { setPos(null); return; }
@@ -92,12 +94,12 @@ export default function CitationBadge({ index, chunk, appId, siloId }: Props) {
             <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-600">
               <span className="font-semibold text-gray-800 dark:text-gray-100 break-all" title={srcLabel}>
                 {srcLabel}
-                <span className="ml-1 font-normal text-gray-400">· Chunk {index}</span>
+                <span className="ml-1 font-normal text-gray-400">· {t('lightrag.citationBadge.chunk', { index })}</span>
               </span>
               <button
                 onClick={() => setPos(null)}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0"
-                aria-label="Close"
+                aria-label={t('close')}
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -105,7 +107,7 @@ export default function CitationBadge({ index, chunk, appId, siloId }: Props) {
               </button>
             </div>
             <div className="max-h-80 overflow-y-auto p-3">
-              <p className="whitespace-pre-wrap leading-relaxed">{chunk.content ?? '(no content)'}</p>
+              <p className="whitespace-pre-wrap leading-relaxed">{chunk.content ?? t('lightrag.citationBadge.noContent')}</p>
             </div>
             <OpenPdfButton appId={appId} siloId={chunk.silo_id ?? siloId} resourceId={chunk.resource_id} page={chunk.page} />
           </div>

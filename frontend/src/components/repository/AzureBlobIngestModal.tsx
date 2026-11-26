@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Cloud } from 'lucide-react';
+import { Trans, useTranslation } from 'react-i18next';
 import Modal from '../ui/Modal';
 import { apiService } from '../../services/api';
 import type {
@@ -36,6 +37,7 @@ export default function AzureBlobIngestModal({
   isUpdate,
   onIngested,
 }: AzureBlobIngestModalProps) {
+  const { t } = useTranslation('common');
   const [accountUrl, setAccountUrl] = useState('https://');
   const [container, setContainer] = useState('');
   const [prefixes, setPrefixes] = useState('');
@@ -79,13 +81,13 @@ export default function AzureBlobIngestModal({
 
   const validate = (): string | null => {
     if (!accountUrl.trim() || !container.trim()) {
-      return 'Account URL and container are required.';
+      return t('lightrag.azureBlobIngestModal.errAccountContainer');
     }
     if (parsePrefixes(prefixes).length && blobName.trim()) {
-      return 'Prefixes and single file are mutually exclusive.';
+      return t('lightrag.azureBlobIngestModal.errPrefixesExclusive');
     }
     if (authMode === 'SAS_TOKEN' && !sasToken.trim()) {
-      return 'A SAS token is required for SAS token auth.';
+      return t('lightrag.azureBlobIngestModal.errSasRequired');
     }
     return null;
   };
@@ -120,7 +122,7 @@ export default function AzureBlobIngestModal({
     } catch (err: any) {
       if (countRequestRef.current === requestId) {
         setCountResult(null);
-        setFormError(err.message || 'Azure Blob count failed');
+        setFormError(err.message || t('lightrag.azureBlobIngestModal.countFailed'));
       }
     } finally {
       // Unconditional: a superseded response must still release the button,
@@ -147,7 +149,7 @@ export default function AzureBlobIngestModal({
       onClose();
       onIngested(result);
     } catch (err: any) {
-      setFormError(err.message || 'Azure Blob ingestion failed');
+      setFormError(err.message || t('lightrag.azureBlobIngestModal.ingestFailed'));
     } finally {
       setSubmitting(false);
     }
@@ -159,17 +161,16 @@ export default function AzureBlobIngestModal({
     <Modal
       isOpen={isOpen}
       onClose={submitting ? () => undefined : onClose}
-      title={isUpdate ? 'Update from Azure Blob' : 'Load from Azure Blob'}
+      title={isUpdate ? t('lightrag.azureBlobIngestModal.titleUpdate') : t('lightrag.azureBlobIngestModal.titleLoad')}
     >
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="bg-blue-50 border border-blue-200 text-blue-800 text-sm rounded-md px-3 py-2">
-          Validation mode: at most {AZURE_BLOB_SAMPLE_SIZE} files are ingested per run, chosen at
-          random from everything not yet in this repository. Use Update to pick up the rest.
+          {t('lightrag.azureBlobIngestModal.validationMode', { size: AZURE_BLOB_SAMPLE_SIZE })}
         </div>
 
         <div>
           <label htmlFor="azure-account-url" className="block text-sm font-medium text-gray-700 mb-2">
-            Storage Account URL
+            {t('lightrag.azureBlobIngestModal.accountUrl')}
           </label>
           <input
             id="azure-account-url"
@@ -184,7 +185,7 @@ export default function AzureBlobIngestModal({
 
         <div>
           <label htmlFor="azure-container" className="block text-sm font-medium text-gray-700 mb-2">
-            Container
+            {t('lightrag.azureBlobIngestModal.container')}
           </label>
           <input
             id="azure-container"
@@ -199,7 +200,7 @@ export default function AzureBlobIngestModal({
 
         <div>
           <label htmlFor="azure-prefixes" className="block text-sm font-medium text-gray-700 mb-2">
-            Name prefixes <span className="text-gray-400 font-normal">(optional — comma-separated)</span>
+            {t('lightrag.azureBlobIngestModal.prefixes')} <span className="text-gray-400 font-normal">{t('lightrag.azureBlobIngestModal.optionalCommaSeparated')}</span>
           </label>
           <input
             id="azure-prefixes"
@@ -210,15 +211,13 @@ export default function AzureBlobIngestModal({
             placeholder="CDOC, DSAT"
           />
           <p className="text-xs text-gray-500 mt-1">
-            Only blobs whose names start with any of these are loaded (e.g. <code>CDOC, DSAT</code>
-            {' '}loads <code>CDOC000933.pdf</code> and <code>DSAT001234.pdf</code>, skipping the
-            rest). Values cannot contain commas. Leave empty to load the whole container.
+            <Trans i18nKey="lightrag.azureBlobIngestModal.prefixesHint" t={t} components={{ code: <code /> }} />
           </p>
         </div>
 
         <div>
           <label htmlFor="azure-name-excludes" className="block text-sm font-medium text-gray-700 mb-2">
-            Excluded characters <span className="text-gray-400 font-normal">(optional — comma-separated)</span>
+            {t('lightrag.azureBlobIngestModal.excludes')} <span className="text-gray-400 font-normal">{t('lightrag.azureBlobIngestModal.optionalCommaSeparated')}</span>
           </label>
           <input
             id="azure-name-excludes"
@@ -229,15 +228,13 @@ export default function AzureBlobIngestModal({
             placeholder="_"
           />
           <p className="text-xs text-gray-500 mt-1">
-            Files whose names contain any of these are never loaded (e.g. <code>_</code> skips
-            generated duplicates like <code>CDOC002817_2a67fdb9.pdf</code>). Values cannot contain
-            commas.
+            <Trans i18nKey="lightrag.azureBlobIngestModal.excludesHint" t={t} components={{ code: <code /> }} />
           </p>
         </div>
 
         <div>
           <label htmlFor="azure-blob-name" className="block text-sm font-medium text-gray-700 mb-2">
-            Single file <span className="text-gray-400 font-normal">(optional — ingests only this one)</span>
+            {t('lightrag.azureBlobIngestModal.singleFile')} <span className="text-gray-400 font-normal">{t('lightrag.azureBlobIngestModal.singleFileOptional')}</span>
           </label>
           <input
             id="azure-blob-name"
@@ -248,14 +245,13 @@ export default function AzureBlobIngestModal({
             placeholder="CDOC004211.pdf"
           />
           <p className="text-xs text-gray-500 mt-1">
-            Exact blob name as stored in the container, including its folder path if it has one
-            (e.g. <code>2026/CDOC004211.pdf</code>). Ignoring the random-20 cap.
+            <Trans i18nKey="lightrag.azureBlobIngestModal.singleFileHint" t={t} values={{ size: AZURE_BLOB_SAMPLE_SIZE }} components={{ code: <code /> }} />
           </p>
         </div>
 
         <div>
           <label htmlFor="azure-auth-mode" className="block text-sm font-medium text-gray-700 mb-2">
-            Authentication
+            {t('lightrag.azureBlobIngestModal.authentication')}
           </label>
           <select
             id="azure-auth-mode"
@@ -263,15 +259,15 @@ export default function AzureBlobIngestModal({
             onChange={(e) => { setAuthMode(e.target.value as 'ANONYMOUS' | 'SAS_TOKEN'); invalidateCount(); }}
             className={inputClassName}
           >
-            <option value="ANONYMOUS">Public access (anonymous)</option>
-            <option value="SAS_TOKEN">SAS token</option>
+            <option value="ANONYMOUS">{t('lightrag.azureBlobIngestModal.authAnonymous')}</option>
+            <option value="SAS_TOKEN">{t('lightrag.azureBlobIngestModal.authSas')}</option>
           </select>
         </div>
 
         {authMode === 'SAS_TOKEN' && (
           <div>
             <label htmlFor="azure-sas-token" className="block text-sm font-medium text-gray-700 mb-2">
-              SAS Token {savedSource?.auth_mode === 'SAS_TOKEN' && <span className="text-gray-400 font-normal">(re-enter to update)</span>}
+              {t('lightrag.azureBlobIngestModal.sasToken')} {savedSource?.auth_mode === 'SAS_TOKEN' && <span className="text-gray-400 font-normal">{t('lightrag.azureBlobIngestModal.sasReenter')}</span>}
             </label>
             <input
               id="azure-sas-token"
@@ -296,8 +292,8 @@ export default function AzureBlobIngestModal({
         >
           {countResult &&
             (countResult.pending_blobs === 0
-              ? `Found ${countResult.total_blobs} document(s) — everything is already up to date.`
-              : `Found ${countResult.total_blobs} document(s): ${countResult.pending_blobs} new or changed. A load ingests up to ${AZURE_BLOB_SAMPLE_SIZE} of them at random.`)}
+              ? t('lightrag.azureBlobIngestModal.countUpToDate', { count: countResult.total_blobs })
+              : t('lightrag.azureBlobIngestModal.countPending', { count: countResult.total_blobs, pending: countResult.pending_blobs, size: AZURE_BLOB_SAMPLE_SIZE }))}
         </div>
 
         {formError && (
@@ -313,7 +309,7 @@ export default function AzureBlobIngestModal({
             disabled={!canCheckCount}
             className="px-4 py-2 bg-green-700 text-white rounded-md hover:bg-green-800 disabled:opacity-50"
           >
-            {counting ? 'Counting…' : 'Check count'}
+            {counting ? t('lightrag.azureBlobIngestModal.counting') : t('lightrag.azureBlobIngestModal.checkCount')}
           </button>
           <button
             type="button"
@@ -321,7 +317,7 @@ export default function AzureBlobIngestModal({
             disabled={submitting}
             className="px-4 py-2 text-gray-600 hover:text-gray-800 disabled:opacity-50"
           >
-            Cancel
+            {t('cancel')}
           </button>
           <button
             type="submit"
@@ -330,14 +326,14 @@ export default function AzureBlobIngestModal({
           >
             <Cloud className="w-4 h-4" aria-hidden="true" />
             {submitting
-              ? 'Checking container…'
+              ? t('lightrag.azureBlobIngestModal.checking')
               : isUpdate
                 ? blobName.trim()
-                  ? 'Update file'
-                  : `Update (${AZURE_BLOB_SAMPLE_SIZE} at random)`
+                  ? t('lightrag.azureBlobIngestModal.updateFile')
+                  : t('lightrag.azureBlobIngestModal.updateRandom', { size: AZURE_BLOB_SAMPLE_SIZE })
                 : blobName.trim()
-                  ? 'Load file'
-                  : `Load (${AZURE_BLOB_SAMPLE_SIZE} at random)`}
+                  ? t('lightrag.azureBlobIngestModal.loadFile')
+                  : t('lightrag.azureBlobIngestModal.loadRandom', { size: AZURE_BLOB_SAMPLE_SIZE })}
           </button>
         </div>
       </form>
