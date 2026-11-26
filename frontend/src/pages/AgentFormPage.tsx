@@ -5,7 +5,7 @@ import { AlertTriangle, Settings, FileText, Lightbulb, Zap, Search, Image, Termi
 import { apiService, ApiError, type ScheduledTask } from '../services/api';
 import { toast } from 'sonner';
 import { useApiMutation } from '../hooks/useApiMutation';
-import { MESSAGES, errorMessage } from '../constants/messages';
+import { errorMessage } from '../constants/messages';
 import { DEFAULT_AGENT_TEMPERATURE, DEFAULT_PROMPT_TEMPLATE } from '../constants/agentConstants';
 import Alert from '../components/ui/Alert';
 import AgentMiddlewaresCard, { type AgentMiddlewareOption } from '../components/forms/AgentMiddlewaresCard';
@@ -844,9 +844,9 @@ function AgentFormPage() {
       : apiService.updateAgent(Number.parseInt(appId || '0'), Number.parseInt(agentId || '0'), submitData);
     setSaving(true);
     const result = await mutate(() => submitPromise, {
-      loading: isNew ? MESSAGES.CREATING('agent') : MESSAGES.UPDATING('agent'),
-      success: isNew ? MESSAGES.CREATED('agent') : MESSAGES.UPDATED('agent'),
-      error: (err) => errorMessage(err, MESSAGES.SAVE_FAILED('agent')),
+      loading: isNew ? t('agentFormPage.saving.creating') : t('agentFormPage.saving.updating'),
+      success: isNew ? t('agentFormPage.saving.created') : t('agentFormPage.saving.updated'),
+      error: (err) => errorMessage(err, t('agentFormPage.saving.failed')),
     });
     setSaving(false);
     if (result !== undefined) navigate(`/apps/${appId}/agents`);
