@@ -323,9 +323,11 @@ _FILTER = {"json": {"filter_metadata": {"a": "b"}}}
 GUARD_BODIES = {
     # Fork additions: estimate-indexing takes a document list; the entity-type
     # inference upload takes the multipart files list (validation runs before
-    # the visibility rule).
+    # the visibility rule); the graph explorer's neighbors/sources take required query params.
     ("POST", "silos/{silo_id}/estimate-indexing"): {"json": {"documents": [{"content": "x"}]}},
     ("POST", "silos/{silo_id}/lightrag/infer-entity-types/upload"): _FILES,
+    ("GET", "silos/{silo_id}/graph/neighbors"): {"params": {"node_id": "x"}},
+    ("GET", "silos/{silo_id}/graph/sources"): {"params": {"ids": "x"}},
     ("PUT", "silos/{silo_id}"): {"json": {"name": "x"}},
     ("PUT", "repositories/{repository_id}"): {"json": {"name": "x"}},
     ("PUT", "repositories/{repo_id}"): {"json": {"name": "x"}},
