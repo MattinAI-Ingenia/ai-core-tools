@@ -643,6 +643,7 @@ def _clean_chunk_text(text: str) -> str:
     for line in lines:
         s = line.strip()
         if not s:
+            clean_lines.append(line)
             continue
         if _SYMBOL_ONLY_RE.match(s) or _PAGE_MARKER_RE.match(s):  # Rule A
             continue

@@ -313,7 +313,7 @@ class TestExtractDocumentsFromFileSplitter:
         ]])
 
         assert len(docs) == 1
-        assert docs[0].page_content == f"{first}\n{second}"
+        assert docs[0].page_content == f"{first}\n\n{second}"
         assert docs[0].metadata["pdf_blocks"] == [0, 1]
 
     def test_second_pass_preserves_a_pdf_unit_above_target_size(self):
