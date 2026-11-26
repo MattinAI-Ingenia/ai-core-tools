@@ -85,6 +85,22 @@ def test_incoming_display_name_canonicalized():
     assert result["nodes"][0]["id"] == "canon(MCF-40)"
 
 
+def test_raw_id_accepted_for_silos_indexed_before_canonicalization():
+    """Old silos store the raw name ("Bomba de Calor"), not the canonical key:
+    the root lookup must also accept the id as displayed and carry on with the
+    stored id for the neighbor queries (was a 404 on expand)."""
+    root = _FakeNode("Bomba de Calor")
+    session = MagicMock()
+    session.run.side_effect = [[{"n": root}], [], []]
+
+    result, session = _run_get_node_neighbors(session, node_id="Bomba de Calor", depth=1)
+
+    calls = session.run.call_args_list
+    assert calls[0].kwargs["roots"] == ["canon(Bomba de Calor)", "Bomba de Calor"]
+    assert calls[1].kwargs["root"] == "Bomba de Calor"
+    assert result["nodes"][0]["id"] == "Bomba de Calor"
+
+
 def test_neighbor_queries_conclude_with_return():
     """Regression: `... WITH ... ORDER BY ... LIMIT` (no RETURN) is invalid
     Cypher — this Neo4j rejects it and the center/expand view 500s."""
