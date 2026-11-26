@@ -457,10 +457,7 @@ class TestExtractDocumentsFromFileWholeFile:
         from tools.vector_stores.lightrag_store import strip_page_markers
 
         texts = [self.GOOD_PAGES[0], self.GOOD_PAGES[1], self.GARBAGE_PAGE, self.GOOD_PAGES[2], self.GOOD_PAGES[3]]
-        with (
-            patch("fitz.open", return_value=self._unstructured_fake_pdf()),
-            patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader,
-        ):
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
             mock_loader_instance = MagicMock()
             mock_loader_instance.load.return_value = self._mock_pdf_pages(texts)
             MockLoader.return_value = mock_loader_instance
@@ -483,10 +480,7 @@ class TestExtractDocumentsFromFileWholeFile:
         assert docs[0].metadata["resource_id"] == 7
 
     def test_pdf_whole_file_all_pages_filtered_returns_empty(self):
-        with (
-            patch("fitz.open", return_value=self._unstructured_fake_pdf()),
-            patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader,
-        ):
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
             mock_loader_instance = MagicMock()
             mock_loader_instance.load.return_value = self._mock_pdf_pages([self.GARBAGE_PAGE] * 3)
             MockLoader.return_value = mock_loader_instance
@@ -497,6 +491,26 @@ class TestExtractDocumentsFromFileWholeFile:
             )
 
         assert docs == []
+
+    def test_pdf_whole_file_reads_pages_not_structured_sections(self):
+        """LightRAG keeps short lines (page headers with the product name, table
+        rows): a whole page goes through the noise filter, never the structured
+        loader's short sections, which the filter would drop one by one."""
+        page = f"BT DUO\n76\n{self.GOOD_PAGES[0]}"
+        with (
+            patch("services.silo_service.PdfLoader") as structured_loader,
+            patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader,
+        ):
+            MockLoader.return_value.load.return_value = self._mock_pdf_pages([page])
+
+            docs = SiloService.extract_documents_from_file(
+                file_path="/tmp/fake.pdf", file_extension=".pdf",
+                base_metadata={"resource_id": 7}, split=False,
+            )
+
+        structured_loader.assert_not_called()
+        assert len(docs) == 1
+        assert "BT DUO\n76\n" in docs[0].page_content
 
     def test_pdf_split_true_unchanged(self):
         """Backward-compat: split=True PDF output is unaffected by this diff."""
@@ -609,10 +623,7 @@ class TestExtractDocumentsFromFileWholeFile:
         from tools.vector_stores.lightrag_store import _source_label_from_metadata
 
         texts = [self.GOOD_PAGES[0], self.GOOD_PAGES[1]]
-        with (
-            patch("fitz.open", return_value=self._unstructured_fake_pdf()),
-            patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader,
-        ):
+        with patch("langchain_community.document_loaders.PyMuPDFLoader") as MockLoader:
             mock_loader_instance = MagicMock()
             mock_loader_instance.load.return_value = self._mock_pdf_pages(texts)
             MockLoader.return_value = mock_loader_instance
@@ -638,12 +649,6 @@ class TestExtractDocumentsFromFileWholeFile:
             mock_loader_instance = MagicMock()
             mock_loader_instance.load.return_value = [self._single_page_doc(extension, text)]
             MockLoader.return_value = mock_loader_instance
-            if extension == ".pdf":
-                with patch("fitz.open", return_value=self._unstructured_fake_pdf()):
-                    return SiloService.extract_documents_from_file(
-                        file_path=f"/tmp/fake{extension}", file_extension=extension,
-                        base_metadata=base_metadata, split=False,
-                    )
             return SiloService.extract_documents_from_file(
                 file_path=f"/tmp/fake{extension}", file_extension=extension,
                 base_metadata=base_metadata, split=False,

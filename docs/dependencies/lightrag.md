@@ -1206,6 +1206,14 @@ caso a `res{id}-p{page}` igual que siempre lo hizo.
 
 ### 13.3 Marcadores de página (`<<<page:N>>>`)
 
+Los PDF de un silo LightRAG se leen por páginas con `PyMuPDFLoader`, no con el
+loader estructurado (`PdfLoader`, `tools/pdf_loader.py`) que usan PGVector y
+Qdrant. El filtro de ruido (`_clean_chunk_text` / `_is_meaningful_chunk`,
+`silo_service.py`) se aplica a cada documento leído antes de unir las páginas;
+con el loader estructurado, cada sección corta (cabeceras con el nombre del
+producto, títulos, filas de tabla) se descartaría por separado y no llegaría
+al grafo.
+
 Un PDF extraído como `Document` único lleva el texto de cada página unido con
 una línea marcador propia, generada por `page_marked_text` (`lightrag_store.py`):
 una línea completa `<<<page:N>>>` seguida de exactamente un `\n`. Solo cuenta

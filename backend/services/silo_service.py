@@ -1811,7 +1811,7 @@ class SiloService:
             List[Document]: List of Document objects
         """
         from langchain_core.documents import Document
-        from langchain_community.document_loaders import Docx2txtLoader, TextLoader
+        from langchain_community.document_loaders import Docx2txtLoader, PyMuPDFLoader, TextLoader
 
         if base_metadata is None:
             base_metadata = {}
@@ -1823,7 +1823,12 @@ class SiloService:
         )
 
         # Determine file type and use appropriate loader
-        if file_extension == '.pdf':
+        if file_extension == '.pdf' and not split:
+            # LightRAG reads whole pages: the structured loader's short sections
+            # (headers, headings, table rows) would not survive the per-document
+            # noise filter below, and they would be lost before the page fold.
+            loader = PyMuPDFLoader(file_path)
+        elif file_extension == '.pdf':
             loader = PdfLoader(file_path, chunk_size=CHUNK_SIZE)
         elif file_extension == '.docx':
             loader = Docx2txtLoader(file_path)
