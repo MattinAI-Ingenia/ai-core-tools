@@ -156,7 +156,7 @@ When something fails, the platform's failure logs and the metrics dashboard reco
 - Resetting or deleting a conversation destroys its sandbox only when the same server process holds it; with several workers, other sandboxes expire on their own (the provider's time limit).
 - If the most recent messages alone are larger than a small model's context window, the message still fails. Models whose size the platform does not know (for example Ollama and Azure AI models) are assumed to have a window of about 37,600 tokens, with summarization starting at 32,000, even if their real window is smaller.
 - When a long conversation is summarized and the answer then fails, the older messages are already replaced by the summary.
-- With a platform base URL configured, images are sent as links, which an Ollama ("Custom") model probably cannot read.
+- With a platform base URL configured, images are sent as links. A "Custom" model can read them only if its server can download the link.
 - In the history, your own message that had an image can show a raw `[IMAGE:...]` marker instead of the picture.
 - These behaviours were tested with simulated providers, not against the real provider APIs, so a provider can still reject a conversation that switched models for reasons the tests cannot show.
 - After a server crash in the middle of an answer, that conversation can answer "still answering" for several minutes. Right after a stream is cut there can also be a brief window in which the previous message has not fully stopped.
