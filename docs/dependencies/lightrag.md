@@ -283,6 +283,10 @@ Desconocido → `"F"`. Comprobar constantes en `lightrag/constants.py`.
   sin tocar el grafo): borrar documentos por id o por metadata, borrar una URL
   de dominio, borrar media (interno y público) y borrar una carpeta. Mensaje:
   borrar el fichero desde su repositorio, "Delete all files" o borrar el silo.
+  La actualización de metadata en bloque de la API pública
+  (`POST /public/v1/app/{app}/silos/{id}/docs/update-metadata`) también
+  responde 409 (`LIGHTRAG_UNSUPPORTED_UPDATE_DETAIL`, `silo_service.py`): no
+  se reflejaría en el grafo, así que no cambia nada.
   `delete_documents` y `delete_documents_excluding` siguen siendo no-ops en el
   store.
 
@@ -1019,6 +1023,18 @@ en `indexing_metric`.
   (`tools/streaming_utils.py`) y los emite como `lightrag_graph` en la respuesta
   final (`agent_streaming_service.py`) → el frontend los pinta como burbuja
   de grafo (`LightRAGGraphBubble`).
+- **App Chat**: un silo LightRAG se puede elegir como fuente en el Chat de la
+  App. El agente interno del Chat no tiene `lightrag_query_mode` ni
+  `rag_chunk_top_k`, así que la consulta usa el modo por defecto del store
+  (`hybrid`, `_resolve_query_mode` en `lightrag_store.py`) y el `CHUNK_TOP_K`
+  global; no hay router de skills.
+- **Filtros de chat (`exposed_chat_filters`)**: no tienen efecto en silos
+  LightRAG. LightRAG no filtra por metadata, el retriever no aplica la lista
+  blanca del silo a estos silos (`_resolve_and_build_retriever_tool`,
+  `agentTools.py`) y `get_distinct_metadata_values` devuelve una lista vacía,
+  así que el playground no muestra ese filtro si solo lo declaran silos
+  LightRAG (`AgentService.get_chat_filter_values` omite los campos sin
+  valores).
 
 ### 10.4 Endpoint de grafo del silo
 
