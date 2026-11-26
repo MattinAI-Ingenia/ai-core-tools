@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from models.agent import Agent, MarketplaceVisibility
 from models.agent_marketplace_profile import AgentMarketplaceProfile
+from models.conversation_starter import ConversationStarter
 from models.agent_marketplace_rating import AgentMarketplaceRating
 from models.conversation import Conversation, ConversationSource
 from models.app_collaborator import AppCollaborator, CollaborationStatus
@@ -130,6 +131,7 @@ class MarketplaceService:
             .filter(
                 Agent.is_tool == False,  # noqa: E712
                 Agent.marketplace_visibility != MarketplaceVisibility.UNPUBLISHED,
+                Agent.visible_clause(),
             )
         )
 
@@ -201,7 +203,7 @@ class MarketplaceService:
                 joinedload(Agent.marketplace_profile),
                 joinedload(Agent.app),
             )
-            .filter(Agent.agent_id == agent_id)
+            .filter(Agent.agent_id == agent_id, Agent.visible_clause())
             .first()
         )
 
@@ -256,7 +258,7 @@ class MarketplaceService:
         agent = (
             db.query(Agent)
             .options(joinedload(Agent.marketplace_profile))
-            .filter(Agent.agent_id == agent_id, Agent.app_id == app_id)
+            .filter(Agent.agent_id == agent_id, Agent.app_id == app_id, Agent.visible_clause())
             .first()
         )
         if not agent:
@@ -301,7 +303,7 @@ class MarketplaceService:
         agent = (
             db.query(Agent)
             .options(joinedload(Agent.marketplace_profile))
-            .filter(Agent.agent_id == agent_id, Agent.app_id == app_id)
+            .filter(Agent.agent_id == agent_id, Agent.app_id == app_id, Agent.visible_clause())
             .first()
         )
         if not agent:
@@ -312,16 +314,47 @@ class MarketplaceService:
         if profile:
             # Update only provided (non-None) fields
             update_data = profile_data.model_dump(exclude_unset=True)
+            
+            # Handle conversation starters separately (1:N relationship)
+            if 'conversation_starters' in update_data:
+                starters_list = update_data.pop('conversation_starters')
+                if starters_list is not None:
+                    # Use a simple replacement strategy for starters: 
+                    # delete existing and recreate to maintain order and simplicity
+                    db.query(ConversationStarter).filter(
+                        ConversationStarter.profile_id == profile.id
+                    ).delete()
+                    
+                    for idx, prompt in enumerate(starters_list):
+                        starter = ConversationStarter(
+                            profile_id=profile.id,
+                            prompt=prompt,
+                            order=idx
+                        )
+                        db.add(starter)
+
             for key, value in update_data.items():
                 setattr(profile, key, value)
         else:
             # Create new profile
+            profile_data_dict = profile_data.model_dump(exclude_unset=True)
+            starters_list = profile_data_dict.pop('conversation_starters', None)
+            
             profile = AgentMarketplaceProfile(
                 agent_id=agent_id,
-                **profile_data.model_dump(exclude_unset=True),
+                **profile_data_dict,
             )
             db.add(profile)
             db.flush()  # populate profile.id before setting published_at
+            
+            if starters_list is not None:
+                for idx, prompt in enumerate(starters_list):
+                    starter = ConversationStarter(
+                        profile_id=profile.id,
+                        prompt=prompt,
+                        order=idx
+                    )
+                    db.add(starter)
 
         # Back-fill published_at if the agent is already published but the
         # timestamp was never set (e.g. visibility was changed before the
@@ -357,6 +390,7 @@ class MarketplaceService:
             .filter(
                 AgentMarketplaceProfile.agent_id == agent_id,
                 Agent.app_id == app_id,
+                Agent.visible_clause(),
             )
             .first()
         )
@@ -365,8 +399,26 @@ class MarketplaceService:
 
         return MarketplaceProfileSchema.model_validate(profile)
 
-    # ------------------------------------------------------------------
-    # 6. Marketplace conversations (consumer list)
+    @staticmethod
+    def get_agent_conversation_starters(
+        db: Session,
+        agent_id: int,
+    ) -> List[ConversationStarter]:
+        """
+        Retrieve the conversation starters for a specific agent.
+        """
+        # The hidden internal chat agent answers like a missing agent (FR-13).
+        profile = (
+            db.query(AgentMarketplaceProfile)
+            .join(Agent, Agent.agent_id == AgentMarketplaceProfile.agent_id)
+            .filter(AgentMarketplaceProfile.agent_id == agent_id, Agent.visible_clause())
+            .first()
+        )
+        if not profile:
+            return []
+        
+        return profile.conversation_starters
+    
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -391,6 +443,7 @@ class MarketplaceService:
             .filter(
                 Conversation.user_id == user_id,
                 Conversation.source == ConversationSource.MARKETPLACE,
+                Agent.visible_clause(),
             )
         )
 
@@ -448,7 +501,7 @@ class MarketplaceService:
         agent = (
             db.query(Agent)
             .options(joinedload(Agent.app))
-            .filter(Agent.agent_id == agent_id)
+            .filter(Agent.agent_id == agent_id, Agent.visible_clause())
             .first()
         )
         if not agent:
@@ -522,6 +575,7 @@ class MarketplaceService:
             .filter(
                 AgentMarketplaceProfile.agent_id == agent_id,
                 Agent.marketplace_visibility != MarketplaceVisibility.UNPUBLISHED,
+                Agent.visible_clause(),
             )
             .first()
         )
@@ -602,9 +656,11 @@ class MarketplaceService:
         user_id: int,
     ) -> UserRatingResponseSchema:
         """Return the current user's star rating for the given agent, or None."""
+        # The hidden internal chat agent answers like a missing agent (FR-13).
         profile = (
             db.query(AgentMarketplaceProfile)
-            .filter(AgentMarketplaceProfile.agent_id == agent_id)
+            .join(Agent, Agent.agent_id == AgentMarketplaceProfile.agent_id)
+            .filter(AgentMarketplaceProfile.agent_id == agent_id, Agent.visible_clause())
             .first()
         )
         if not profile:

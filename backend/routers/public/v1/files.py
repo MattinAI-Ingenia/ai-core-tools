@@ -20,12 +20,14 @@ from .auth import (
 )
 from db.database import get_db
 
+from services.chat_attachment_service import ChatAttachmentService
 from services.file_management_service import FileManagementService, FileReference
 from services.conversation_service import ConversationService
-from services.playground_media_service import PlaygroundMediaService, VECTORIZABLE_FILE_TYPES
+from services.playground_media_service import PlaygroundMediaService, is_vectorizable_file
 from utils.security import generate_signature
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -39,7 +41,10 @@ files_router = APIRouter()
     summary="Attach file for chat",
     tags=["File Operations"],
     response_model=AttachFileResponseSchema,
-    responses={500: {"description": "Failed to attach file"}},
+    responses={
+        409: {"description": "A service used by this resource was retired"},
+        500: {"description": "Failed to attach file"},
+    },
 )
 async def attach_file(
     app_id: int,
@@ -88,32 +93,34 @@ async def attach_file(
             user_context["conversation_id"] = effective_conversation_id
             logger.info(f"Auto-created conversation {effective_conversation_id} for file attachment to agent {agent_id}")
 
+        # Only a client-supplied id needs checking: a conversation auto-created above is the caller's by construction.
+        if conversation_id:
+            conversation_id = ChatAttachmentService.require_owned_conversation(
+                db, conversation_id, user_context, agent_id, bool(agent.has_memory)
+            )
+            user_context["conversation_id"] = conversation_id
+            effective_conversation_id = conversation_id  # canonical id: "012" must not become a directory of its own
         file_service = FileManagementService()
         file_ref = await file_service.upload_file(
             file=file,
             agent_id=agent_id,
             user_context=user_context,
             conversation_id=effective_conversation_id,
+            has_memory=bool(agent.has_memory),
         )
 
-        # Vectorize documents (PDF/text) into the session's temp playground silo
-        # so agent chat retrieves them via RAG. A temp silo is always created —
-        # a conversation is created here to key it when the agent has no memory
-        # and none was provided — so the public API never silently drops content.
-        if file_ref.file_type in VECTORIZABLE_FILE_TYPES and file_ref.content:
-            if not effective_conversation_id:
-                new_conversation = ConversationService.create_conversation(
-                    db=db,
-                    agent_id=agent_id,
-                    user_context=user_context,
-                    title=None,
-                )
-                effective_conversation_id = str(new_conversation.conversation_id)
-                user_context["conversation_id"] = effective_conversation_id
-                logger.info(
-                    f"Auto-created conversation {effective_conversation_id} to scope "
-                    f"vectorized file for agent {agent_id}"
-                )
+        # Vectorize documents (PDF/text) into the conversation's temp silo so
+        # later chat turns retrieve them via RAG. Only memory-enabled agents
+        # keep a temp silo; memory-less agents get the full content in the
+        # prompt on every call instead.
+        extracted_content = getattr(file_ref, "content", None)
+        if (
+            agent.has_memory
+            and effective_conversation_id
+            and is_vectorizable_file(file_ref.file_type, file_ref.filename)
+            and isinstance(extracted_content, str)
+            and extracted_content
+        ):
             conversation = ConversationService.get_conversation(
                 db, int(effective_conversation_id), user_context, agent_id
             )
@@ -126,9 +133,14 @@ async def attach_file(
                         file_id=file_ref.file_id,
                         filename=file_ref.filename,
                         file_path=file_ref.file_path,
-                        content=file_ref.content,
+                        content=extracted_content,
                         db=db,
                     )
+                except ServiceRetiredError:
+                    await file_service.discard_uploaded_file(
+                        file_ref.file_id, agent_id, user_context, effective_conversation_id
+                    )
+                    raise
                 except Exception as vec_err:
                     logger.warning(f"File vectorization at upload failed: {vec_err}")
 
@@ -149,7 +161,7 @@ async def attach_file(
             mime_type=file_ref.mime_type,
         )
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error attaching file for agent {agent_id}: {str(e)}")
@@ -184,10 +196,13 @@ async def detach_file(
     - If conversation_id is not provided, removes from the global session
     """
     validate_api_key_for_app(app_id, api_key, db)
-    validate_agent_ownership(db, agent_id, app_id)
+    agent = validate_agent_ownership(db, agent_id, app_id)
 
     try:
         user_context = create_api_key_user_context(app_id, api_key, conversation_id)
+        conversation_id = ChatAttachmentService.require_owned_conversation(
+            db, conversation_id, user_context, agent_id, bool(agent.has_memory)
+        )
 
         file_service = FileManagementService()
         success = await file_service.remove_file(
@@ -243,10 +258,13 @@ async def list_attached_files(
     - If conversation_id is not provided, returns files from the global session
     """
     validate_api_key_for_app(app_id, api_key, db)
-    validate_agent_ownership(db, agent_id, app_id)
+    agent = validate_agent_ownership(db, agent_id, app_id)
 
     try:
         user_context = create_api_key_user_context(app_id, api_key, conversation_id)
+        conversation_id = ChatAttachmentService.require_owned_conversation(
+            db, conversation_id, user_context, agent_id, bool(agent.has_memory)
+        )
 
         file_service = FileManagementService()
         files_data = await file_service.list_attached_files(
@@ -317,10 +335,13 @@ async def download_file(
     The URL is signed and time-limited for security.
     """
     validate_api_key_for_app(app_id, api_key, db)
-    validate_agent_ownership(db, agent_id, app_id)
+    agent = validate_agent_ownership(db, agent_id, app_id)
 
     try:
         user_context = create_api_key_user_context(app_id, api_key, conversation_id)
+        conversation_id = ChatAttachmentService.require_owned_conversation(
+            db, conversation_id, user_context, agent_id, bool(agent.has_memory)
+        )
 
         file_service = FileManagementService()
 

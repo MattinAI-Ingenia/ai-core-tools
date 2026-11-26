@@ -1,0 +1,131 @@
+# Default OpenSandbox server configuration for Docker runtime.
+#
+# Based on the upstream example config:
+# https://github.com/alibaba/OpenSandbox/blob/main/server/opensandbox_server/examples/example.config.toml
+#
+# Compose-specific adjustments:
+# - host/api_key/network are rendered by entrypoint.py (see [server] below)
+# - sqlite store path lives in the mounted opensandbox-data volume
+
+[server]
+# Rendered by docker/opensandbox/entrypoint.py at container start (this file is
+# a read-only template; the @@MARKERS@@ are replaced, never edit them by hand):
+#   @@BIND_HOST@@  -> this container's IP on the control network (mattin-network).
+#                     The API is deliberately NOT bound to 0.0.0.0: the server is
+#                     also attached to sandbox-workloads (it has to reach the
+#                     sandboxes it proxies into), and binding the wildcard would
+#                     expose the control plane to the untrusted code running there.
+#                     A raw start without the entrypoint fails (invalid host).
+#   @@API_KEY@@    -> OPENSANDBOX_API_KEY (>= 32 chars). The entrypoint refuses to
+#                     start without it. The server checks it in the
+#                     OPEN-SANDBOX-API-KEY header, which is what the Python SDK
+#                     sends for ConnectionConfig(api_key=...).
+# NOTE (verified on opensandbox-server 0.1.11): the route
+# /[v1/]sandboxes/{id}/proxy/{port}/... is EXEMPT from the API key check
+# (middleware/auth.py). Anything that can open a TCP connection to the API port
+# can therefore talk to any sandbox's exec daemon without a key. The network
+# binding above, not the key, is what protects that route.
+host = "@@BIND_HOST@@"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+api_key = "@@API_KEY@@"
+
+[log]
+# Rendered from OPENSANDBOX_LOG_LEVEL (default INFO). DEBUG also turns on
+# third-party debug loggers (websockets, httpcore, docker/urllib3) for the proxy
+# path, which can include proxied payload frames (user code/output): do not use
+# DEBUG on shared deployments. (The server's own debug lines do not log bodies.)
+level = "@@LOG_LEVEL@@"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.0.14"
+
+[storage]
+# Allowlist of host path prefixes permitted for bind mounts.
+# If empty, all host paths are allowed by OpenSandbox — dangerous, since a
+# malicious create-sandbox request (e.g. from LLM-run code calling back into
+# the control-plane API) could otherwise mount arbitrary host paths
+# (including "/") into a new sandbox container.
+# Nothing in this codebase's sandbox integration requests a host bind mount
+# for normal operation (checked backend/tools/sandbox/opensandbox_provider.py
+# and factory.py — no volumes/bind/host_path usage there), so this is set to
+# a harmless placeholder path that has no special meaning on the host or in
+# this Compose setup, purely so the allowlist is non-empty and any
+# unexpected/malicious bind-mount request is rejected by default.
+# If a real feature ever needs host bind mounts, replace this with the
+# actual trusted path(s) it requires.
+allowed_host_paths = ["/var/lib/opensandbox/scratch"]
+# Default storage size for auto-created Kubernetes PVCs when caller omits size.
+# Kept for schema compatibility even though this deployment uses Docker runtime.
+volume_default_size = "1Gi"
+
+[store]
+type = "sqlite"
+path = "/var/lib/opensandbox/opensandbox.db"
+
+[docker]
+# Sandboxes must share a Docker network with the OpenSandbox server when the
+# backend uses use_server_proxy=true (the server proxies exec/file calls to the
+# execd daemon in each sandbox via the sandbox's container IP).
+#
+# SECURITY MODEL
+# Sandbox containers run LLM-generated code and are untrusted. They live on a
+# dedicated network (sandbox-workloads, name rendered from SANDBOX_NETWORK_NAME)
+# that is NOT shared with backend/postgres/qdrant/caddy/frontend. The server is
+# dual-homed (control network + workloads network). What is enforced:
+#   1. The API only listens on the server's control-network address (see
+#      [server].host), so a sandbox cannot connect to it, and Docker's bridge
+#      isolation keeps the control network unroutable from the workloads one.
+#   2. The API requires OPENSANDBOX_API_KEY (defence in depth: it covers
+#      list/create/delete/pause/renew; it does NOT cover the proxy route, see
+#      the [server] note).
+#   3. Optional hardened mode (docker/docker-compose.sandbox-hardened.yaml,
+#      Docker >= 28): the workloads network is internal + gateway-less: no
+#      internet, no host services, no LAN. Breaks `pip install` in sandboxes.
+# DEFAULT MODE (egress allowed, accepted risk): sandbox code can reach the
+# internet, every host service on the bridge gateway IP (incl. published ports
+# like 5432/5433), the LAN/RFC1918, and the unauthenticated exec daemon
+# (:44772) of every other sandbox on the network. Sandbox-to-sandbox access is
+# NOT closed in ANY mode: the server needs the same L2 path (icc=false would
+# also cut server -> sandbox), and per-sandbox `networkPolicy` is refused by
+# opensandbox-server for user-defined networks (docker.py
+# _ensure_network_policy_support). execd supports X-EXECD-ACCESS-TOKEN but
+# opensandbox-server 0.1.11 never sets it: closing this needs an upstream
+# change. Mitigations: hardened mode, host firewall (DOCKER-USER) rules
+# (docker/README.md), one OpenSandbox server per trust boundary.
+network_mode = "@@SANDBOX_NETWORK@@"
+# Drop dangerous capabilities and block privilege escalation.
+drop_capabilities = [
+  "AUDIT_WRITE",
+  "MKNOD",
+  "NET_ADMIN",
+  "NET_RAW",
+  "SYS_ADMIN",
+  "SYS_MODULE",
+  "SYS_PTRACE",
+  "SYS_TIME",
+  "SYS_TTY_CONFIG",
+]
+no_new_privileges = true
+
+# Optional: set an AppArmor profile name, e.g. "docker-default", when AppArmor is enabled.
+apparmor_profile = ""
+
+# Seccomp profile: empty string uses Docker default; set an absolute path for a custom profile.
+seccomp_profile = ""
+
+# Limit process count to reduce host impact from fork bombs; set to null to disable.
+pids_limit = 4096
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.0.10"
+mode = "dns"
+
+# Experimental renew-on-access. Off by default.
+[renew_intent]
+enabled = false
+min_interval_seconds = 60

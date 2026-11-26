@@ -9,7 +9,7 @@ This describes **what Mattin AI does** from a product/domain perspective. It aut
 
 ## Core Concepts
 
-**App (Workspace)**: The central tenant unit. Every resource (agents, silos, repos, services, API keys) is scoped to an App. Each App has an `owner`, a URL-safe `slug`, configurable rate limits, CORS origins, and max file sizes.
+**App (Workspace)**: The central tenant unit. Every resource (agents, silos, repos, services, API keys) is scoped to an App. Each App has an `owner`, a URL-safe `slug`, a configurable per-agent rate limit, CORS origins, and max file sizes.
 
 **User**: A platform account (email, name). Owns multiple Apps and can collaborate on others. Authenticates via `AICT_LOGIN`: `FAKE` (email-only local dev), `LOCAL` (SaaS email + password with `UserCredential`), or `OIDC` (Azure Entra ID, production).
 
@@ -31,7 +31,8 @@ Enforced with `@require_min_role(AppRole.EDITOR)` on routes. All resources filte
 | **OCRAgent** | Agent subclass (STI via `type`). Dual-LLM: vision model for scanned pages + text model for structuring output. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom): type, endpoint, API key. Multiple per App. |
 | **EmbeddingService** | Embedding model config for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. Selection via `backend/tools/embeddingTools.py`. |
-| **Skill** | Reusable markdown prompt block attached to agents (M:N via `agent_skills`). Injected into the system prompt at execution. |
+| **Skill** | Reusable markdown prompt block attached to agents (M:N via `agent_skills`). Injected into the system prompt at execution. App-scoped or system-wide (`app_id IS NULL`, platform-managed by omniadmins). |
+| **SkillFile** | One bundled package file (script, reference, template) for a Skill; text/bytes split with checksum, cascade-deleted with the Skill. |
 | **OutputParser** | JSON-schema for structured output (`fields` JSON column). Dynamically generates a Pydantic model at runtime. Used by agents and for silo metadata filtering. |
 | **Conversation** | Chat session between a user and an agent. Memory in LangGraph's PostgreSQL checkpointer; metadata (title, count, last message) in the Conversation table. |
 
@@ -112,7 +113,7 @@ Three groups with different auth:
 | **Public v1** | `/public/v1` | `X-API-KEY` header | External programmatic access. Chat, file upload, repo/silo ops. |
 | **MCP** | `/mcp/v1` | `X-API-KEY` header | JSON-RPC 2.0 for Model Context Protocol. |
 
-**Public API controls:** per-app rate limiting (`App.agent_rate_limit`), CORS origin validation (`App.agent_cors_origins`), file size limits (`App.max_file_size_mb`).
+**Public API controls:** per-agent rate limiting (`App.agent_rate_limit`, with an independent budget for each agent), CORS origin validation (`App.agent_cors_origins`), file size limits (`App.max_file_size_mb`).
 
 ## Key User Workflows
 
@@ -153,12 +154,9 @@ User message (+ optional files)
 - **Config per agent**: `has_memory`, `memory_max_messages` (default 20), `memory_max_tokens` (default 4000), `memory_summarize_threshold` (default 10)
 - **Strategies**: token counting (tiktoken), message trimming (keeps recent N, preserves system messages), tool message cleanup
 
-## Client Deployment Model
+## Frontend Deployment
 
-Frontend is a **reusable npm library** (`@lksnext/ai-core-tools-base`):
-- Base library provides all pages, components, contexts, auth, themes
-- Client projects (`clients/<name>/`) import it and customize via `clientConfig.ts`: theme, branding, auth config, API URL, feature flags, custom routes
-- All clients share the same backend
+The frontend is a single React SPA shipped as a Docker image (Nginx behind Caddy); it is not published as an npm library. Configuration comes from `VITE_*` variables or runtime config injected at container start.
 
 ## Notable Features
 
@@ -168,6 +166,7 @@ Frontend is a **reusable npm library** (`@lksnext/ai-core-tools-base`):
 - **Secure static files**: `/static/{path}` requires a cryptographic signature
 - **Cascade deletion**: `AppService.delete_app()` performs ordered deletion across all entity types
 - **LangSmith tracing**: per-app via `App.langsmith_api_key` (project = app name), global env-var fallback (`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` + `LANGSMITH_PROJECT`). Validated via `POST /internal/apps/{id}/langsmith/test`. Helper: `backend/tools/langsmith_config.py`.
+- **System skills**: platform-wide skills (`Skill.app_id IS NULL`) are seeded create-if-missing from `backend/system_defaults.yaml`'s `skills:` block on every backend startup, in all deployment modes. See `docs/guides/skills.md`.
 
 ## Environment Variables
 

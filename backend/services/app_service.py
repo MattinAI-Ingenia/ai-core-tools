@@ -4,6 +4,7 @@ from models.app import App
 from repositories.app_repository import AppRepository
 from repositories.app_collaboration_repository import AppCollaborationRepository
 from datetime import datetime
+from services.a2a_server.lifecycle_service import schedule_owner_purge
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,6 +36,59 @@ class AppService:
         """Get a specific app by ID"""
         return self.app_repo.get_by_id(app_id)
     
+    def validate_default_sandbox_service(
+        self, app_id: int, sandbox_service_id: Optional[int], current_id: Optional[int]
+    ) -> None:
+        """Validate an app's ``default_sandbox_service_id`` (``None`` = env default, always valid).
+
+        The service must exist and be system-scoped or owned by this app (checked first, so a
+        foreign service id and a missing one are indistinguishable); then a retired service can
+        only be kept (``current_id``), not newly selected.
+
+        Raises:
+            ValueError: the service is not valid for this app, or is retired and not the current one
+                (``RetiredServiceAssignmentError``).
+        """
+        if sandbox_service_id is None:
+            return
+        from repositories.sandbox_service_repository import SandboxServiceRepository
+        from utils.service_lifecycle import SERVICE_KIND_SANDBOX, ensure_assignable
+
+        sandbox_service = SandboxServiceRepository.get_by_id(self.db, sandbox_service_id)
+        if sandbox_service is None or (
+            sandbox_service.app_id is not None and sandbox_service.app_id != app_id
+        ):
+            raise ValueError(
+                f"default_sandbox_service_id '{sandbox_service_id}' does not "
+                "reference a valid sandbox service for this app."
+            )
+        ensure_assignable(sandbox_service, current_id, "default_sandbox_service_id", SERVICE_KIND_SANDBOX)
+
+    def validate_default_embedding_service(
+        self, app_id: int, embedding_service_id: Optional[int], current_id: Optional[int]
+    ) -> None:
+        """Validate an app's ``default_embedding_service_id`` (``None`` = no default, always valid).
+
+        The service must exist and be system-scoped (``app_id`` NULL) or owned by this app (checked first, so a
+        foreign service id and a missing one are indistinguishable); then a retired service can only be kept
+        (``current_id``), not newly selected.
+
+        Raises:
+            ValueError: the service is not valid for this app, or is retired and not the current one.
+        """
+        if embedding_service_id is None:
+            return
+        from repositories.embedding_service_repository import EmbeddingServiceRepository
+        from utils.service_lifecycle import SERVICE_KIND_EMBEDDING, ensure_assignable
+
+        service = EmbeddingServiceRepository.get_by_id(self.db, embedding_service_id)
+        if service is None or (service.app_id is not None and service.app_id != app_id):
+            raise ValueError(
+                f"default_embedding_service_id '{embedding_service_id}' does not "
+                "reference a valid embedding service for this app."
+            )
+        ensure_assignable(service, current_id, "default_embedding_service_id", SERVICE_KIND_EMBEDDING)
+
     def create_or_update_app(self, app_data: dict, user_id: int = None) -> App:
         """Create a new app or update an existing one.
 
@@ -67,8 +121,11 @@ class AppService:
         from .ai_service_service import AIServiceService
         from .silo_service import SiloService
         from .embedding_service_service import EmbeddingServiceService
+        from .sandbox_service_service import SandboxServiceService
         from .api_key_service import APIKeyService
         from .mcp_config_service import MCPConfigService
+        from .middleware_service import MiddlewareService
+        from repositories.middleware_repository import MiddlewareRepository
         from .resource_service import ResourceService
         from .skill_service import SkillService
         from .mcp_server_service import MCPServerService
@@ -90,6 +147,7 @@ class AppService:
             ai_service_service = AIServiceService()
             silo_service = SiloService()
             embedding_service_service = EmbeddingServiceService()
+            sandbox_service_service = SandboxServiceService()
             api_key_service = APIKeyService()
             mcp_config_service = MCPConfigService()
             resource_service = ResourceService()
@@ -100,7 +158,13 @@ class AppService:
             agents = self.app_repo.get_agents_by_app_id(app_id)
             for agent in agents:
                 logger.info(f"Deleting agent {agent.agent_id}: {agent.name}")
-                agent_service.delete_agent(self.db, agent.agent_id)
+                if not agent_service.delete_agent(self.db, agent.agent_id):
+                    raise RuntimeError(f"agent {agent.agent_id} could not be deleted")
+
+            # 1b. Delete middlewares (after agents; before AI services, which they may reference)
+            for middleware in MiddlewareRepository.get_all_by_app_id(self.db, app_id):
+                logger.info(f"Deleting middleware {middleware.middleware_id}: {middleware.name}")
+                MiddlewareService.delete_middleware(self.db, app_id, middleware.middleware_id)
 
             # 2. Delete skills (after agents, since agents may reference skills)
             skills = self.app_repo.get_skills_by_app_id(app_id)
@@ -183,18 +247,45 @@ class AppService:
                 logger.info(f"Deleting embedding service {service.service_id}: {service.name}")
                 embedding_service_service.delete_embedding_service(self.db, app_id, service.service_id)
             
+            # 13b. Delete sandbox services
+            sandbox_services = self.app_repo.get_sandbox_services_by_app_id(app_id)
+            for service in sandbox_services:
+                logger.info(f"Deleting sandbox service {service.service_id}: {service.name}")
+                sandbox_service_service.delete_sandbox_service(self.db, app_id, service.service_id)
+
             # 14. Delete collaborations
             collaborations = self.collaboration_repo.get_collaborations_by_app(app_id)
             for collab in collaborations:
                 logger.info(f"Deleting collaboration {collab.id}")
                 self.collaboration_repo.delete_collaboration(collab)
             
-            # 15. Finally, delete the app
+            # 15. Finally, delete the app.
+            # FR-15/AC-12 hardening: re-check for any leftover app-private skills right before the
+            # delete. Skill creation/import is not blocked while this method runs (repository/silo
+            # deletion above can take seconds to minutes), so a skill created after step 2's
+            # enumeration but before this point would otherwise be missed by the loop above. With
+            # App.skills now passive_deletes='all' and Skill.app_id's FK left at its default NO
+            # ACTION, an actual leftover row would raise IntegrityError anyway (caught below and
+            # turned into a clean False) — this check just fails fast with a clear log line instead
+            # of relying on that DB-level safety net. Uses the app-private accessor (NOT the merged
+            # system+app listing) so system skills never factor into this check.
+            leftover_skills = self.app_repo.get_skills_by_app_id(app_id)
+            if leftover_skills:
+                leftover_ids = [s.skill_id for s in leftover_skills]
+                logger.error(
+                    f"Aborting deletion of app {app_id}: {len(leftover_skills)} skill(s) "
+                    f"{leftover_ids} still reference this app (race with concurrent skill "
+                    "creation/import). Retry the deletion."
+                )
+                self.db.rollback()
+                return False
+
             success = self.app_repo.delete(app)
-            
+
             if success:
                 logger.info(f"Successfully deleted app {app_id} and all related data")
-            
+                schedule_owner_purge(app_id)  # FR-22/AD-10: app-wide A2A purge; sync, never raises
+
             return success
                 
         except Exception as e:

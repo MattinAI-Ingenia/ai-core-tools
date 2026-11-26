@@ -157,7 +157,7 @@ def test_dense_plus_rerank_builds_a_sync_mode_retriever():
     dense search_method + rerank strategy must produce a retriever built with
     use_async=False, since find_docs_in_collection calls it via .invoke()."""
     silo = _make_silo()
-    embedding_service = MagicMock()
+    embedding_service = MagicMock(end_of_service_at=None)
     vector_store = MagicMock()
     vector_store.get_retriever.return_value = _FakeDenseRetriever()
     db = MagicMock()

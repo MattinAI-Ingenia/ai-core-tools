@@ -1,13 +1,35 @@
 import { ExternalLink } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { FormField } from '../../../ui/FormField';
 import Alert from '../../../ui/Alert';
 import { getProviderDescriptor } from '../providers';
-import type { ServiceWizardMode } from '../../../../types/services';
+import type { ServiceKind, ServiceWizardMode } from '../../../../types/services';
 
 /** Provider-specific label for the secret field. */
 const API_KEY_LABELS: Record<string, string> = {
-  GoogleCloud: 'Service Account JSON',
-  Bedrock: 'AWS Secret Access Key',
+  GoogleCloud: 'serviceWizard.credentialsStep.apiKeyLabels.serviceAccountJson',
+  Bedrock: 'serviceWizard.credentialsStep.apiKeyLabels.awsSecretAccessKey',
+};
+
+const API_KEY_HELP_KEYS: Record<string, string> = {
+  'ai:OpenAI': 'openAI',
+  'ai:Anthropic': 'anthropic',
+  'ai:OpenRouter': 'openRouter',
+  'ai:MistralAI': 'mistralAI',
+  'ai:Google': 'google',
+  'ai:Custom': 'selfHosted',
+  'embedding:Custom': 'huggingFace',
+  'embedding:Ollama': 'ollama',
+  'embedding:MistralAI': 'mistralAI',
+  'ai:Azure': 'azure',
+  'embedding:Azure': 'azure',
+  'ai:GoogleCloud': 'googleCloud',
+  'embedding:GoogleCloud': 'googleCloud',
+  'ai:Bedrock': 'bedrock',
+  'embedding:Bedrock': 'bedrock',
+  'sandbox:opensandbox': 'openSandbox',
+  'sandbox:daytona': 'daytona',
+  'sandbox:e2b': 'e2b',
 };
 
 export interface CredentialsState {
@@ -22,9 +44,16 @@ export interface CredentialsState {
   aws_access_key_id?: string;
   /** AWS Bedrock: region, e.g. us-east-1. */
   aws_region?: string;
+  /** Sandbox (OpenSandbox): container image used to create sandboxes. */
+  image?: string;
+  /** Sandbox (Daytona): target/region identifier. */
+  target?: string;
+  /** Sandbox (E2B): template id used to create sandboxes. */
+  template?: string;
 }
 
 interface CredentialsStepProps {
+  readonly kind: ServiceKind;
   readonly provider: string;
   readonly mode: ServiceWizardMode;
   readonly value: CredentialsState;
@@ -32,19 +61,21 @@ interface CredentialsStepProps {
 }
 
 function CredentialsStep({
+  kind,
   provider,
   mode,
   value,
   onChange,
 }: Readonly<CredentialsStepProps>) {
+  const { t } = useTranslation('common');
   const descriptor = getProviderDescriptor(provider);
 
   if (!descriptor) {
     return (
       <Alert
         type="error"
-        title="Provider not found"
-        message="Go back and pick a provider before continuing."
+        title={t('serviceWizard.credentialsStep.providerNotFound')}
+        message={t('serviceWizard.credentialsStep.pickProviderFirst')}
       />
     );
   }
@@ -53,31 +84,34 @@ function CredentialsStep({
     onChange({ ...value, ...patch });
   const manualFields = descriptor.manualFields ?? [];
 
-  const apiKeyBaseLabel = API_KEY_LABELS[descriptor.value] ?? 'API Key';
-  const apiKeyLabel = `${apiKeyBaseLabel}${
-    descriptor.apiKey === 'optional' ? ' (optional)' : ''
-  }`;
+  const apiKeyBaseLabel = t(API_KEY_LABELS[descriptor.value] ?? 'serviceWizard.credentialsStep.apiKey');
+  let apiKeyLabel = apiKeyBaseLabel;
+  if (descriptor.apiKey === 'optional') {
+    apiKeyLabel += ` (${t('serviceWizard.credentialsStep.optional')})`;
+  }
 
-  let baseUrlLabel = 'Base URL';
-  if (descriptor.value === 'GoogleCloud') baseUrlLabel = 'GCP Project ID';
-  else if (descriptor.value === 'Azure') baseUrlLabel = 'Azure endpoint';
+  let baseUrlLabel = t('serviceWizard.credentialsStep.baseUrl');
+  if (descriptor.value === 'GoogleCloud') baseUrlLabel = t('serviceWizard.credentialsStep.gcpProjectId');
+  else if (descriptor.value === 'Azure') baseUrlLabel = t('serviceWizard.credentialsStep.azureEndpoint');
+  else if (descriptor.value === 'opensandbox') baseUrlLabel = t('serviceWizard.credentialsStep.openSandboxDomain');
+  else if (descriptor.value === 'daytona') baseUrlLabel = t('serviceWizard.credentialsStep.daytonaApiUrl');
+  const apiKeyHelpKey = API_KEY_HELP_KEYS[`${kind}:${descriptor.value}`] ?? 'default';
 
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="text-base font-semibold text-gray-900">
-          Enter credentials for {descriptor.label}
+        <h3 className="text-base font-semibold text-fg dark:text-fg-dark">
+          {t('serviceWizard.credentialsStep.title', { provider: descriptor.label })}
         </h3>
-        <p className="text-sm text-gray-600 mt-1">
-          These credentials are used to fetch the available models. They are not
-          saved until you confirm the service in the final step.
+        <p className="text-sm text-fg-secondary dark:text-fg-secondary-dark mt-1">
+          {t('serviceWizard.credentialsStep.subtitle')}
         </p>
       </div>
 
       {mode === 'edit-model' && (
         <Alert
           type="info"
-          message="Re-enter the API key — the masked value cannot be used to list models."
+          message={t('serviceWizard.credentialsStep.reenterApiKey')}
         />
       )}
 
@@ -90,7 +124,7 @@ function CredentialsStep({
             value={value.api_key}
             onChange={(e) => update({ api_key: e.target.value })}
             placeholder={descriptor.apiKeyPlaceholder}
-            helpText={descriptor.apiKeyHelp}
+            helpText={t(`serviceWizard.credentialsStep.apiKeyHelp.${apiKeyHelpKey}`)}
             required={descriptor.apiKey === 'required'}
           />
           {descriptor.apiKeyDocUrl && (
@@ -98,12 +132,13 @@ function CredentialsStep({
               href={descriptor.apiKeyDocUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800"
+              className="text-sm text-bronze  dark:text-bronze-dark inline-block"
             >
-              <ExternalLink className="w-3 h-3" />
+              
               {descriptor.value === 'GoogleCloud'
-                ? 'Open Google Cloud Console'
-                : `Get a ${descriptor.label} key`}
+                ? t('serviceWizard.credentialsStep.openGoogleCloudConsole')
+                : t('serviceWizard.credentialsStep.getProviderKey', { provider: descriptor.label })}
+              <ExternalLink className="w-4 h-4 inline-block ml-1" />
             </a>
           )}
         </div>
@@ -123,7 +158,9 @@ function CredentialsStep({
 
       {manualFields.includes('api_version') && (
         <FormField
-          label={descriptor.value === 'GoogleCloud' ? 'Region (location)' : 'API version'}
+          label={descriptor.value === 'GoogleCloud'
+            ? t('serviceWizard.credentialsStep.regionLocation')
+            : t('serviceWizard.credentialsStep.apiVersion')}
           id="api_version"
           type="text"
           value={value.api_version}
@@ -136,7 +173,7 @@ function CredentialsStep({
 
       {manualFields.includes('aws_access_key_id') && (
         <FormField
-          label="AWS Access Key ID"
+          label={t('serviceWizard.credentialsStep.awsAccessKeyId')}
           id="aws_access_key_id"
           type="text"
           value={value.aws_access_key_id ?? ''}
@@ -148,30 +185,66 @@ function CredentialsStep({
 
       {manualFields.includes('aws_region') && (
         <FormField
-          label="AWS Region"
+          label={t('serviceWizard.credentialsStep.awsRegion')}
           id="aws_region"
           type="text"
           value={value.aws_region ?? ''}
           onChange={(e) => update({ aws_region: e.target.value })}
           placeholder="us-east-1"
-          helpText="Region where Bedrock is enabled, e.g. us-east-1 or eu-west-1."
+          helpText={t('serviceWizard.credentialsStep.awsRegionHelp')}
           required
+        />
+      )}
+
+      {manualFields.includes('image') && (
+        <FormField
+          label={t('serviceWizard.credentialsStep.containerImage')}
+          id="image"
+          type="text"
+          value={value.image ?? ''}
+          onChange={(e) => update({ image: e.target.value })}
+          placeholder="python:3.11-slim"
+          helpText={t('serviceWizard.credentialsStep.containerImageHelp')}
+        />
+      )}
+
+      {manualFields.includes('target') && (
+        <FormField
+          label={t('serviceWizard.credentialsStep.target')}
+          id="target"
+          type="text"
+          value={value.target ?? ''}
+          onChange={(e) => update({ target: e.target.value })}
+          placeholder="us"
+          helpText={t('serviceWizard.credentialsStep.targetHelp')}
+        />
+      )}
+
+      {manualFields.includes('template') && (
+        <FormField
+          label={t('serviceWizard.credentialsStep.template')}
+          id="template"
+          type="text"
+          value={value.template ?? ''}
+          onChange={(e) => update({ template: e.target.value })}
+          placeholder="base"
+          helpText={t('serviceWizard.credentialsStep.templateHelp')}
         />
       )}
 
       {descriptor.value === 'Bedrock' && (
         <Alert
           type="info"
-          title="Model access may be required"
-          message="A listed model still needs to be enabled in the AWS console (Bedrock → Model access) before it can be invoked."
+          title={t('serviceWizard.credentialsStep.modelAccessTitle')}
+          message={t('serviceWizard.credentialsStep.modelAccessMessage')}
         />
       )}
 
-      {!descriptor.supportsModelListing && (
+      {kind !== 'sandbox' && !descriptor.supportsModelListing && (
         <Alert
           type="info"
-          title="Manual model entry"
-          message="This provider does not expose a public model listing. The next step will ask you to type the model identifier directly."
+          title={t('serviceWizard.credentialsStep.manualModelTitle')}
+          message={t('serviceWizard.credentialsStep.manualModelMessage')}
         />
       )}
     </div>

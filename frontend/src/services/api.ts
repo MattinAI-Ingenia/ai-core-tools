@@ -1,11 +1,41 @@
 import { configService } from '../core/ConfigService';
 import { authService } from './auth';
 import { getCsrfToken } from './cookies';
-import type { StreamEvent } from '../types/streaming';
+import type { HitlCancelResult, HitlDecision, HitlPendingApproval, StreamEvent } from '../types/streaming';
+import type { IndexingDetailFields, IndexingSettingsPayload } from '../types/indexing';
+import type {
+  ChatActionResult,
+  ChatConversation,
+  ChatConversationCreateRequest,
+  ChatConversationDetail,
+  ChatConversationList,
+  ChatFileDownload,
+  ChatFileList,
+  ChatFileUploadResult,
+  ChatOptions,
+  ChatSelection,
+  ChatStreamRequest,
+} from '../types/appChat';
+import type {
+  ExistingSandboxService,
+  ExistingService,
+  MoveAgentsResult,
+  MoveSandboxServiceUsageResult,
+  ServiceLifecycleFields,
+  ServiceLifecycleWarning,
+  ServiceUsage,
+} from '../types/services';
 
 /** Non-2xx HTTP error; callers can branch on `.status` without string-sniffing. */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  /** Raw `detail` from the JSON error body (e.g. FastAPI's 422 validation array), when present. */
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly detail?: unknown,
+    /** Machine-readable `error_code` of the JSON error body (e.g. `SERVICE_RETIRED`), when present. */
+    readonly errorCode?: string,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -32,14 +62,645 @@ import type {
   DomainUrlListResponse,
   DomainUrlActionResponse,
 } from '../types/crawl';
+import type {
+  MCPConfig,
+  Skill,
+  MCPServer,
+  MCPServerListItem,
+  ToolAgent,
+  AgentMCPUsage,
+  AppSlugInfo,
+  ClaudePluginImportResult,
+  Middleware,
+  MiddlewarePayload,
+  MiddlewareType,
+} from '../core/types';
+import type {
+  ImportResponse,
+  FullAppImportResponse,
+  AgentImportPreview,
+  AppImportPreview,
+} from '../types/import';
 
 type ConflictMode = 'fail' | 'rename' | 'override';
+
+/** Fields accepted by the admin skill create/update endpoints. Null clears nullable fields. */
+export interface SystemSkillWriteData {
+  name: string;
+  description?: string | null;
+  content: string;
+  display_name?: string | null;
+  when_to_use?: string | null;
+  allowed_tools?: string[] | null;
+  runtime?: string | null;
+  bootstrap_script_path?: string | null;
+  runtime_options?: Record<string, unknown> | null;
+  is_enabled?: boolean | null;
+}
+
+/** Current rate-limit usage snapshot for one active agent. */
+export interface AgentRateLimitUsage {
+  agent_id: number;
+  usage_percentage: number;
+  current_usage: number;
+  limit: number;
+  remaining: number;
+  reset_in_seconds: number;
+  is_over_limit: boolean;
+}
+
+export interface App {
+  app_id: number;
+  name: string;
+  created_at: string;
+  owner_id: number;
+  owner_name?: string;
+  owner_email?: string;
+  role: string;
+  /** Only present on the single-app detail response (GET /internal/apps/{id}); list responses use `role` instead. */
+  user_role?: string;
+  langsmith_configured: boolean;
+  langsmith_api_key?: string;
+  agent_rate_limit: number;
+  max_file_size_mb?: number;
+  agent_cors_origins?: string;
+  enable_openai_api?: boolean;
+  default_sandbox_service_id?: number | null;
+  chat_code_interpreter_enabled?: boolean;
+  default_embedding_service_id?: number | null;
+  agent_count: number;
+  repository_count: number;
+  domain_count: number;
+  silo_count: number;
+  collaborator_count: number;
+  onboarding_dismissed?: boolean;
+  /** Version of the App image (GET /internal/apps/{id}/image); null/absent = no image. */
+  image_updated_at?: string | null;
+}
+
+/** Answer of the picture uploads (user avatar, App image). */
+export interface ImageUpdatedResponse {
+  image_updated_at: string;
+}
+
+/** RAG retrieval-time filter applied on top of an agent's fixed silo. Mirrors RagConfigSection's RagFixedFilter shape. */
+export interface AgentRagFixedFilter {
+  field: string;
+  op: '$eq' | '$ne' | '$gt' | '$gte' | '$lt' | '$lte' | '$in';
+  value: unknown;
+  _key?: string;
+}
+
+export interface Agent {
+  rag_search_method?: Array<'dense' | 'bm25'>;
+  rag_strategy?: string[] | null;
+  rag_rerank_top_n?: number | null;
+  rag_rerank_similarity_threshold?: number | null;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
+  agent_id: number;
+  name: string;
+  description?: string;
+  system_prompt: string;
+  prompt_template: string;
+  type: string;
+  is_tool: boolean;
+  has_memory: boolean;
+  enable_code_interpreter: boolean;
+  skill_router_enabled?: boolean;
+  status?: string;
+  server_tools?: string[];
+  memory_max_messages: number;
+  memory_max_tokens: number;
+  memory_summarize_threshold: number;
+  service_id?: number;
+  sandbox_service_id?: number;
+  silo_id?: number;
+  output_parser_id?: number;
+  temperature: number;
+  tool_ids?: number[];
+  mcp_config_ids?: number[];
+  skill_ids?: number[];
+  exposed_chat_filters?: string[];
+  middleware_ids?: number[];
+  created_at: string;
+  last_used_date: string | null;
+  request_count: number;
+  marketplace_visibility?: MarketplaceVisibility;
+  a2a_enabled?: boolean;
+  a2a_card_visibility?: 'public' | 'api_key';
+  a2a_name_override?: string | null;
+  a2a_description_override?: string | null;
+  a2a_skill_tags?: string[];
+  a2a_examples?: string[];
+  a2a_card_url?: string | null;
+  a2a_rpc_url?: string | null;
+  // OCR-specific fields
+  vision_service_id?: number;
+  vision_system_prompt?: string;
+  text_system_prompt?: string;
+  // Media processing configuration
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
+  media_embedding_service_id?: number | null;
+  media_forced_language?: string | null;
+  media_chunk_min_duration?: number | null;
+  media_chunk_max_duration?: number | null;
+  media_chunk_overlap?: number | null;
+  // RAG retrieval config
+  rag_k?: number;
+  rag_search_type?: 'similarity' | 'mmr' | 'similarity_score_threshold';
+  rag_score_threshold?: number | null;
+  rag_max_retrieval_calls?: number | null;
+  rag_fixed_filters?: AgentRagFixedFilter[];
+  ai_service?: { name: string; model_name: string; provider: string };
+  ai_services: Array<{ service_id: number; name: string }>;
+  silo?: {
+    silo_id: number;
+    name: string;
+    vector_db_type?: string;
+    metadata_definition?: { fields: Array<{ name: string; type: string; description?: string }> };
+  };
+  silos: Array<{ silo_id: number; name: string }>;
+  output_parser?: {
+    parser_id: number;
+    name: string;
+    description?: string;
+    fields: Array<{ name: string; type: string; description: string; optional?: boolean }>;
+  };
+  output_parsers: Array<{ parser_id: number; name: string }>;
+  sandbox_services: Array<{ service_id: number; name: string }>;
+  tools: Array<{ agent_id: number; name: string }>;
+  mcp_configs: Array<{ config_id: number; name: string }>;
+  skills: Array<{ skill_id: number; name: string; description?: string }>;
+  middlewares?: Array<{ middleware_id: number; name: string; description?: string; middleware_type: MiddlewareType }>;
+}
+
+export type ScheduledTaskVisibility = 'unpublished' | 'private' | 'public';
+
+export interface ScheduledTask {
+  id: number;
+  name: string;
+  description?: string | null;
+  agent_id: number;
+  app_id: number;
+  created_by: number;
+  orchestrator_schedule_name: string;
+  input: Record<string, unknown>;
+  cron_expression: string;
+  timezone: string;
+  conversation_mode: 'new_per_run' | 'continuous' | string;
+  persistent_conversation_id?: number | null;
+  status: 'active' | 'paused' | string;
+  max_concurrent_runs: number;
+  max_runs_retained: number;
+  marketplace_visibility: ScheduledTaskVisibility;
+  created_at: string;
+  updated_at: string;
+  next_run_at?: string | null;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
+}
+
+export type OutputContentMode = 'result' | 'excerpt' | 'link_only';
+
+export interface OutputDestination {
+  id: number;
+  app_id: number;
+  name: string;
+  provider_key: 'teams_workflow' | 'webhook' | string;
+  enabled: boolean;
+  has_secret: boolean;
+  content_mode: OutputContentMode;
+  public_config: Record<string, unknown>;
+  has_credentials: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduledTaskOutputBinding {
+  destination_id: number;
+  enabled: boolean;
+  destination_name?: string | null;
+  provider_key?: string | null;
+  include_attachments?: boolean;
+}
+
+export interface OutputDeliveryAttempt {
+  attempt_number: number;
+  status: string;
+  started_at: string;
+  finished_at?: string | null;
+  http_status?: number | null;
+  error_summary?: string | null;
+}
+
+export interface OutputDelivery {
+  id: number;
+  destination_name: string;
+  provider_key: string;
+  event_type: string;
+  status: string;
+  attempt_count: number;
+  next_attempt_at?: string | null;
+  receipt?: Record<string, unknown> | null;
+  error_summary?: string | null;
+  created_at: string;
+  attempts: OutputDeliveryAttempt[];
+}
+
+export type ScheduledTaskCreate = Pick<ScheduledTask, 'name' | 'agent_id' | 'input' | 'cron_expression' | 'timezone' | 'conversation_mode' | 'max_concurrent_runs'>
+  & Partial<Pick<ScheduledTask, 'description' | 'max_runs_retained' | 'marketplace_visibility'>>
+  & { output_bindings?: Omit<ScheduledTaskOutputBinding, 'destination_name'>[] };
+
+export type ScheduledTaskUpdate = Partial<Pick<ScheduledTask,
+  'name' | 'description' | 'input' | 'cron_expression' | 'timezone' | 'max_concurrent_runs' | 'status'
+  | 'max_runs_retained' | 'marketplace_visibility'>>;
+
+export interface ScheduledTaskRunFile {
+  file_id: string;
+  filename: string;
+  file_type?: string | null;
+}
+
+export interface ScheduledTaskRun {
+  id: number;
+  scheduled_task_id: number;
+  conversation_id?: number | null;
+  conversation_anchor_message_id?: number | null;
+  orchestrator_run_id: string;
+  scheduled_time: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  status: string;
+  attempt_count: number;
+  error_summary?: string | null;
+  output_text?: string | null;
+  output_files: ScheduledTaskRunFile[];
+}
+
+export interface ScheduledTaskRunList {
+  items: ScheduledTaskRun[];
+  page: number;
+  per_page: number;
+  total: number;
+}
+
+/** What the marketplace shows of a scheduled task (never its input). */
+export interface MarketplaceScheduledTask {
+  id: number;
+  name: string;
+  description?: string | null;
+  app_id: number;
+  app_name?: string | null;
+  cron_expression: string;
+  timezone: string;
+  conversation_mode: string;
+  status: string;
+  marketplace_visibility: ScheduledTaskVisibility;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_run_status?: string | null;
+  run_count: number;
+}
+
+export interface MarketplaceScheduledTaskCatalog {
+  tasks: MarketplaceScheduledTask[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface ScheduledTaskTriggerResponse {
+  task_id: number;
+  workflow_id: string;
+  status: string;
+}
+
+export interface AIService extends Partial<ServiceLifecycleFields> {
+  service_id: number;
+  name: string;
+  provider: string;
+  model_name: string;
+  created_at: string;
+  needs_api_key?: boolean;
+  supports_video?: boolean;
+  is_system?: boolean;
+}
+
+export interface EmbeddingService extends Partial<ServiceLifecycleFields> {
+  service_id: number;
+  name: string;
+  provider: string;
+  model_name: string;
+  created_at: string;
+  needs_api_key?: boolean;
+  is_system?: boolean;
+}
+
+export interface VectorDbOption {
+  code: string;
+  label: string;
+}
+
+export interface Silo extends IndexingDetailFields {
+  silo_id: number;
+  name: string;
+  description?: string;
+  type?: string;
+  created_at?: string;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
+  docs_count: number;
+  vector_db_type?: string;
+  metadata_definition_id?: number;
+  embedding_service_id?: number;
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
+  ai_services?: Array<{ service_id: number; name: string; supports_video?: boolean }>;
+  metadata_fields?: Array<{ name: string; type: string; description?: string }>;
+  output_parsers?: Array<{ parser_id: number; name: string }>;
+  embedding_services?: Array<{ service_id: number; name: string; provider?: string; is_system?: boolean }>;
+  vector_db_options?: VectorDbOption[];
+}
+
+/** A single vector-search hit. Mirrors ResultCard's SearchResult shape. */
+export interface SearchResult {
+  page_content: string;
+  metadata: Record<string, unknown>;
+  score?: number;
+  id?: string;
+}
+
+export interface Folder {
+  folder_id: number;
+  name: string;
+  parent_folder_id?: number;
+  create_date?: string;
+  status?: string;
+  repository_id: number;
+  subfolders: Folder[];
+  resource_count: number;
+  folder_path: string;
+}
+
+export interface RepositoryListItem {
+  repository_id: number;
+  name: string;
+  created_at: string;
+  resource_count: number;
+  lifecycle_warnings?: ServiceLifecycleWarning[];
+}
+
+export interface Media {
+  media_id: number;
+  name: string;
+  source_type: string;
+  source_url: string | null;
+  duration: number | null;
+  language: string | null;
+  status: string;
+  processing_mode: string | null;
+  error_message: string | null;
+  create_date: string;
+  folder_id: number | null;
+}
+
+export interface Repository extends IndexingDetailFields {
+  lifecycle_warnings?: ServiceLifecycleWarning[];
+  repository_id: number;
+  name: string;
+  created_at: string;
+  silo_id?: number;
+  resources: Array<{
+    resource_id: number;
+    name: string;
+    uri: string;
+    file_type: string;
+    created_at: string;
+    folder_id?: number;
+    folder_path?: string;
+  }>;
+  folders: Array<{ folder_id: number; name: string; parent_folder_id?: number }>;
+  embedding_services: Array<{ service_id: number; name: string; provider?: string; model_name?: string; is_system?: boolean }>;
+  ai_services: Array<{ service_id: number; name: string; supports_video?: boolean }>;
+  media: Media[];
+  embedding_service_id?: number;
+  vector_db_type?: string;
+  vector_db_options?: VectorDbOption[];
+  transcription_service_id?: number | null;
+  video_ai_service_id?: number | null;
+  metadata_fields?: Array<{ name: string; type: string; description?: string }>;
+}
+
+export interface UploadResult {
+  failed_files?: Array<{ filename: string; error: string }>;
+  created_resources?: unknown[];
+  // Uploaded but not indexed (kept; reindex once the cause is fixed)
+  indexing_failures?: Array<{ resource_id: number; filename: string; error: string }>;
+}
+
+export interface DomainListItem {
+  domain_id: number;
+  name: string;
+  description: string;
+  base_url: string;
+  created_at: string;
+  url_count: number;
+  silo_id?: number;
+}
+
+export interface Domain {
+  domain_id: number;
+  name: string;
+  description: string;
+  base_url: string;
+  content_tag: string;
+  content_class: string;
+  content_id: string;
+  created_at: string;
+  url_count: number;
+  silo_id?: number;
+  embedding_service_id?: number;
+  vector_db_type?: string;
+  embedding_services: Array<{ service_id: number; name: string; is_system?: boolean }>;
+  vector_db_options?: VectorDbOption[];
+}
+
+export interface APIKey {
+  key_id: number;
+  name: string;
+  key_preview: string;
+  created_at: string;
+  last_used_at: string | null;
+  is_active: boolean;
+}
+
+export interface DataStructureField {
+  name: string;
+  type: string;
+  description: string;
+  parser_id?: number;
+  list_item_type?: string;
+  list_item_parser_id?: number;
+}
+
+export interface DataStructure {
+  parser_id: number;
+  name: string;
+  description: string;
+  field_count?: number;
+  fields?: DataStructureField[];
+  created_at: string;
+  available_parsers?: Array<{ value: number; name: string }>;
+}
+
+export interface Collaborator {
+  id: number;
+  user_id: number;
+  user_email: string;
+  user_name?: string;
+  role: string;
+  status: string;
+  invited_at: string;
+  accepted_at?: string;
+  invited_by_name?: string;
+  platform_role?: string;
+}
+
+export interface PendingInvitation {
+  id: number;
+  app_id: number;
+  app_name: string;
+  inviter_email: string;
+  inviter_name?: string;
+  role: string;
+  invited_at: string;
+}
+
+export interface Conversation {
+  conversation_id: number;
+  agent_id: number;
+  user_id?: number;
+  title: string;
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  last_message?: string;
+  message_count: number;
+}
+
+export interface AttachedFile {
+  file_id: string;
+  filename: string;
+  file_type?: string;
+  processing_status?: string;
+  file_size_display?: string;
+  has_extractable_content?: boolean;
+  content_preview?: string;
+}
+
+export interface TestConnectionResult {
+  status: 'success' | 'error';
+  message: string;
+  response?: string;
+  tools?: Array<{ name: string; description: string }>;
+}
+
+export interface SystemSetting {
+  key: string;
+  value: string | null;
+  type: string;
+  category: string;
+  description: string | null;
+  updated_at: string | null;
+  resolved_value: unknown;
+  source: 'env' | 'db' | 'default';
+}
+
+export interface SubscriptionData {
+  tier: string;
+  billing_status: string;
+  trial_end: string | null;
+  call_count: number;
+  call_limit: number;
+  pct_used: number;
+  max_apps: number;
+  agents_per_app: number;
+  silos_per_app: number;
+  skills_per_app: number;
+  mcp_servers_per_app: number;
+  collaborators_per_app: number;
+  admin_override_tier: string | null;
+}
+
+export interface UsageData {
+  call_count: number;
+  call_limit: number;
+  period_start: string | null;
+  pct_used: number;
+}
+
+export interface SaasUser {
+  user_id: number;
+  email: string;
+  name: string | null;
+  is_active: boolean;
+  tier: string | null;
+  billing_status: string | null;
+  call_count: number;
+  call_limit: number;
+  owned_apps_count: number;
+}
+
+export interface TierConfigEntry {
+  id: number;
+  tier: string;
+  resource_type: string;
+  limit_value: number;
+}
+
+export interface SystemAIService extends Partial<ServiceLifecycleFields> {
+  service_id: number;
+  name: string;
+  provider: string;
+  model_name: string;
+  api_key: string;
+  base_url: string;
+  api_version?: string;
+  aws_access_key_id?: string;
+  aws_region?: string;
+  is_system: boolean;
+  supports_video: boolean;
+  created_at: string;
+  available_providers: Array<{ value: string; name: string }>;
+}
+
+export interface SystemEmbeddingService extends Partial<ServiceLifecycleFields> {
+  service_id: number;
+  name: string;
+  provider: string;
+  model_name: string;
+  api_key: string;
+  base_url: string;
+  api_version?: string;
+  aws_access_key_id?: string;
+  aws_region?: string;
+  is_system: boolean;
+  created_at?: string;
+}
+
+export interface SystemEmbeddingServiceImpact {
+  service_id: number;
+  service_name: string;
+  affected_silos_count: number;
+  affected_apps_count: number;
+  affected_silos: Array<{ silo_id: number; silo_name: string; app_id: number; app_name: string }>;
+}
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 // DeploymentModeContext cannot be read here (not a hook), so it writes the
 // resolved auth mode via setApiAuthMode(). The default is derived from the
-// env/runtime OIDC flag so early requests (e.g. CapabilitiesContext) already
+// env/runtime OIDC flag so early requests already
 // use the correct mode before the context resolves /internal/config.
 const _rc = (globalThis as Record<string, unknown>).__RUNTIME_CONFIG__ as Record<string, string> | undefined;
 const _oidcDefault = _rc?.VITE_OIDC_ENABLED === undefined
@@ -56,26 +717,25 @@ class ApiService {
     return configService.getApiBaseUrl();
   }
 
-  // Coalesces concurrent 401-triggered refreshes into a single in-flight promise.
-  private _refreshPromise: Promise<boolean> | null = null;
-
-  private async _doRefresh(): Promise<boolean> {
-    if (!this._refreshPromise) {
-      this._refreshPromise = authService.refresh().finally(() => {
-        this._refreshPromise = null;
-      });
-    }
-    return this._refreshPromise;
+  // Renews the session once: refresh-token rotation (LOCAL) or OIDC silent renew.
+  private renewSession(): Promise<boolean> {
+    return _apiAuthMode === 'oidc' ? authService.renewOidcSession() : authService.refresh();
   }
 
-  // Called when a refresh fails or a retried request still 401s (LOCAL mode only).
-  private clearClientAuthAndRedirect(): void {
-    // Use logout() (not clearAuth()) to clear the httpOnly session cookies. Best-effort.
-    authService.logout().catch(() => {}).finally(() => {
-      if (typeof globalThis !== 'undefined' && globalThis.location) {
-        globalThis.location.href = '/login';
-      }
-    });
+  private _sessionExpiring: Promise<void> | null = null;
+
+  // Route guards react to the expired session and navigate to /login in-app,
+  // preserving the requested location. Concurrent 401s share one expiry.
+  private expireSession(): void {
+    if (this._sessionExpiring) return;
+    // LOCAL: clear the httpOnly session cookies first. Best-effort.
+    const clearCookies = _apiAuthMode === 'local' ? authService.logout() : Promise.resolve();
+    this._sessionExpiring = clearCookies
+      .catch(() => {})
+      .finally(() => {
+        this._sessionExpiring = null;
+        authService.notifySessionExpired();
+      });
   }
 
   // LOCAL: cookies carry auth; CSRF header on mutating calls. OIDC: Authorization bearer.
@@ -111,9 +771,13 @@ class ApiService {
 
     if (typeof data['error'] === 'string') return data['error'];
     if (data['detail'] !== undefined) {
-      return typeof data['detail'] === 'string'
-        ? data['detail']
-        : JSON.stringify(data['detail']);
+      const detail = data['detail'];
+      if (typeof detail === 'string') return detail;
+      // Structured errors ({code, message}) carry a human-readable message.
+      if (detail && typeof detail === 'object' && typeof (detail as Record<string, unknown>)['message'] === 'string') {
+        return (detail as Record<string, unknown>)['message'] as string;
+      }
+      return JSON.stringify(detail);
     }
     if (typeof data['message'] === 'string') return data['message'];
     return null;
@@ -121,12 +785,23 @@ class ApiService {
 
   private async handleResponseError(response: Response): Promise<never> {
     let message = `API Error: ${response.status} ${response.statusText}`;
+    let detail: unknown;
+    let errorCode: string | undefined;
 
     try {
       const errorData: unknown = await response.json();
       const extracted = this.extractErrorMessage(errorData);
       if (extracted) {
         message = extracted;
+      }
+      if (errorData && typeof errorData === 'object' && 'detail' in (errorData as Record<string, unknown>)) {
+        detail = (errorData as Record<string, unknown>)['detail'];
+      }
+      const rawCode = errorData && typeof errorData === 'object'
+        ? (errorData as Record<string, unknown>)['error_code']
+        : undefined;
+      if (typeof rawCode === 'string') {
+        errorCode = rawCode;
       }
     } catch (error) {
       console.debug('Failed to parse error response JSON:', error);
@@ -135,15 +810,15 @@ class ApiService {
       }
     }
 
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, detail, errorCode);
   }
 
-  async request(
+  async request<T = unknown>(
     endpoint: string,
     options: RequestInit = {},
     _isRetryAfterRefresh = false,
     _requestOptions: { suppressAuthRedirect?: boolean } = {},
-  ): Promise<unknown> {
+  ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`;
     const authHeaders = this.buildAuthHeaders(
       typeof options.method === 'string' ? options.method : 'GET',
@@ -167,47 +842,46 @@ class ApiService {
         throw new Error('Authentication required');
       }
 
-      // OIDC re-auth is owned by oidc-client-ts / OIDCProvider / ProtectedRoute.
-      if (_apiAuthMode === 'oidc') {
-        throw new Error('Authentication required');
-      }
-
       const isRefreshEndpoint = endpoint.includes('/auth/refresh');
       if (!_isRetryAfterRefresh && !isRefreshEndpoint) {
-        const refreshed = await this._doRefresh();
-        if (refreshed) {
-          // Cookie may have rotated — rebuild headers on retry.
+        const renewed = await this.renewSession();
+        if (renewed) {
+          // Token or cookie changed — rebuild headers on retry.
           return this.request(endpoint, options, true, _requestOptions);
         }
       }
-      this.clearClientAuthAndRedirect();
-      throw new Error('Authentication required');
+      this.expireSession();
+      throw new ApiError('Your session has expired. Please sign in again.', 401);
     }
 
     if (!response.ok) {
       await this.handleResponseError(response);
     }
 
-    if (response.status === 204) return null;
+    if (response.status === 204) return null as T;
     return response.json();
   }
 
-  async getApps() {
+  async getAgentConversationStarters(agentId: number): Promise<MarketplaceProfile['conversation_starters']> {
+    return this.request(`/internal/marketplace/agents/${agentId}/conversation-starters`);
+  }
+
+  async getApps(): Promise<App[]> {
     return this.request('/internal/apps/');
   }
 
-  async getApp(appId: number) {
+  async getApp(appId: number): Promise<App> {
     return this.request(`/internal/apps/${appId}`);
   }
 
-  async createApp(data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string }) {
+  async createApp(data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string }): Promise<App> {
     return this.request('/internal/apps/', {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateApp(appId: number, data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string; enable_openai_api?: boolean }) {
+  async updateApp(appId: number, data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string; enable_openai_api?: boolean; default_sandbox_service_id?: number | null; chat_code_interpreter_enabled?: boolean; default_embedding_service_id?: number | null }): Promise<App> {
     return this.request(`/internal/apps/${appId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -227,80 +901,282 @@ class ApiService {
     });
   }
 
-  async dismissOnboarding(appId: number) {
+  async dismissOnboarding(appId: number): Promise<App> {
     return this.request(`/internal/apps/${appId}/onboarding-dismissed`, {
       method: 'PATCH',
     });
   }
 
-  async deleteApp(appId: number) {
+  async deleteApp(appId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}`, {
       method: 'DELETE',
     });
   }
 
-  async leaveApp(appId: number) {
+  async leaveApp(appId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/leave`, {
       method: 'POST',
     });
   }
 
-  async getUsageStats() {
-    return this.request('/internal/usage-stats/');
-  }
-
-  async getAppUsageStats(appId: number) {
+  async getAppAgentUsageStats(appId: number): Promise<AgentRateLimitUsage[]> {
     return this.request(`/internal/usage-stats/${appId}`);
   }
 
-  async getPendingInvitations() {
+  /**
+   * A stored picture (user avatar, App image), or null when there is none. Passing its `version` makes the
+   * URL immutable, so the browser's HTTP cache can answer the next load.
+   */
+  private async fetchImage(path: string, version?: string | null): Promise<Blob | null> {
+    const query = version ? `?v=${encodeURIComponent(version)}` : '';
+    const response = await fetch(`${this.baseURL}${path}${query}`, {
+      credentials: 'include',
+      headers: this.buildAuthHeaders('GET', true),
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+    return response.blob();
+  }
+
+  private async uploadImage(path: string, file: File): Promise<ImageUpdatedResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return this.request(path, { method: 'PUT', body: formData });
+  }
+
+  async getMyAvatar(version?: string | null): Promise<Blob | null> {
+    return this.fetchImage('/internal/me/avatar', version);
+  }
+
+  async uploadMyAvatar(file: File): Promise<ImageUpdatedResponse> {
+    return this.uploadImage('/internal/me/avatar', file);
+  }
+
+  async deleteMyAvatar(): Promise<void> {
+    return this.request('/internal/me/avatar', { method: 'DELETE' });
+  }
+
+  async getAppImage(appId: number, version?: string | null): Promise<Blob | null> {
+    return this.fetchImage(`/internal/apps/${appId}/image`, version);
+  }
+
+  async uploadAppImage(appId: number, file: File): Promise<ImageUpdatedResponse> {
+    return this.uploadImage(`/internal/apps/${appId}/image`, file);
+  }
+
+  async deleteAppImage(appId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/image`, { method: 'DELETE' });
+  }
+
+  async getPendingInvitations(): Promise<PendingInvitation[]> {
     return this.request('/internal/auth/pending-invitations');
   }
 
-  async respondToInvitation(invitationId: number, action: 'accept' | 'decline') {
+  async respondToInvitation(invitationId: number, action: 'accept' | 'decline'): Promise<void> {
     return this.request(`/internal/auth/invitations/${invitationId}/respond`, {
       method: 'POST',
       body: JSON.stringify({ action }),
     });
   }
 
-  async register(email: string, password: string) {
+  async register(email: string, password: string): Promise<{ user_id: number; email: string }> {
     return this.request('/internal/auth/register', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
   }
 
-  async getAgents(appId: number) {
+  async getAgents(appId: number): Promise<Agent[]> {
     return this.request(`/internal/apps/${appId}/agents/`);
   }
 
-  async getAgent(appId: number, agentId: number) {
+  async getAgent(appId: number, agentId: number): Promise<Agent> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}`);
   }
 
-  async createAgent(appId: number, agentId: number, data: any) {
+  async createAgent(appId: number, agentId: number, data: any): Promise<Agent> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateAgent(appId: number, agentId: number, data: any) {
+  async updateAgent(appId: number, agentId: number, data: any): Promise<Agent> {
     return this.createAgent(appId, agentId, data);
   }
 
-  async deleteAgent(appId: number, agentId: number) {
+  async deleteAgent(appId: number, agentId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}`, {
       method: 'DELETE',
     });
   }
 
-  async getAgentMCPUsage(appId: number, agentId: number) {
+  async getAgentMCPUsage(appId: number, agentId: number): Promise<AgentMCPUsage> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}/mcp-usage`);
   }
 
-  async updateAgentPrompt(appId: number, agentId: number, promptType: 'system' | 'template', prompt: string) {
+  async getAvailableChatFilterFields(
+    appId: number,
+    agentId: number,
+    toolIds: number[],
+    siloId?: number | null,
+  ): Promise<{ fields: { name: string; type: string; description?: string }[] }> {
+    const params = new URLSearchParams();
+    toolIds.forEach((id) => params.append('tool_ids', String(id)));
+    if (siloId) params.append('silo_id', String(siloId));
+    return this.request(
+      `/internal/apps/${appId}/agents/${agentId}/available-chat-filter-fields?${params}`,
+    );
+  }
+
+  async getAgentChatFilters(
+    appId: number,
+    agentId: number,
+  ): Promise<{ filters: { field_name: string; values: string[]; has_more?: boolean }[] }> {
+    return this.request(`/internal/apps/${appId}/agents/${agentId}/chat-filters`);
+  }
+
+  async searchAgentChatFilterValues(
+    appId: number,
+    agentId: number,
+    fieldName: string,
+    query: string,
+    limit = 50,
+  ): Promise<{ values: string[] }> {
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    return this.request(
+      `/internal/apps/${appId}/agents/${agentId}/chat-filters/${encodeURIComponent(fieldName)}/values?${params}`,
+    );
+  }
+
+  async getMarketplaceChatFilters(
+    conversationId: number,
+  ): Promise<{ filters: { field_name: string; values: string[]; has_more?: boolean }[] }> {
+    return this.request(`/internal/marketplace/conversations/${conversationId}/chat-filters`);
+  }
+
+  async getScheduledTasks(appId: number, agentId?: number): Promise<ScheduledTask[]> {
+    const query = agentId === undefined ? '' : `?agent_id=${agentId}`;
+    return this.request(`/internal/apps/${appId}/scheduled-tasks${query}`);
+  }
+
+  async getScheduledTask(appId: number, taskId: number): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`);
+  }
+
+  async createScheduledTask(appId: number, data: ScheduledTaskCreate): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks`, { method: 'POST', body: JSON.stringify(data) });
+  }
+
+  async updateScheduledTask(appId: number, taskId: number, data: ScheduledTaskUpdate): Promise<ScheduledTask> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) });
+  }
+
+  async deleteScheduledTask(appId: number, taskId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}`, { method: 'DELETE' });
+  }
+
+  async getOutputDestinations(appId: number): Promise<OutputDestination[]> {
+    return this.request(`/internal/apps/${appId}/output-destinations`);
+  }
+
+  async createOutputDestination(appId: number, data: { name: string; provider_key: 'teams_workflow' | 'webhook'; webhook_url: string; content_mode?: OutputContentMode; public_config?: Record<string, unknown>; credentials?: Record<string, string> }): Promise<OutputDestination> {
+    return this.request(`/internal/apps/${appId}/output-destinations`, { method: 'POST', body: JSON.stringify(data) });
+  }
+
+  async updateOutputDestination(appId: number, destinationId: number, data: { webhook_url?: string; enabled?: boolean; name?: string; content_mode?: OutputContentMode; public_config?: Record<string, unknown>; credentials?: Record<string, string>; clear_credentials?: boolean }): Promise<OutputDestination> {
+    return this.request(`/internal/apps/${appId}/output-destinations/${destinationId}`, { method: 'PATCH', body: JSON.stringify(data) });
+  }
+
+  async deleteOutputDestination(appId: number, destinationId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/output-destinations/${destinationId}`, { method: 'DELETE' });
+  }
+
+  async testOutputDestination(appId: number, destinationId: number): Promise<{ accepted: boolean; http_status: number; event_id?: string | null }> {
+    return this.request(`/internal/apps/${appId}/output-destinations/${destinationId}/test`, { method: 'POST' });
+  }
+
+  async getScheduledTaskOutputs(appId: number, taskId: number): Promise<{ bindings: ScheduledTaskOutputBinding[] }> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/outputs`);
+  }
+
+  async setScheduledTaskOutputs(appId: number, taskId: number, bindings: ScheduledTaskOutputBinding[]): Promise<{ bindings: ScheduledTaskOutputBinding[] }> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/outputs`, { method: 'PUT', body: JSON.stringify({ bindings }) });
+  }
+
+  async getScheduledTaskRunDeliveries(appId: number, taskId: number, runId: number): Promise<{ deliveries: OutputDelivery[] }> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}/deliveries`);
+  }
+
+  async retryScheduledTaskDelivery(appId: number, taskId: number, runId: number, deliveryId: number): Promise<{ workflow_id: string }> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}/deliveries/${deliveryId}/retry`, { method: 'POST' });
+  }
+
+  async getScheduledTaskRuns(appId: number, taskId: number, page = 1, perPage = 50): Promise<ScheduledTaskRunList> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs?page=${page}&per_page=${perPage}`);
+  }
+
+  async getScheduledTaskRun(appId: number, taskId: number, runId: number): Promise<ScheduledTaskRun> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}`);
+  }
+
+  async getScheduledTaskRunFileUrl(appId: number, taskId: number, runId: number, fileId: string): Promise<string> {
+    const result: { download_url: string } = await this.request(
+      `/internal/apps/${appId}/scheduled-tasks/${taskId}/runs/${runId}/files/${encodeURIComponent(fileId)}/download`,
+    );
+    return result.download_url;
+  }
+
+  async runScheduledTaskNow(appId: number, taskId: number): Promise<ScheduledTaskTriggerResponse> {
+    return this.request(`/internal/apps/${appId}/scheduled-tasks/${taskId}/run-now`, { method: 'POST' });
+  }
+
+  async getMarketplaceScheduledTasks(
+    params: { search?: string; my_apps_only?: boolean; page?: number; page_size?: number } = {},
+  ): Promise<MarketplaceScheduledTaskCatalog> {
+    const qs = new URLSearchParams();
+    if (params.search) qs.set('search', params.search);
+    if (params.my_apps_only) qs.set('my_apps_only', 'true');
+    if (params.page) qs.set('page', String(params.page));
+    if (params.page_size) qs.set('page_size', String(params.page_size));
+    const query = qs.toString();
+    return this.request(`/internal/marketplace/scheduled-tasks${query ? `?${query}` : ''}`);
+  }
+
+  async getMarketplaceScheduledTask(taskId: number): Promise<MarketplaceScheduledTask> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}`);
+  }
+
+  async getMarketplaceScheduledTaskRuns(taskId: number, page = 1, perPage = 50): Promise<ScheduledTaskRunList> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}/runs?page=${page}&per_page=${perPage}`);
+  }
+
+  async getMarketplaceScheduledTaskRun(taskId: number, runId: number): Promise<ScheduledTaskRun> {
+    return this.request(`/internal/marketplace/scheduled-tasks/${taskId}/runs/${runId}`);
+  }
+
+  async getMarketplaceScheduledTaskRunFileUrl(taskId: number, runId: number, fileId: string): Promise<string> {
+    const result: { download_url: string } = await this.request(
+      `/internal/marketplace/scheduled-tasks/${taskId}/runs/${runId}/files/${encodeURIComponent(fileId)}/download`,
+    );
+    return result.download_url;
+  }
+
+  async searchMarketplaceChatFilterValues(
+    conversationId: number,
+    fieldName: string,
+    query: string,
+    limit = 50,
+  ): Promise<{ values: string[] }> {
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    return this.request(
+      `/internal/marketplace/conversations/${conversationId}/chat-filters/${encodeURIComponent(fieldName)}/values?${params}`,
+    );
+  }
+
+  async updateAgentPrompt(appId: number, agentId: number, promptType: 'system' | 'template', prompt: string): Promise<Agent> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}/update-prompt`, {
       method: 'POST',
       body: JSON.stringify({
@@ -310,14 +1186,14 @@ class ApiService {
     });
   }
 
-  async resetAgentConversation(appId: number, agentId: number, conversationId?: number | null) {
+  async resetAgentConversation(appId: number, agentId: number, conversationId?: number | null): Promise<void> {
     const params = conversationId ? `?conversation_id=${conversationId}` : '';
     return this.request(`/internal/apps/${appId}/agents/${agentId}/reset${params}`, {
       method: 'POST',
     });
   }
 
-  async getConversationHistory(appId: number, agentId: number) {
+  async getConversationHistory(appId: number, agentId: number): Promise<{ messages: Array<{ role: string; content: string }> }> {
     return this.request(`/internal/apps/${appId}/agents/${agentId}/conversation-history`, {
       method: 'GET',
     });
@@ -366,7 +1242,7 @@ class ApiService {
     selectedAIServiceId?: number,
     selectedSiloId?: number,
     selectedOutputParserId?: number
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -400,47 +1276,100 @@ class ApiService {
     return response.json();
   }
 
-  async getAIServices(appId: number) {
+  async getAIServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/used-by`);
+  }
+
+  async getEmbeddingServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}/used-by`);
+  }
+
+  async getSystemAIServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-ai-services/${serviceId}/used-by`);
+  }
+
+  async getSystemEmbeddingServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-embedding-services/${serviceId}/used-by`);
+  }
+
+  async getSandboxServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/used-by`);
+  }
+
+  async moveSandboxServiceUsage(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedAgentCount: number,
+    expectedAppCount: number,
+  ): Promise<MoveSandboxServiceUsageResult> {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/move-usage`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_service_id: targetServiceId,
+        expected_agent_count: expectedAgentCount,
+        expected_app_count: expectedAppCount,
+      }),
+    });
+  }
+
+  async getSystemSandboxServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-sandbox-services/${serviceId}/used-by`);
+  }
+
+  async moveAgentsToAIService(
+    appId: number,
+    serviceId: number,
+    targetServiceId: number,
+    expectedCount: number,
+  ): Promise<MoveAgentsResult> {
+    return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/move-agents`, {
+      method: 'POST',
+      body: JSON.stringify({ target_service_id: targetServiceId, expected_count: expectedCount }),
+    });
+  }
+
+  async getAIServices(appId: number): Promise<AIService[]> {
     return this.request(`/internal/apps/${appId}/ai-services/`);
   }
 
-  async getAIService(appId: number, serviceId: number) {
+  async getAIService(appId: number, serviceId: number): Promise<AIService> {
     return this.request(`/internal/apps/${appId}/ai-services/${serviceId}`);
   }
 
-  async createAIService(appId: number, data: any) {
+  async createAIService(appId: number, data: any): Promise<AIService> {
     return this.request(`/internal/apps/${appId}/ai-services/0`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateAIService(appId: number, serviceId: number, data: any) {
+  async updateAIService(appId: number, serviceId: number, data: any): Promise<AIService> {
     return this.request(`/internal/apps/${appId}/ai-services/${serviceId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async copyAIService(appId: number, serviceId: number) {
+  async copyAIService(appId: number, serviceId: number): Promise<AIService> {
     return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/copy`, {
       method: 'POST',
     });
   }
   
-  async deleteAIService(appId: number, serviceId: number) {
+  async deleteAIService(appId: number, serviceId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/ai-services/${serviceId}`, {
       method: 'DELETE',
     });
   }
 
-  async testAIServiceConnection(appId: number, serviceId: number) {
+  async testAIServiceConnection(appId: number, serviceId: number): Promise<TestConnectionResult> {
     return this.request(`/internal/apps/${appId}/ai-services/${serviceId}/test`, {
       method: 'POST',
     });
   }
 
-  async testAIServiceConnectionWithConfig(appId: number, data: any, serviceId?: number) {
+  async testAIServiceConnectionWithConfig(appId: number, data: any, serviceId?: number): Promise<TestConnectionResult> {
     const qs = serviceId != null ? `?service_id=${serviceId}` : '';
     return this.request(`/internal/apps/${appId}/ai-services/test-connection${qs}`, {
       method: 'POST',
@@ -482,7 +1411,7 @@ class ApiService {
     file: File,
     conflictMode: ConflictMode,
     newName?: string
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -507,29 +1436,29 @@ class ApiService {
     return response.json();
   }
 
-  async getEmbeddingServices(appId: number) {
+  async getEmbeddingServices(appId: number): Promise<EmbeddingService[]> {
     return this.request(`/internal/apps/${appId}/embedding-services/`);
   }
 
-  async getEmbeddingService(appId: number, serviceId: number) {
+  async getEmbeddingService(appId: number, serviceId: number): Promise<ExistingService> {
     return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}`);
   }
 
-  async createEmbeddingService(appId: number, data: any) {
+  async createEmbeddingService(appId: number, data: any): Promise<EmbeddingService> {
     return this.request(`/internal/apps/${appId}/embedding-services/0`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateEmbeddingService(appId: number, serviceId: number, data: any) {
+  async updateEmbeddingService(appId: number, serviceId: number, data: any): Promise<EmbeddingService> {
     return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteEmbeddingService(appId: number, serviceId: number) {
+  async deleteEmbeddingService(appId: number, serviceId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/embedding-services/${serviceId}`, {
       method: 'DELETE',
     });
@@ -545,7 +1474,7 @@ class ApiService {
     });
   }
 
-  async testEmbeddingServiceConnectionWithConfig(appId: number, data: any, serviceId?: number) {
+  async testEmbeddingServiceConnectionWithConfig(appId: number, data: any, serviceId?: number): Promise<TestConnectionResult> {
     const qs = serviceId != null ? `?service_id=${serviceId}` : '';
     return this.request(`/internal/apps/${appId}/embedding-services/test-connection${qs}`, {
       method: 'POST',
@@ -577,7 +1506,7 @@ class ApiService {
     file: File,
     conflictMode: ConflictMode,
     newName?: string
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -602,41 +1531,89 @@ class ApiService {
     return response.json();
   }
 
-  async getMCPConfigs(appId: number) {
+  async getSandboxServices(appId: number) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/`);
+  }
+
+  async getSandboxService(appId: number, serviceId: number) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}`);
+  }
+
+  async createSandboxService(appId: number, data: any) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/0`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSandboxService(appId: number, serviceId: number, data: any) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async copySandboxService(appId: number, serviceId: number) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/copy`, {
+      method: 'POST',
+    });
+  }
+
+  async deleteSandboxService(appId: number, serviceId: number) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testSandboxServiceConnection(appId: number, serviceId: number) {
+    return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/test`, {
+      method: 'POST',
+    });
+  }
+
+  async testSandboxServiceConnectionWithConfig(appId: number, data: any, serviceId?: number) {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/apps/${appId}/sandbox-services/test-connection${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getMCPConfigs(appId: number): Promise<MCPConfig[]> {
     return this.request(`/internal/apps/${appId}/mcp-configs/`);
   }
 
-  async getMCPConfig(appId: number, configId: number) {
+  async getMCPConfig(appId: number, configId: number): Promise<MCPConfig> {
     return this.request(`/internal/apps/${appId}/mcp-configs/${configId}`);
   }
 
-  async createMCPConfig(appId: number, data: any) {
+  async createMCPConfig(appId: number, data: any): Promise<MCPConfig> {
     return this.request(`/internal/apps/${appId}/mcp-configs/0`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateMCPConfig(appId: number, configId: number, data: any) {
+  async updateMCPConfig(appId: number, configId: number, data: any): Promise<MCPConfig> {
     return this.request(`/internal/apps/${appId}/mcp-configs/${configId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteMCPConfig(appId: number, configId: number) {
+  async deleteMCPConfig(appId: number, configId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/mcp-configs/${configId}`, {
       method: 'DELETE',
     });
   }
 
-  async testMCPConnection(appId: number, configId: number) {
+  async testMCPConnection(appId: number, configId: number): Promise<TestConnectionResult> {
     return this.request(`/internal/apps/${appId}/mcp-configs/${configId}/test`, {
       method: 'POST',
     });
   }
 
-  async testMCPConnectionWithConfig(appId: number, data: any) {
+  async testMCPConnectionWithConfig(appId: number, data: any): Promise<TestConnectionResult> {
     return this.request(`/internal/apps/${appId}/mcp-configs/test-connection`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -667,7 +1644,7 @@ class ApiService {
     file: File,
     conflictMode: ConflictMode,
     newName?: string
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -691,134 +1668,288 @@ class ApiService {
 
     return response.json();
   }
-  async getSkills(appId: number) {
+  async getSkills(appId: number): Promise<Skill[]> {
     return this.request(`/internal/apps/${appId}/skills/`);
   }
 
-  async getSkill(appId: number, skillId: number) {
+  async getSkill(appId: number, skillId: number): Promise<Skill> {
     return this.request(`/internal/apps/${appId}/skills/${skillId}`);
   }
 
-  async createSkill(appId: number, data: any) {
+  async createSkill(appId: number, data: any): Promise<Skill> {
     return this.request(`/internal/apps/${appId}/skills/0`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateSkill(appId: number, skillId: number, data: any) {
+  async updateSkill(appId: number, skillId: number, data: any): Promise<Skill> {
     return this.request(`/internal/apps/${appId}/skills/${skillId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteSkill(appId: number, skillId: number) {
+  async deleteSkill(appId: number, skillId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/skills/${skillId}`, {
       method: 'DELETE',
     });
   }
 
-  async getMCPServers(appId: number) {
+  async getMiddlewares(appId: number): Promise<Middleware[]> {
+    return this.request(`/internal/apps/${appId}/middlewares/`);
+  }
+
+  async getMiddleware(appId: number, middlewareId: number): Promise<Middleware> {
+    return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`);
+  }
+
+  async createMiddleware(appId: number, data: MiddlewarePayload): Promise<Middleware> {
+    return this.request(`/internal/apps/${appId}/middlewares/0`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateMiddleware(appId: number, middlewareId: number, data: MiddlewarePayload): Promise<Middleware> {
+    return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteMiddleware(appId: number, middlewareId: number) {
+    return this.request(`/internal/apps/${appId}/middlewares/${middlewareId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async exportMiddleware(appId: number, middlewareId: number): Promise<Blob> {
+    const response = await fetch(`${this.baseURL}/internal/apps/${appId}/middlewares/${middlewareId}/export`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', false),
+    });
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+    return response.blob();
+  }
+
+  async importMiddleware(
+    appId: number,
+    file: File,
+    conflictMode: ConflictMode,
+    newName?: string,
+  ): Promise<ImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    let url = `${this.baseURL}/internal/apps/${appId}/middlewares/import?conflict_mode=${conflictMode}`;
+    if (newName) {
+      url += `&new_name=${encodeURIComponent(newName)}`;
+    }
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: this.buildAuthHeaders('POST', true),
+      body: formData,
+    });
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+    return response.json();
+  }
+
+  async importSkill(appId: number, file: File): Promise<Skill> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/skills/import`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  async importClaudePlugin(appId: number, file: File): Promise<ClaudePluginImportResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/skills/import-claude-plugin`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  async exportSkill(appId: number, skillId: number): Promise<Blob> {
+    const headers = this.buildAuthHeaders('GET', false);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/skills/${skillId}/export`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.blob();
+  }
+
+  async setSkillEnabled(appId: number, skillId: number, isEnabled: boolean): Promise<Skill> {
+    return this.request(`/internal/apps/${appId}/skills/${skillId}/enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_enabled: isEnabled }),
+    });
+  }
+
+  /**
+   * Fetch the text content of a single package file of an app-scoped skill, on demand (never
+   * bulk-fetched with the skill). A 404 means the preview is unavailable (e.g. binary file, or
+   * the file no longer resolves) — callers should treat it as "preview unavailable", not a hard
+   * failure.
+   */
+  async getSkillFileContent(appId: number, skillId: number, path: string): Promise<{ path: string; content: string; media_type?: string; truncated?: boolean }> {
+    return this.request(`/internal/apps/${appId}/skills/${skillId}/files/content?path=${encodeURIComponent(path)}`);
+  }
+
+  /**
+   * Fetch the text content of a single package file of a SYSTEM skill (platform admin route —
+   * no app scoping). Same response shape and 404 semantics as {@link getSkillFileContent}.
+   */
+  async getSystemSkillFileContent(skillId: number, path: string): Promise<{ path: string; content: string; media_type?: string; truncated?: boolean }> {
+    return this.request(`/internal/admin/system-skills/${skillId}/files/content?path=${encodeURIComponent(path)}`);
+  }
+
+  async getMCPServers(appId: number): Promise<MCPServerListItem[]> {
     return this.request(`/internal/apps/${appId}/mcp-servers/`);
   }
 
-  async getMCPServer(appId: number, serverId: number) {
+  async getMCPServer(appId: number, serverId: number): Promise<MCPServer> {
     return this.request(`/internal/apps/${appId}/mcp-servers/${serverId}`);
   }
 
-  async createMCPServer(appId: number, data: any) {
+  async createMCPServer(appId: number, data: any): Promise<MCPServer> {
     return this.request(`/internal/apps/${appId}/mcp-servers/`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateMCPServer(appId: number, serverId: number, data: any) {
+  async updateMCPServer(appId: number, serverId: number, data: any): Promise<MCPServer> {
     return this.request(`/internal/apps/${appId}/mcp-servers/${serverId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteMCPServer(appId: number, serverId: number) {
+  async deleteMCPServer(appId: number, serverId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/mcp-servers/${serverId}`, {
       method: 'DELETE',
     });
   }
 
-  async getMCPServerToolAgents(appId: number) {
+  async getMCPServerToolAgents(appId: number): Promise<ToolAgent[]> {
     return this.request(`/internal/apps/${appId}/mcp-servers/tool-agents`);
   }
 
-  async getAppSlugInfo(appId: number) {
+  async getAppSlugInfo(appId: number): Promise<AppSlugInfo> {
     return this.request(`/internal/apps/${appId}/mcp-servers/slug/info`);
   }
 
-  async updateAppSlug(appId: number, slug: string) {
+  async updateAppSlug(appId: number, slug: string): Promise<AppSlugInfo> {
     return this.request(`/internal/apps/${appId}/mcp-servers/slug`, {
       method: 'PUT',
       body: JSON.stringify({ slug }),
     });
   }
 
-  async getAPIKeys(appId: number) {
+  async getAPIKeys(appId: number): Promise<APIKey[]> {
     return this.request(`/internal/apps/${appId}/api-keys/`);
   }
 
-  async getAPIKey(appId: number, keyId: number) {
+  async getAPIKey(appId: number, keyId: number): Promise<APIKey> {
     return this.request(`/internal/apps/${appId}/api-keys/${keyId}`);
   }
 
-  async createAPIKey(appId: number, data: any) {
+  async createAPIKey(appId: number, data: any): Promise<APIKey & { key_value: string; message?: string }> {
     return this.request(`/internal/apps/${appId}/api-keys/0`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateAPIKey(appId: number, keyId: number, data: any) {
+  async updateAPIKey(appId: number, keyId: number, data: any): Promise<APIKey> {
     return this.request(`/internal/apps/${appId}/api-keys/${keyId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteAPIKey(appId: number, keyId: number) {
+  async deleteAPIKey(appId: number, keyId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/api-keys/${keyId}`, {
       method: 'DELETE',
     });
   }
 
-  async toggleAPIKey(appId: number, keyId: number) {
+  async toggleAPIKey(appId: number, keyId: number): Promise<APIKey> {
     return this.request(`/internal/apps/${appId}/api-keys/${keyId}/toggle`, {
       method: 'POST',
     });
   }
 
-  async getOutputParsers(appId: number) {
+  async getOutputParsers(appId: number): Promise<(DataStructure & { field_count: number })[]> {
     return this.request(`/internal/apps/${appId}/output-parsers/`);
   }
 
-  async getOutputParser(appId: number, parserId: number) {
+  async getOutputParser(appId: number, parserId: number): Promise<DataStructure> {
     return this.request(`/internal/apps/${appId}/output-parsers/${parserId}`);
   }
 
-  async createOutputParser(appId: number, data: any) {
+  async createOutputParser(appId: number, data: any): Promise<DataStructure> {
     return this.request(`/internal/apps/${appId}/output-parsers/0`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateOutputParser(appId: number, parserId: number, data: any) {
+  async updateOutputParser(appId: number, parserId: number, data: any): Promise<DataStructure> {
     return this.request(`/internal/apps/${appId}/output-parsers/${parserId}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteOutputParser(appId: number, parserId: number) {
+  async deleteOutputParser(appId: number, parserId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/output-parsers/${parserId}`, {
       method: 'DELETE',
     });
@@ -848,7 +1979,7 @@ class ApiService {
     file: File,
     conflictMode: ConflictMode,
     newName?: string
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -873,15 +2004,19 @@ class ApiService {
     return response.json();
   }
 
-  async searchPlatformUsers(q: string): Promise<Array<{ user_id: number; name: string; email: string; platform_role: string }>> {
+  async searchPlatformUsers(q: string): Promise<Array<{ user_id: number; name: string; email: string; platform_role: string; is_omniadmin: boolean }>> {
     return this.request(`/internal/users/search?q=${encodeURIComponent(q)}`);
   }
 
-  async getCollaborators(appId: number) {
+  async getOmniadminAccounts(): Promise<Array<{ user_id: number; name: string; email: string; platform_role: string; is_omniadmin: boolean }>> {
+    return this.request(`/internal/users/omniadmins`);
+  }
+
+  async getCollaborators(appId: number): Promise<Collaborator[]> {
     return this.request(`/internal/collaboration/?app_id=${appId}`);
   }
 
-  async inviteCollaborator(appId: number, email: string, role: string = 'editor') {
+  async inviteCollaborator(appId: number, email: string, role: string = 'editor'): Promise<Collaborator> {
     return this.request(`/internal/collaboration/invite?app_id=${appId}`, {
       method: 'POST',
       body: JSON.stringify({
@@ -891,7 +2026,7 @@ class ApiService {
     });
   }
 
-  async updateCollaboratorRole(appId: number, userId: number, role: string) {
+  async updateCollaboratorRole(appId: number, userId: number, role: string): Promise<Collaborator> {
     return this.request(`/internal/collaboration/${userId}/role?app_id=${appId}`, {
       method: 'PUT',
       body: JSON.stringify({
@@ -900,17 +2035,17 @@ class ApiService {
     });
   }
 
-  async removeCollaborator(appId: number, userId: number) {
+  async removeCollaborator(appId: number, userId: number): Promise<void> {
     return this.request(`/internal/collaboration/${userId}?app_id=${appId}`, {
       method: 'DELETE',
     });
   }
 
-  async getMyInvitations() {
+  async getMyInvitations(): Promise<PendingInvitation[]> {
     return this.request(`/internal/collaboration/my-invitations`);
   }
 
-  async respondToCollaborationInvitation(collaborationId: number, action: 'accept' | 'decline') {
+  async respondToCollaborationInvitation(collaborationId: number, action: 'accept' | 'decline'): Promise<void> {
     return this.request(`/internal/collaboration/invitations/${collaborationId}/respond`, {
       method: 'POST',
       body: JSON.stringify({ action }),
@@ -922,7 +2057,7 @@ class ApiService {
     chunk_min_duration?: number;
     chunk_max_duration?: number;
     chunk_overlap?: number;
-  }) {
+  }): Promise<UploadResult> {
     const formData = new FormData();
 
     files.forEach(file => formData.append('files', file));
@@ -947,7 +2082,7 @@ class ApiService {
     chunk_min_duration?: number;
     chunk_max_duration?: number;
     chunk_overlap?: number;
-  }) {
+  }): Promise<Media> {
     const formData = new FormData();
 
     formData.append('url', url);
@@ -965,16 +2100,16 @@ class ApiService {
     });
   }
 
-  async getMediaStatus(appId: number, repositoryId: number, mediaId: number) {
+  async getMediaStatus(appId: number, repositoryId: number, mediaId: number): Promise<Media> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media/${mediaId}`);
   }
 
-  async listMedia(appId: number, repositoryId: number, folderId?: number) {
+  async listMedia(appId: number, repositoryId: number, folderId?: number): Promise<Media[]> {
     const params = folderId === undefined ? '' : `?folder_id=${folderId}`;
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media${params}`);
   }
 
-  async moveMedia(appId: number, repositoryId: number, mediaId: number, newFolderId?: number) {
+  async moveMedia(appId: number, repositoryId: number, mediaId: number, newFolderId?: number): Promise<Media> {
     const formData = new FormData();
     if (newFolderId !== undefined) {
       formData.append('new_folder_id', newFolderId.toString());
@@ -986,7 +2121,7 @@ class ApiService {
     });
   }
 
-  async deleteMedia(appId: number, repositoryId: number, mediaId: number) {
+  async deleteMedia(appId: number, repositoryId: number, mediaId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/media/${mediaId}`, {
       method: 'DELETE',
     })
@@ -1081,33 +2216,33 @@ class ApiService {
   }
 
   // ==================== SILOS API ====================
-  async getSilos(appId: number) {
+  async getSilos(appId: number): Promise<Silo[]> {
     return this.request(`/internal/apps/${appId}/silos/`);
   }
 
-  async getSilo(appId: number, siloId: number) {
+  async getSilo(appId: number, siloId: number): Promise<Silo> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}`);
   }
 
-  async getSiloOptions(appId: number) {
+  async getSiloOptions(appId: number): Promise<Pick<Silo, 'vector_db_options' | 'embedding_services' | 'output_parsers'>> {
     return this.request(`/internal/apps/${appId}/silos/0`);
   }
 
-  async createSilo(appId: number, data: { name: string; description?: string; embedding_service_id?: number; vector_db_type?: string; fixed_metadata?: boolean }) {
+  async createSilo(appId: number, data: { name: string; description?: string; embedding_service_id?: number; vector_db_type?: string; fixed_metadata?: boolean; transcription_service_id?: number | null; video_ai_service_id?: number | null } & IndexingSettingsPayload): Promise<Silo> {
     return this.request(`/internal/apps/${appId}/silos/`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateSilo(appId: number, siloId: number, data: { name: string; description?: string; fixed_metadata?: boolean; status?: string }) {
+  async updateSilo(appId: number, siloId: number, data: { name: string; description?: string; fixed_metadata?: boolean; status?: string; transcription_service_id?: number | null; video_ai_service_id?: number | null } & IndexingSettingsPayload): Promise<Silo> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteSilo(appId: number, siloId: number) {
+  async deleteSilo(appId: number, siloId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}`, {
       method: 'DELETE',
     });
@@ -1138,7 +2273,7 @@ class ApiService {
     conflictMode: ConflictMode,
     newName?: string,
     selectedEmbeddingServiceId?: number
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -1184,7 +2319,7 @@ class ApiService {
       topN?: number;
       similarityThreshold?: number;
     },
-  ) {
+  ): Promise<{ results: SearchResult[] }> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/search`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1224,7 +2359,7 @@ class ApiService {
       similarityThreshold?: number;
     },
     _isRetryAfterRefresh = false,
-  ): Promise<{ data: unknown; serverMs: number | null }> {
+  ): Promise<{ data: { results: SearchResult[] }; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
     const body = JSON.stringify({
       query,
@@ -1249,23 +2384,16 @@ class ApiService {
     const response = await fetch(url, { method: 'POST', body, credentials: 'include', headers });
 
     // Mirror request()'s silent-refresh-and-retry: this method bypasses request()
-    // to read the raw x-server-time-ms header, so it must repeat that 401 handling
-    // itself instead of surfacing a stale-cookie 401 straight to the caller.
-    if (response.status === 401 && _apiAuthMode !== 'oidc' && !_isRetryAfterRefresh) {
-      const refreshed = await this._doRefresh();
-      if (refreshed) {
-        return this.searchSiloDocumentsWithTiming(
-          appId,
-          siloId,
-          query,
-          limit,
-          filterMetadata,
-          searchOptions,
-          true,
-        );
+    // to read the raw x-server-time-ms header, so it must repeat the 401 handling.
+    if (response.status === 401) {
+      if (!_isRetryAfterRefresh) {
+        const renewed = await this.renewSession();
+        if (renewed) {
+          return this.searchSiloDocumentsWithTiming(appId, siloId, query, limit, filterMetadata, searchOptions, true);
+        }
       }
-      this.clearClientAuthAndRedirect();
-      throw new Error('Authentication required');
+      this.expireSession();
+      throw new ApiError('Your session has expired. Please sign in again.', 401);
     }
 
     if (!response.ok) {
@@ -1273,7 +2401,7 @@ class ApiService {
     }
     const serverMsHeader = response.headers.get('x-server-time-ms');
     const serverMs = serverMsHeader !== null ? parseInt(serverMsHeader, 10) : null;
-    const data: unknown = await response.json();
+    const data: { results: SearchResult[] } = await response.json();
     return { data, serverMs };
   }
 
@@ -1282,7 +2410,7 @@ class ApiService {
     siloId: number | string,
     sourceType: string,
     sourceId: string,
-  ) {
+  ): Promise<{ chunks: SearchResult[] }> {
     return this.request(
       `/internal/apps/${appId}/silos/${siloId}/documents/neighbors?source_type=${encodeURIComponent(sourceType)}&source_id=${encodeURIComponent(sourceId)}`,
     );
@@ -1294,7 +2422,7 @@ class ApiService {
     field: string,
     prefix?: string,
     limit = 100,
-  ) {
+  ): Promise<{ values: string[] }> {
     const params = new URLSearchParams({ limit: String(limit) });
     if (prefix) params.set('prefix', prefix);
     return this.request(
@@ -1302,7 +2430,7 @@ class ApiService {
     );
   }
 
-  async deleteSiloDocuments(appId: number, siloId: number, documentIds: string[]) {
+  async deleteSiloDocuments(appId: number, siloId: number, documentIds: string[]): Promise<void> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/documents`, {
       method: 'DELETE',
       body: JSON.stringify({ document_ids: documentIds }),
@@ -1315,7 +2443,7 @@ class ApiService {
     filterMetadata?: Record<string, unknown> | null,
     minContentLength?: number | null,
     maxContentLength?: number | null,
-  ) {
+  ): Promise<{ count: number }> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/documents/count`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1330,42 +2458,42 @@ class ApiService {
     appId: number | string,
     siloId: number | string,
     resourceId: number | string,
-  ) {
+  ): Promise<void> {
     return this.request(
       `/internal/apps/${appId}/silos/${siloId}/resources/${resourceId}/reindex`,
       { method: 'POST' },
     );
   }
 
-  async getRepositories(appId: number) {
+  async getRepositories(appId: number): Promise<RepositoryListItem[]> {
     return this.request(`/internal/apps/${appId}/repositories/`);
   }
 
-  async getRepository(appId: number, repositoryId: number) {
+  async getRepository(appId: number, repositoryId: number): Promise<Repository> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`);
   }
 
-  async createRepository(appId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number }) {
+  async createRepository(appId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number } & IndexingSettingsPayload): Promise<Repository> {
     return this.request(`/internal/apps/${appId}/repositories/`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async updateRepository(appId: number, repositoryId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number }) {
+  async updateRepository(appId: number, repositoryId: number, data: { name: string; embedding_service_id?: number; vector_db_type?: string; transcription_service_id?: number; video_ai_service_id?: number } & IndexingSettingsPayload): Promise<Repository> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteRepository(appId: number, repositoryId: number) {
+  async deleteRepository(appId: number, repositoryId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}`, {
       method: 'DELETE',
     });
   }
 
-  async uploadResources(appId: number, repositoryId: number, files: File[], folderId?: number) {
+  async uploadResources(appId: number, repositoryId: number, files: File[], folderId?: number): Promise<UploadResult> {
     const formData = new FormData();
     files.forEach(file => formData.append('files', file));
 
@@ -1379,13 +2507,13 @@ class ApiService {
     });
   }
 
-  async deleteResource(appId: number, repositoryId: number, resourceId: number) {
+  async deleteResource(appId: number, repositoryId: number, resourceId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/resources/${resourceId}`, {
       method: 'DELETE',
     });
   }
 
-  async moveResource(appId: number, repositoryId: number, resourceId: number, newFolderId?: number) {
+  async moveResource(appId: number, repositoryId: number, resourceId: number, newFolderId?: number): Promise<void> {
     const formData = new FormData();
     if (newFolderId !== undefined) {
       formData.append('new_folder_id', newFolderId.toString());
@@ -1397,7 +2525,7 @@ class ApiService {
     });
   }
 
-  async downloadResource(appId: number, repositoryId: number, resourceId: number) {
+  async downloadResource(appId: number, repositoryId: number, resourceId: number): Promise<Blob> {
     const headers = this.buildAuthHeaders('GET', false);
 
     const response = await fetch(
@@ -1416,7 +2544,7 @@ class ApiService {
     return response.blob();
   }
 
-  async searchRepositoryDocuments(appId: number, repositoryId: number, query: string, limit: number = 10, filterMetadata?: Record<string, any>) {
+  async searchRepositoryDocuments(appId: number, repositoryId: number, query: string, limit: number = 10, filterMetadata?: Record<string, any>): Promise<{ results: SearchResult[] }> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/search`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1427,7 +2555,7 @@ class ApiService {
     });
   }
 
-  async chatWithAgent(appId: number, agentId: number, message: string, files?: File[], searchParams?: any, conversationId?: number | null) {
+  async chatWithAgent(appId: number, agentId: number, message: string, files?: File[], searchParams?: any, conversationId?: number | null): Promise<{ response: string | Record<string, unknown>; conversation_id?: number }> {
     const formData = new FormData();
     formData.append('message', message);
     
@@ -1490,16 +2618,39 @@ class ApiService {
       options.files.forEach((file) => formData.append('files', file));
     }
 
-    const url = `${this.baseURL}/internal/apps/${appId}/agents/${agentId}/chat/stream`;
-    const headers = this.buildAuthHeaders('POST', true);
+    await this.postSSE(
+      `/internal/apps/${appId}/agents/${agentId}/chat/stream`, formData, options.onEvent, options.signal,
+    );
+  }
 
-    const response = await fetch(url, {
+  /** POST a form or JSON body and consume the SSE response (same auth/cookies/CSRF as every other call). */
+  private async postSSE(
+    endpoint: string,
+    body: FormData | Record<string, unknown>,
+    onEvent: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const isFormData = body instanceof FormData;
+    const send = () => fetch(`${this.baseURL}${endpoint}`, {
       method: 'POST',
       credentials: 'include',
-      headers,
-      body: formData,
-      signal: options.signal,
+      headers: this.buildAuthHeaders('POST', isFormData),
+      body: isFormData ? body : JSON.stringify(body),
+      signal,
     });
+
+    let response = await send();
+    if (response.status === 401) {
+      // Same contract as request(): renew the session once and retry; only then expire it.
+      // The body is re-sent as is (FormData and JSON strings can be reused); headers are rebuilt with the new token.
+      if (await this.renewSession()) {
+        response = await send();
+      }
+      if (response.status === 401) {
+        this.expireSession();
+        throw new ApiError('Your session has expired. Please sign in again.', 401);
+      }
+    }
 
     if (!response.ok) {
       await this.handleResponseError(response);
@@ -1523,14 +2674,38 @@ class ApiService {
         const lines = buffer.split('\n\n');
         buffer = lines.pop() || '';
 
-        this.parseSSELines(lines, options.onEvent);
+        this.parseSSELines(lines, onEvent);
       }
     } finally {
       reader.releaseLock();
     }
   }
 
-  async uploadFileForChat(appId: number, agentId: number, file: File, conversationId?: number | null) {
+  /** Answer a pending human-in-the-loop approval; streams the rest of the turn. */
+  async decideApprovalStream(
+    approvalId: string,
+    decisions: readonly HitlDecision[],
+    options: {
+      onEvent: (event: StreamEvent) => void;
+      signal?: AbortSignal;
+    }
+  ): Promise<void> {
+    await this.postSSE(
+      `/internal/approvals/${encodeURIComponent(approvalId)}/decisions/stream`,
+      { decisions },
+      options.onEvent,
+      options.signal,
+    );
+  }
+
+  /** Reject every action of a pending approval; returns the agent's answer. */
+  async cancelApproval(approvalId: string): Promise<HitlCancelResult> {
+    return this.request<HitlCancelResult>(`/internal/approvals/${encodeURIComponent(approvalId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  async uploadFileForChat(appId: number, agentId: number, file: File, conversationId?: number | null): Promise<{ file_id: string }> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -1544,14 +2719,14 @@ class ApiService {
     });
   }
 
-  async listAttachedFiles(appId: number, agentId: number, conversationId?: number | null) {
+  async listAttachedFiles(appId: number, agentId: number, conversationId?: number | null): Promise<{ files: AttachedFile[] }> {
     const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files`;
     return this.request(url);
   }
 
-  async removeAttachedFile(appId: number, agentId: number, fileId: string, conversationId?: number | null) {
+  async removeAttachedFile(appId: number, agentId: number, fileId: string, conversationId?: number | null): Promise<void> {
     const url = conversationId
       ? `/internal/apps/${appId}/agents/${agentId}/files/${fileId}?conversation_id=${conversationId}`
       : `/internal/apps/${appId}/agents/${agentId}/files/${fileId}`;
@@ -1563,11 +2738,11 @@ class ApiService {
   async getFileDownloadUrl(appId: number, agentId: number, fileId: string, conversationId?: number | null): Promise<string> {
     const base = `/internal/apps/${appId}/agents/${agentId}/files/${fileId}/download`;
     const url = conversationId ? `${base}?conversation_id=${conversationId}` : base;
-    const response = await this.request(url, { method: 'GET' });
-    return response.download_url as string;
+    const response = await this.request<{ download_url: string }>(url, { method: 'GET' });
+    return response.download_url;
   }
 
-  async processOCR(appId: number, agentId: number, file: File) {
+  async processOCR(appId: number, agentId: number, file: File): Promise<{ extracted_text?: string; metadata?: unknown; result?: unknown }> {
     const formData = new FormData();
     formData.append('pdf_file', file);
 
@@ -1577,11 +2752,11 @@ class ApiService {
     });
   }
 
-  async getDomains(appId: number) {
+  async getDomains(appId: number): Promise<DomainListItem[]> {
     return this.request(`/internal/apps/${appId}/domains/`);
   }
 
-  async getDomain(appId: number, domainId: number) {
+  async getDomain(appId: number, domainId: number): Promise<Domain> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}`);
   }
 
@@ -1597,7 +2772,7 @@ class ApiService {
       embedding_service_id?: number;
       vector_db_type?: string;
     }
-  ) {
+  ): Promise<Domain> {
     return this.request(`/internal/apps/${appId}/domains/`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -1615,14 +2790,14 @@ class ApiService {
       content_class?: string;
       content_id?: string;
     }
-  ) {
+  ): Promise<Domain> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteDomain(appId: number, domainId: number) {
+  async deleteDomain(appId: number, domainId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}`, {
       method: 'DELETE',
     });
@@ -1691,7 +2866,7 @@ class ApiService {
     });
   }
 
-  async getUrlContent(appId: number, domainId: number, urlId: number) {
+  async getUrlContent(appId: number, domainId: number, urlId: number): Promise<{ content: string }> {
     return this.request(`/internal/apps/${appId}/domains/${domainId}/urls/${urlId}/content`);
   }
 
@@ -1735,23 +2910,22 @@ class ApiService {
   }
 
   async getVersion(): Promise<{ name: string; version: string }> {
-    const response = await this.request('/internal/version/');
-    return response;
+    return this.request('/internal/version/');
   }
 
-  async getFolders(appId: number, repositoryId: number) {
+  async getFolders(appId: number, repositoryId: number): Promise<Folder[]> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/`);
   }
 
-  async getFolderTree(appId: number, repositoryId: number) {
+  async getFolderTree(appId: number, repositoryId: number): Promise<{ folders: Folder[] }> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/tree`);
   }
 
-  async getFolder(appId: number, repositoryId: number, folderId: number) {
+  async getFolder(appId: number, repositoryId: number, folderId: number): Promise<Folder> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/${folderId}`);
   }
 
-  async createFolder(appId: number, repositoryId: number, name: string, parentFolderId?: number) {
+  async createFolder(appId: number, repositoryId: number, name: string, parentFolderId?: number): Promise<Folder> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1761,20 +2935,20 @@ class ApiService {
     });
   }
 
-  async updateFolder(appId: number, repositoryId: number, folderId: number, name: string) {
+  async updateFolder(appId: number, repositoryId: number, folderId: number, name: string): Promise<Folder> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/${folderId}`, {
       method: 'PUT',
       body: JSON.stringify({ name }),
     });
   }
 
-  async deleteFolder(appId: number, repositoryId: number, folderId: number) {
+  async deleteFolder(appId: number, repositoryId: number, folderId: number): Promise<void> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/${folderId}`, {
       method: 'DELETE',
     });
   }
 
-  async moveFolder(appId: number, repositoryId: number, folderId: number, newParentFolderId?: number) {
+  async moveFolder(appId: number, repositoryId: number, folderId: number, newParentFolderId?: number): Promise<Folder> {
     return this.request(`/internal/apps/${appId}/repositories/${repositoryId}/folders/${folderId}/move`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1783,40 +2957,147 @@ class ApiService {
     });
   }
 
-  async uploadResourcesToFolder(appId: number, repositoryId: number, folderId: number, files: File[]) {
+  async uploadResourcesToFolder(appId: number, repositoryId: number, folderId: number, files: File[]): Promise<UploadResult> {
     return this.uploadResources(appId, repositoryId, files, folderId);
   }
 
-  async createConversation(agentId: number, title?: string) {
+  async createConversation(agentId: number, title?: string): Promise<Conversation> {
     const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
     return this.request(`/internal/conversations?agent_id=${agentId}${titleParam}`, {
       method: 'POST',
     });
   }
 
-  async listConversations(agentId: number, limit = 50, offset = 0) {
+  async listConversations(agentId: number, limit = 50, offset = 0): Promise<{ conversations: Conversation[]; total: number }> {
     return this.request(`/internal/conversations?agent_id=${agentId}&limit=${limit}&offset=${offset}`);
   }
 
-  async getConversation(conversationId: number) {
+  async getConversation(conversationId: number): Promise<Conversation> {
     return this.request(`/internal/conversations/${conversationId}`);
   }
 
-  async getConversationWithHistory(conversationId: number) {
+  async getConversationWithHistory(conversationId: number): Promise<{
+    session_id?: string | null;
+    messages: Array<{ role: string; content: string }>;
+    pending_approval?: HitlPendingApproval | null;
+  }> {
     return this.request(`/internal/conversations/${conversationId}/history`);
   }
 
-  async updateConversation(conversationId: number, data: { title?: string }) {
+  async updateConversation(conversationId: number, data: { title?: string }): Promise<Conversation> {
     return this.request(`/internal/conversations/${conversationId}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteConversation(conversationId: number) {
+  async deleteConversation(conversationId: number): Promise<void> {
     return this.request(`/internal/conversations/${conversationId}`, {
       method: 'DELETE',
     });
+  }
+
+  // ─── App Chat (`/internal/apps/{appId}/chat`) ────────────────────────────────
+
+  async getAppChatOptions(appId: number): Promise<ChatOptions> {
+    return this.request(`/internal/apps/${appId}/chat/options`);
+  }
+
+  /** The caller's default selection; null when the App has no usable model. */
+  async getAppChatDefaults(appId: number): Promise<ChatSelection | null> {
+    return this.request(`/internal/apps/${appId}/chat/defaults`);
+  }
+
+  async listAppChatConversations(appId: number, limit = 50, offset = 0): Promise<ChatConversationList> {
+    return this.request(`/internal/apps/${appId}/chat/conversations?limit=${limit}&offset=${offset}`);
+  }
+
+  async createAppChatConversation(
+    appId: number,
+    data: ChatConversationCreateRequest = {},
+  ): Promise<ChatConversation> {
+    return this.request(`/internal/apps/${appId}/chat/conversations`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getAppChatConversation(appId: number, conversationId: number): Promise<ChatConversationDetail> {
+    return this.request(`/internal/apps/${appId}/chat/conversations/${conversationId}`);
+  }
+
+  async renameAppChatConversation(appId: number, conversationId: number, title: string): Promise<ChatConversation> {
+    return this.request(`/internal/apps/${appId}/chat/conversations/${conversationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    });
+  }
+
+  async deleteAppChatConversation(appId: number, conversationId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/chat/conversations/${conversationId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async resetAppChatConversation(appId: number, conversationId: number): Promise<ChatActionResult> {
+    return this.request(`/internal/apps/${appId}/chat/conversations/${conversationId}/reset`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * Send one Chat turn and consume its SSE response (same mechanism as the playground stream).
+   * Without `conversationId` the backend creates the conversation and reports it in the `metadata` event.
+   * 403/404/409/422 are real HTTP errors raised before the stream starts (`ApiError`, with `errorCode`).
+   */
+  async streamAppChatMessage(
+    appId: number,
+    request: ChatStreamRequest,
+    options: { onEvent: (event: StreamEvent) => void; signal?: AbortSignal },
+  ): Promise<void> {
+    const formData = new FormData();
+    formData.append('message', request.message);
+    formData.append('selection', JSON.stringify(request.selection));
+    if (request.conversationId) {
+      formData.append('conversation_id', request.conversationId.toString());
+    }
+    request.files?.forEach((file) => formData.append('files', file));
+    if (request.fileReferences && request.fileReferences.length > 0) {
+      formData.append('file_references', JSON.stringify(request.fileReferences));
+    }
+    if (request.searchParams) {
+      formData.append('search_params', JSON.stringify(request.searchParams));
+    }
+
+    await this.postSSE(`/internal/apps/${appId}/chat/stream`, formData, options.onEvent, options.signal);
+  }
+
+  async uploadAppChatFile(appId: number, conversationId: number, file: File): Promise<ChatFileUploadResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return this.request(`/internal/apps/${appId}/chat/conversations/${conversationId}/files`, {
+      method: 'POST',
+      body: formData,
+    });
+  }
+
+  async listAppChatFiles(appId: number, conversationId: number): Promise<ChatFileList> {
+    return this.request(`/internal/apps/${appId}/chat/conversations/${conversationId}/files`);
+  }
+
+  /** Unlike the playground, an unknown file id is a 404 (not `success: false`). */
+  async removeAppChatFile(appId: number, conversationId: number, fileId: string): Promise<ChatActionResult> {
+    return this.request(
+      `/internal/apps/${appId}/chat/conversations/${conversationId}/files/${encodeURIComponent(fileId)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /** Signed link that expires after 5 minutes: request it on click, never cache it. */
+  async getAppChatFileDownload(appId: number, conversationId: number, fileId: string): Promise<ChatFileDownload> {
+    return this.request(
+      `/internal/apps/${appId}/chat/conversations/${conversationId}/files/${encodeURIComponent(fileId)}/download`,
+    );
   }
 
   async getMarketplaceCatalog(
@@ -1916,6 +3197,7 @@ class ApiService {
     options: {
       files?: File[];
       fileReferences?: string[];
+      searchParams?: unknown;
       onEvent: (event: StreamEvent) => void;
       signal?: AbortSignal;
     },
@@ -1925,6 +3207,9 @@ class ApiService {
 
     if (options.fileReferences && options.fileReferences.length > 0) {
       formData.append('file_references', JSON.stringify(options.fileReferences));
+    }
+    if (options.searchParams) {
+      formData.append('search_params', JSON.stringify(options.searchParams));
     }
     if (options.files && options.files.length > 0) {
       options.files.forEach((file) => formData.append('files', file));
@@ -1989,11 +3274,11 @@ class ApiService {
   }
 
   async getMarketplaceFileDownloadUrl(conversationId: number, fileId: string): Promise<string> {
-    const response = await this.request(
+    const response = await this.request<{ download_url: string }>(
       `/internal/marketplace/conversations/${conversationId}/files/${fileId}/download`,
       { method: 'GET' },
     );
-    return response.download_url as string;
+    return response.download_url;
   }
 
   async getMarketplaceQuotaUsage(): Promise<MarketplaceQuotaUsage> {
@@ -2055,7 +3340,7 @@ class ApiService {
     file: File,
     conflictMode: ConflictMode,
     newName?: string
-  ): Promise<any> {
+  ): Promise<FullAppImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     
@@ -2081,7 +3366,7 @@ class ApiService {
     return response.json();
   }
 
-  async previewAgentImport(appId: number, file: File) {
+  async previewAgentImport(appId: number, file: File): Promise<AgentImportPreview> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -2100,7 +3385,7 @@ class ApiService {
     return response.json();
   }
 
-  async previewAppImport(file: File) {
+  async previewAppImport(file: File): Promise<AppImportPreview> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -2131,7 +3416,7 @@ class ApiService {
       importBundledMCPConfigs?: boolean;
       importBundledAgentTools?: boolean;
     }
-  ) {
+  ): Promise<ImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -2185,7 +3470,7 @@ class ApiService {
       componentSelection?: Record<string, string[]>;
       apiKeys?: Record<string, string>;
     }
-  ) {
+  ): Promise<FullAppImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -2223,71 +3508,71 @@ class ApiService {
     return response.json();
   }
 
-  async fetchSystemSettings() {
+  async fetchSystemSettings(): Promise<SystemSetting[]> {
     return this.request('/internal/admin/settings');
   }
 
-  async updateSystemSetting(key: string, value: string) {
+  async updateSystemSetting(key: string, value: string): Promise<SystemSetting> {
     return this.request(`/internal/admin/settings/${encodeURIComponent(key)}`, {
       method: 'PUT',
       body: JSON.stringify({ value }),
     });
   }
 
-  async resetSystemSetting(key: string) {
+  async resetSystemSetting(key: string): Promise<SystemSetting> {
     return this.request(`/internal/admin/settings/${encodeURIComponent(key)}`, {
       method: 'DELETE',
     });
   }
 
-  async getSubscription() {
+  async getSubscription(): Promise<SubscriptionData> {
     return this.request('/internal/subscription');
   }
 
-  async createCheckoutSession(tier: string) {
+  async createCheckoutSession(tier: string): Promise<{ checkout_url: string }> {
     return this.request('/internal/subscription/checkout', {
       method: 'POST',
       body: JSON.stringify({ tier }),
     });
   }
 
-  async createPortalSession() {
+  async createPortalSession(): Promise<{ portal_url: string }> {
     return this.request('/internal/subscription/portal', {
       method: 'POST',
     });
   }
 
-  async getUsage() {
+  async getUsage(): Promise<UsageData> {
     return this.request('/internal/usage');
   }
 
-  async getAdminSaasUsers() {
+  async getAdminSaasUsers(): Promise<SaasUser[]> {
     return this.request('/internal/admin/saas/users');
   }
 
-  async overrideUserTier(userId: number, tier: string) {
+  async overrideUserTier(userId: number, tier: string): Promise<SaasUser> {
     return this.request(`/internal/admin/saas/users/${userId}/tier`, {
       method: 'PUT',
       body: JSON.stringify({ tier }),
     });
   }
 
-  async getTierConfig() {
+  async getTierConfig(): Promise<TierConfigEntry[]> {
     return this.request('/internal/admin/saas/tier-config');
   }
 
-  async updateTierConfig(data: { tier: string; resource_type: string; limit_value: number }) {
+  async updateTierConfig(data: { tier: string; resource_type: string; limit_value: number }): Promise<TierConfigEntry> {
     return this.request('/internal/admin/saas/tier-config', {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async getSystemAIServices() {
+  async getSystemAIServices(): Promise<SystemAIService[]> {
     return this.request('/internal/admin/system-ai-services');
   }
 
-  async getSystemAIService(serviceId: number) {
+  async getSystemAIService(serviceId: number): Promise<SystemAIService> {
     return this.request(`/internal/admin/system-ai-services/${serviceId}`);
   }
 
@@ -2297,7 +3582,9 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
-  }) {
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
+  }): Promise<SystemAIService> {
     return this.request('/internal/admin/system-ai-services', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -2310,20 +3597,99 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
-  }) {
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
+  }): Promise<SystemAIService> {
     return this.request(`/internal/admin/system-ai-services/${serviceId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async deleteSystemAIService(serviceId: number) {
+  async deleteSystemAIService(serviceId: number): Promise<void> {
     return this.request(`/internal/admin/system-ai-services/${serviceId}`, {
       method: 'DELETE',
     });
   }
 
-  async getSystemEmbeddingServices() {
+  async getSystemSkills(): Promise<Skill[]> {
+    return this.request('/internal/admin/system-skills');
+  }
+
+  async getSystemSkill(skillId: number): Promise<Skill> {
+    return this.request(`/internal/admin/system-skills/${skillId}`);
+  }
+
+  async createSystemSkill(data: SystemSkillWriteData): Promise<Skill> {
+    return this.request('/internal/admin/system-skills', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSystemSkill(skillId: number, data: SystemSkillWriteData): Promise<Skill> {
+    return this.request(`/internal/admin/system-skills/${skillId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteSystemSkill(skillId: number): Promise<void> {
+    return this.request(`/internal/admin/system-skills/${skillId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async importSystemSkill(file: File): Promise<Skill> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/admin/system-skills/import`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  async exportSystemSkill(skillId: number): Promise<Blob> {
+    const headers = this.buildAuthHeaders('GET', false);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/admin/system-skills/${skillId}/export`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.blob();
+  }
+
+  async setSystemSkillEnabled(skillId: number, isEnabled: boolean): Promise<Skill> {
+    return this.request(`/internal/admin/system-skills/${skillId}/enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_enabled: isEnabled }),
+    });
+  }
+
+  async getSystemEmbeddingServices(): Promise<SystemEmbeddingService[]> {
     return this.request('/internal/admin/system-embedding-services');
   }
 
@@ -2333,7 +3699,9 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
-  }) {
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
+  }): Promise<SystemEmbeddingService> {
     return this.request('/internal/admin/system-embedding-services', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -2346,18 +3714,20 @@ class ApiService {
     model_name: string;
     api_key: string;
     base_url?: string;
-  }) {
+    end_of_service_at?: string | null;
+    deprecation_notice?: string | null;
+  }): Promise<SystemEmbeddingService> {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async getSystemEmbeddingServiceImpact(serviceId: number) {
+  async getSystemEmbeddingServiceImpact(serviceId: number): Promise<SystemEmbeddingServiceImpact> {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}/impact`);
   }
 
-  async deleteSystemEmbeddingService(serviceId: number) {
+  async deleteSystemEmbeddingService(serviceId: number): Promise<void> {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}`, {
       method: 'DELETE',
     });
@@ -2381,7 +3751,7 @@ class ApiService {
     });
   }
 
-  async testSystemAIServiceConnectionWithConfig(data: any, serviceId?: number) {
+  async testSystemAIServiceConnectionWithConfig(data: any, serviceId?: number): Promise<TestConnectionResult> {
     const qs = serviceId != null ? `?service_id=${serviceId}` : '';
     return this.request(`/internal/admin/system-ai-services/test-connection${qs}`, {
       method: 'POST',
@@ -2389,9 +3759,45 @@ class ApiService {
     });
   }
 
-  async testSystemEmbeddingServiceConnectionWithConfig(data: any, serviceId?: number) {
+  async testSystemEmbeddingServiceConnectionWithConfig(data: any, serviceId?: number): Promise<TestConnectionResult> {
     const qs = serviceId != null ? `?service_id=${serviceId}` : '';
     return this.request(`/internal/admin/system-embedding-services/test-connection${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getSystemSandboxServices() {
+    return this.request('/internal/admin/system-sandbox-services');
+  }
+
+  async getSystemSandboxService(serviceId: number): Promise<ExistingSandboxService> {
+    return this.request(`/internal/admin/system-sandbox-services/${serviceId}`);
+  }
+
+  async createSystemSandboxService(data: any) {
+    return this.request('/internal/admin/system-sandbox-services', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSystemSandboxService(serviceId: number, data: any) {
+    return this.request(`/internal/admin/system-sandbox-services/${serviceId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteSystemSandboxService(serviceId: number) {
+    return this.request(`/internal/admin/system-sandbox-services/${serviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testSystemSandboxServiceConnectionWithConfig(data: any, serviceId?: number) {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/admin/system-sandbox-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });

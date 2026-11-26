@@ -1,21 +1,23 @@
 [tool.poetry]
 name = "ai-core-tools"
-version = "0.4.3.dev0"
+version = "0.6.0.dev0"
 description = "Mattin AI is a comprehensive AI toolbox that provides a wide range of artificial intelligence capabilities and tools."
 authors = ["Aritz Galdos", "Mikel Lonbide"]
 readme = "README.md"
 license = "MPL-2.0"
 package-mode = false
+# If package-mode is ever enabled, non-.py skill package data MUST be declared:
+# include = [{ path = "backend/system_skills/**/*", format = ["sdist", "wheel"] }]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<4.0"
+python = ">=3.11.5,<4.0"
 python-dotenv = ">=1.0.1,<2.0.0"
 psycopg = ">=3.2.9,<4.0.0"
 psycopg2-binary = ">=2.9.0,<3.0.0"
 langchain-openai = ">=1.1.0,<2.0.0"
-langchain = ">=1.2.0,<2.0.0"
+langchain = ">=1.3.9,<2.0.0"
 pdf2image = ">=1.17.0,<2.0.0"
-pypdf = ">=5.2.0,<6.0.0"
+pypdf = ">=6.16.1,<7.0.0"
 langchain-anthropic = ">=1.3.0,<2.0.0"
 langchain-community = ">=0.4.0,<1.0.0"
 langchain-classic = ">=1.0.2,<2.0.0"
@@ -23,7 +25,7 @@ docx2txt = ">=0.9,<1.0.0"
 langchain-postgres = ">=0.0.17,<0.1.0"
 rank-bm25 = ">=0.2.2,<0.3.0"
 snowballstemmer = ">=3.0.0,<4.0.0"
-authlib = ">=1.4.0,<2.0.0"
+authlib = ">=1.6.12,<2.0.0"
 deprecation = ">=2.1.0,<3.0.0"
 langchain-mistralai = ">=1.1.0,<2.0.0"
 mistralai = ">=1.5.0,<2.0.0"
@@ -34,7 +36,7 @@ langchain-google-genai = ">=4.0.0,<5.0.0"
 langchain-mcp-adapters = ">=0.2.0,<0.3.0"
 toml = ">=0.10.2,<0.11.0"
 langgraph = ">=1.0.0,<2.0.0"
-fastapi = ">=0.116.1,<0.117.0"
+fastapi = ">=0.142.2,<0.143.0"
 uvicorn = ">=0.35.0,<0.36.0"
 scalar-fastapi = ">=1.4.4,<2.0.0"
 SQLAlchemy = ">=2.0.42,<3.0.0"
@@ -46,7 +48,7 @@ pydantic-settings = ">=2.10.1,<3.0.0"
 orjson = ">=3.11.1,<4.0.0"
 aiohttp = ">=3.12.15,<4.0.0"
 httpx = ">=0.28.1,<0.29.0"
-starlette = ">=0.47.2,<0.48.0"
+starlette = ">=1.3.1,<2.0.0"
 sse-starlette = ">=3.0.2,<4.0.0"
 pyjwt = ">=2.8.0,<3.0.0"
 langchain-azure-ai = ">=1.0.0,<2.0.0"
@@ -55,7 +57,7 @@ aiohappyeyeballs = ">=2.6.1,<3.0.0"
 aiosignal = ">=1.4.0,<2.0.0"
 annotated-types = ">=0.7.0,<1.0.0"
 anthropic = ">=0.61.0,<1.0.0"
-anyio = ">=4.10.0,<5.0.0"
+anyio = ">=4.14.2,<5.0.0"
 asyncpg = ">=0.30.0,<1.0.0"
 attrs = ">=25.3.0,<26.0.0"
 azure-ai-agents = ">=1.1.0,<2.0.0"
@@ -74,7 +76,7 @@ email-validator = ">=2.2.0,<3.0.0"
 blinker = ">=1.9.0,<2.0.0"
 bs4 = ">=0.0.2,<1.0.0"
 cachetools = ">=6.1.0,<7.0.0"
-certifi = ">=2025.8.3,<2026.0.0"
+certifi = ">=2026.10.18,<2027.0.0"
 cffi = ">=1.17.1,<2.0.0"
 charset-normalizer = ">=3.4.2,<4.0.0"
 click = ">=8.2.1,<9.0.0"
@@ -103,7 +105,7 @@ jsonpointer = ">=3.0.0,<4.0.0"
 jsonschema = ">=4.25.0,<5.0.0"
 jsonschema-specifications = ">=2025.4.1,<2026.0.0"
 langchain-text-splitters = ">=1.1.0,<2.0.0"
-langgraph-checkpoint = ">=2.1.2,<4.0.0"
+langgraph-checkpoint = ">=4.1.1,<5.0.0"
 langgraph-prebuilt = ">=1.0.0,<2.0.0"
 langgraph-sdk = ">=0.2.0,<1.0.0"
 langsmith = ">=0.4.13,<1.0.0"
@@ -111,8 +113,6 @@ mako = ">=1.3.10,<2.0.0"
 markupsafe = ">=3.0.2,<4.0.0"
 marshmallow = ">=3.26.1,<4.0.0"
 mcp = ">=1.9.2,<2.0.0"
-mistral = ">=20.0.0,<21.0.0"
-mistral-lib = ">=3.4.0,<4.0.0"
 msal = ">=1.33.0,<2.0.0"
 msal-extensions = ">=1.3.1,<2.0.0"
 multidict = ">=6.6.3,<7.0.0"
@@ -122,13 +122,13 @@ numpy = ">=2.3.2,<3.0.0"
 pandas = ">=2.0.0,<3.0.0"
 openpyxl = ">=3.1.0,<4.0.0"
 ollama = ">=0.5.2,<1.0.0"
-openai = ">=1.99.1,<2.0.0"
+openai = ">=2.26.0,<3.0.0"
 opentelemetry-api = ">=1.36.0,<2.0.0"
 ormsgpack = ">=1.10.0,<2.0.0"
 packaging = ">=25.0,<26.0.0"
 passlib = ">=1.7.4,<2.0.0"
 pgvector = ">=0.3.6,<1.0.0"
-pillow = ">=11.3.0,<12.0.0"
+pillow = ">=13.0.0,<14.0.0"
 prometheus-client = ">=0.22.1,<1.0.0"
 propcache = ">=0.3.2,<1.0.0"
 psutil = ">=7.0.0,<8.0.0"
@@ -149,7 +149,7 @@ rfc3986 = ">=2.0.0,<3.0.0"
 rpds-py = ">=0.27.0,<1.0.0"
 six = ">=1.17.0,<2.0.0"
 sniffio = ">=1.3.1,<2.0.0"
-soupsieve = ">=2.7,<3.0.0"
+soupsieve = ">=4.0.0,<5.0.0"
 tenacity = ">=9.1.2,<10.0.0"
 tiktoken = ">=0.10.0,<1.0.0"
 tokenizers = ">=0.21.4,<1.0.0"
@@ -171,12 +171,23 @@ lks-idprovider-entraid = "^0.1.3"
 yt-dlp = ">=2024.0.0"
 pydub = ">=0.25.1"
 ffmpeg-python = "^0.2.0"
-pymupdf = "^1.27.2.3"
+# Exact pins: pymupdf4llm raises ImportError unless its version equals pymupdf's; bump both together.
+pymupdf = "2.1"
+pymupdf4llm = "2.1"
 langchain-aws = ">=1.0.0,<2.0.0"
 sentence-transformers = "<6.0"
 # CPU-only wheel: the default PyPI build pulls the full CUDA/NVIDIA stack
 # (~5GB), which single-host CPU deployments (see backend/Dockerfile) never use.
 torch = { version = ">=2.2,<3.0", source = "pytorch-cpu" }
+opensandbox = "0.1.7"
+opensandbox-code-interpreter = "0.1.2"
+daytona = "0.173.0"
+e2b-code-interpreter = "2.5.0"
+e2b = "2.7.0"
+dbos = ">=2.0.0,<3.0.0"
+croniter = ">=6.0.0,<7.0.0"  # used directly by scheduled_task_service (was only pulled in transitively)
+# Exact pin: services/a2a_server/storage.py overrides private SDK attributes; bump only after tests/integration/a2a_server/test_sdk_contract.py passes
+a2a-sdk = {version = "==1.2.2", extras = ["http-server"]}  # SDK DB stores run on our psycopg async_engine; no asyncpg extra
 
 [[tool.poetry.source]]
 name = "pytorch-cpu"
@@ -185,13 +196,6 @@ priority = "explicit"
 
 [tool.poetry.scripts]
 dev = "uvicorn backend.main:app --reload --port 8000"
-
-[tool.poetry.group.sharepoint]
-optional = true
-
-[tool.poetry.group.sharepoint.dependencies]
-#mattin-sharepoint = {path = "../mattin-ai-plugins", develop = true}  # local dev
-#mattin-sharepoint = {git = "https://github.com/lksnext-ai-lab/mattin-ai-plugins.git"}  # client
 
 [tool.poetry.group.test.dependencies]
 pytest = ">=8.0.0,<9.0.0"
@@ -222,9 +226,6 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
-dev = [
-    "debugpy (>=1.8.20,<2.0.0)"
-]
 qdrant = [
     "qdrant-client (>=1.17.1,<2.0.0)",
     "langchain-qdrant (>=1.1.0,<2.0.0)"

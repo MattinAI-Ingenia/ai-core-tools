@@ -17,7 +17,7 @@ The **Agent System** is the core execution engine of Mattin AI, powered by **Lan
 - **Tool support**: Built-in tools (date/time, file access, scraping, PDF, transcription) + custom tools
 - **Memory management**: Conversation history persisted via checkpointer with configurable limits
 - **File attachments**: Process uploaded files during agent execution
-- **Skills system**: Reusable skills (legacy, being phased out)
+- **Skills system**: Reusable, package-based skills — app-scoped or platform-wide system skills, with optional sandbox activation and an opt-in LLM router (see [Skills guide](../guides/skills.md))
 - **MCP integration**: Connect to Model Context Protocol servers — tools are loaded for both top-level agents and agents used as sub-tools by other agents
 
 ## Agent Configuration
@@ -53,14 +53,14 @@ class Agent(Base):
 | `output_parser_id` | Structured output schema (optional) |
 | `temperature` | LLM sampling temperature (0.0-1.0) |
 | `marketplace_visibility` | `UNPUBLISHED` / `PRIVATE` / `PUBLIC` (default `UNPUBLISHED`) |
-| `enable_code_interpreter` | Enable code interpreter tool (default `false`) |
+| `enable_code_interpreter` | Enable code interpreter tool (default `false`). The App Chat does not use this flag: its code interpreter is an App-level switch, see [App Chat](app-chat.md#code-interpreter) |
 | `server_tools` | JSON list of server-side built-in tool configs (default `[]`) |
 
 **Linked resources**:
 - `ai_service`: LLM configuration (OpenAI, Anthropic, etc.)
 - `silo`: Default vector store for RAG
 - `output_parser`: Structured output schema
-- `skill_associations`: AgentSkill (many-to-many, legacy)
+- `skill_associations`: AgentSkill (many-to-many)
 - `mcp_associations`: AgentMCP (many-to-many)
 - `tool_associations`: AgentTool (self-referential, agents as tools)
 - `marketplace_profile`: `AgentMarketplaceProfile` (1:1, optional) — marketplace catalog metadata
@@ -163,54 +163,28 @@ if agent.silo_id and search_params:
 
 ## Memory Management
 
-### MemoryManagementService
+### Conversation memory
 
-Manages conversation memory with configurable limits:
+Agents with `has_memory` keep their history in the LangGraph PostgreSQL checkpointer and summarize it
+with LangChain's `SummarizationMiddleware` (`backend/tools/middleware/factory.py`). An attached
+`summarization` middleware sets the values; otherwise these defaults apply:
 
-```python
-# backend/models/agent.py
-DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20  # centralised constant
+| Setting | Default | Source |
+|---|---|---|
+| Trigger | 85% of the model's `max_input_tokens`, at most 150,000 tokens; 32,000 when the model has no profile (custom endpoints, Ollama) | Deep Agents summarization defaults; Anthropic compaction default trigger |
+| Keep | Last 20 messages | LangChain `SummarizationMiddleware` default |
+| Tokens to summarize | No limit (the whole older history, already bounded by the trigger) | Deep Agents `create_summarization_middleware` default |
 
-class MemoryManagementService:
-    # Default limits (configurable per-agent via Agent fields)
-    MAX_MESSAGES = 20          # Agent.memory_max_messages
-    MAX_TOKENS = 4000          # Agent.memory_max_tokens
-    SUMMARIZATION_THRESHOLD = 20  # Agent.memory_summarize_threshold
-```
+The legacy `memory_max_messages`, `memory_max_tokens` and `memory_summarize_threshold` agent columns are
+kept for export/import compatibility but are no longer read.
 
-> The summarization threshold constant (`DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20`) is defined once in `backend/models/agent.py` and used everywhere memory configuration is set or defaulted. Override per-agent via the `memory_summarize_threshold` field.
+## Retired Services
 
-**Methods**:
+When a service an agent needs (main LLM, OCR vision/text model, transcription, video, embedding of a linked silo, middleware LLM, or an agent-as-tool's LLM) is past its end of service, the turn fails with `ServiceRetiredError` (HTTP `409 SERVICE_RETIRED`, SSE `error` with `code: "service_retired"`, scheduled runs failed without retry). The exception is the sandbox service: a retired one disables the code interpreter for the turn instead of failing it ([details](rfc-sandbox-providers.md#sandbox-service-end-of-service)). See [Service End of Service](../guides/chat-bot/kb-ai-services.md#service-end-of-service) for the user-facing behavior.
 
-| Method | Purpose |
-|--------|---------|
-| `trim_conversation(conversation_id, max_tokens, db)` | Trim to fit context window |
-| `summarize_conversation(agent_id, conversation_id, db)` | Summarize old messages |
-| `get_conversation_token_count(conversation_id, db)` | Count tokens in conversation |
-
-**Memory strategies**:
-
-1. **Sliding window**: Keep only recent N messages
-   ```python
-   messages = messages[-MemoryManagementService.MAX_MESSAGES:]
-   ```
-
-2. **Token-based trimming**: Trim to fit max tokens
-   ```python
-   trimmed = await MemoryManagementService.trim_conversation(
-       conversation_id, 
-       max_tokens=4000, 
-       db
-   )
-   ```
-
-3. **Summarization**: Use LLM to summarize old messages when threshold reached
-   ```python
-   if len(messages) > MemoryManagementService.SUMMARIZATION_THRESHOLD:
-       summarized = await MemoryManagementService.summarize_conversation(
-           agent_id, conversation_id, db
-       )
-   ```
+Known limitations:
+- A tool that turns out to be retired mid-turn may leave an unanswered tool call in the agent's memory; the next turn recovers through the existing checkpoint rollback.
+- Users of a published marketplace agent see the retirement message (service name and notice) of the owning App's service. This is accepted.
 
 ## Conversation Persistence
 
@@ -252,39 +226,9 @@ class Conversation(Base):
 
 ## Skills
 
-**Note**: The skills system is legacy and being phased out in favor of MCP tools.
+Skills are reusable, Markdown-driven specializations (`SKILL.md` + optional bundled files) attached to agents (M:N via `AgentSkill`). A skill can be **app-scoped** (`Skill.app_id` set) or a **system skill** (`Skill.app_id IS NULL`, platform-managed, YAML-seeded at startup). `Agent.skill_router_enabled` optionally turns on an LLM pre-selection step (default off) that narrows which attached skills are surfaced on a given turn.
 
-Skills are reusable code modules that agents can load and execute:
-
-```python
-class Skill(Base):
-    __tablename__ = 'Skill'
-    skill_id = Column(Integer, primary_key=True)
-    app_id = Column(Integer, ForeignKey('App.app_id'))
-    name = Column(String(255))
-    description = Column(Text)
-    code = Column(Text)  # Python code
-```
-
-**Skill loader tool**:
-
-```python
-from tools.skill_tools import create_skill_loader_tool
-
-skill_loader = create_skill_loader_tool(agent, db)
-tools.append(skill_loader)
-```
-
-The agent can dynamically load and execute skills at runtime.
-
-**Skills system prompt section**:
-
-```python
-from tools.skill_tools import generate_skills_system_prompt_section
-
-skills_section = generate_skills_system_prompt_section(agent)
-system_prompt += "\n\n" + skills_section
-```
+See the [Skills guide](../guides/skills.md) for the full package format (frontmatter contract, `allowed_tools` metadata-only clarification), system skills, sandbox activation, and the opt-in router. `backend/tools/skill_tools.py` provides the `load_skill` / `read_skill_file` tools exposed to the agent at runtime; `backend/tools/skill_tools.py::resolve_agent_skills` is the single source of truth for which of an agent's attached skills are actually usable on a given turn (drops disabled skills, dedupes by normalised name).
 
 ## File Attachments
 
@@ -527,6 +471,7 @@ When the quota is exceeded, the endpoint returns:
 - [LLM Integration](llm-integration.md) — AI service configuration
 - [RAG & Vector Stores](rag-vector-stores.md) — Silo and retrieval
 - [MCP Integration](mcp-integration.md) — MCP servers and tools
+- [App Chat](app-chat.md) — Hidden internal agent (`Agent.kind = 'internal_chat'`) and per-turn configuration
 - [Backend Architecture](../architecture/backend.md) — Agent execution service
 - [Database Schema](../architecture/database.md) — Agent model
 - [File Processing](../reference/file-processing.md) — File handling details

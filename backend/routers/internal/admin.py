@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from lks_idprovider import AuthContext
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -25,7 +26,10 @@ from schemas.admin_schemas import (
 )
 from schemas.system_setting_schemas import SystemSettingRead, SystemSettingUpdate
 from services.marketplace_quota_service import MarketplaceQuotaService
+from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from services.service_lifecycle_service import ServiceLifecycleService
 from services.system_settings_service import SystemSettingsService
+from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING
 from services.user_service import UserService
 from utils.config import is_omniadmin
 from utils.logger import get_logger
@@ -37,6 +41,8 @@ router = APIRouter(tags=["admin"])
 USER_NOT_FOUND = "User not found"
 SYSTEM_AI_SERVICE_NOT_FOUND = "System AI service not found"
 SYSTEM_EMBEDDING_SERVICE_NOT_FOUND = "System embedding service not found"
+SYSTEM_SANDBOX_SERVICE_NOT_FOUND = "System sandbox service not found"
+SYSTEM_SKILL_NOT_FOUND = "System skill not found"
 
 
 async def require_admin(
@@ -472,7 +478,7 @@ async def get_system_stats(
         active_users = UserService.get_active_users_count(db)
         inactive_users = UserService.get_inactive_users_count(db)
         total_apps = db.query(App).count()
-        total_agents = db.query(Agent).count()
+        total_agents = db.query(Agent).filter(Agent.visible_clause()).count()
         total_api_keys = db.query(APIKey).count()
         active_api_keys = db.query(APIKey).filter(APIKey.is_active == True).count()
         
@@ -591,6 +597,26 @@ from schemas.embedding_service_schemas import (
     CreateUpdateEmbeddingServiceSchema,
     SystemEmbeddingServiceImpactSchema,
 )
+from schemas.sandbox_service_schemas import (
+    SandboxServiceListItemSchema,
+    SandboxServiceDetailSchema,
+    CreateUpdateSandboxServiceSchema,
+)
+from schemas.skill_schemas import (
+    CreateUpdateSkillSchema,
+    SkillDetailSchema,
+    SkillEnabledUpdateSchema,
+    SkillFileContentSchema,
+    SkillListItemSchema,
+)
+from routers.controls.skill_router_helpers import (
+    read_upload_bounded,
+    skill_error_boundary,
+    zip_download_response,
+)
+from services.skill_errors import SkillServiceError
+from services.skill_package_service import SkillPackageService
+from services.skill_service import SkillService
 from typing import List
 
 
@@ -702,24 +728,11 @@ async def list_system_ai_services(
 ):
     """List all platform-level AI Services (OMNIADMIN only, available in all deployment modes)."""
     from repositories.ai_service_repository import AIServiceRepository
-    from utils.secret_utils import mask_api_key
-    from tools.aws_bedrock_utils import parse_extra_config
+    from services.ai_service_service import AIServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     services = AIServiceRepository.get_system_services(db)
-    return [
-        AIServiceDetailSchema(
-            service_id=svc.service_id,
-            name=svc.name,
-            provider=svc.provider.value if hasattr(svc.provider, 'value') else svc.provider,
-            model_name=svc.description or "",
-            api_key=mask_api_key(svc.api_key) if svc.api_key else "",
-            base_url=svc.endpoint or "",
-            supports_video=svc.supports_video or False,
-            created_at=svc.create_date,
-            aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
-            aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
-        )
-        for svc in services
-    ]
+    warning_days = ServiceLifecycleService.warning_days(db)
+    return [AIServiceService.to_detail(svc, warning_days) for svc in services]
 
 
 @router.get("/system-ai-services/{service_id}", response_model=AIServiceDetailSchema)
@@ -730,25 +743,13 @@ async def get_system_ai_service(
 ):
     """Get a single platform-level AI Service by ID (OMNIADMIN only)."""
     from repositories.ai_service_repository import AIServiceRepository
-    from utils.secret_utils import mask_api_key
-    from tools.aws_bedrock_utils import parse_extra_config
+    from services.ai_service_service import AIServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
 
     svc = AIServiceRepository.get_by_id(db, service_id)
     if not svc or svc.app_id is not None:
         raise HTTPException(status_code=404, detail=SYSTEM_AI_SERVICE_NOT_FOUND)
-    extra_cfg = parse_extra_config(svc.extra_config)
-    return AIServiceDetailSchema(
-        service_id=svc.service_id,
-        name=svc.name,
-        provider=svc.provider.value if hasattr(svc.provider, 'value') else svc.provider,
-        model_name=svc.description or "",
-        api_key=mask_api_key(svc.api_key) if svc.api_key else "",
-        base_url=svc.endpoint or "",
-        supports_video=svc.supports_video or False,
-        created_at=svc.create_date,
-        aws_access_key_id=extra_cfg.get("aws_access_key_id"),
-        aws_region=extra_cfg.get("aws_region"),
-    )
+    return AIServiceService.to_detail(svc, ServiceLifecycleService.warning_days(db))
 
 
 @router.post("/system-ai-services", response_model=AIServiceListItemSchema, status_code=201)
@@ -761,7 +762,9 @@ async def create_system_ai_service(
     from models.ai_service import AIService
     from repositories.ai_service_repository import AIServiceRepository
     from services.ai_service_service import AIServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     from tools.aws_bedrock_utils import build_extra_config
+    from utils.service_lifecycle import SERVICE_KIND_AI
     from datetime import datetime
 
     svc = AIService()
@@ -773,9 +776,14 @@ async def create_system_ai_service(
     svc.endpoint = body.base_url or ""
     svc.supports_video = body.supports_video
     svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
+    AIServiceService.apply_lifecycle_fields(svc, body, int(auth_context.identity.id))
     svc.create_date = datetime.now()
     svc = AIServiceRepository.create(db, svc)
-    return AIServiceService._to_list_item(svc, is_system=True)
+    if svc.end_of_service_at is not None:
+        ServiceLifecycleService.log_change(
+            svc, SERVICE_KIND_AI, None, svc.end_of_service_at, int(auth_context.identity.id)
+        )
+    return AIServiceService._to_list_item(svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db))
 
 
 @router.put("/system-ai-services/{service_id}", response_model=AIServiceListItemSchema)
@@ -788,6 +796,7 @@ async def update_system_ai_service(
     """Update a platform-level AI Service (OMNIADMIN only, available in all deployment modes)."""
     from repositories.ai_service_repository import AIServiceRepository
     from services.ai_service_service import AIServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     from utils.secret_utils import is_masked_key
     from tools.aws_bedrock_utils import build_extra_config
 
@@ -803,8 +812,9 @@ async def update_system_ai_service(
     svc.endpoint = body.base_url or ""
     svc.supports_video = body.supports_video
     svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
+    AIServiceService.apply_lifecycle_fields(svc, body, int(auth_context.identity.id))
     svc = AIServiceRepository.update(db, svc)
-    return AIServiceService._to_list_item(svc, is_system=True)
+    return AIServiceService._to_list_item(svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db))
 
 
 @router.delete("/system-ai-services/{service_id}", status_code=204)
@@ -829,24 +839,11 @@ async def list_system_embedding_services(
 ):
     """List all platform-level Embedding Services (OMNIADMIN only)."""
     from repositories.embedding_service_repository import EmbeddingServiceRepository
-    from utils.secret_utils import mask_api_key
-    from tools.aws_bedrock_utils import parse_extra_config
+    from services.embedding_service_service import EmbeddingServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     services = EmbeddingServiceRepository.get_system_services(db)
-    return [
-        EmbeddingServiceDetailSchema(
-            service_id=svc.service_id,
-            name=svc.name,
-            provider=svc.provider,
-            model_name=svc.description or "",
-            api_key=mask_api_key(svc.api_key) if svc.api_key else "",
-            base_url=svc.endpoint or "",
-            api_version=svc.api_version,
-            created_at=svc.create_date,
-            aws_access_key_id=parse_extra_config(svc.extra_config).get("aws_access_key_id"),
-            aws_region=parse_extra_config(svc.extra_config).get("aws_region"),
-        )
-        for svc in services
-    ]
+    warning_days = ServiceLifecycleService.warning_days(db)
+    return [EmbeddingServiceService.to_detail(svc, warning_days) for svc in services]
 
 
 @router.post("/system-embedding-services", response_model=EmbeddingServiceListItemSchema, status_code=201)
@@ -859,7 +856,9 @@ async def create_system_embedding_service(
     from models.embedding_service import EmbeddingService
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from services.embedding_service_service import EmbeddingServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     from tools.aws_bedrock_utils import build_extra_config
+    from utils.service_lifecycle import SERVICE_KIND_EMBEDDING
     from datetime import datetime
 
     svc = EmbeddingService()
@@ -871,9 +870,16 @@ async def create_system_embedding_service(
     svc.endpoint = body.base_url or ""
     svc.api_version = body.api_version
     svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
+    EmbeddingServiceService.apply_lifecycle_fields(svc, body, int(auth_context.identity.id))
     svc.create_date = datetime.now()
     svc = EmbeddingServiceRepository.create(db, svc)
-    return EmbeddingServiceService._to_list_item(svc, is_system=True)
+    if svc.end_of_service_at is not None:
+        ServiceLifecycleService.log_change(
+            svc, SERVICE_KIND_EMBEDDING, None, svc.end_of_service_at, int(auth_context.identity.id)
+        )
+    return EmbeddingServiceService._to_list_item(
+        svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
+    )
 
 
 @router.put("/system-embedding-services/{service_id}", response_model=EmbeddingServiceListItemSchema)
@@ -886,6 +892,7 @@ async def update_system_embedding_service(
     """Update a platform-level Embedding Service (OMNIADMIN only)."""
     from repositories.embedding_service_repository import EmbeddingServiceRepository
     from services.embedding_service_service import EmbeddingServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
     from utils.secret_utils import is_masked_key
     from tools.aws_bedrock_utils import build_extra_config
 
@@ -901,8 +908,37 @@ async def update_system_embedding_service(
     svc.endpoint = body.base_url or ""
     svc.api_version = body.api_version
     svc.extra_config = build_extra_config(body.aws_access_key_id, body.aws_region)
+    EmbeddingServiceService.apply_lifecycle_fields(svc, body, int(auth_context.identity.id))
     svc = EmbeddingServiceRepository.update(db, svc)
-    return EmbeddingServiceService._to_list_item(svc, is_system=True)
+    return EmbeddingServiceService._to_list_item(
+        svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
+    )
+
+
+@router.get("/system-ai-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_ai_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level AI service, across all apps (platform admin only)."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_AI, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail="System AI service not found")
+    return usage
+
+
+@router.get("/system-embedding-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_embedding_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level embedding service, across all apps (platform admin only)."""
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_EMBEDDING, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=SYSTEM_EMBEDDING_SERVICE_NOT_FOUND)
+    return usage
 
 
 @router.get("/system-embedding-services/{service_id}/impact", response_model=SystemEmbeddingServiceImpactSchema)
@@ -963,6 +999,178 @@ async def delete_system_embedding_service(
         {Silo.embedding_service_id: None}, synchronize_session='fetch'
     )
     EmbeddingServiceRepository.delete(db, svc)
+
+
+@router.get("/system-skills", response_model=List[SkillListItemSchema])
+async def list_system_skills(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """List all system (platform) skills, including disabled ones (platform admin (AICT_OMNIADMINS or platform_role='admin'))."""
+    with skill_error_boundary("Error listing system skills"):
+        return SkillService.list_system_skills(db, enabled_only=False)
+
+
+@router.get("/system-skills/{skill_id}", response_model=SkillDetailSchema)
+async def get_system_skill(
+    skill_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Get a system skill in any enabled state (platform admin (AICT_OMNIADMINS or platform_role='admin')). 404 when missing or app-scoped."""
+    with skill_error_boundary(f"Error retrieving system skill {skill_id}"):
+        detail = SkillService.get_system_skill_detail(db, skill_id)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+        return detail
+
+
+@router.post("/system-skills", response_model=SkillDetailSchema, status_code=status.HTTP_201_CREATED)
+async def create_system_skill(
+    body: CreateUpdateSkillSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Create a new system skill (platform admin (AICT_OMNIADMINS or platform_role='admin')). Never subject to the per-app skill quota."""
+    with skill_error_boundary(f"create_system_skill: unexpected error by={auth_context.identity.email}"):
+        detail = SkillService.create_or_update_system_skill(db, 0, body)
+        logger.info("admin:create_system_skill skill_id=%s by=%s", detail.skill_id, auth_context.identity.email)
+        return detail
+
+
+@router.put("/system-skills/{skill_id}", response_model=SkillDetailSchema)
+async def update_system_skill(
+    skill_id: int,
+    body: CreateUpdateSkillSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Update a system skill (platform admin (AICT_OMNIADMINS or platform_role='admin')). ``source`` is immutable after creation."""
+    with skill_error_boundary(
+        f"update_system_skill: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        if skill_id == 0:
+            # Sentinel-0 create is POST-only; a PUT to id 0 can never resolve an existing skill.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        detail = SkillService.create_or_update_system_skill(db, skill_id, body)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        logger.info("admin:update_system_skill skill_id=%s by=%s", skill_id, auth_context.identity.email)
+        return detail
+
+
+@router.delete("/system-skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_system_skill(
+    skill_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Delete a system skill (platform admin (AICT_OMNIADMINS or platform_role='admin')).
+
+    Refuses (409) skills seeded from system_defaults.yaml, frozen skills, and skills still attached
+    to at least one agent — disable it instead in those cases.
+    """
+    with skill_error_boundary(
+        f"delete_system_skill: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        deleted = SkillService.delete_system_skill(db, skill_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        logger.info("admin:delete_system_skill skill_id=%s by=%s", skill_id, auth_context.identity.email)
+
+
+@router.get("/system-skills/{skill_id}/files/content", response_model=SkillFileContentSchema)
+async def get_system_skill_file_content(
+    skill_id: int,
+    path: str,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Fetch the text content of one file of a system skill in any enabled state (platform admin).
+
+    404 when the skill is missing/app-scoped, or when ``path`` does not resolve to a file of THIS
+    skill. A binary file, or a ``path`` that fails the shared path-safety validation, is rejected
+    with 400.
+    """
+    with skill_error_boundary(f"Error reading system skill file content for skill {skill_id}"):
+        content = SkillService.get_file_content_for_system_skill(db, skill_id, path)
+        if content is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+        return content
+
+
+@router.post("/system-skills/import", response_model=SkillDetailSchema, status_code=status.HTTP_201_CREATED)
+async def import_system_skill(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    file: Annotated[UploadFile, File(...)],
+):
+    """Import a system skill package (ZIP with SKILL.md). platform admin (AICT_OMNIADMINS or platform_role='admin'), never subject to a quota."""
+    import config as settings
+
+    with skill_error_boundary(f"import_system_skill: unexpected error by={auth_context.identity.email}"):
+        try:
+            with SkillPackageService.upload_admission_slot():
+                data = await read_upload_bounded(
+                    file, settings.SKILL_IMPORT_MAX_ARCHIVE_BYTES, log_context="system"
+                )
+                detail = await run_in_threadpool(
+                    SkillPackageService.import_package, db, app_id=None, data=data, source='admin',
+                )
+        except SkillServiceError as exc:
+            logger.info(
+                "admin:import_system_skill rejected by=%s: %s (%s) %s",
+                auth_context.identity.email, exc.__class__.__name__, exc.status_code, exc.detail,
+            )
+            raise
+        logger.info(
+            "admin:import_system_skill accepted skill_id=%s bytes=%s files=%s by=%s",
+            detail.skill_id, len(data), len(detail.files), auth_context.identity.email,
+        )
+        return detail
+
+
+@router.get("/system-skills/{skill_id}/export")
+async def export_system_skill(
+    skill_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Export a system skill as a ZIP package (platform admin (AICT_OMNIADMINS or platform_role='admin')). Works for any enabled state."""
+    with skill_error_boundary(
+        f"export_system_skill: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        result = await run_in_threadpool(SkillPackageService.export_system_skill, db, skill_id)
+        if result is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        filename, data = result
+        return zip_download_response(filename, data)
+
+
+@router.patch("/system-skills/{skill_id}/enabled", response_model=SkillDetailSchema)
+async def set_system_skill_enabled(
+    skill_id: int,
+    body: SkillEnabledUpdateSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Enable or disable a system skill (platform admin (AICT_OMNIADMINS or platform_role='admin'))."""
+    with skill_error_boundary(
+        f"set_system_skill_enabled: unexpected error skill_id={skill_id} by={auth_context.identity.email}"
+    ):
+        detail = SkillService.set_system_skill_enabled(db, skill_id, body.is_enabled)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SYSTEM_SKILL_NOT_FOUND)
+
+        logger.info(
+            "admin:set_system_skill_enabled skill_id=%s is_enabled=%s by=%s",
+            skill_id, body.is_enabled, auth_context.identity.email,
+        )
+        return detail
 
 
 @router.post(
@@ -1065,6 +1273,216 @@ async def test_system_ai_service_connection_with_config(
     except Exception as e:
         logger.error(
             "Error testing system AI service connection (provider: %s): %s",
+            config.provider,
+            type(e).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Test failed")
+
+
+@router.get("/system-sandbox-services", response_model=List[SandboxServiceDetailSchema])
+async def list_system_sandbox_services(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """List all platform-level Sandbox Services (OMNIADMIN only, available in all deployment modes)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
+    services = SandboxServiceRepository.get_system_services(db)
+    warning_days = ServiceLifecycleService.warning_days(db)
+    return [SandboxServiceService.to_detail(svc, warning_days) for svc in services]
+
+
+@router.get("/system-sandbox-services/{service_id}", response_model=SandboxServiceDetailSchema)
+async def get_system_sandbox_service(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Get a single platform-level Sandbox Service by ID (OMNIADMIN only)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
+
+    svc = SandboxServiceRepository.get_by_id(db, service_id)
+    if not svc or svc.app_id is not None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+    return SandboxServiceService.to_detail(svc, ServiceLifecycleService.warning_days(db))
+
+
+@router.get("/system-sandbox-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_sandbox_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level sandbox service, across all apps (platform admin only)."""
+    from services.service_lifecycle_service import ServiceLifecycleService
+    from utils.service_lifecycle import SERVICE_KIND_SANDBOX
+
+    usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_SANDBOX, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+    return usage
+
+
+@router.post("/system-sandbox-services", response_model=SandboxServiceListItemSchema, status_code=201)
+async def create_system_sandbox_service(
+    body: CreateUpdateSandboxServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Create a new platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
+    from models.sandbox_service import SandboxService
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
+    from tools.sandbox.factory import SandboxProviderUnavailableError
+    from tools.sandbox_service_utils import build_extra_config
+    from utils.service_lifecycle import SERVICE_KIND_SANDBOX
+    from datetime import datetime
+
+    try:
+        SandboxServiceService._validate_provider_allowed(body.provider)
+    except SandboxProviderUnavailableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    actor_id = int(auth_context.identity.id)
+    svc = SandboxService()
+    svc.app_id = None
+    svc.name = body.name
+    svc.provider = body.provider
+    svc.api_key = body.api_key
+    svc.endpoint = body.base_url or ""
+    svc.extra_config = build_extra_config(
+        body.provider,
+        image=body.opensandbox_image,
+        target=body.daytona_target,
+        workspace=body.daytona_workspace or body.e2b_workspace,
+        cpu=body.daytona_cpu,
+        memory_gb=body.daytona_memory_gb,
+        template=body.e2b_template,
+    )
+    svc.create_date = datetime.now()
+    SandboxServiceService.apply_lifecycle_fields(svc, body, actor_id)
+    svc = SandboxServiceRepository.create(db, svc)
+    if svc.end_of_service_at is not None:
+        ServiceLifecycleService.log_change(svc, SERVICE_KIND_SANDBOX, None, svc.end_of_service_at, actor_id)
+    return SandboxServiceService._to_list_item(
+        svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
+    )
+
+
+@router.put("/system-sandbox-services/{service_id}", response_model=SandboxServiceListItemSchema)
+async def update_system_sandbox_service(
+    service_id: int,
+    body: CreateUpdateSandboxServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Update a platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from services.sandbox_service_service import SandboxServiceService
+    from services.service_lifecycle_service import ServiceLifecycleService
+    from tools.sandbox.factory import SandboxProviderUnavailableError
+    from utils.secret_utils import is_masked_key
+    from tools.sandbox_service_utils import build_extra_config
+
+    svc = SandboxServiceRepository.get_by_id(db, service_id)
+    if not svc or svc.app_id is not None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+
+    try:
+        SandboxServiceService._validate_provider_allowed(body.provider)
+    except SandboxProviderUnavailableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    svc.name = body.name
+    svc.provider = body.provider
+    if not is_masked_key(body.api_key):
+        svc.api_key = body.api_key
+    svc.endpoint = body.base_url or ""
+    svc.extra_config = build_extra_config(
+        body.provider,
+        image=body.opensandbox_image,
+        target=body.daytona_target,
+        workspace=body.daytona_workspace or body.e2b_workspace,
+        cpu=body.daytona_cpu,
+        memory_gb=body.daytona_memory_gb,
+        template=body.e2b_template,
+    )
+    SandboxServiceService.apply_lifecycle_fields(svc, body, int(auth_context.identity.id))
+    svc = SandboxServiceRepository.update(db, svc)
+    return SandboxServiceService._to_list_item(
+        svc, is_system=True, warning_days=ServiceLifecycleService.warning_days(db)
+    )
+
+
+@router.delete("/system-sandbox-services/{service_id}", status_code=204)
+async def delete_system_sandbox_service(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Delete a platform-level Sandbox Service (OMNIADMIN only, available in all deployment modes)."""
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+
+    svc = SandboxServiceRepository.get_by_id(db, service_id)
+    if not svc or svc.app_id is not None:
+        raise HTTPException(status_code=404, detail=SYSTEM_SANDBOX_SERVICE_NOT_FOUND)
+    SandboxServiceRepository.delete(db, svc)
+
+
+@router.post("/system-sandbox-services/test-connection")
+async def test_system_sandbox_service_connection_with_config(
+    config: CreateUpdateSandboxServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    service_id: Optional[int] = Query(None, description="Edit-mode: recover stored API key when the request sends a masked placeholder"),
+):
+    """Test a system Sandbox Service connection (OMNIADMIN). Falls back to the stored key when api_key is empty or masked."""
+    from services.sandbox_service_service import SandboxServiceService
+    from repositories.sandbox_service_repository import SandboxServiceRepository
+    from utils.secret_utils import is_masked_key
+    from core.export_constants import PLACEHOLDER_API_KEY
+    from tools.sandbox_service_utils import build_extra_config
+
+    try:
+        api_key = config.api_key or ""
+        if service_id is not None and (
+            not api_key
+            or api_key == PLACEHOLDER_API_KEY
+            or is_masked_key(api_key)
+        ):
+            stored = SandboxServiceRepository.get_by_id(db, service_id)
+            # Only use stored key for system services (app_id IS NULL) — never leak an app-scoped key.
+            if stored and stored.app_id is None and stored.api_key:
+                api_key = stored.api_key
+
+        service_config = {
+            "provider": config.provider,
+            "api_key": api_key,
+            "endpoint": config.base_url,
+            "extra_config": build_extra_config(
+                config.provider,
+                image=config.opensandbox_image,
+                target=config.daytona_target,
+                workspace=config.daytona_workspace or config.e2b_workspace,
+                cpu=config.daytona_cpu,
+                memory_gb=config.daytona_memory_gb,
+                template=config.e2b_template,
+            ),
+        }
+        result = SandboxServiceService.test_connection_with_config(service_config)
+        if isinstance(result, dict) and len(str(result.get("response", ""))) > 500:
+            result["response"] = str(result["response"])[:500] + "... (truncated)"
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Error testing system sandbox service connection (provider: %s): %s",
             config.provider,
             type(e).__name__,
             exc_info=True,

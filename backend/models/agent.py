@@ -1,9 +1,13 @@
 import enum
 
-from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, Table, DateTime, Float, Enum, JSON
+from sqlalchemy import (
+    Column, Integer, String, Text, Boolean, ForeignKey, Table, DateTime, Float, Enum, JSON, text,
+    CheckConstraint, Index,
+)
 from sqlalchemy.orm import relationship
 from db.database import Base
 from datetime import datetime
+from models.middleware import AgentMiddleware
 
 
 class MarketplaceVisibility(enum.Enum):
@@ -13,11 +17,20 @@ class MarketplaceVisibility(enum.Enum):
 
 AGENT_ID = 'Agent.agent_id'
 
+# Agent.kind: 'standard' for every user-visible agent; 'internal_chat' marks the single
+# hidden per-App agent that backs the flexible Chat (never exposed, see ck_agent_internal_chat_unexposed).
+AGENT_KIND_STANDARD = 'standard'
+AGENT_KIND_INTERNAL_CHAT = 'internal_chat'
+
 # Default temperature for agents
 DEFAULT_AGENT_TEMPERATURE = 0.7
 
 # Default memory summarize threshold (number of messages)
 DEFAULT_MEMORY_SUMMARIZE_THRESHOLD = 20
+
+# Default prompt template: passes the user message through unchanged. An empty
+# template would format to an empty string and drop the user's message.
+DEFAULT_PROMPT_TEMPLATE = '{question}'
 
 
 class AgentSkill(Base):
@@ -57,13 +70,17 @@ class Agent(Base):
     description = Column(String(1000))
     create_date = Column(DateTime, default=datetime.now)
     system_prompt = Column(Text)
-    prompt_template = Column(Text)
+    prompt_template = Column(Text, default=DEFAULT_PROMPT_TEMPLATE)
     type = Column(String(45), nullable=False, default='agent')
     status = Column(String(45))
     request_count = Column(Integer, default=0)
+    last_used_date = Column(DateTime, nullable=True)
     is_tool = Column(Boolean, default=False)
     service_id = Column(Integer,
                         ForeignKey('AIService.service_id', ondelete='SET NULL'),
+                        nullable=True)
+    sandbox_service_id = Column(Integer,
+                        ForeignKey('SandboxService.service_id', ondelete='SET NULL'),
                         nullable=True)
     silo_id = Column(Integer,
                         ForeignKey('Silo.silo_id'),
@@ -74,6 +91,7 @@ class Agent(Base):
 
     has_memory = Column(Boolean)
     enable_code_interpreter = Column(Boolean, default=False, nullable=False, server_default='false')
+    skill_router_enabled = Column(Boolean, nullable=False, server_default=text('false'), default=False)
     server_tools = Column(JSON, default=list, nullable=False, server_default='[]')
 
     # RAG retrieval config (step_007 / FR-7); rag_search_type values validated in schemas (step_008).
@@ -83,6 +101,7 @@ class Agent(Base):
     rag_search_type = Column(String(45), default='similarity', nullable=False, server_default='similarity')
     rag_score_threshold = Column(Float, nullable=True)  # only used when rag_search_type='similarity_score_threshold'
     rag_fixed_filters = Column(JSON, nullable=True)     # list of {field, op, value} filter clauses applied on every retrieval
+    exposed_chat_filters = Column(JSON, default=list, nullable=False, server_default='[]')  # list of metadata field names the designer exposes as end-user chat-time dropdown filters
     rag_max_retrieval_calls = Column(Integer, nullable=True)  # NULL = legacy unbounded behaviour
     rag_search_method = Column(JSON(none_as_null=True), default=lambda: ["dense"], nullable=False, server_default='["dense"]')  # raw capability set, e.g. ["dense"], ["dense","bm25"] (values from SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS); none_as_null=True + a fresh-list default keep this column's invariants consistent with rag_strategy below (no JSON null, no shared mutable default)
     rag_strategy = Column(JSON(none_as_null=True), nullable=True)  # list of post-retrieval strategies, e.g. ["rerank"] or [] / SQL NULL for none (values from StrategyFactory.IMPLEMENTED_STRATEGIES); none_as_null=True keeps "no strategy" as a single SQL NULL representation instead of JSON null
@@ -131,8 +150,53 @@ class Agent(Base):
         default=MarketplaceVisibility.UNPUBLISHED
     )
 
+    # A2A (Agent2Agent protocol) exposure (step_007; FR-3).
+    a2a_enabled = Column(Boolean, nullable=False, default=False, server_default='false')
+    a2a_card_visibility = Column(String(16), nullable=False, default='public', server_default='public')
+    a2a_name_override = Column(String(255), nullable=True)
+    a2a_description_override = Column(Text, nullable=True)
+    a2a_skill_tags = Column(JSON, nullable=False, default=list, server_default='[]')
+    a2a_examples = Column(JSON, nullable=False, default=list, server_default='[]')
+
+    # Hidden-agent marker (not the STI discriminator `type`).
+    kind = Column(String(32), nullable=False, default=AGENT_KIND_STANDARD, server_default=AGENT_KIND_STANDARD)
+
+    __table_args__ = (
+        CheckConstraint("a2a_card_visibility IN ('public','api_key')", name='ck_agent_a2a_card_visibility'),
+        CheckConstraint("kind IN ('standard','internal_chat')", name='ck_agent_kind'),
+        # DB-level belt and braces: the internal chat agent can never be exposed.
+        CheckConstraint(
+            "kind <> 'internal_chat' OR (is_tool IS NOT TRUE AND a2a_enabled = false "
+            "AND marketplace_visibility = 'UNPUBLISHED' AND enable_code_interpreter = false)",
+            name='ck_agent_internal_chat_unexposed',
+        ),
+        # Agent.app_id is nullable; the one-per-App index would not cover a NULL app_id.
+        CheckConstraint("kind <> 'internal_chat' OR app_id IS NOT NULL", name='ck_agent_internal_chat_has_app'),
+        # One and only one internal chat agent per App.
+        Index('uq_agent_internal_chat_per_app', 'app_id', unique=True, postgresql_where=text("kind = 'internal_chat'")),
+        # Partial index: the A2A catalog/discovery query filters on app_id WHERE a2a_enabled.
+        Index('ix_agent_a2a_enabled_app', 'app_id', postgresql_where=text('a2a_enabled')),
+    )
+
+    @property
+    def is_internal_chat(self) -> bool:
+        return self.kind == AGENT_KIND_INTERNAL_CHAT
+
+    @classmethod
+    def visible_clause(cls):
+        """SQL clause for user-visible agents (excludes the hidden internal chat agent). Single definition."""
+        return cls.kind == AGENT_KIND_STANDARD
+
+    @classmethod
+    def internal_chat_clause(cls):
+        """SQL clause matching only the hidden internal chat agent."""
+        return cls.kind == AGENT_KIND_INTERNAL_CHAT
+
     ai_service = relationship('AIService',
                            foreign_keys=[service_id])
+
+    sandbox_service = relationship('SandboxService',
+                           foreign_keys=[sandbox_service_id])
 
     silo = relationship('Silo',
                            back_populates='agents',
@@ -160,6 +224,14 @@ class Agent(Base):
     skill_associations = relationship('AgentSkill',
                                      primaryjoin=(agent_id == AgentSkill.agent_id),
                                      back_populates='agent')
+
+    # Middleware relationship
+    middleware_associations = relationship('AgentMiddleware',
+                                          primaryjoin=(agent_id == AgentMiddleware.agent_id),
+                                          back_populates='agent',
+                                          order_by=AgentMiddleware.order,
+                                          cascade='all, delete-orphan',
+                                          passive_deletes=True)
 
     # Marketplace profile (1:1)
     marketplace_profile = relationship(

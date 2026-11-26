@@ -21,6 +21,12 @@ import {
   CreditCard,
   Sliders,
   Cpu,
+  Box,
+  CalendarClock,
+  Webhook,
+  Target,
+  Activity,
+  MessageSquare,
 } from 'lucide-react';
 import type { NavigationConfig } from './types';
 
@@ -62,14 +68,29 @@ export const defaultNavigation: NavigationConfig = {
       section: 'appNavigation'
     },
     {
+      // Visible to every App member (VIEWER and up). A client project can hide the menu entry with
+      // `navigation.remove: ['/apps/:appId/chat']` in `clientConfig.ts`; the route itself stays reachable by URL.
+      // The sidebar translates this name through `breadcrumbs.navigation.chat`.
+      path: '/apps/:appId/chat',
+      name: 'Chat',
+      icon: <MessageSquare size={16} />,
+      section: 'appNavigation'
+    },
+    {
       path: '/apps/:appId/agents',
       name: 'Agents',
       icon: <Bot size={16} />,
       section: 'appNavigation'
     },
     {
+      path: '/apps/:appId/scheduled-tasks',
+      name: 'Scheduled Tasks',
+      icon: <CalendarClock size={16} />,
+      section: 'appNavigation'
+    },
+    {
       path: '/apps/:appId/data',
-      name: 'Data',
+      name: 'Data sources',
       icon: <Database size={16} />,
       section: 'appNavigation',
       children: [
@@ -95,8 +116,7 @@ export const defaultNavigation: NavigationConfig = {
           path: '/apps/:appId/sharepoint',
           name: 'SharePoint',
           icon: <Cloud size={16} />,
-          section: 'appNavigation',
-          enterpriseFeature: 'sharepoint'
+          section: 'appNavigation'
         },
       ]
     },
@@ -107,9 +127,21 @@ export const defaultNavigation: NavigationConfig = {
       section: 'appNavigation'
     },
     {
+      path: '/apps/:appId/metrics',
+      name: 'Metrics',
+      icon: <BarChart2 size={16} />,
+      section: 'appNavigation'
+    },
+    {
       path: '/apps/:appId/skills',
       name: 'Skills',
       icon: <Zap size={16} />,
+      section: 'appNavigation'
+    },
+    {
+      path: '/apps/:appId/middlewares',
+      name: 'Middlewares',
+      icon: <Layers size={16} />,
       section: 'appNavigation'
     },
     {
@@ -122,6 +154,18 @@ export const defaultNavigation: NavigationConfig = {
   // Settings sub-navigation (rendered inside collapsible in sidebar)
   settingsNavigation: [
     {
+      path: '/apps/:appId/settings/general',
+      name: 'General',
+      icon: <Settings size={16} />,
+      section: 'settings'
+    },
+    {
+      path: '/apps/:appId/settings/output-destinations',
+      name: 'Output Channels',
+      icon: <Webhook size={16} />,
+      section: 'settings'
+    },
+    {
       path: '/apps/:appId/settings/ai-services',
       name: 'AI Services',
       icon: <Bot size={16} />,
@@ -131,6 +175,12 @@ export const defaultNavigation: NavigationConfig = {
       path: '/apps/:appId/settings/embedding-services',
       name: 'Embedding Services',
       icon: <Brain size={16} />,
+      section: 'settings'
+    },
+    {
+      path: '/apps/:appId/settings/sandbox-services',
+      name: 'Sandbox Services',
+      icon: <Box size={16} />,
       section: 'settings'
     },
     {
@@ -156,12 +206,6 @@ export const defaultNavigation: NavigationConfig = {
       name: 'Collaboration',
       icon: <Users size={16} />,
       section: 'settings'
-    },
-    {
-      path: '/apps/:appId/settings/general',
-      name: 'General',
-      icon: <Settings size={16} />,
-      section: 'settings'
     }
   ],
   // Administration section
@@ -177,6 +221,13 @@ export const defaultNavigation: NavigationConfig = {
       path: '/admin/stats',
       name: 'Statistics',
       icon: <BarChart2 size={16} />,
+      section: 'admin',
+      adminOnly: true
+    },
+    {
+      path: '/admin/metrics',
+      name: 'Agent Metrics',
+      icon: <Activity size={16} />,
       section: 'admin',
       adminOnly: true
     },
@@ -206,6 +257,20 @@ export const defaultNavigation: NavigationConfig = {
       path: '/admin/system-embedding-services',
       name: 'System Embedding Services',
       icon: <Brain size={16} />,
+      section: 'admin',
+      adminOnly: true,
+    },
+    {
+      path: '/admin/system-sandbox-services',
+      name: 'System Sandbox Services',
+      icon: <Box size={16} />,
+      section: 'admin',
+      adminOnly: true,
+    },
+    {
+      path: '/admin/system-skills',
+      name: 'System Skills',
+      icon: <Target size={16} />,
       section: 'admin',
       adminOnly: true,
     },

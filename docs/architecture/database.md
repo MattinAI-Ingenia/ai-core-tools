@@ -48,7 +48,9 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 | `agent_rate_limit` | Integer | Rate limit per agent (requests/minute) |
 | `max_file_size_mb` | Integer | Max file upload size (MB) |
 | `agent_cors_origins` | String(1000) | Allowed CORS origins |
-| `langsmith_api_key` | String(255) | LangSmith API key for tracing |
+| `langsmith_api_key` | String(255) | LangSmith API key for tracing (only the owner can change it) |
+| `default_embedding_service_id` | Integer (FK → embedding_service, SET NULL) | Embedding service the App Chat indexes attachments with; NULL = attachments are sent whole (`ichat002`) |
+| `chat_code_interpreter_enabled` | Boolean (NOT NULL, default `false`) | App Chat code interpreter opt-in; when true the Chat runs code in a sandbox (App default sandbox service, else the system default). Changed by administrators and above (`ichat003`) |
 | `create_date` | DateTime | App creation timestamp |
 
 **Relationships**:
@@ -99,6 +101,7 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 | `is_tool` | Boolean | Whether agent is a tool |
 | `service_id` | Integer (FK → AIService) | LLM service configuration |
 | `silo_id` | Integer (FK → Silo) | Default vector store for RAG |
+| `kind` | String(32) | `standard` (default) or `internal_chat`: the hidden per-App agent behind the [App Chat](../ai/app-chat.md), at most one per App, never exposed |
 | `request_count` | Integer | Number of requests served |
 | `create_date` | DateTime | Agent creation timestamp |
 
@@ -210,6 +213,8 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 | `temperature` | Float | LLM temperature (0.0-1.0) |
 | `max_tokens` | Integer | Max output tokens |
 | `create_date` | DateTime | Service creation timestamp |
+| `end_of_service_at` | DateTime (tz, nullable) | Planned end of service; retired once reached. See [End-of-service columns](#end-of-service-columns) |
+| `deprecation_notice` | String(1000) (nullable) | Notice shown to users |
 
 **Relationships**:
 - `app` → Owning app
@@ -279,10 +284,27 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 | `api_key` | String(500) | Encrypted API key |
 | `dimensions` | Integer | Embedding dimensions |
 | `create_date` | DateTime | Service creation timestamp |
+| `end_of_service_at` | DateTime (tz, nullable) | Planned end of service (see below) |
+| `deprecation_notice` | String(1000) (nullable) | Notice shown to users |
 
 **Relationships**:
 - `app` → Owning app
 - `silos` → List of silos using this service
+
+### End-of-service columns
+
+`AIService`, `EmbeddingService` (table `embedding_service`) and `SandboxService` share two nullable columns, added by migration `svceos001` (down revision `indexerr001`):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `end_of_service_at` | DateTime(timezone=True) | Stored in UTC (00:00 of the chosen day). NULL = no end of service planned |
+| `deprecation_notice` | String(1000) | Free text, control characters replaced with spaces |
+
+No status column exists: `active` / `deprecated` / `retired` is computed at read time from `end_of_service_at` and the system setting `service_end_of_service_warning_days` (default 30, `0` = no deprecated phase; env override `AICT_SYSTEM_SERVICE_END_OF_SERVICE_WARNING_DAYS`). Existing rows stay NULL. Logic lives in `backend/utils/service_lifecycle.py` (pure helpers) and `backend/services/service_lifecycle_service.py` (usage, bulk move, warnings).
+
+### Silo output parser ownership
+
+A silo's `metadata_definition_id` (output parser) must belong to the silo's app; it is checked on create/update, and deleting a silo or repository only deletes a parser of the same app. Migration `siloparser001` (down revision `svceos001`) sets `metadata_definition_id` to NULL on silos whose parser is missing or belongs to another app. It is a data fix: the downgrade is a no-op and cleared links are not restored.
 
 ### BaseService
 
@@ -396,7 +418,7 @@ Provides common fields and methods for AIService and EmbeddingService.
 | `updated_at` | DateTime | When the value was last changed |
 
 **Notes**:
-- Environment variable names follow the pattern `AICT_SETTING_<KEY_UPPERCASE>` (e.g., `AICT_SETTING_MARKETPLACE_CALL_QUOTA`).
+- Environment variable names follow the pattern `AICT_SYSTEM_<KEY_UPPERCASE>` (e.g., `AICT_SYSTEM_MARKETPLACE_CALL_QUOTA`).
 - The defaults file `backend/system_defaults.yaml` defines all valid keys, their types, categories, and fallback values.
 - Settings are managed via the Admin API (`GET/PUT/DELETE /internal/admin/settings/{key}`).
 
@@ -405,6 +427,7 @@ Provides common fields and methods for AIService and EmbeddingService.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `marketplace_call_quota` | integer | `0` | Max marketplace API calls per user per month. `0` = unlimited. |
+| `service_end_of_service_warning_days` | integer | `30` | Days before a service's end of service during which it shows as deprecated. `0` = no deprecated phase. |
 
 ## Content Models
 
@@ -428,7 +451,39 @@ Provides common fields and methods for AIService and EmbeddingService.
 - `agent` → Agent used
 - `user` → User who owns the conversation
 
-**Source values**: `playground`, `marketplace`, `api`
+**Source values**: `playground`, `marketplace`, `api`, `internal_chat` (App Chat; owned by the hidden internal chat agent)
+
+### App Chat tables
+
+Added by migration `ichat001` (`ichat002` adds the columns noted below and `ichat002`/`ichat003` add columns to the `App` table above; `ichat004` adds two indexes to `"Conversation"`, listed after the tables). Details and delete rules: [App Chat](../ai/app-chat.md#defaults-and-conversation-state); code interpreter: [App Chat](../ai/app-chat.md#code-interpreter).
+
+**`conversation_turn`** — snapshot of the configuration of each assistant message.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | BigInteger (PK) | Row id |
+| `conversation_id` | Integer (FK → Conversation, CASCADE) | Chat conversation |
+| `app_id` | Integer (FK → App, CASCADE) | Owning app |
+| `user_id` | Integer (FK → User, SET NULL) | User who sent the turn |
+| `turn_index` | Integer | Unique per conversation (`uq_conversation_turn_conversation_index`) |
+| `assistant_message_id`, `execution_event_id` | String(128), UUID | Links to the message and the execution event |
+| `ai_service_id`, `ai_service_name`, `ai_model_name` | Integer, String | Model used (name kept after deletion) |
+| `silo_id`, `silo_name`, `silo_source_type` | Integer, String | Source used |
+| `skills`, `mcp_configs` | JSON | `[{id, name}]` used |
+| `created_at` | DateTime | Turn timestamp |
+
+**`chat_user_default`** — PK `(user_id, app_id)` (both CASCADE): `selection` (JSON), `updated_at`.
+
+**`chat_conversation_state`** — PK `conversation_id` (CASCADE): `app_id` (CASCADE), `selection` (JSON), `generation` (Integer, bumped by reset), `updated_at`, plus (`ichat002`) `busy_token` (UUID, nullable) and `busy_until` (timestamptz, nullable): the "turn in flight" marker, which expires by itself.
+
+Temporary conversation silos live in `Repository` rows of type `playground_media`. The partial index `ix_Repository_silo_id_temp` on `Repository(silo_id) WHERE type = 'playground_media'` (`ichat002`) serves the rule that hides them from lists, exports and "used by" views.
+
+Indexes of `"Conversation"` added by `ichat004` (plain `CREATE INDEX IF NOT EXISTS`, see [App Chat](../ai/app-chat.md#migrations-ichat001-to-ichat004)):
+
+| Index | Columns | Serves |
+|-------|---------|--------|
+| `ix_conversation_agent_user_updated` | `(agent_id, user_id, updated_at DESC)` | A user's conversation list of the shared internal agent, newest first |
+| `ix_conversation_agent_api_key_hash` | `(agent_id, api_key_hash)` | The API-key conversation lookup |
 
 ### Media
 
@@ -579,6 +634,7 @@ Mattin AI uses string-based enum values stored in database columns. These are va
 | `playground` | Agent playground (app management UI) |
 | `marketplace` | Marketplace consumer chat |
 | `api` | Public API or MCP endpoint |
+| `internal_chat` | App Chat (per-App hidden agent) |
 
 ### CollaborationRole
 

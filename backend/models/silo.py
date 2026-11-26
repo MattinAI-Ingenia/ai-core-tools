@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, DateTime
+from sqlalchemy import JSON, Column, Integer, String, Text, Boolean, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from db.database import Base
 from enum import Enum
@@ -25,7 +25,22 @@ class Silo(Base):
     metadata_definition = relationship('OutputParser', uselist=False)
     embedding_service_id = Column(Integer, ForeignKey('embedding_service.service_id'), nullable=True)
     embedding_service = relationship('EmbeddingService', uselist=False)
+    # Media (video/audio) indexing: transcription is required to index media into this silo,
+    # the video service (supports_video) optionally adds visual analysis. Configured from the
+    # silo itself or from the repository that owns it.
+    transcription_service_id = Column(Integer, ForeignKey('AIService.service_id', ondelete='SET NULL'), nullable=True)
+    video_ai_service_id = Column(Integer, ForeignKey('AIService.service_id', ondelete='SET NULL'), nullable=True)
+    transcription_service = relationship('AIService', foreign_keys=[transcription_service_id])
+    video_ai_service = relationship('AIService', foreign_keys=[video_ai_service_id])
     vector_db_type = Column(String(45), default='PGVECTOR')
+    # Indexing settings (tools/document_loaders): chunking applies to every file type and to raw
+    # content; the PDF loader and its options only to PDFs. Changing them affects what is indexed
+    # from then on (existing chunks stay until reindexed). Defaults mirror tools.document_loaders;
+    # silos created before migration siloidx001 were set to the previous 1000/200.
+    chunk_size = Column(Integer, nullable=False, default=2000, server_default='2000')
+    chunk_overlap = Column(Integer, nullable=False, default=400, server_default='400')
+    pdf_loader = Column(String(45), nullable=False, default='pymupdf', server_default='pymupdf')
+    pdf_loader_options = Column(JSON, nullable=True)
 
     is_frozen = Column(Boolean, default=False, nullable=False)
     agents = relationship('Agent', lazy=True)

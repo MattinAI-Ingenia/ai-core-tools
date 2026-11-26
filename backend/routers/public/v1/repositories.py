@@ -9,7 +9,6 @@ from .schemas import (
     RepositorySchema,
     CreateRepositoryRequestSchema,
     UpdateRepositoryRequestSchema,
-    SiloSearchSchema,
     DocsResponseSchema,
     MediaSchema,
     MediaListResponseSchema,
@@ -18,6 +17,7 @@ from .schemas import (
     YouTubeRequestSchema,
     MessageResponseSchema,
 )
+from schemas.silo_schemas import SiloSearchSchema
 from .auth import (
     get_api_key_auth,
     validate_api_key_for_app,
@@ -32,6 +32,7 @@ from services.media_service import MediaService
 from db.database import get_db
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -201,6 +202,7 @@ async def delete_repo(
     summary="Find docs in repository",
     tags=["Repositories"],
     response_model=DocsResponseSchema,
+    responses={409: {"description": "A service used by this resource was retired"}},
 )
 async def find_docs_in_repository(
     app_id: int,
@@ -226,6 +228,12 @@ async def find_docs_in_repository(
             query=query,
             filter_metadata=request.filter_metadata,
             limit=request.limit,
+            search_type=request.search_type,
+            score_threshold=request.score_threshold,
+            fetch_k=request.fetch_k,
+            lambda_mult=request.lambda_mult,
+            min_content_length=request.min_content_length,
+            max_content_length=request.max_content_length,
             db=db,
         )
 
@@ -248,7 +256,7 @@ async def find_docs_in_repository(
             )
 
         return DocsResponseSchema(docs=doc_schemas)
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error finding documents in repository: {str(e)}")

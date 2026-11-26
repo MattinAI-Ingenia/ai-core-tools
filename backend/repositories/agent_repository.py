@@ -1,58 +1,129 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from models.agent import Agent, AgentMCP, AgentTool, AgentSkill
+from models.middleware import AgentMiddleware
 from models.ocr_agent import OCRAgent
 from models.ai_service import AIService
+from models.sandbox_service import SandboxService
 from models.silo import Silo
 from models.output_parser import OutputParser
 from models.mcp_config import MCPConfig
 from models.skill import Skill
 from repositories.ai_service_repository import AIServiceRepository
+from repositories.sandbox_service_repository import SandboxServiceRepository
 from repositories.silo_repository import SiloRepository
 from repositories.output_parser_repository import OutputParserRepository
 from repositories.mcp_config_repository import MCPConfigRepository
 from repositories.skill_repository import SkillRepository
+from repositories.middleware_repository import MiddlewareRepository
+from utils.logger import get_logger
+from utils.service_lifecycle import to_utc
+
+logger = get_logger(__name__)
 
 
 class AgentRepository:
     """Repository class for Agent database operations"""
     
     # ==================== BASIC AGENT OPERATIONS ====================
-    
+
+    @staticmethod
+    def visible_agents_clause():
+        """SQL clause selecting user-visible agents (excludes the hidden internal chat agent).
+
+        Apply to every listing / lookup that must never expose the internal chat agent.
+        """
+        return Agent.visible_clause()
+
+    @staticmethod
+    def get_internal_chat_ids(db: Session, agent_ids: List[int]) -> Set[int]:
+        """Return the subset of ``agent_ids`` that are hidden internal chat agents."""
+        if not agent_ids:
+            return set()
+        rows = db.query(Agent.agent_id).filter(
+            Agent.agent_id.in_(list(agent_ids)), Agent.internal_chat_clause()
+        ).all()
+        return {agent_id for (agent_id,) in rows}
+
     @staticmethod
     def get_by_id(db: Session, agent_id: int) -> Optional[Agent]:
-        """Get agent by ID from Agent table"""
+        """Get agent by ID from Agent table.
+
+        Raw lookup: it INCLUDES internal chat agents. Only for cascade deletion and code that
+        is already protected by a visibility guard; prefer ``get_agent_by_id_and_type``.
+        """
         return db.query(Agent).filter(Agent.agent_id == agent_id).first()
     
     @staticmethod
     def get_ocr_agent_by_id(db: Session, agent_id: int) -> Optional[OCRAgent]:
-        """Get OCR agent by ID from OCRAgent table"""
+        """Get OCR agent by ID from OCRAgent table (raw; the internal chat agent is never an OCR agent)"""
         return db.query(OCRAgent).filter(OCRAgent.agent_id == agent_id).first()
+
+    @staticmethod
+    def existing_ids(db: Session, candidate_ids: list[int]) -> set[int]:
+        """Returns the subset of `candidate_ids` that still exist in `Agent`.
+
+        `OCRAgent` is single-table-inheritance-joined on `Agent.agent_id`
+        (every `OCRAgent` row has a matching `Agent` row), so a plain
+        `Agent.agent_id` lookup covers both. Used by the A2A maintenance
+        worker's orphan sweep (step_018) via `asyncio.to_thread`.
+        """
+        if not candidate_ids:
+            return set()
+        rows = db.query(Agent.agent_id).filter(Agent.agent_id.in_(candidate_ids)).all()
+        return {row[0] for row in rows}
+
+    @staticmethod
+    def any_exists(db: Session) -> bool:
+        """True if at least one agent row exists (A2A orphan-sweep sanity guard)."""
+        return db.query(Agent.agent_id).limit(1).first() is not None
     
     @staticmethod
-    def get_agent_by_id_and_type(db: Session, agent_id: int, agent_type: str = 'basic') -> Agent | OCRAgent:
-        """Get agent by ID and type"""
+    def get_agent_by_id_and_type(
+        db: Session, agent_id: int, agent_type: str = 'basic', include_internal: bool = False
+    ) -> Agent | OCRAgent:
+        """Get agent by ID and type.
+
+        Args:
+            include_internal: when False (default) the internal chat agent is treated as not found
+                (filtered in SQL, for both the Agent and the OCRAgent lookups).
+        """
+        def _basic() -> Optional[Agent]:
+            query = db.query(Agent).filter(Agent.agent_id == agent_id)
+            if not include_internal:
+                query = query.filter(Agent.visible_clause())
+            return query.first()
+
+        def _ocr() -> Optional[OCRAgent]:
+            query = db.query(OCRAgent).filter(OCRAgent.agent_id == agent_id)
+            if not include_internal:
+                query = query.filter(OCRAgent.visible_clause())
+            return query.first()
+
         if agent_type == 'ocr' or agent_type == 'ocr_agent':
-            return AgentRepository.get_ocr_agent_by_id(db, agent_id)
-        elif agent_type == 'basic' or agent_type == 'agent':
-            return AgentRepository.get_by_id(db, agent_id)
-        else:
-            agent = AgentRepository.get_by_id(db, agent_id)
-            if not agent:
-                agent = AgentRepository.get_ocr_agent_by_id(db, agent_id)
-            return agent
-    
+            return _ocr()
+        if agent_type == 'basic' or agent_type == 'agent':
+            return _basic()
+        return _basic() or _ocr()
+
     @staticmethod
     def get_by_app_id(db: Session, app_id: int) -> List[Agent]:
         """Get all agents for a specific app"""
-        return db.query(Agent).filter(Agent.app_id == app_id).order_by(Agent.create_date.desc()).all()
+        return (
+            db.query(Agent)
+            .filter(Agent.app_id == app_id, AgentRepository.visible_agents_clause())
+            .order_by(Agent.create_date.desc())
+            .all()
+        )
     
     @staticmethod
     def get_tool_agents_by_app_id(db: Session, app_id: int, exclude_agent_id: Optional[int] = None) -> List[Agent]:
         """Get agents that are marked as tools for a specific app"""
         query = db.query(Agent).filter(
             Agent.app_id == app_id,
-            Agent.is_tool == True
+            Agent.is_tool == True,
+            AgentRepository.visible_agents_clause(),
         )
         if exclude_agent_id:
             query = query.filter(Agent.agent_id != exclude_agent_id)
@@ -96,8 +167,9 @@ class AgentRepository:
             if agent:
                 return AgentRepository._delete_agent_with_associations(db, agent)
             return False
-        except Exception:
+        except SQLAlchemyError:
             db.rollback()
+            logger.exception("Could not delete agent %s", agent_id)
             return False
 
     @staticmethod
@@ -185,11 +257,17 @@ class AgentRepository:
         db.commit()
     
     @staticmethod
-    def get_valid_tool_ids(db: Session, tool_ids: List[int]) -> List[int]:
-        """Get valid tool IDs (agents that are marked as tools)"""
+    def get_valid_tool_ids(db: Session, tool_ids: List[int], app_id: int) -> List[int]:
+        """Get valid tool IDs: agents marked as tools AND belonging to ``app_id``.
+
+        The ``app_id`` filter is mandatory — without it, a caller could attach another
+        tenant's tool-agent to their own agent (cross-tenant tool invocation / IDOR).
+        """
         tools_query = db.query(Agent.agent_id).filter(
             Agent.agent_id.in_(tool_ids),
-            Agent.is_tool == True
+            Agent.is_tool == True,
+            Agent.app_id == app_id,
+            AgentRepository.visible_agents_clause(),
         )
         return [id for (id,) in tools_query]
     
@@ -208,7 +286,21 @@ class AgentRepository:
             s.service_id: {"name": s.name, "model_name": s.description, "provider": s.provider}
             for s in ai_services
         }
-    
+
+    @staticmethod
+    def get_sandbox_services_by_app_id(db: Session, app_id: int) -> List[SandboxService]:
+        """Get all sandbox services for a specific app, including system (app_id=NULL) services."""
+        return SandboxServiceRepository.get_by_app_id(db, app_id) + SandboxServiceRepository.get_system_services(db)
+
+    @staticmethod
+    def get_sandbox_services_dict_by_app_id(db: Session, app_id: int) -> Dict[int, Dict[str, str]]:
+        """Get sandbox services as a dictionary for quick lookup"""
+        sandbox_services = AgentRepository.get_sandbox_services_by_app_id(db, app_id)
+        return {
+            s.service_id: {"name": s.name, "provider": s.provider}
+            for s in sandbox_services
+        }
+
     @staticmethod
     def get_silos_by_app_id(db: Session, app_id: int) -> List[Silo]:
         """Get all silos for a specific app"""
@@ -226,9 +318,13 @@ class AgentRepository:
         return MCPConfigRepository.get_all_by_app_id(db, app_id)
 
     @staticmethod
-    def get_skills_by_app_id(db: Session, app_id: int) -> List[Skill]:
-        """Get all skills for a specific app"""
-        return SkillRepository.get_all_by_app_id(db, app_id)
+    def get_selectable_skills_for_app(db: Session, app_id: int, agent_id: Optional[int] = None) -> List[Skill]:
+        """Skills selectable in an agent form: app skills plus enabled, non-colliding system skills.
+
+        Delegates to ``SkillRepository.get_selectable_for_app`` (the single visibility predicate). System skills
+        already attached to ``agent_id`` are kept even if disabled so the form can flag them.
+        """
+        return SkillRepository.get_selectable_for_app(db, app_id, agent_id)
 
     @staticmethod
     def get_silo_by_id(db: Session, silo_id: int) -> Optional[Silo]:
@@ -258,7 +354,7 @@ class AgentRepository:
         # Get metadata definition if it exists
         if silo.metadata_definition_id:
             metadata_parser = AgentRepository.get_output_parser_by_id(db, silo.metadata_definition_id)
-            if metadata_parser and metadata_parser.fields:
+            if metadata_parser and metadata_parser.app_id == silo.app_id and metadata_parser.fields:
                 silo_info["metadata_definition"] = {
                     "fields": metadata_parser.fields
                 }
@@ -287,10 +383,28 @@ class AgentRepository:
         # Get AI services
         ai_services = AgentRepository.get_ai_services_by_app_id(db, app_id)
         ai_services_list = [
-            {"service_id": s.service_id, "name": f"[System] {s.name}" if s.app_id is None else s.name}
+            {
+                "service_id": s.service_id,
+                "name": f"[System] {s.name}" if s.app_id is None else s.name,
+                "supports_video": s.supports_video,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
+            }
             for s in ai_services
         ]
         
+        # Get sandbox services
+        sandbox_services = AgentRepository.get_sandbox_services_by_app_id(db, app_id)
+        sandbox_services_list = [
+            {
+                "service_id": s.service_id,
+                "name": f"[System] {s.name}" if s.app_id is None else s.name,
+                "end_of_service_at": to_utc(s.end_of_service_at),
+                "deprecation_notice": s.deprecation_notice,
+            }
+            for s in sandbox_services
+        ]
+
         # Get silos
         silos = AgentRepository.get_silos_by_app_id(db, app_id)
         silos_list = [{"silo_id": s.silo_id, "name": s.name} for s in silos]
@@ -308,23 +422,42 @@ class AgentRepository:
         mcp_configs_list = [{"config_id": c.config_id, "name": c.name} for c in mcp_configs]
 
         # Get skills
-        skills = AgentRepository.get_skills_by_app_id(db, app_id)
-        skills_list = [{"skill_id": s.skill_id, "name": s.name, "description": s.description} for s in skills]
+        skills = AgentRepository.get_selectable_skills_for_app(db, app_id, agent_id=agent_id)
+        skills_list = [
+            {
+                "skill_id": s.skill_id,
+                "name": s.name,
+                "description": s.description,
+                "is_system": s.is_system,
+                "is_enabled": True if s.is_enabled is None else bool(s.is_enabled),
+            }
+            for s in skills
+        ]
+
+        # Get middlewares
+        middlewares = MiddlewareRepository.get_all_by_app_id(db, app_id)
+        middlewares_list = [
+            {"middleware_id": m.middleware_id, "name": m.name, "description": m.description,
+             "middleware_type": m.middleware_type.value}
+            for m in middlewares
+        ]
 
         return {
             'ai_services': ai_services_list,
+            'sandbox_services': sandbox_services_list,
             'silos': silos_list,
             'output_parsers': output_parsers_list,
             'tools': tools_list,
             'mcp_configs': mcp_configs_list,
-            'skills': skills_list
+            'skills': skills_list,
+            'middlewares': middlewares_list
         }
     
     @staticmethod
     def get_agent_associations_dict(db: Session, agent_id: int) -> Dict[str, List]:
         """Get agent's current associations as a dictionary"""
         if agent_id == 0:
-            return {'tool_ids': [], 'mcp_ids': [], 'skill_ids': []}
+            return {'tool_ids': [], 'mcp_ids': [], 'skill_ids': [], 'middleware_ids': []}
 
         # Get tool associations
         tool_assocs = AgentRepository.get_agent_tool_associations(db, agent_id)
@@ -338,4 +471,13 @@ class AgentRepository:
         skill_assocs = AgentRepository.get_agent_skill_associations(db, agent_id)
         agent_skill_ids = [assoc.skill_id for assoc in skill_assocs]
 
-        return {'tool_ids': agent_tool_ids, 'mcp_ids': agent_mcp_ids, 'skill_ids': agent_skill_ids}
+        # Get middleware associations
+        middleware_assocs = (
+            db.query(AgentMiddleware)
+            .filter(AgentMiddleware.agent_id == agent_id)
+            .order_by(AgentMiddleware.order)
+            .all()
+        )
+        agent_middleware_ids = [assoc.middleware_id for assoc in middleware_assocs]
+
+        return {'tool_ids': agent_tool_ids, 'mcp_ids': agent_mcp_ids, 'skill_ids': agent_skill_ids, 'middleware_ids': agent_middleware_ids}

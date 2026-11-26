@@ -16,6 +16,20 @@ class AppRepository:
         """Get a specific app by ID"""
         return self.db.query(App).filter(App.app_id == app_id).first()
 
+    def get_slug_by_id(self, app_id: int) -> Optional[str]:
+        """Return only the app's slug, without loading the full App row.
+
+        Used where only the slug is needed (e.g. building A2A URLs): a
+        ``with_entities`` projection avoids fetching every App column.
+        """
+        row = (
+            self.db.query(App)
+            .with_entities(App.slug)
+            .filter(App.app_id == app_id)
+            .first()
+        )
+        return row[0] if row else None
+
     def get_all(self) -> List[App]:
         """Get all apps."""
         return self.db.query(App).all()
@@ -59,13 +73,22 @@ class AppRepository:
         return app
     
     def delete(self, app: App) -> bool:
-        """Delete an app"""
+        """Delete an app.
+
+        FR-15/AC-12 hardening: `app_id` is captured up front, before attempting the delete, so the
+        except branch never touches a (possibly now-expired, post-failed-flush) ORM attribute on
+        `app` — doing so on a session left in a pending-rollback state after a failed flush (e.g. a
+        FK violation from a leftover Skill row still referencing this app; see models/app.py's
+        `skills` relationship) would itself raise `PendingRollbackError`, masking the real error and
+        skipping the `self.db.rollback()` below.
+        """
+        app_id = app.app_id
         try:
             self.db.delete(app)
             self.db.commit()
             return True
         except Exception as e:
-            logger.error(f"Error deleting app {app.app_id}: {e}")
+            logger.error(f"Error deleting app {app_id}: {e}")
             self.db.rollback()
             return False
     
@@ -85,6 +108,12 @@ class AppRepository:
             app.agent_cors_origins = data['agent_cors_origins']
         if 'enable_openai_api' in data:
             app.enable_openai_api = data['enable_openai_api']
+        if 'default_sandbox_service_id' in data:
+            app.default_sandbox_service_id = data['default_sandbox_service_id']
+        if 'default_embedding_service_id' in data:
+            app.default_embedding_service_id = data['default_embedding_service_id']
+        if 'chat_code_interpreter_enabled' in data:
+            app.chat_code_interpreter_enabled = bool(data['chat_code_interpreter_enabled'])
         if 'onboarding_dismissed' in data:
             app.onboarding_dismissed = data['onboarding_dismissed']
     
@@ -95,25 +124,41 @@ class AppRepository:
         from models.agent import Agent
         return self.db.query(Agent).filter(Agent.app_id == app_id).all()
     
-    def get_repositories_by_app_id(self, app_id: int):
-        """Get all repositories for an app"""
+    def get_repositories_by_app_id(self, app_id: int, visible_only: bool = False):
+        """Get all repositories for an app.
+
+        The delete cascade needs every row (``visible_only=False``, including the temp repositories of
+        playground / Chat conversations); the export passes ``visible_only=True`` to leave those out.
+        """
         from models.repository import Repository
-        return self.db.query(Repository).filter(Repository.app_id == app_id).all()
+        from repositories.repository_repository import RepositoryRepository
+        query = self.db.query(Repository).filter(Repository.app_id == app_id)
+        if visible_only:
+            query = query.filter(RepositoryRepository.visible_clause())
+        return query.all()
     
     def get_domains_by_app_id(self, app_id: int):
         """Get all domains for an app"""
         from models.domain import Domain
         return self.db.query(Domain).filter(Domain.app_id == app_id).all()
     
-    def get_silos_by_app_id(self, app_id: int):
-        """Get all silos for an app"""
+    def get_silos_by_app_id(self, app_id: int, visible_only: bool = False):
+        """Get all silos for an app (``visible_only=True`` leaves out the temp silos of conversations; see above)."""
         from models.silo import Silo
-        return self.db.query(Silo).filter(Silo.app_id == app_id).all()
+        from repositories.silo_repository import SiloRepository
+        query = self.db.query(Silo).filter(Silo.app_id == app_id)
+        if visible_only:
+            query = query.filter(SiloRepository.visible_clause())
+        return query.all()
     
-    def get_output_parsers_by_app_id(self, app_id: int):
-        """Get all output parsers for an app"""
+    def get_output_parsers_by_app_id(self, app_id: int, visible_only: bool = False):
+        """Get all output parsers for an app (``visible_only=True`` leaves out the temp silos' metadata parsers)."""
         from models.output_parser import OutputParser
-        return self.db.query(OutputParser).filter(OutputParser.app_id == app_id).all()
+        from repositories.output_parser_repository import OutputParserRepository
+        query = self.db.query(OutputParser).filter(OutputParser.app_id == app_id)
+        if visible_only:
+            query = query.filter(OutputParserRepository.visible_clause())
+        return query.all()
     
     def get_mcp_configs_by_app_id(self, app_id: int):
         """Get all MCP configs for an app"""
@@ -134,14 +179,26 @@ class AppRepository:
         """Get all embedding services for an app"""
         from models.embedding_service import EmbeddingService
         return self.db.query(EmbeddingService).filter(EmbeddingService.app_id == app_id).all()
-    
+
+    def get_sandbox_services_by_app_id(self, app_id: int):
+        """Get all sandbox services for an app"""
+        from models.sandbox_service import SandboxService
+        return self.db.query(SandboxService).filter(SandboxService.app_id == app_id).all()
+
     def get_urls_by_domain_id(self, domain_id: int):
         """Get all URLs for a domain"""
         from models.domain_url import DomainUrl
         return self.db.query(DomainUrl).filter(DomainUrl.domain_id == domain_id).all()
 
     def get_skills_by_app_id(self, app_id: int):
-        """Get all skills for an app"""
+        """Get all skills for an app.
+
+        Used by AppService.delete_app() for cascade deletion. Must stay app-private
+        (`Skill.app_id == app_id`, excluding system skills where app_id IS NULL). NEVER switch this
+        to the merged accessor (SkillRepository.get_selectable_for_app / AgentRepository
+        .get_selectable_skills_for_app) — a merged list here would delete platform-owned system
+        skills as a side effect of deleting a single tenant's app.
+        """
         from models.skill import Skill
         return self.db.query(Skill).filter(Skill.app_id == app_id).all()
 

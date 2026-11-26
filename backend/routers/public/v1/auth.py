@@ -1,5 +1,3 @@
-import hashlib
-
 from fastapi import HTTPException, Depends, status, Request
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -8,12 +6,13 @@ from typing import Optional, Callable
 from pydantic import BaseModel
 
 from db.database import SessionLocal
-from services.public_auth_service import PublicAuthService
+from services.public_auth_service import PublicAuthService, create_api_key_user_context
 from services.agent_service import AgentService
 from services.repository_service import RepositoryService
 from services.resource_service import ResourceService
 from services.silo_service import SiloService
 from repositories.media_repository import MediaRepository
+from models.repository import PLAYGROUND_MEDIA_REPO_TYPE
 
 # API Key authentication using header
 api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
@@ -133,36 +132,10 @@ def validate_api_key_for_app(app_id: int, api_key: str, db: Session = None) -> A
         session.close()
 
 
-def create_api_key_user_context(
-    app_id: int,
-    api_key: str,
-    conversation_id: str = None,
-    user_token: str = None,
-) -> dict:
-    """
-    Create user context for API key authentication.
-    Uses a hash of the API key as user identifier to maintain session isolation.
-
-    Args:
-        app_id: Application ID
-        api_key: API key for authentication
-        conversation_id: Optional conversation ID
-        user_token: Optional end-user JWT to forward to MCP servers. When set,
-                    MCPClientManager will inject it as ``Authorization: Bearer``
-                    on every MCP tool call made during this agent execution.
-    """
-    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
-    context = {
-        "user_id": f"apikey_{api_key_hash}",
-        "app_id": app_id,
-        "oauth": False,
-        "api_key": api_key
-    }
-    if conversation_id is not None:
-        context["conversation_id"] = conversation_id
-    if user_token:
-        context["token"] = user_token
-    return context
+# create_api_key_user_context moved to services.public_auth_service (step_016,
+# layering: a service -- the A2A executor bridge -- must not import a
+# router module). Re-exported above so every existing `.auth import
+# create_api_key_user_context` caller keeps working unchanged.
 
 
 def validate_agent_ownership(db: Session, agent_id: int, app_id: int):
@@ -198,7 +171,7 @@ def validate_repository_ownership(db: Session, repo_id: int, app_id: int):
         HTTPException: 404 if repository not found or doesn't belong to app
     """
     repo = RepositoryService.get_repository(repo_id, db)
-    if not repo or repo.app_id != app_id:
+    if not repo or repo.app_id != app_id or repo.type == PLAYGROUND_MEDIA_REPO_TYPE:
         raise HTTPException(status_code=404, detail="Repository not found")
     return repo
 
@@ -246,6 +219,7 @@ def validate_silo_ownership(db: Session, silo_id: int, app_id: int):
         HTTPException: 404 if silo not found or doesn't belong to app
     """
     silo = SiloService.get_silo(silo_id, db)
-    if not silo or silo.app_id != app_id:
+    if not silo or silo.app_id != app_id or SiloService.is_temp_silo(silo_id, db):
+        # Also the hidden temp silo of a playground / Chat conversation: same answer as a missing silo.
         raise HTTPException(status_code=404, detail="Silo not found")
     return silo

@@ -1,18 +1,79 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { StreamEvent, ActiveTool } from '../types/streaming';
+import type { StreamEvent, ActiveTool, HitlPendingApproval, HitlResume } from '../types/streaming';
 import { getStreamingMessage } from '../i18n/streaming';
+import { randomId } from '../utils/randomId';
+import type { ChatTurnConfig, ChatTurnInfo } from '../types/appChat';
+
+function isCodeTool(toolName: string): boolean {
+  return toolName === 'code_interpreter' || toolName.endsWith('_repl');
+}
+
+export interface ToolOutputLine {
+  readonly stream: 'stdout' | 'stderr';
+  readonly line: string;
+}
+
+export type ToolExecutionStatus =
+  | 'awaiting_approval' | 'running' | 'complete' | 'rejected' | 'expired' | 'cancelled';
+
+export interface ToolExecutionRecord {
+  readonly id: string;
+  readonly toolCallId?: string;
+  readonly toolName: string;
+  readonly displayName: string;
+  readonly parentToolName?: string;
+  readonly subagentName?: string;
+  readonly subagentId?: number;
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly status: ToolExecutionStatus;
+  readonly outputLines: ToolOutputLine[];
+  readonly toolInput?: string;     // serialised args from tool_start
+  readonly edited?: boolean;       // a reviewer changed the args before it ran
+  readonly toolOutput?: string;    // result from tool_end
+}
+
+function buildToolRecordId(toolName: string, toolCallId?: string): string {
+  return toolCallId || `${toolName}-${Date.now()}-${randomId()}`;
+}
+
+function buildToolDisplayName(toolName: string, subagentName?: string): string {
+  const formattedToolName = toolName.replaceAll('_', ' ');
+  return subagentName ? `${subagentName} / ${formattedToolName}` : formattedToolName;
+}
 
 interface StreamResult {
   response: string | Record<string, unknown>;
   conversationId: number | null;
   sessionId: string | null;
   files: Array<{ file_id: string; filename: string; file_type: string }>;
+  elapsedMs: number;
+  /** Set when the turn paused for human approval (nothing to commit yet). */
+  pendingApproval: HitlPendingApproval | null;
+  /** App Chat only: effective configuration of the turn (`done.turn`) and the `metadata` summary. */
+  turn?: ChatTurnInfo | null;
+  turnConfig?: ChatTurnConfig | null;
+}
+
+export class StreamingChatError extends Error {
+  readonly elapsedMs: number;
+  /** Conversation the failed turn ran in (known once the `metadata` event arrived): it exists server-side. */
+  readonly conversationId: number | null;
+
+  constructor(message: string, elapsedMs: number, cause?: unknown, conversationId: number | null = null) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = 'StreamingChatError';
+    this.elapsedMs = elapsedMs;
+    this.conversationId = conversationId;
+  }
 }
 
 export interface StreamFnOptions {
   readonly files?: File[];
   readonly searchParams?: any;
   readonly conversationId?: number | null;
+  /** Answer a pending human-in-the-loop approval instead of sending a message. */
+  readonly resume?: HitlResume;
   readonly onEvent: (event: StreamEvent) => void;
   readonly signal?: AbortSignal;
 }
@@ -23,6 +84,7 @@ interface SendOptions {
   readonly files?: File[];
   readonly conversationId?: number | null;
   readonly searchParams?: any;
+  readonly resume?: HitlResume;
 }
 
 interface UseStreamingChatReturn {
@@ -30,25 +92,108 @@ interface UseStreamingChatReturn {
   readonly activeTools: ActiveTool[];
   readonly thinkingMessage: string | null;
   readonly isStreaming: boolean;
+  readonly responseElapsedMs: number;
   readonly streamError: string | null;
+  /** Human-in-the-loop approval the conversation is waiting for. */
+  readonly pendingApproval: HitlPendingApproval | null;
+  readonly setPendingApproval: (approval: HitlPendingApproval | null) => void;
+  readonly codeOutputLines: string[];
+  readonly isCodeRunning: boolean;
+  readonly toolExecutionHistory: ToolExecutionRecord[];
+  readonly clearToolHistory: () => void;
+  /** Close tool rows still waiting for approval (the approval was cancelled or expired). */
+  readonly settleAwaitingTools: (status: 'cancelled' | 'expired') => void;
   readonly sendMessage: (message: string, options?: SendOptions) => Promise<StreamResult>;
   readonly abortStream: () => void;
 }
 
-function buildActiveTool(toolName: string): ActiveTool {
+function buildActiveTool(
+  toolName: string,
+  toolCallId?: string,
+  subagentName?: string,
+  subagentId?: number,
+  parentToolName?: string,
+): ActiveTool {
   return {
     name: toolName,
+    toolCallId,
     displayName: toolName.replaceAll('_', ' '),
+    parentToolName,
+    subagentName,
+    subagentId,
     status: 'running' as const,
     startedAt: Date.now(),
   };
 }
 
-function markToolComplete(toolName: string) {
+function markToolComplete(toolName: string, toolCallId?: string) {
   return (prev: ActiveTool[]): ActiveTool[] =>
     prev.map((t) =>
-      t.name === toolName && t.status === 'running' ? { ...t, status: 'complete' as const } : t,
+      t.status === 'running' &&
+      (
+        (toolCallId && t.toolCallId === toolCallId) ||
+        (!toolCallId && t.name === toolName)
+      )
+        ? { ...t, status: 'complete' as const }
+        : t,
     );
+}
+
+function isOpenRecord(record: ToolExecutionRecord): boolean {
+  return record.status === 'running' || record.status === 'awaiting_approval';
+}
+
+function setRecordStatus(from: ToolExecutionStatus, to: ToolExecutionStatus) {
+  return (prev: ToolExecutionRecord[]): ToolExecutionRecord[] =>
+    prev.some((record) => record.status === from)
+      ? prev.map((record) => (record.status === from ? { ...record, status: to } : record))
+      : prev;
+}
+
+function completeMatchingToolRecords(
+  prev: ToolExecutionRecord[],
+  toolName: string,
+  toolCallId?: string,
+  toolOutput?: string,
+  rejected = false,
+): ToolExecutionRecord[] {
+  const endedAt = Date.now();
+  let changed = false;
+
+  const updated = prev.map((record) => {
+    // A rejection is shown as soon as it is sent; its tool_end only adds the reason.
+    const awaitsReason = rejected && record.status === 'rejected' && record.toolOutput === undefined;
+    const matches =
+      (isOpenRecord(record) || awaitsReason) &&
+      (
+        (toolCallId && record.toolCallId === toolCallId) ||
+        (!toolCallId && record.toolName === toolName)
+      );
+
+    if (!matches) return record;
+    changed = true;
+    return { ...record, status: rejected ? 'rejected' as const : 'complete' as const, endedAt, toolOutput };
+  });
+
+  return changed ? updated : prev;
+}
+
+function completeOpenTools(prev: ToolExecutionRecord[], fallbackOutput?: string): ToolExecutionRecord[] {
+  const endedAt = Date.now();
+  let changed = false;
+
+  const updated = prev.map((record) => {
+    if (record.status !== 'running') return record;
+    changed = true;
+    return {
+      ...record,
+      status: 'complete' as const,
+      endedAt,
+      toolOutput: record.toolOutput ?? fallbackOutput,
+    };
+  });
+
+  return changed ? updated : prev;
 }
 
 /**
@@ -63,7 +208,18 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
   const [thinkingMessage, setThinkingMessage] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [responseElapsedMs, setResponseElapsedMs] = useState(0);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<HitlPendingApproval | null>(null);
+  const [codeOutputLines, setCodeOutputLines] = useState<string[]>([]);
+  const [isCodeRunning, setIsCodeRunning] = useState(false);
+  const [toolExecutionHistory, setToolExecutionHistory] = useState<ToolExecutionRecord[]>([]);
+
+  const clearToolHistory = useCallback(() => setToolExecutionHistory([]), []);
+  const settleAwaitingTools = useCallback(
+    (status: 'cancelled' | 'expired') => setToolExecutionHistory(setRecordStatus('awaiting_approval', status)),
+    [],
+  );
 
   const streamFnRef = useRef(streamFn);
   useEffect(() => {
@@ -74,6 +230,22 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
   const contentRef = useRef('');
   const flushRequestedRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
+  const streamStartedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isStreaming || streamStartedAtRef.current === null) return;
+
+    const updateElapsedTime = () => {
+      const startedAt = streamStartedAtRef.current;
+      if (startedAt !== null) {
+        setResponseElapsedMs(Math.max(0, Math.round(performance.now() - startedAt)));
+      }
+    };
+
+    updateElapsedTime();
+    const intervalId = window.setInterval(updateElapsedTime, 100);
+    return () => window.clearInterval(intervalId);
+  }, [isStreaming]);
 
   const abortStream = useCallback(() => {
     if (abortControllerRef.current) {
@@ -88,11 +260,31 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       setActiveTools([]);
       setThinkingMessage(getStreamingMessage('thinking'));
       setIsStreaming(true);
+      streamStartedAtRef.current = performance.now();
+      setResponseElapsedMs(0);
       setStreamError(null);
+      setPendingApproval(null);
+      setCodeOutputLines([]);
+      setIsCodeRunning(false);
       contentRef.current = '';
       flushRequestedRef.current = false;
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
+      if (options?.resume) {
+        // Approved/edited calls start running now; rejected ones never run.
+        const rejected = new Set(
+          options.resume.decisions.filter((d) => d.type === 'reject').map((d) => d.action_id),
+        );
+        setToolExecutionHistory((prev) =>
+          prev.map((record) => {
+            if (record.status !== 'awaiting_approval') return record;
+            const isRejected = record.toolCallId !== undefined && rejected.has(record.toolCallId);
+            return isRejected
+              ? { ...record, status: 'rejected' as const, endedAt: Date.now() }
+              : { ...record, status: 'running' as const };
+          }),
+        );
+      }
 
       const scheduleFlush = () => {
         if (!flushRequestedRef.current) {
@@ -111,12 +303,24 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
       let sessionId: string | null = null;
       let finalResponse: string | Record<string, unknown> = '';
       let finalFiles: Array<{ file_id: string; filename: string; file_type: string }> = [];
+      let elapsedMs = 0;
+      let approval: HitlPendingApproval | null = null;
+      let errorMessage: string | null = null;
+      let receivedDone = false;
+      let turn: ChatTurnInfo | null = null;
+      let turnConfig: ChatTurnConfig | null = null;
+
+      const getElapsedMs = (): number => {
+        const startedAt = streamStartedAtRef.current;
+        return startedAt === null ? 0 : Math.max(0, Math.round(performance.now() - startedAt));
+      };
 
       try {
         await streamFnRef.current(message, {
           files: options?.files,
           searchParams: options?.searchParams,
           conversationId: options?.conversationId,
+          resume: options?.resume,
           signal: abortController.signal,
           onEvent: (event: StreamEvent) => {
             switch (event.type) {
@@ -130,23 +334,128 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
 
               case 'tool_start': {
                 const toolName = (event.data as { tool_name?: string }).tool_name || 'unknown';
+                const toolCallId = (event.data as { tool_call_id?: string }).tool_call_id || undefined;
+                const parentToolName = (event.data as { parent_tool_name?: string }).parent_tool_name || undefined;
+                const subagentName = (event.data as { subagent_name?: string }).subagent_name || undefined;
+                const subagentId = (event.data as { subagent_id?: number }).subagent_id || undefined;
                 const thinkingMsg =
                   (event.data as { message?: string }).message ||
                   getStreamingMessage('using_tool', { name: toolName });
                 setThinkingMessage(thinkingMsg);
-                setActiveTools((prev) => [...prev, buildActiveTool(toolName)]);
+                setActiveTools((prev) => {
+                  if (!toolCallId) {
+                    return [...prev, buildActiveTool(toolName, toolCallId, subagentName, subagentId, parentToolName)];
+                  }
+
+                  const existingIdx = prev.findIndex(
+                    (tool) => tool.toolCallId === toolCallId && tool.status === 'running',
+                  );
+                  if (existingIdx !== -1) {
+                    const updated = [...prev];
+                    updated[existingIdx] = {
+                      ...updated[existingIdx],
+                      parentToolName: updated[existingIdx].parentToolName ?? parentToolName,
+                      subagentName: updated[existingIdx].subagentName ?? subagentName,
+                      subagentId: updated[existingIdx].subagentId ?? subagentId,
+                    };
+                    return updated;
+                  }
+
+                  return [
+                    ...prev,
+                    buildActiveTool(toolName, toolCallId, subagentName, subagentId, parentToolName),
+                  ];
+                });
+                if (isCodeTool(toolName)) {
+                  setCodeOutputLines([]);
+                  setIsCodeRunning(true);
+                }
+                const toolInput = (event.data as { tool_input?: string }).tool_input ?? undefined;
+                const edited = (event.data as { edited?: boolean }).edited === true;
+                const newRecord: ToolExecutionRecord = {
+                  id: buildToolRecordId(toolName, toolCallId),
+                  toolCallId,
+                  toolName,
+                  displayName: buildToolDisplayName(toolName, subagentName),
+                  parentToolName,
+                  subagentName,
+                  subagentId,
+                  startedAt: Date.now(),
+                  status: 'running',
+                  outputLines: [],
+                  toolInput,
+                };
+                setToolExecutionHistory((prev) => {
+                  if (!toolCallId) return [...prev, newRecord];
+
+                  // Tool call ids are unique, so a repeated id (e.g. an edited call) updates its row.
+                  const existingIdx = prev.findIndex((record) => record.toolCallId === toolCallId);
+                  if (existingIdx === -1) return [...prev, newRecord];
+
+                  const updated = [...prev];
+                  updated[existingIdx] = {
+                    ...updated[existingIdx],
+                    toolName,
+                    displayName: buildToolDisplayName(toolName, subagentName),
+                    parentToolName: updated[existingIdx].parentToolName ?? parentToolName,
+                    subagentName: updated[existingIdx].subagentName ?? subagentName,
+                    subagentId: updated[existingIdx].subagentId ?? subagentId,
+                    toolInput: edited ? toolInput : updated[existingIdx].toolInput ?? toolInput,
+                    edited: updated[existingIdx].edited || edited,
+                  };
+                  return updated;
+                });
                 break;
               }
 
               case 'tool_end': {
                 const toolName = (event.data as { tool_name?: string }).tool_name || '';
-                setActiveTools(markToolComplete(toolName));
+                const toolCallId = (event.data as { tool_call_id?: string }).tool_call_id || undefined;
+                const toolOutput = (event.data as { tool_output?: string }).tool_output ?? undefined;
+                const rejected = (event.data as { outcome?: string }).outcome === 'rejected';
+                setActiveTools(markToolComplete(toolName, toolCallId));
+                if (isCodeTool(toolName)) {
+                  setIsCodeRunning(false);
+                }
+                setToolExecutionHistory((prev) =>
+                  completeMatchingToolRecords(prev, toolName, toolCallId, toolOutput, rejected),
+                );
                 break;
               }
 
               case 'thinking': {
                 const msg = (event.data as { message?: string }).message;
                 if (msg) setThinkingMessage(msg);
+                break;
+              }
+
+              case 'code_output': {
+                const line = (event.data as { line?: string }).line ?? '';
+                const toolName = (event.data as { tool_name?: string }).tool_name || undefined;
+                const subagentName = (event.data as { subagent_name?: string }).subagent_name || undefined;
+                const stream = (event.data as { stream?: 'stdout' | 'stderr' }).stream === 'stderr'
+                  ? 'stderr'
+                  : 'stdout';
+                if (line) {
+                  setCodeOutputLines((prev) => [...prev, line]);
+                  setToolExecutionHistory((prev) => {
+                    const lastRunningIdx = [...prev].map((r, i) => ({ r, i })).reverse()
+                      .find(({ r }) =>
+                        isCodeTool(r.toolName) &&
+                        r.status === 'running' &&
+                        (!toolName || r.toolName === toolName),
+                      )?.i ?? -1;
+                    if (lastRunningIdx === -1) return prev;
+                    const updated = [...prev];
+                    updated[lastRunningIdx] = {
+                      ...updated[lastRunningIdx],
+                      displayName: buildToolDisplayName(updated[lastRunningIdx].toolName, subagentName ?? updated[lastRunningIdx].subagentName),
+                      subagentName: updated[lastRunningIdx].subagentName ?? subagentName,
+                      outputLines: [...updated[lastRunningIdx].outputLines, { stream, line }],
+                    };
+                    return updated;
+                  });
+                }
                 break;
               }
 
@@ -159,6 +468,7 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
                 if (metaSessionId) {
                   sessionId = metaSessionId;
                 }
+                turnConfig = (event.data as { turn_config?: ChatTurnConfig }).turn_config ?? turnConfig;
                 break;
               }
 
@@ -167,32 +477,59 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
                   response?: string | Record<string, unknown>;
                   files?: Array<{ file_id: string; filename: string; file_type: string }>;
                   conversation_id?: number;
+                  turn?: ChatTurnInfo | null;
                 };
+                receivedDone = true;
+                turn = doneData.turn ?? null;
                 finalResponse = doneData.response ?? contentRef.current;
                 finalFiles = doneData.files ?? [];
                 if (doneData.conversation_id) {
                   conversationId = doneData.conversation_id;
                 }
+                setActiveTools((prev) =>
+                  prev.map((tool) => tool.status === 'running' ? { ...tool, status: 'complete' as const } : tool),
+                );
+                setToolExecutionHistory((prev) => completeOpenTools(prev));
+                setIsCodeRunning(false);
                 break;
               }
 
               case 'error': {
                 const errMsg = (event.data as { message?: string }).message || 'Stream error';
+                errorMessage = errMsg;
                 setStreamError(errMsg);
+                setActiveTools((prev) =>
+                  prev.map((tool) => tool.status === 'running' ? { ...tool, status: 'complete' as const } : tool),
+                );
+                setToolExecutionHistory((prev) => completeOpenTools(prev, `[Stream error] ${errMsg}`));
+                setIsCodeRunning(false);
+                break;
+              }
+
+              case 'hitl_interrupt': {
+                approval = event.data as unknown as HitlPendingApproval;
+                setPendingApproval(approval);
+                setToolExecutionHistory(setRecordStatus('running', 'awaiting_approval'));
                 break;
               }
             }
           },
         });
+        if (errorMessage && !receivedDone) {
+          throw new Error(errorMessage);
+        }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           setStreamError(null);
         } else {
           const errMsg = err instanceof Error ? err.message : 'Streaming failed';
           setStreamError(errMsg);
-          throw err;
+          throw new StreamingChatError(errMsg, getElapsedMs(), err, conversationId);
         }
       } finally {
+        elapsedMs = getElapsedMs();
+        setResponseElapsedMs(elapsedMs);
+        streamStartedAtRef.current = null;
         if (rafIdRef.current) {
           cancelAnimationFrame(rafIdRef.current);
           rafIdRef.current = null;
@@ -201,6 +538,11 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
         setStreamingContent(contentRef.current);
         setIsStreaming(false);
         setThinkingMessage(null);
+        setActiveTools((prev) =>
+          prev.map((tool) => tool.status === 'running' ? { ...tool, status: 'complete' as const } : tool),
+        );
+        setToolExecutionHistory((prev) => completeOpenTools(prev));
+        setIsCodeRunning(false);
         abortControllerRef.current = null;
       }
 
@@ -209,6 +551,10 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
         conversationId,
         sessionId,
         files: finalFiles,
+        elapsedMs,
+        pendingApproval: approval,
+        turn,
+        turnConfig,
       };
     },
     [],
@@ -219,7 +565,15 @@ export function useStreamingChat(streamFn: StreamFn): UseStreamingChatReturn {
     activeTools,
     thinkingMessage,
     isStreaming,
+    responseElapsedMs,
     streamError,
+    pendingApproval,
+    setPendingApproval,
+    codeOutputLines,
+    isCodeRunning,
+    toolExecutionHistory,
+    clearToolHistory,
+    settleAwaitingTools,
     sendMessage,
     abortStream,
   };

@@ -6,6 +6,7 @@ import { DEFAULT_SEARCH_CONTROLS } from '../components/playground/SearchControls
 import type { SearchControlsValue } from '../components/playground/SearchControls';
 import type { SearchResult } from '../components/playground/ResultCard';
 import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
+import type { ServiceLifecycleWarning } from '../types/services';
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -18,6 +19,7 @@ export interface Silo {
   created_at?: string;
   docs_count: number;
   metadata_fields?: SearchFilterMetadataField[];
+  lifecycle_warnings?: ServiceLifecycleWarning[];
 }
 
 export interface QueryHistoryEntry {
@@ -231,7 +233,7 @@ export function useSiloSearch(
     apiService.getAgents(Number.parseInt(appId))
       .then((agents: unknown) => {
         const arr = (agents as Array<{ id: number; name: string; silo_id?: number | null }>) ?? [];
-        setAppAgentsForSilo(arr.filter((a) => a.silo_id === Number.parseInt(siloId)));
+        setAppAgentsForSilo(arr.filter((agent) => agent.silo_id === Number.parseInt(siloId)));
       })
       .catch(() => { /* ignore */ });
   }, [appId, siloId]);

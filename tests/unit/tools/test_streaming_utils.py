@@ -8,10 +8,13 @@ suppress those chunks so the summary text never reaches the SSE token stream.
 
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from tools.streaming_utils import (
+    SSE_THINKING,
     SSE_TOKEN,
+    SSE_TOOL_END,
+    SSE_TOOL_START,
     _map_messages_chunk,
     map_stream_event,
 )
@@ -48,6 +51,17 @@ class TestMapMessagesChunk:
                 "langgraph_node": "agent",
                 "metadata": {"lc_source": "summarization"},
             },
+        )
+
+        assert _map_messages_chunk(chunk) is None
+
+    def test_drops_llm_pii_detector_chunk(self):
+        # LLMPIIMiddleware tags its detector model.ainvoke() with
+        # config={"metadata": {"lc_source": "pii"}}; the raw structured-output
+        # JSON must never reach the SSE token stream shown to the user.
+        chunk = (
+            _ai_chunk('{"findings":[{"type":"last name","value":"Martinez"}]}'),
+            {"langgraph_node": "agent", "lc_source": "pii"},
         )
 
         assert _map_messages_chunk(chunk) is None
@@ -127,3 +141,174 @@ class TestMapStreamEventDispatcher:
         )
 
         assert map_stream_event("messages", chunk) is None
+from backend.tools.streaming_utils import SSE_CODE_OUTPUT, SSE_TOOL_START, map_stream_event
+
+
+def test_code_output_custom_event_preserves_stream():
+    events = map_stream_event(
+        "custom",
+        {"type": "code_output", "stream": "stderr", "line": "warn\n"},
+    )
+
+    assert events == [
+        {
+            "type": SSE_CODE_OUTPUT,
+            "data": {"line": "warn\n", "stream": "stderr"},
+        }
+    ]
+
+
+def test_code_output_custom_event_defaults_unknown_stream_to_stdout():
+    events = map_stream_event(
+        "custom",
+        {"type": "code_output", "stream": "invalid", "line": "hello\n"},
+    )
+
+    assert events == [
+        {
+            "type": SSE_CODE_OUTPUT,
+            "data": {"line": "hello\n", "stream": "stdout"},
+        }
+    ]
+
+
+def test_code_output_custom_event_preserves_tool_name():
+    events = map_stream_event(
+        "custom",
+        {
+            "type": "code_output",
+            "tool_name": "python_repl",
+            "stream": "stdout",
+            "line": "hello\n",
+        },
+    )
+
+    assert events == [
+        {
+            "type": SSE_CODE_OUTPUT,
+            "data": {
+                "tool_name": "python_repl",
+                "line": "hello\n",
+                "stream": "stdout",
+            },
+        }
+    ]
+
+
+def test_custom_tool_event_is_forwarded():
+    events = map_stream_event(
+        "custom",
+        {
+            "type": "tool_start",
+            "data": {
+                "tool_name": "python_repl",
+                "tool_call_id": "subagent:call-1",
+                "subagent_name": "Research Agent",
+            },
+        },
+    )
+
+    assert events == [
+        {
+            "type": SSE_TOOL_START,
+            "data": {
+                "tool_name": "python_repl",
+                "tool_call_id": "subagent:call-1",
+                "subagent_name": "Research Agent",
+            },
+        }
+    ]
+
+
+def test_code_output_custom_event_preserves_subagent_context():
+    events = map_stream_event(
+        "custom",
+        {
+            "type": "code_output",
+            "tool_name": "python_repl",
+            "parent_tool_name": "Research_Agent",
+            "subagent_name": "Research Agent",
+            "subagent_id": 42,
+            "stream": "stdout",
+            "line": "hello\n",
+        },
+    )
+
+    assert events == [
+        {
+            "type": SSE_CODE_OUTPUT,
+            "data": {
+                "tool_name": "python_repl",
+                "parent_tool_name": "Research_Agent",
+                "subagent_name": "Research Agent",
+                "subagent_id": 42,
+                "line": "hello\n",
+                "stream": "stdout",
+            },
+        }
+    ]
+
+
+class TestMapUpdatesChunkHumanApproval:
+    _TOOL_CALL = {"name": "search_docs", "args": {"q": "S3"}, "id": "call_1", "type": "tool_call"}
+
+    def _hitl_update(self, *messages, edited=None):
+        delta = {"messages": list(messages), "hitl_edited_tool_calls": edited or {}}
+        return {"HumanInTheLoopMiddleware.after_model": delta}
+
+    def test_model_node_announces_tool_calls(self):
+        events = map_stream_event("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[self._TOOL_CALL])]}})
+
+        assert [e["type"] for e in events] == [SSE_TOOL_START, SSE_THINKING]
+
+    def test_rejection_ends_the_tool_as_rejected_without_restarting_it(self):
+        rejection = ToolMessage(content="User rejected the tool call", name="search_docs", tool_call_id="call_1", status="error")
+
+        events = map_stream_event("updates", self._hitl_update(AIMessage(content="", tool_calls=[self._TOOL_CALL]), rejection))
+
+        assert events == [{
+            "type": SSE_TOOL_END,
+            "data": {
+                "tool_name": "search_docs",
+                "tool_call_id": "call_1",
+                "tool_output": "User rejected the tool call",
+                "outcome": "rejected",
+            },
+        }]
+
+    def test_approval_announces_the_call_that_will_run(self):
+        events = map_stream_event("updates", self._hitl_update(AIMessage(content="", tool_calls=[self._TOOL_CALL])))
+
+        assert [e["type"] for e in events] == [SSE_TOOL_START, SSE_THINKING]
+        assert events[0]["data"]["tool_call_id"] == "call_1"
+
+    def test_other_middleware_nodes_do_not_reannounce_tool_calls(self):
+        update = {"PIIMiddleware[email].after_model": {"messages": [AIMessage(content="", tool_calls=[self._TOOL_CALL])]}}
+
+        assert map_stream_event("updates", update) is None
+
+    def test_edit_reannounces_the_tool_with_the_edited_args(self):
+        edited = {"call_1": {"name": "search_docs", "args": {"q": "EBS"}}}
+
+        events = map_stream_event("updates", self._hitl_update(AIMessage(content="", tool_calls=[self._TOOL_CALL]), edited=edited))
+
+        assert events == [{
+            "type": SSE_TOOL_START,
+            "data": {
+                "tool_name": "search_docs",
+                "tool_call_id": "call_1",
+                "args": {"q": "EBS"},
+                "tool_input": '{"q": "EBS"}',
+                "edited": True,
+            },
+        }]
+
+    def test_executed_tool_result_has_no_outcome(self):
+        result = ToolMessage(content="ok", name="search_docs", tool_call_id="call_1")
+
+        events = map_stream_event("updates", {"tools": {"messages": [result]}})
+
+        assert events == [{
+            "type": SSE_TOOL_END,
+            "data": {"tool_name": "search_docs", "tool_call_id": "call_1", "tool_output": "ok"},
+        }]

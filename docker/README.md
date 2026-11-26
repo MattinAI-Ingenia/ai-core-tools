@@ -35,8 +35,10 @@ Frontend y backend viajan por el mismo origen → **sin CORS**, sin necesidad de
 Las imágenes publicadas viven en:
 - `ghcr.io/lksnext-ai-lab/mattinai-backend:${IMAGE_TAG}`
 - `ghcr.io/lksnext-ai-lab/mattinai-frontend:${IMAGE_TAG}`
+- `ghcr.io/lksnext-ai-lab/mattinai-opensandbox-server:${IMAGE_TAG}` (perfil `opensandbox`)
+- `ghcr.io/lksnext-ai-lab/mattinai-code-interpreter:${IMAGE_TAG}` (perfil `opensandbox`)
 
-El tag por defecto es `develop` (último build de la rama `develop`). En servidores de cliente se recomienda **pinear un SHA** (`IMAGE_TAG=sha-c1feaaf`) para evitar actualizaciones accidentales al hacer `docker compose pull`.
+El tag por defecto es `develop` (último build de la rama `develop`). En servidores de cliente se recomienda **pinear un SHA** (`IMAGE_TAG=sha-c1feaaf`) para evitar actualizaciones accidentales al hacer `docker compose pull`. Las dos imágenes de `opensandbox` se publican desde `.github/workflows/opensandbox-ci.yml`, un workflow separado del de backend/frontend porque cambian mucho menos a menudo (solo cuando toca `docker/opensandbox/**`).
 
 ## Uso
 
@@ -54,6 +56,16 @@ cp .env.example .env
 #   IMAGE_TAG=sha-<commit>   # o "develop" para el último
 docker compose pull backend frontend
 docker compose up -d
+```
+
+Si vas a usar el code interpreter de los agentes, añade el perfil `opensandbox`
+(también se resuelve por `pull`, sin necesitar el código fuente de `docker/opensandbox/`):
+
+```bash
+# Antes: OPENSANDBOX_API_KEY en .env (obligatoria; >= 32 caracteres):
+#   python -c "import secrets; print(secrets.token_hex(32))"
+docker compose --profile opensandbox pull opensandbox mattin-code-interpreter
+docker compose --profile opensandbox up -d
 ```
 
 Accede a `http://<ip-del-servidor>/` (o `http://localhost/` en local).
@@ -106,13 +118,16 @@ docker compose pull backend frontend
 docker compose up -d
 ```
 
-## Primer login (modo FAKE)
+## Primer login (modo LOCAL)
 
-En `AICT_LOGIN=FAKE` el usuario debe existir previamente en la tabla `"User"`.
-La forma soportada de crearlos es el script de seeding, que se ejecuta **dentro
-del contenedor backend** y reutiliza su configuración de base de datos (no
-necesitas Python ni acceso directo a Postgres en el host). Es idempotente: los
-usuarios que ya existan se respetan.
+En `AICT_LOGIN=LOCAL` el backend provisiona en el primer arranque las cuentas de
+`AICT_OMNIADMINS` y publica en el log un enlace de alta de contraseña de un solo
+uso. Para el resto de usuarios, la forma soportada de crearlos es el script de
+seeding, que se ejecuta **dentro del contenedor backend** y reutiliza su
+configuración de base de datos (no necesitas Python ni acceso directo a Postgres
+en el host). Es idempotente: los usuarios que ya existan se respetan.
+
+(El modo `FAKE` está retirado; el endpoint de dev-login ya no existe.)
 
 ### Opción recomendada: script de seeding
 
@@ -140,9 +155,8 @@ Los wrappers comprueban que el stack esté arrancado y reenvían los argumentos:
 .\seed-users.ps1 --users "tu@email.com:Tu Nombre"
 ```
 
-> El script solo siembra si `AICT_LOGIN` es `FAKE` o `LOCAL` (evita crear
-> usuarios sin contraseña en un despliegue OIDC). Para forzarlo deliberadamente,
-> añade `--force`.
+> El script solo siembra en modo `LOCAL` (evita crear usuarios sin contraseña
+> en un despliegue OIDC). Para forzarlo deliberadamente, añade `--force`.
 
 Para sembrar los usuarios de forma declarativa al desplegar, define
 `AICT_DEV_SEED_USERS` en el `.env` (ver `.env.example`) y lanza el script sin
@@ -153,7 +167,7 @@ Para sembrar los usuarios de forma declarativa al desplegar, define
 Si prefieres no usar el script, puedes insertar directamente vía `psql`:
 
 ```bash
-docker exec -i mattin-postgres psql -U mattin -d mattin_ai <<EOF
+docker compose exec -T postgres psql -U mattin -d mattin_ai <<EOF
 INSERT INTO "User" (email, name, create_date, is_active, auth_method, email_verified) VALUES
   ('user1@cliente.com', 'User 1', NOW(), true, 'dev', true),
   ('user2@cliente.com', 'User 2', NOW(), true, 'dev', true)
@@ -161,13 +175,177 @@ ON CONFLICT DO NOTHING;
 EOF
 ```
 
+## Varios Mattin a la vez (multi-entorno local)
+
+Trabajar contra varios proyectos que corren **versiones distintas** de Mattin
+—la demo que enseñas a clientes, la funcionalidad que estás implementando, la
+PR de otra persona, la versión pineada de un cliente— exige un stack por
+versión. No es preferencia: `backend/Dockerfile` arranca con
+`alembic upgrade head`, así que **dos versiones sobre el mismo volumen de
+Postgres se migran la BD la una a la otra**, y el downgrade no siempre
+recupera los datos.
+
+La unidad de aislamiento es el **project name** de Compose, que prefija
+contenedores, redes y volúmenes
+([docs](https://docs.docker.com/compose/how-tos/project-name/)). Cada entorno
+es un fichero en `envs/` que se carga encima de `envs/base.env`:
+
+```
+docker/envs/
+  base.env          # secretos y config común a todos (gitignored)
+  demo.env          # develop del registry  → mattin-demo    :8080
+  dev.env           # tu working tree       → mattin-dev     :8081
+  review.env        # la rama de otro       → mattin-review  :8082
+  dibal.env         # cliente pineado       → mattin-dibal   :8090
+  _templates/       # plantillas de `mattin.ps1 new`
+```
+
+Los `.env` están gitignored; se versionan sus `.env.example`. Para empezar en
+una máquina nueva: copiar cada `.example` a `.env` y rellenar `base.env`.
+
+### El comando
+
+```powershell
+cd docker
+.\mattin.ps1 ls                       # qué entornos hay y cuáles están vivos
+```
+
+| Comando | Para qué |
+|---|---|
+| `up <e>` | Arranca con la imagen que ya haya |
+| `rebuild <e>` | Build desde el working tree actual → entornos de trabajo |
+| `update <e>` | `pull` + recrear → demo y clientes |
+| `stop` / `start` | Libera RAM / vuelve, **conservando datos** |
+| `down <e>` | Borra contenedores, conserva volúmenes |
+| `destroy <e>` | Borra también los volúmenes (pide confirmación) |
+| `new <n> [-Type feature\|cliente]` | Crea un entorno con puerto libre asignado |
+| `rm <n>` | `destroy` + borra su `envs/<n>.env` |
+| `logs` / `ps` / `exec` / `psql` / `open` | Operación del día a día |
+| `invite <e>` / `setpass <e> <email> <pw>` | Entrar la primera vez (ver abajo) |
+
+Todo esto es Compose plano por debajo; el script solo evita repetir los
+`--env-file` y añade unas cuantas comprobaciones. El equivalente crudo:
+
+```bash
+docker compose --env-file envs/base.env --env-file envs/dev.env up -d
+```
+
+El segundo `--env-file` sobreescribe al primero
+([precedencia](https://docs.docker.com/compose/how-tos/environment-variables/envvars-precedence/)),
+y `--env-file` **sustituye** al `.env` por defecto del directorio: los entornos
+locales y el despliegue single-host de `docker/.env` no se mezclan.
+
+### Los tres casos de uso
+
+**Demo a cliente** — `demo` corre la imagen `:develop` que publica CI, nunca un
+build tuyo. Sus datos (apps, agentes, silos de demostración) persisten entre
+actualizaciones.
+
+```powershell
+.\mattin.ps1 update demo     # a la última develop
+.\mattin.ps1 open demo
+```
+
+**Probar una funcionalidad** — `dev` para lo tuyo, `review` para la rama de
+otra persona. Están separados a propósito: revisar una PR ajena no debería
+obligarte a tirar tu propia BD de trabajo.
+
+```powershell
+git switch feature/lo-que-sea
+.\mattin.ps1 rebuild dev
+
+git fetch origin pull/231/head:pr-231 && git switch pr-231
+.\mattin.ps1 rebuild review
+.\mattin.ps1 destroy review          # al terminar
+```
+
+Destruir `review` al acabar no es limpieza, es lo que hace honesta la siguiente
+revisión: sobre BD vacía compruebas que *sus* migraciones corren de cero, no
+que corren sobre los restos de la PR anterior.
+
+Si necesitas más de uno a la vez (dos PRs en paralelo), `new` los crea con
+puerto libre:
+
+```powershell
+.\mattin.ps1 new pr-231              # asigna 8083, IMAGE_TAG=local-pr-231
+.\mattin.ps1 rebuild pr-231
+.\mattin.ps1 rm pr-231               # cuando sobre
+```
+
+**Reproducir la versión de un cliente** — un entorno por cliente, con
+`IMAGE_TAG` pineado al tag exacto que corre en producción.
+
+```powershell
+.\mattin.ps1 new acme -Type cliente  # asigna 8091; editar IMAGE_TAG
+.\mattin.ps1 up acme
+```
+
+> `dibal.env` es la plantilla trabajada de este patrón, pero **no** gobierna el
+> despliegue de Dibal que ya existe en esta máquina: aquel es otro Compose
+> project (`dibal-satia`, con su Redis, worker y panel propios). `up dibal`
+> levanta una reproducción local y vacía de la versión de Mattin que corre allí.
+
+### Entrar la primera vez
+
+Con `AICT_LOGIN=LOCAL`, el backend provisiona en el primer arranque las cuentas
+de `AICT_OMNIADMINS` y publica un enlace de alta de contraseña —de un solo uso—
+en el log (`services/auth/omniadmin_bootstrap.py`):
+
+```powershell
+.\mattin.ps1 invite dev              # saca el enlace del log
+```
+
+Si el enlace ya se usó o caducó, la ruta de recuperación que soporta el propio
+backend (`backend/utils/seed_dev_users.py`, funciona también sobre imágenes del
+registry):
+
+```powershell
+.\mattin.ps1 setpass dev tu@correo.com 'UnaPasswordBuena123!'
+```
+
+### Trampas conocidas
+
+- **`IMAGE_TAG` propio por entorno no es opcional.** El servicio `backend`
+  etiqueta lo que construye como `mattinai-backend:${IMAGE_TAG}`. Si un entorno
+  de trabajo usara `IMAGE_TAG=develop`, un `--build` machacaría en local la
+  imagen `:develop` de `demo`. `rebuild` se niega a correr sobre un tag
+  publicado precisamente por esto.
+- **Ficheros de repositorios.** Por defecto el compose los monta desde
+  `../backend/data` (bind mount), que sería **compartido por todos los
+  entornos**. Los `envs/*.env` ponen `BACKEND_DATA=backend-data` para usar un
+  volumen nombrado, que Compose prefija con el project name. Los despliegues de
+  cliente ya existentes no cambian: sin esa variable sigue el bind mount.
+  Para llevarte lo que ya hubiera en `backend/data`:
+  ```bash
+  docker run --rm -v "$PWD/../backend/data:/from" -v mattin-dev_backend-data:/to \
+    alpine sh -c "cp -a /from/. /to/"
+  ```
+- **OpenSandbox.** `opensandbox/sandbox.toml` es una plantilla: el entrypoint de
+  la imagen la renderiza con `OPENSANDBOX_API_KEY` (obligatoria; sin ella el
+  perfil `opensandbox` no arranca) y `SANDBOX_NETWORK_NAME` (nombre de la red de
+  sandboxes), así que para levantar el perfil en más de un stack a la vez basta
+  con un `SANDBOX_NETWORK_NAME` distinto por stack, sin copiar el toml. La API
+  solo escucha en la red `mattin-network`. Ver la sección "OpenSandbox:
+  exposición y mitigaciones" más abajo (riesgo aceptado: acceso entre sandboxes).
+  Las imágenes `opensandbox-server` y `code-interpreter` siguen el
+  mismo `IMAGE_TAG` que backend/frontend (se publican en GHCR), así que la
+  misma trampa de arriba ("`IMAGE_TAG` propio por entorno no es opcional")
+  también les aplica.
+- **Puertos.** `up` aborta si el `HTTP_PORT` del entorno ya está ocupado por
+  otro, en vez de dejar el stack a medio levantar. `new` elige puerto libre solo
+  (8083+ para trabajo, 8090+ para clientes).
+- **RAM.** No hace falta tenerlos todos arriba. Cada stack son 5 contenedores;
+  `stop` los apaga conservando los datos y `start` los devuelve en segundos. Con
+  `VECTOR_DB_TYPE=PGVECTOR` puedes parar además su Qdrant:
+  `.\mattin.ps1 stop dev qdrant`.
+
 ## Acceso a la base de datos desde fuera
 
 Postgres **no** está publicado al host por seguridad. Tres formas de acceder:
 
 1. **Desde el servidor, psql del contenedor** (rápido):
    ```bash
-   docker exec -it mattin-postgres psql -U mattin -d mattin_ai
+   docker compose exec postgres psql -U mattin -d mattin_ai
    ```
 
 2. **Tunel SSH desde tu equipo** (recomendado para DBeaver/pgAdmin):
@@ -182,14 +360,32 @@ Postgres **no** está publicado al host por seguridad. Tres formas de acceder:
 
 Cuando el cliente tenga dominio interno y abra el 443:
 
-1. Edita el `Caddyfile`:
+1. Edita el `Caddyfile` — incluye también el bloque `@a2a` (rutas A2A, sin
+   `encode`, con su propio `request_body` y `flush_interval -1` para que las
+   respuestas SSE no se corten) junto al `@backend` habitual:
    ```
    mattinai.cliente.local {
        tls internal    # cert de la CA interna de Caddy (autofirmado)
-       encode zstd gzip
+
+       @a2a path /a2a/* /.well-known/agent-card.json
+       handle @a2a {
+           request_body {
+               max_size {$A2A_CADDY_MAX_REQUEST_BODY:40MB}
+           }
+           reverse_proxy backend:8000 {
+               flush_interval -1
+           }
+       }
+
        @backend path /internal/* /public/* /mcp/* /docs/* /scalar /openapi-*.json /static/* /health
-       handle @backend { reverse_proxy backend:8000 }
-       handle { reverse_proxy frontend:80 }
+       handle @backend {
+           encode zstd gzip
+           reverse_proxy backend:8000
+       }
+       handle {
+           encode zstd gzip
+           reverse_proxy frontend:80
+       }
    }
    ```
 2. En el compose, publica también el 443:
@@ -200,6 +396,39 @@ Cuando el cliente tenga dominio interno y abra el 443:
        - "443:443"
    ```
 3. Si el cliente tiene PKI corporativa, monta el cert del cliente en el contenedor y sustituye `tls internal` por `tls /etc/caddy/cert.pem /etc/caddy/key.pem`.
+4. Notas de operación para este cambio (y en general para cualquier
+   despliegue detrás de otro proxy/balanceador o con TLS):
+   - **Proxies de confianza**: si este Caddy queda él mismo detrás de otro
+     proxy/LB (no el caso de arriba, donde Caddy termina el TLS), fija
+     `CADDY_TRUSTED_PROXIES` a la CIDR de ese LB (ver `docker/.env.example`;
+     si esa CIDR es pública, añádela también a `UVICORN_FORWARDED_ALLOW_IPS`,
+     el LB debe sobrescribir `X-Forwarded-For` y nunca uses `0.0.0.0/0`)
+     para que Caddy confíe en SU `X-Forwarded-For` en vez de sobrescribirlo
+     con la IP del LB — si no, todos los clientes detrás de ese LB
+     comparten un único cubo de rate-limit. Por defecto (vacío), Caddy
+     reemplaza el `X-Forwarded-For` del cliente con la IP real del peer que
+     conecta; `backend/services/auth/login_throttle.py` depende de que ese
+     comportamiento por defecto se mantenga en el caso single-host.
+   - **IPv6**: publicar el puerto sin especificar familia (`"80:80"`,
+     `"443:443"`) también escucha en `[::]`, pero el proxy *userland* de
+     Docker hace NAT de esas conexiones IPv6 a través del gateway IPv4 del
+     bridge — Caddy ve todo ese tráfico como si viniera de una sola IP, así
+     que esos clientes comparten un único cubo de rate-limit entre sí. Para
+     aislarlos de verdad: activa una red IPv6 nativa en Docker
+     (`enable_ipv6`) o publica solo IPv4 explícitamente
+     (`"0.0.0.0:443:443"`) y resuelve IPv6 en otro front que sí reenvíe la
+     IP real (y entonces aplica el punto anterior sobre
+     `CADDY_TRUSTED_PROXIES`).
+   - **URL pública**: con TLS, `A2A_PUBLIC_BASE_URL` (o, si está vacía,
+     `FRONTEND_URL`) debe ser la URL `https://` pública real
+     (`https://mattinai.cliente.local`), no `http://localhost` — de lo
+     contrario las tarjetas A2A y las URLs de fichero firmadas apuntan al
+     esquema/host equivocado.
+   - **Apagado ordenado**: si cambias `UVICORN_GRACEFUL_SHUTDOWN_SECONDS`
+     (backend/Dockerfile, RB-15), sube también `stop_grace_period` del
+     servicio `backend` en el compose por encima de ese valor (más margen
+     para `close_runtime` y el resto del lifespan) — ver el comentario junto
+     a esa variable en `docker/.env.example` y `docker-compose.yaml`.
 
 ## Utilities aisladas
 
@@ -208,3 +437,58 @@ En [`utilities/`](./utilities/) hay compose files para servicios aislados que no
 ## Para producción seria (K8s)
 
 Este despliegue es para **single-host**: dev local, POCs, pilotos, demos de cliente. Para producción con alta disponibilidad, múltiples réplicas, TLS automático con Let's Encrypt, backups gestionados, etc., usar los Helm charts en el repo `mattinai-infra`.
+
+## OpenSandbox: exposición y mitigaciones
+
+La API de control exige `OPENSANDBOX_API_KEY` (el perfil no arranca sin ella) y
+solo escucha en `mattin-network`; el código de un sandbox no puede alcanzarla
+(verificado, también con egress activo). Lo siguiente es **riesgo aceptado y
+documentado**, no cerrado:
+
+| | Modo por defecto (egress activo) | Modo hardened (sin egress) |
+|---|---|---|
+| Internet / `pip install` | Sí | No (los skills con `pip install` fallan) |
+| Servicios del host vía gateway del bridge (puertos publicados 5432/5433/80, cualquier listener en 0.0.0.0) | Alcanzables | No |
+| LAN / RFC1918 | Alcanzable | No |
+| Exec daemon (`:44772`, sin autenticación) de otros sandboxes | **Alcanzable** | **Alcanzable** |
+| API de control de OpenSandbox | No | No |
+| Docker mínimo | cualquiera | Engine >= 28 |
+
+Consecuencia: usuarios cuyo código corre en el mismo servidor OpenSandbox pueden
+leer/modificar los sandboxes de los demás. Cerrarlo requiere un cambio upstream
+(el exec daemon soporta `X-EXECD-ACCESS-TOKEN`, pero opensandbox-server 0.1.11 no
+lo configura). Arranque sin API key (solo desarrollo): `OPENSANDBOX_INSECURE_SERVER=YES` solo
+no basta (un `.env` antiguo lo traía): hace falta además `OPENSANDBOX_ALLOW_INSECURE_DEV=1`,
+y el servidor registra un ERROR en cada arranque. El nivel de log del servidor es
+`OPENSANDBOX_LOG_LEVEL` (INFO por defecto; DEBUG puede registrar payloads proxied).
+
+Nunca publiques el puerto 8080 de `opensandbox` en 0.0.0.0: verificado que un
+puerto publicado así es alcanzable desde un sandbox vía el gateway del bridge
+(en modo por defecto), y la ruta `/sandboxes/{id}/proxy/...` no exige API key.
+Un publish solo en `127.0.0.1` no fue alcanzable desde sandboxes.
+
+Mitigaciones recomendadas:
+
+1. **Modo hardened:** `docker compose -f docker-compose.yaml -f docker-compose.sandbox-hardened.yaml --profile opensandbox up -d`
+   (o `COMPOSE_FILE=docker-compose.yaml:docker-compose.sandbox-hardened.yaml` en `.env`).
+   Al cambiar de modo hay que recrear la red: `docker compose --profile opensandbox down` y volver a `up -d`.
+2. **Firewall del host (cadena `DOCKER-USER`)** si necesitas egress a internet.
+   Ejemplo (sustituye `SBX` por la subred de la red de sandboxes, p. ej.
+   `docker network inspect docker_sandbox-workloads -f '{{(index .IPAM.Config 0).Subnet}}'`;
+   las reglas no persisten al reiniciar, usa tu gestor de firewall):
+   ```bash
+   SBX=172.24.0.0/16
+   # NO EJECUTADO/PROBADO: ejemplo orientativo. `-I DOCKER-USER 2` (abajo) asume que
+   # la regla 1 es este ACCEPT, insertado justo antes; si cambias el orden, revisa los índices.
+   # permitir respuestas y tráfico dentro del propio bridge (server <-> sandboxes)
+   iptables -I DOCKER-USER -s $SBX -d $SBX -j ACCEPT
+   # bloquear sandbox -> RFC1918, CGNAT y link-local (LAN, otros bridges, metadata)
+   for N in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16; do
+     iptables -I DOCKER-USER 2 -s $SBX -d $N -j DROP
+   done
+   # bloquear sandbox -> servicios del propio host (tráfico INPUT hacia el gateway del bridge)
+   iptables -I INPUT -s $SBX -j DROP
+   ```
+   El resto (internet) sigue permitido. No cierra el acceso entre sandboxes.
+3. **Un servidor OpenSandbox por límite de confianza** (cada uno con su
+   `SANDBOX_NETWORK_NAME`, p. ej. un stack por cliente/App sensible).

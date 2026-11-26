@@ -8,8 +8,6 @@ export interface ClientConfig {
   branding: BrandingConfig;
   api?: ApiConfig;
   navigation?: NavigationConfig;
-  features?: FeatureConfig;
-  homePage?: React.ComponentType; // Allow client to override home page
 }
 
 export interface ThemeConfig {
@@ -52,27 +50,6 @@ export interface BrandingConfig {
   headerTitle?: string;
 }
 
-export interface ExtraRoute {
-  path: string;
-  element: React.ReactNode;
-  name?: string;
-  protected?: boolean;
-  adminOnly?: boolean;  // Requires admin privileges (is_admin === true)
-}
-
-export interface FeatureConfig {
-  enabledModules?: string[];
-  customPages?: CustomPage[];
-  extraRoutes?: ExtraRoute[];
-}
-
-export interface CustomPage {
-  path: string;
-  component: React.ComponentType;
-  name: string;
-  protected?: boolean;
-}
-
 export interface MCPConfig {
   config_id: number;
   name: string;
@@ -87,6 +64,70 @@ export interface Skill {
   description?: string;
   content?: string;
   created_at: string;
+  display_name?: string;
+  is_system?: boolean;
+  is_enabled?: boolean;
+  is_frozen?: boolean;
+  source?: 'yaml' | 'admin';
+  file_count?: number;
+  frontmatter?: Record<string, unknown>;
+  allowed_tools?: string[];
+  runtime?: string;
+  bootstrap_script_path?: string;
+  runtime_options?: Record<string, unknown>;
+  files?: SkillFileInfo[];
+}
+
+export interface SkillFileInfo {
+  path: string;
+  media_type?: string;
+  size_bytes: number;
+  checksum_sha256?: string;
+  is_text: boolean;
+}
+
+// Claude Code plugin import (step_035/036) — see backend/schemas/skill_schemas.py
+export type ClaudePluginSkillStatus = 'imported' | 'skipped' | 'failed';
+
+export interface ClaudePluginSkillResult {
+  name: string;
+  status: ClaudePluginSkillStatus;
+  reason?: string | null;
+  skill_id?: number | null;
+  bootstrap_script_path?: string | null;
+  runtime?: string | null;
+  has_bootstrap: boolean;
+}
+
+export interface ClaudePluginImportResult {
+  skills: ClaudePluginSkillResult[];
+  imported_count: number;
+  skipped_count: number;
+  failed_count: number;
+}
+
+export type MiddlewareType =
+  | 'summarization'
+  | 'model_call_limit'
+  | 'tool_call_limit'
+  | 'pii'
+  | 'human_in_the_loop'
+  | 'guardrails';
+
+export interface Middleware {
+  middleware_id: number;
+  name: string;
+  description?: string;
+  middleware_type: MiddlewareType;
+  config?: Record<string, any> | null;
+  created_at?: string | null;
+}
+
+export interface MiddlewarePayload {
+  name: string;
+  description?: string;
+  middleware_type: MiddlewareType;
+  config: Record<string, any> | null;
 }
 
 // MCP Server types - for exposing agents as MCP tools
@@ -187,7 +228,6 @@ export interface NavigationItem {
   editorOnly?: boolean;  // Only shown to editors and admins (not viewers)
   saasOnly?: boolean;  // Only shown when deployment_mode === 'saas'
   children?: NavigationItem[];  // Renders as a collapsible group in the sidebar
-  enterpriseFeature?: string;  // Capability key — shows [EE] badge + upgrade page link when not enabled
 }
 
 export interface NavigationConfig {
@@ -199,34 +239,4 @@ export interface NavigationConfig {
   custom?: NavigationItem[];
 }
 
-// New extensible navigation types
-export interface NavigationOverride {
-  path: string;
-  name?: string;
-  icon?: React.ReactNode;
-  section?: string;
-  protected?: boolean;
-  adminOnly?: boolean;
-  hidden?: boolean; // Hide this navigation item
-}
-
-export interface NavigationAdditions {
-  mainFeatures?: NavigationItem[];
-  appNavigation?: NavigationItem[];
-  settingsNavigation?: NavigationItem[];
-  settings?: NavigationItem[];
-  admin?: NavigationItem[];
-  custom?: NavigationItem[];
-}
-
-export interface ExtensibleNavigationConfig {
-  // Add new navigation items
-  add?: NavigationAdditions;
-  // Override existing navigation items
-  override?: NavigationOverride[];
-  // Remove navigation items by path
-  remove?: string[];
-}
-
-// Re-export LibraryConfig from LibraryConfig.ts
-export type { LibraryConfig } from './LibraryConfig';
+export type { AppConfig, OrganizationConfig } from './AppConfig';

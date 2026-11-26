@@ -1,7 +1,6 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres
     environment:
       POSTGRES_DB: ${DATABASE_NAME:-mattin_ai}
       POSTGRES_USER: ${DATABASE_USER:-mattin}
@@ -21,12 +20,16 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: mattin-qdrant
     volumes:
       - qdrant-data:/qdrant/storage
     environment:
       QDRANT__SERVICE__GRPC_PORT: "6334"
       QDRANT__LOG_LEVEL: INFO
+      # Enables Qdrant's own API key check so the QDRANT_API_KEY the backend
+      # sends (see backend service env below) is actually enforced server-side.
+      # Empty by default (no auth) to avoid breaking existing deployments that
+      # don't set QDRANT_API_KEY in .env.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
     networks:
       - mattin-network
     healthcheck:
@@ -42,7 +45,6 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
-    container_name: mattin-backend
     environment:
       SQLALCHEMY_DATABASE_URI: postgresql://${DATABASE_USER:-mattin}:${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set in .env}@postgres:5432/${DATABASE_NAME:-mattin_ai}
       DATABASE_HOST: postgres
@@ -50,6 +52,11 @@ services:
       DATABASE_USER: ${DATABASE_USER:-mattin}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set in .env}
       DATABASE_NAME: ${DATABASE_NAME:-mattin_ai}
+      # DBOS uses the same Postgres instance; its tables live in the dbos schema.
+      # Override this with a dedicated logical database in production if desired.
+      DBOS_DATABASE_URL: ${DBOS_DATABASE_URL:-}
+      DBOS_ENABLED: ${DBOS_ENABLED:-true}
+      AICT_MIN_SCHEDULE_INTERVAL_SECONDS: ${AICT_MIN_SCHEDULE_INTERVAL_SECONDS:-60}
 
       AICT_LOGIN: ${AICT_LOGIN:-LOCAL}
       # Set AUTH_COOKIE_SECURE=false for local HTTP testing (no TLS); keep true
@@ -82,9 +89,159 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+
+      # Agent turns and human approvals (see docker/.env.example)
+      AICT_AGENT_RUN_TIMEOUT_SECONDS: ${AICT_AGENT_RUN_TIMEOUT_SECONDS:-600}
+      # Client-side timeout of embedding requests (OpenAI, MistralAI, HuggingFace, Ollama, Bedrock), seconds.
+      AICT_EMBEDDING_REQUEST_TIMEOUT_SECONDS: ${AICT_EMBEDDING_REQUEST_TIMEOUT_SECONDS:-120}
+      # Graph-step limits of one turn: agents, and the App Chat (which also retrieves, loads skills and runs code).
+      AICT_AGENT_RECURSION_LIMIT: ${AICT_AGENT_RECURSION_LIMIT:-50}
+      AICT_CHAT_RECURSION_LIMIT: ${AICT_CHAT_RECURSION_LIMIT:-100}
+      # App Chat attachments: total indexing time per turn (s, 0 = unlimited) and files per turn (0 = unlimited).
+      ATTACHMENT_INDEXING_TURN_BUDGET_S: ${ATTACHMENT_INDEXING_TURN_BUDGET_S:-120}
+      CHAT_MAX_FILES_PER_TURN: ${CHAT_MAX_FILES_PER_TURN:-10}
+      HITL_MAX_APPROVAL_TTL_SECONDS: ${HITL_MAX_APPROVAL_TTL_SECONDS:-604800}
+      HITL_EXPIRY_SWEEP_SECONDS: ${HITL_EXPIRY_SWEEP_SECONDS:-60}
+
+      # ----------------------------------------------------------------------
+      # Pool de procesos uvicorn (ver docker/.env.example para la explicación
+      # completa de cada una; backend/Dockerfile las consume en el CMD).
+      # These were previously documented-only (.env.example) but never
+      # actually reached the container — docker-compose.yaml has no
+      # `env_file:` for backend, only this explicit `environment:` list, so a
+      # var only takes effect once it is listed here (step_021).
+      # ----------------------------------------------------------------------
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      UVICORN_LIMIT_CONCURRENCY: ${UVICORN_LIMIT_CONCURRENCY:-100}
+      # Pools de conexiones a Postgres, POR worker (ver .env.example).
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_ASYNC_POOL_SIZE: ${DB_ASYNC_POOL_SIZE:-5}
+      DB_ASYNC_MAX_OVERFLOW: ${DB_ASYNC_MAX_OVERFLOW:-5}
+      CHECKPOINTER_POOL_MIN: ${CHECKPOINTER_POOL_MIN:-2}
+      CHECKPOINTER_POOL_MAX: ${CHECKPOINTER_POOL_MAX:-10}
+      DBOS_SYS_DB_POOL_SIZE: ${DBOS_SYS_DB_POOL_SIZE:-}
+      # RB-15: ventana de apagado ordenado tras SIGTERM (debe quedar por
+      # debajo de `stop_grace_period` menos el timeout interno de
+      # close_runtime, ver ese comentario más abajo en este mismo servicio).
+      UVICORN_GRACEFUL_SHUTDOWN_SECONDS: ${UVICORN_GRACEFUL_SHUTDOWN_SECONDS:-20}
+      # RB-9/RB-16: NUNCA '*'. Por defecto, el rango RFC1918 completo — ver el
+      # comentario junto al CMD en backend/Dockerfile para el modelo de
+      # confianza completo (backend:8000 nunca se publica al host; solo
+      # Caddy, en la práctica, usa esta red para llegar a él) y por qué ya no
+      # fijamos una subred concreta (chocaba con multi-entorno local y con
+      # cualquier daemon Docker cuyo pool por defecto cae en 172.16/12).
+      UVICORN_FORWARDED_ALLOW_IPS: ${UVICORN_FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+
+      # ----------------------------------------------------------------------
+      # A2A (Agent2Agent protocol) server — ver docker/.env.example para la
+      # tabla completa con comentarios; fuente de verdad del código (y de
+      # estos mismos defaults, que la reflejan, no al revés):
+      # backend/utils/a2a_config.py (AD-15), backend/services/rate_limit_service.py
+      # (limitador de descubrimiento) y backend/utils/security.py (TTL de URLs
+      # firmadas). Todas opcionales: sin definir, el backend usa los defaults
+      # de ese módulo.
+      # ----------------------------------------------------------------------
+      A2A_ENABLED: ${A2A_ENABLED:-true}
+      A2A_ENABLE_V0_3_COMPAT: ${A2A_ENABLE_V0_3_COMPAT:-true}
+      A2A_ROOT_AGENT: ${A2A_ROOT_AGENT:-}
+      # Vacío por defecto: cae a FRONTEND_URL (arriba) y, si tampoco está,
+      # al Host header de la petición entrante (inseguro para tarjetas
+      # cacheadas detrás de un proxy no confiable — fijar esto en producción).
+      A2A_PUBLIC_BASE_URL: ${A2A_PUBLIC_BASE_URL:-}
+      A2A_DISCOVERY_RATE_LIMIT_PER_MINUTE: ${A2A_DISCOVERY_RATE_LIMIT_PER_MINUTE:-60}
+      A2A_DISCOVERY_MAX_TRACKED_KEYS: ${A2A_DISCOVERY_MAX_TRACKED_KEYS:-100000}
+      A2A_DISCOVERY_OVERFLOW_MULTIPLIER: ${A2A_DISCOVERY_OVERFLOW_MULTIPLIER:-100}
+      A2A_RPC_PREAUTH_RATE_LIMIT_PER_MINUTE: ${A2A_RPC_PREAUTH_RATE_LIMIT_PER_MINUTE:-300}
+      A2A_MAX_REQUEST_MB: ${A2A_MAX_REQUEST_MB:-32}
+      A2A_NON_SEND_MAX_BODY_BYTES: ${A2A_NON_SEND_MAX_BODY_BYTES:-65536}
+      A2A_MAX_FILE_MB: ${A2A_MAX_FILE_MB:-10}
+      A2A_INLINE_FILE_MAX_BYTES: ${A2A_INLINE_FILE_MAX_BYTES:-5242880}
+      A2A_FILE_URL_TTL_SECONDS: ${A2A_FILE_URL_TTL_SECONDS:-3600}
+      A2A_FILE_URL_MAX_TTL_SECONDS: ${A2A_FILE_URL_MAX_TTL_SECONDS:-86400}
+      A2A_URI_FETCH_TIMEOUT_SECONDS: ${A2A_URI_FETCH_TIMEOUT_SECONDS:-15}
+      A2A_MAX_PARTS: ${A2A_MAX_PARTS:-64}
+      A2A_MAX_FILE_PARTS: ${A2A_MAX_FILE_PARTS:-10}
+      A2A_TASK_RETENTION_DAYS: ${A2A_TASK_RETENTION_DAYS:-30}
+      A2A_TASK_TIMEOUT_SECONDS: ${A2A_TASK_TIMEOUT_SECONDS:-900}
+      A2A_TURN_MAX_SECONDS: ${A2A_TURN_MAX_SECONDS:-900}
+      A2A_SWEEP_INTERVAL_SECONDS: ${A2A_SWEEP_INTERVAL_SECONDS:-600}
+      A2A_EVENT_RETENTION_MINUTES: ${A2A_EVENT_RETENTION_MINUTES:-15}
+      A2A_EVENT_POLL_SECONDS: ${A2A_EVENT_POLL_SECONDS:-0.5}
+      A2A_STREAM_COALESCE_MS: ${A2A_STREAM_COALESCE_MS:-250}
+      A2A_KEEPALIVE_SECONDS: ${A2A_KEEPALIVE_SECONDS:-1.0}
+      A2A_PURGE_GRACE_SECONDS: ${A2A_PURGE_GRACE_SECONDS:-5}
+      A2A_STREAM_MAX_SECONDS: ${A2A_STREAM_MAX_SECONDS:-1800}
+      A2A_STREAM_LIVENESS_SECONDS: ${A2A_STREAM_LIVENESS_SECONDS:-5.0}
+      A2A_MAX_CONCURRENT_STREAMS_PER_APP: ${A2A_MAX_CONCURRENT_STREAMS_PER_APP:-10}
+      A2A_MAX_CONCURRENT_STREAMS_PER_KEY: ${A2A_MAX_CONCURRENT_STREAMS_PER_KEY:-5}
+      A2A_MAX_CONCURRENT_STREAMS_WORKER: ${A2A_MAX_CONCURRENT_STREAMS_WORKER:-40}
+      A2A_STATUS_UPDATES: ${A2A_STATUS_UPDATES:-false}
+      A2A_SDK_DEBUG: ${A2A_SDK_DEBUG:-false}
+      ALEMBIC_LOCK_TIMEOUT: ${ALEMBIC_LOCK_TIMEOUT:-5s}
+
+      # Sandbox provider (IT-2). Default must be a provider actually registered
+      # in backend/tools/sandbox/factory.py (opensandbox/daytona/e2b) — 'subprocess'
+      # was removed and is no longer a valid provider name.
+      SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-opensandbox}
+      SANDBOX_ALLOWED_PROVIDERS: ${SANDBOX_ALLOWED_PROVIDERS:-opensandbox,daytona,e2b}
+      # See docker/.env.example for the SSRF trade-off this controls — the
+      # "Test Connection" probe and the save-time endpoint check both refuse
+      # loopback/link-local/private targets by default, which also blocks
+      # OPENSANDBOX_DOMAIN below when it's an internal Docker service name.
+      SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE: ${SANDBOX_TEST_CONNECTION_ALLOW_PRIVATE:-false}
+      OPENSANDBOX_DOMAIN: ${OPENSANDBOX_DOMAIN:-opensandbox:8080}
+      OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
+      # Defaults to our published GHCR image at the same IMAGE_TAG as
+      # backend/frontend (see the opensandbox/mattin-code-interpreter services
+      # below) so `docker compose pull` is enough — no local build required.
+      OPENSANDBOX_CODE_INTERPRETER_IMAGE: ${OPENSANDBOX_CODE_INTERPRETER_IMAGE:-ghcr.io/lksnext-ai-lab/mattinai-code-interpreter:${IMAGE_TAG:-develop}}
+      DAYTONA_API_KEY: ${DAYTONA_API_KEY:-}
+      DAYTONA_API_URL: ${DAYTONA_API_URL:-}
+      DAYTONA_TARGET: ${DAYTONA_TARGET:-}
+      DAYTONA_IMAGE: ${DAYTONA_IMAGE:-}
+      DAYTONA_SNAPSHOT: ${DAYTONA_SNAPSHOT:-}
+      DAYTONA_WORKSPACE: ${DAYTONA_WORKSPACE:-workspace}
+      DAYTONA_SUPPORTED_LANGUAGES: ${DAYTONA_SUPPORTED_LANGUAGES:-python,bash}
+      DAYTONA_AUTO_STOP_INTERVAL: ${DAYTONA_AUTO_STOP_INTERVAL:-2}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      E2B_TEMPLATE: ${E2B_TEMPLATE:-}
+      E2B_WORKSPACE: ${E2B_WORKSPACE:-/home/user/workspace}
+      E2B_SUPPORTED_LANGUAGES: ${E2B_SUPPORTED_LANGUAGES:-python,javascript,bash}
+      E2B_ALLOW_INTERNET_ACCESS: ${E2B_ALLOW_INTERNET_ACCESS:-true}
+      SANDBOX_CREATE_TIMEOUT_S: ${SANDBOX_CREATE_TIMEOUT_S:-60}
+      SANDBOX_DEFAULT_TIMEOUT_S: ${SANDBOX_DEFAULT_TIMEOUT_S:-30}
+      SANDBOX_SESSION_TTL_H: ${SANDBOX_SESSION_TTL_H:-2}
+      SANDBOX_IDLE_TIMEOUT_S: ${SANDBOX_IDLE_TIMEOUT_S:-120}
+      SANDBOX_REAPER_INTERVAL_S: ${SANDBOX_REAPER_INTERVAL_S:-30}
+      SANDBOX_MAX_EXECUTIONS_PER_TURN: ${SANDBOX_MAX_EXECUTIONS_PER_TURN:-5}
+      # Max output files pulled from a sandbox per turn (0 = unlimited).
+      SANDBOX_PULL_MAX_FILES: ${SANDBOX_PULL_MAX_FILES:-20}
+      # Max size of one pulled output file in bytes (0 = unlimited).
+      SANDBOX_PULL_MAX_FILE_BYTES: ${SANDBOX_PULL_MAX_FILE_BYTES:-52428800}
+      # Max total bytes pulled per turn (0 = unlimited).
+      SANDBOX_PULL_MAX_TOTAL_BYTES: ${SANDBOX_PULL_MAX_TOTAL_BYTES:-104857600}
+      # Overall time budget of one turn's output pull, seconds.
+      SANDBOX_PULL_TIME_BUDGET_S: ${SANDBOX_PULL_TIME_BUDGET_S:-20}
+      # Output pulls allowed to run at once, process-wide.
+      SANDBOX_PULL_MAX_CONCURRENT: ${SANDBOX_PULL_MAX_CONCURRENT:-2}
+      # Live sandbox sessions per user, App Chat only (0 = unlimited).
+      SANDBOX_MAX_SESSIONS_PER_USER: ${SANDBOX_MAX_SESSIONS_PER_USER:-3}
+      # Live sandbox sessions per App, App Chat only (0 = unlimited).
+      SANDBOX_MAX_SESSIONS_PER_APP: ${SANDBOX_MAX_SESSIONS_PER_APP:-10}
+      # App Chat only: ceiling of one Bash call, seconds.
+      SANDBOX_CHAT_BASH_MAX_TIMEOUT_S: ${SANDBOX_CHAT_BASH_MAX_TIMEOUT_S:-60}
+      SANDBOX_EVICT_MIN_IDLE_S: ${SANDBOX_EVICT_MIN_IDLE_S:-60}
+      OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE: ${OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE:-4}
+      OPENSANDBOX_SUPPORTED_LANGUAGES: ${OPENSANDBOX_SUPPORTED_LANGUAGES:-python,bash}
     volumes:
-      - ../backend/data:/aict_backend/data
-      - ../backend/logs:/aict_backend/logs
+      # Por defecto bind mount al repo — comportamiento histórico, intacto para
+      # los despliegues de cliente ya existentes.
+      # En multi-entorno local se apunta al volumen nombrado (BACKEND_DATA=backend-data),
+      # que Compose prefija con el project name: cada entorno tiene sus propios
+      # ficheros de repositorios en vez de compartir un único directorio del host.
+      - ${BACKEND_DATA:-../backend/data}:/aict_backend/data
+      - ${BACKEND_LOGS:-../backend/logs}:/aict_backend/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,6 +250,24 @@ services:
     networks:
       - mattin-network
     restart: unless-stopped
+    # fix round 1, LOW: the exec'd uvicorn (backend/Dockerfile) is PID 1 and
+    # receives SIGTERM directly (RB-15), but a plain process that is PID 1
+    # does not reap zombie processes the way an init system would, and
+    # uvicorn's own multi-worker supervisor forks child worker processes.
+    # `init: true` runs Docker's built-in tini as the real PID 1, which
+    # forwards signals (including SIGTERM) to uvicorn and reaps zombies —
+    # verified in the step_021 smoke test that `docker stop` still runs the
+    # full FastAPI lifespan shutdown with this enabled.
+    init: true
+    # RB-15: debe superar UVICORN_GRACEFUL_SHUTDOWN_SECONDS (default 20s) más
+    # el timeout interno de close_runtime (10s fijo,
+    # backend/services/a2a_server/runtime.py) más margen para el resto de
+    # pasos del lifespan (DBOS, crawl/file-cleanup/SharePoint workers,
+    # checkpointer, LangSmith flush — ver backend/main.py). Si Docker mata
+    # con SIGKILL antes de que uvicorn complete su propio apagado, el
+    # lifespan `shutdown` nunca corre y las tareas A2A en curso de este
+    # worker quedan sin marcarse como FAILED (RB-1).
+    stop_grace_period: 45s
 
   frontend:
     image: ghcr.io/lksnext-ai-lab/mattinai-frontend:${IMAGE_TAG:-develop}
@@ -101,7 +276,6 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_API_BASE_URL: ""
-    container_name: mattin-frontend
     environment:
       # SPA and API are same-origin behind Caddy, so the API base is the public
       # FRONTEND_URL. (Empty here would make ConfigService fall back to its
@@ -119,16 +293,141 @@ services:
       - mattin-network
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # OpenSandbox — isolated code execution server (IT-2)
+  # Runs on the internal Docker network only; no port is exposed to the host.
+  # Enable by setting SANDBOX_DEFAULT_PROVIDER=opensandbox in .env.
+  #
+  # Image is published to GHCR (see .github/workflows/opensandbox-ci.yml), same
+  # as backend/frontend: `docker compose --profile opensandbox pull && up -d`
+  # is enough in any environment, no need to build locally. `build:` below
+  # stays only as a local-dev override (`--build`).
+  #
+  # SECURITY — read before changing anything here (see also sandbox.toml).
+  # Spawned sandbox containers run untrusted (LLM-generated) code. Topology:
+  #   - mattin-network: where `backend` reaches the control-plane API
+  #     (opensandbox:8080). The API listens ONLY on this address
+  #     (docker/opensandbox/entrypoint.py) and requires OPENSANDBOX_API_KEY.
+  #   - sandbox-workloads: the network the spawned sandboxes run on. The server
+  #     is attached to it only so it can proxy exec/file calls INTO the
+  #     sandboxes (use_server_proxy=true in opensandbox_provider.py); it does
+  #     not listen there, so code in a sandbox cannot call the control plane
+  #     (list/create/delete sandboxes, nor the API-key-exempt
+  #     /sandboxes/{id}/proxy route that reaches other sandboxes' exec daemons).
+  #   - EGRESS (default: ALLOWED, so skills can `pip install`). In the default
+  #     mode sandbox code can reach: the internet; the Docker host through the
+  #     bridge gateway IP (every host service listening on 0.0.0.0; published
+  #     container ports such as 5432/5433 included); the LAN / RFC1918 ranges;
+  #     and the exec daemon (:44772, unauthenticated) of every other sandbox on
+  #     the same network. It still cannot reach the control-plane API.
+  #     Mitigations, in order: (1) hardened mode, deny egress and host access:
+  #       docker compose -f docker-compose.yaml -f docker-compose.sandbox-hardened.yaml \
+  #         --profile opensandbox up -d     (Docker Engine >= 28; breaks pip install)
+  #     (2) host firewall (DOCKER-USER) rules, see docker/README.md; (3) one
+  #     OpenSandbox server per trust boundary (own SANDBOX_NETWORK_NAME).
+  #   - Sandbox-to-sandbox exec-daemon access is NOT closed in any mode (the
+  #     server needs the same L2 path; icc=false would cut it). Closing it needs
+  #     an upstream per-sandbox exec-daemon token (execd supports
+  #     X-EXECD-ACCESS-TOKEN, opensandbox-server 0.1.11 never sets it).
+  #     Accepted risk: users whose code runs on the same server can read and
+  #     tamper with each other's sandboxes.
+  #   - NEVER publish port 8080 of this service on the host: a host published
+  #     port is reachable from sandboxes through the gateway in the default mode.
+  #   - The Docker socket is mounted here (root-equivalent on the host), so the
+  #     control plane must stay unreachable from sandboxes: that is what the
+  #     points above guarantee.
+  # The service REFUSES TO START without OPENSANDBOX_API_KEY: the preflight
+  # service makes `docker compose --profile opensandbox up` fail with a clear
+  # message and entrypoint.py re-checks. OPENSANDBOX_INSECURE_SERVER=YES is a
+  # dev-only override, off by default.
+  # ---------------------------------------------------------------------------
+  opensandbox-preflight:
+    image: ghcr.io/lksnext-ai-lab/mattinai-opensandbox-server:${IMAGE_TAG:-develop}
+    entrypoint: ["/usr/local/bin/opensandbox-entrypoint", "--check"]
+    environment:
+      OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
+      OPENSANDBOX_INSECURE_SERVER: ${OPENSANDBOX_INSECURE_SERVER:-}
+      OPENSANDBOX_ALLOW_INSECURE_DEV: ${OPENSANDBOX_ALLOW_INSECURE_DEV:-}
+      OPENSANDBOX_LOG_LEVEL: ${OPENSANDBOX_LOG_LEVEL:-INFO}
+      SANDBOX_NETWORK_NAME: ${SANDBOX_NETWORK_NAME:-docker_sandbox-workloads}
+    network_mode: none
+    restart: "no"
+    profiles:
+      - opensandbox
+
+  opensandbox:
+    image: ghcr.io/lksnext-ai-lab/mattinai-opensandbox-server:${IMAGE_TAG:-develop}
+    build:
+      context: ./opensandbox
+      dockerfile: Dockerfile
+      args:
+        OPENSANDBOX_SERVER_VERSION: ${OPENSANDBOX_SERVER_VERSION:-0.1.11}
+    command: ["--config", "/etc/opensandbox/sandbox.toml"]
+    environment:
+      SANDBOX_CONFIG_PATH: /etc/opensandbox/sandbox.toml
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # Required: entrypoint.py refuses to start with an empty key.
+      OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-}
+      # Dev-only, OFF by default: YES tolerates an empty OPENSANDBOX_API_KEY.
+      OPENSANDBOX_INSECURE_SERVER: ${OPENSANDBOX_INSECURE_SERVER:-}
+      # Also required to run without a key (see entrypoint.py); dev only.
+      OPENSANDBOX_ALLOW_INSECURE_DEV: ${OPENSANDBOX_ALLOW_INSECURE_DEV:-}
+      OPENSANDBOX_LOG_LEVEL: ${OPENSANDBOX_LOG_LEVEL:-INFO}
+      # Rendered into sandbox.toml [docker].network_mode; must equal the
+      # `name:` of the sandbox-workloads network below.
+      SANDBOX_NETWORK_NAME: ${SANDBOX_NETWORK_NAME:-docker_sandbox-workloads}
+    depends_on:
+      opensandbox-preflight:
+        condition: service_completed_successfully
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./opensandbox/sandbox.toml:/etc/opensandbox/sandbox.toml:ro
+      - opensandbox-data:/var/lib/opensandbox
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - mattin-network
+      - sandbox-workloads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://$$(cat /run/opensandbox/bind_host):8080/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    profiles:
+      - opensandbox
+
+  # ---------------------------------------------------------------------------
+  # mattin-code-interpreter — custom sandbox container image builder.
+  # Extends opensandbox/code-interpreter:v1.0.2 with a tail wrapper that
+  # starts Jupyter before execd connects, fixing the opensandbox entrypoint
+  # override bug. Published to GHCR (see .github/workflows/opensandbox-ci.yml)
+  # at the same IMAGE_TAG as the other services, so `docker compose pull` fetches
+  # it directly — this service's `build:` only matters when you `--build` for
+  # local dev. Either way it exits immediately after the image is available
+  # locally; the opensandbox server references it via OPENSANDBOX_CODE_INTERPRETER_IMAGE
+  # (backend env above) when spawning sandboxes.
+  # ---------------------------------------------------------------------------
+  mattin-code-interpreter:
+    image: ghcr.io/lksnext-ai-lab/mattinai-code-interpreter:${IMAGE_TAG:-develop}
+    build:
+      context: ./opensandbox/code-interpreter
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/true"]
+    restart: no
+    profiles:
+      - opensandbox
+
   db_test:
     image: pgvector/pgvector:pg17
-    container_name: mattin-postgres-test
     environment:
       POSTGRES_DB: ${TEST_DB_NAME:-test_db}
       POSTGRES_USER: ${TEST_DB_USER:-test_user}
       POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:-test_pass}  # pragma: allowlist secret
       POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
     ports:
-      - "5433:5432"
+      - "${TEST_DB_PORT:-5433}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     networks:
@@ -143,9 +442,32 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: mattin-caddy
     ports:
       - "${HTTP_PORT:-80}:80"
+    environment:
+      # RB-9/RB-16 (step_021): the A2A route's own request-body ceiling. See
+      # docker/Caddyfile for how it's used (`{$VAR:default}` interpolation) —
+      # this compose default mirrors the Caddyfile's own fallback, so the
+      # container always receives a concrete, non-empty value even when
+      # unset in .env (an empty-but-set env var would NOT fall back to the
+      # Caddyfile's inline default, it would make `max_size` empty and
+      # invalid). There is deliberately no read-body *timeout* variable here
+      # (fix round 1, C1) — see docker/Caddyfile's comment on the @a2a block.
+      # Headroom above A2A_MAX_REQUEST_MB (backend default 32MB) for the
+      # base64 encoding of inline FileParts plus the JSON-RPC envelope; keep
+      # this in sync if you raise A2A_MAX_REQUEST_MB. The backend's own cap
+      # (read_body_capped, utils/a2a_config.py) is the authoritative,
+      # precise one — this is only a blunt perimeter guard.
+      A2A_CADDY_MAX_REQUEST_BODY: ${A2A_CADDY_MAX_REQUEST_BODY:-40MB}
+      # Optional: trusted reverse-proxy/LB CIDR(s) in FRONT of Caddy
+      # (space-separated), only needed if this Caddy instance is itself
+      # behind another proxy/load balancer — NOT the default single-host
+      # deployment. See docker/Caddyfile's top comment and
+      # docker/.env.example for the full write-up. Empty by default, which
+      # keeps Caddy's default behaviour (replace client X-Forwarded-For with
+      # the real peer address) — verified with `caddy validate` to parse
+      # identically to omitting the directive.
+      CADDY_TRUSTED_PROXIES: ${CADDY_TRUSTED_PROXIES:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -159,10 +481,39 @@ services:
 
 networks:
   mattin-network:
+    # fix round 1 (H1/M1): no fixed `ipam.config` subnet here on purpose —
+    # pinning one forced Compose to recreate this network (and therefore
+    # restart every attached container) on any config change, collided with
+    # running more than one Mattin stack on the same host at once, and could
+    # collide with a host whose Docker daemon's own default address pool
+    # already uses part of 172.16/12. uvicorn's `--forwarded-allow-ips`
+    # (backend/Dockerfile) instead trusts the whole RFC1918 range by default,
+    # which doesn't need this network's subnet to be deterministic.
     driver: bridge
+  # Isolated network for spawned OpenSandbox sandbox containers (the ones that
+  # actually run LLM-generated code). It carries no route to backend,
+  # postgres, qdrant, caddy, or frontend. Only opensandbox itself is
+  # dual-homed onto it (see opensandbox service comment above) so its
+  # server-proxy exec/file path works; the server does NOT listen on this
+  # network (entrypoint.py binds the API to its mattin-network address), so
+  # sandbox code cannot reach the control plane.
+  # The network name is rendered into sandbox.toml [docker].network_mode by
+  # entrypoint.py from SANDBOX_NETWORK_NAME, so a second stack only needs its
+  # own SANDBOX_NETWORK_NAME (no copy of sandbox.toml any more).
+  sandbox-workloads:
+    name: ${SANDBOX_NETWORK_NAME:-docker_sandbox-workloads}
+    driver: bridge
+    # Default: plain bridge with NAT egress (works on any Docker Engine).
+    # Hardened opt-in (no internet, no host/LAN access): add the override file
+    #   -f docker-compose.yaml -f docker-compose.sandbox-hardened.yaml
+    # (or COMPOSE_FILE in .env). It needs Docker Engine >= 28 and the network
+    # must be recreated when switching modes. See docker/README.md.
 
 volumes:
   postgres-data:
+  backend-data:
+  backend-logs:
   qdrant-data:
+  opensandbox-data:
   caddy-data:
   caddy-config:

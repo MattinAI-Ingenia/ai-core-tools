@@ -1,4 +1,5 @@
 import React, { useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 
 /**
  * Interface defining the structure of a tab item
@@ -6,7 +7,12 @@ import React, { useRef, useEffect } from 'react';
 export interface TabItem {
   id: string;
   label: string;
-  icon?: string;
+  icon?: React.ReactNode;
+  description?: string;
+  /** When true, the tab is shown but cannot be activated (e.g. "save first"). */
+  disabled?: boolean;
+  /** Tooltip/accessible hint shown when the tab is disabled. */
+  disabledReason?: string;
 }
 
 /**
@@ -46,6 +52,7 @@ export function Tabs({
   onChange,
   className = ''
 }: Readonly<TabsProps>): React.ReactElement {
+  const { t } = useTranslation('common');
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -69,13 +76,23 @@ export function Tabs({
       e.preventDefault();
     }
 
+    // Skip disabled tabs so arrow-key navigation never lands on one.
     if (nextIndex !== null) {
-      const nextTabId = tabs[nextIndex].id;
-      onChange(nextTabId);
+      let attempts = 0;
+      while (tabs[nextIndex]?.disabled && attempts < tabs.length) {
+        nextIndex = e.key === 'ArrowLeft'
+          ? (nextIndex - 1 + tabs.length) % tabs.length
+          : (nextIndex + 1) % tabs.length;
+        attempts += 1;
+      }
+      if (tabs[nextIndex]?.disabled) return;
+
+      const targetIndex = nextIndex;
+      onChange(tabs[targetIndex].id);
 
       // Focus the newly selected tab for keyboard navigation UX
       setTimeout(() => {
-        tabRefs.current[nextIndex]?.focus();
+        tabRefs.current[targetIndex]?.focus();
       }, 0);
     }
   };
@@ -91,43 +108,68 @@ export function Tabs({
   }, [activeTab, tabs]);
 
   return (
-    <div className={`border-b border-gray-200 ${className}`}>
+    <div className={`border-b border-line dark:border-line-dark ${className}`}>
       <div
         ref={tabListRef}
         role="tablist"
-        className="flex flex-wrap sm:flex-nowrap overflow-x-auto scrollbar-hide"
-        aria-label="Tab navigation"
+        className="flex flex-nowrap overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        aria-label={t('tabs.navigation')}
       >
         {tabs.map((tab, index) => {
           const isActive = tab.id === activeTab;
+          const isDisabled = !!tab.disabled;
+          const disabledReasonId = `${tab.id}-disabled-reason`;
+          let tabStateClasses: string;
+          if (isDisabled) {
+            tabStateClasses = 'cursor-not-allowed text-fg-tertiary dark:text-fg-tertiary-dark';
+          } else if (isActive) {
+            tabStateClasses = 'text-fg-primary dark:text-fg-dark  border-b-2  border-fg text-fg dark:border-fg-dark';
+          } else {
+            tabStateClasses = 'border-transparent text-fg-secondary hover:text-fg-primary dark:text-fg-secondary-dark dark:hover:text-fg-primary-dark';
+          }
 
           return (
-            <button
-              key={tab.id}
-              type="button"
-              ref={(el) => {
-                tabRefs.current[index] = el;
-              }}
-              role="tab"
-              aria-selected={isActive}
-              aria-controls={`${tab.id}-panel`}
-              tabIndex={isActive ? 0 : -1}
-              onClick={() => onChange(tab.id)}
-              onKeyDown={(e) => handleKeyDown(e, index)}
-              className={`
-                px-4 py-3 text-sm font-medium whitespace-nowrap
-                transition-colors duration-200
-                focus:outline-none
-                ${
-                  isActive
-                    ? 'border-b-2 border-blue-600 text-blue-600'
-                    : 'text-gray-600 hover:text-gray-800'
-                }
-              `}
-            >
-              {tab.icon && <span className="mr-2">{tab.icon}</span>}
-              {tab.label}
-            </button>
+            <React.Fragment key={tab.id}>
+              <button
+                type="button"
+                id={tab.id}
+                ref={(el) => {
+                  tabRefs.current[index] = el;
+                }}
+                role="tab"
+                aria-selected={isActive}
+                aria-controls={`${tab.id}-panel`}
+                aria-disabled={isDisabled}
+                aria-describedby={isDisabled && tab.disabledReason ? disabledReasonId : undefined}
+                title={isDisabled ? tab.disabledReason : undefined}
+                tabIndex={isActive ? 0 : -1}
+                onClick={() => {
+                  if (!isDisabled) onChange(tab.id);
+                }}
+                onKeyDown={(e) => handleKeyDown(e, index)}
+                className={`
+                  px-4 py-3 text-sm font-medium whitespace-nowrap
+                  transition-colors duration-200
+                  focus:outline-none
+                  ${tabStateClasses}
+                `}
+              >
+                <span className="flex items-center justify-center gap-2">
+                  {tab.icon}
+                  {tab.label}
+                </span>
+                {tab.description && (
+                  <span className="mt-1 block text-xs font-normal text-fg-secondary dark:text-fg-secondary-dark">
+                    {tab.description}
+                  </span>
+                )}
+              </button>
+              {isDisabled && tab.disabledReason && (
+                <span id={disabledReasonId} className="sr-only">
+                  {tab.disabledReason}
+                </span>
+              )}
+            </React.Fragment>
           );
         })}
       </div>

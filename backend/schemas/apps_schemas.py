@@ -1,17 +1,17 @@
-from pydantic import BaseModel, ConfigDict, field_validator
-from typing import Literal, Optional, Dict, Any
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from typing import Any, Dict, List, Literal, Optional
 from datetime import datetime
 
-class AppUsageStatsSchema(BaseModel):
+from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
+
+class AgentRateLimitUsageSchema(BaseModel):
+    agent_id: int
     usage_percentage: float
-    stress_level: str  # "low", "moderate", "high", "critical", "unlimited"
     current_usage: int
     limit: int
     remaining: int
     reset_in_seconds: int
     is_over_limit: bool
-    
-    model_config = ConfigDict(from_attributes=True)
 
 
 class AppListItemSchema(BaseModel):
@@ -32,8 +32,9 @@ class AppListItemSchema(BaseModel):
     domain_count: int = 0
     silo_count: int = 0
     collaborator_count: int = 0
-    usage_stats: Optional[AppUsageStatsSchema] = None
     is_frozen: bool = False
+    # Version of the App image (GET /apps/{id}/image?v=...); null = no image, show initials.
+    image_updated_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -58,6 +59,12 @@ class AppDetailSchema(BaseModel):
     collaborator_count: int = 0
     onboarding_dismissed: bool = False
     is_frozen: bool = False
+    default_sandbox_service_id: Optional[int] = None  # None = inherit system default
+    default_embedding_service_id: Optional[int] = None  # None = Chat attachments are not indexed
+    chat_code_interpreter_enabled: bool = False  # App Chat code interpreter opt-in
+    image_updated_at: Optional[datetime] = None  # App image version; null = no image
+    # Deprecated / retired services behind the App's defaults (GET only).
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,11 +95,23 @@ class UpdateAppSchema(BaseModel):
     max_file_size_mb: Optional[int] = 0
     agent_cors_origins: Optional[str] = None
     enable_openai_api: bool = False
+    default_sandbox_service_id: Optional[int] = None  # None = inherit system default
+    # Omitted keeps the current value; an explicit null clears it (``model_fields_set``). Deliberately unlike
+    # ``default_sandbox_service_id`` above, where omitting it resets it to the system default.
+    default_embedding_service_id: Optional[int] = None
+    # Omitted keeps the current value. It is a boolean, not nullable: an explicit null is a 422.
+    chat_code_interpreter_enabled: Optional[bool] = None
 
     @field_validator("langsmith_api_key", mode="before")
     @classmethod
     def _strip_credentials(cls, v):
         return _strip_if_string(v)
+
+    @model_validator(mode="after")
+    def _switch_is_not_nullable(self):
+        if "chat_code_interpreter_enabled" in self.model_fields_set and self.chat_code_interpreter_enabled is None:
+            raise ValueError("chat_code_interpreter_enabled cannot be null")
+        return self
 
 
 class LangSmithTestRequestSchema(BaseModel):
@@ -117,6 +136,8 @@ class LangSmithTestResponseSchema(BaseModel):
     project_name: Optional[str] = None
     source: Optional[Literal["app", "env", "request"]] = None
 
+
+# ==================== COLLABORATION SCHEMAS ====================
 
 class CollaboratorListItemSchema(BaseModel):
     id: int
@@ -191,6 +212,4 @@ class OwnershipAcceptResponse(BaseModel):
     previous_owner_id: int
 
     model_config = ConfigDict(from_attributes=True)
-
-
 

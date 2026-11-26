@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Mattin AI** is an extensible AI toolbox platform providing LLM integration, RAG systems, vector databases, and AI agent management. The project uses a **FastAPI backend** and a **React frontend** distributed as a reusable npm library for client-specific deployments.
+**Mattin AI** is an extensible AI toolbox platform providing LLM integration, RAG systems, vector databases, and AI agent management. The project uses a **FastAPI backend** and a **React frontend**, both shipped as Docker images.
 
 **Tech Stack**: Python 3.11+, FastAPI, SQLAlchemy, Alembic, LangChain/LangGraph, PostgreSQL + pgvector, React 18, TypeScript, Vite, Tailwind CSS.
 
@@ -39,9 +39,10 @@ alembic downgrade -1                            # Always test rollback
 cd frontend
 npm install
 npm run dev                     # Dev server (port 5173)
-npm run build:lib               # Build reusable library package
-npm run build:lib:watch         # Watch mode for library development
+npm run build                   # Production build (tsc + vite)
 npm run lint
+npm test                        # node --test + type check + Vitest render tests (frontend/tests/ui)
+npm run test:ui                 # Vitest + Testing Library only
 ```
 
 ### Testing
@@ -83,14 +84,35 @@ docker compose down -v           # Parar y borrar volúmenes
 - Acceso: `http://localhost/` en local, `http://<ip-servidor>/` en cliente.
 - Swagger: `/docs/internal` y `/docs/public` desde el mismo origen.
 - Utilities aisladas (p. ej. Qdrant + web UI): `docker/utilities/`.
-
-### Client Project Management
-
-```bash
-./deploy/scripts/create-client-project.sh <client-name>
-./deploy/scripts/update-client.sh <client-name>
-./deploy/scripts/publish-library.sh
-```
+- **Sandbox / Code Interpreter**: el servicio `opensandbox` (monta el socket de Docker,
+  así que está deshabilitado por defecto) NO arranca con el `docker compose up -d` de
+  arriba — está detrás de un profile, igual que `db_test`. Para habilitar el code
+  interpreter de los agentes:
+  ```bash
+  docker compose --profile opensandbox up -d --build
+  ```
+  `SANDBOX_DEFAULT_PROVIDER=opensandbox` viene activo por defecto en `.env.example`
+  aunque no se use este profile; sin el profile, cualquier agente con
+  `enable_code_interpreter=true` degrada el code interpreter para ese turno en vez de
+  fallar (no hace falta desactivar el provider por defecto si no vas a usar el
+  sandbox). Igual con un `SandboxService` retirado (fin de servicio alcanzado, el del
+  agente o el default de la app): el code interpreter se desactiva ese turno, sin
+  fallback a otro provider y con WARNING en el log (hasta 3 idénticos por turno);
+  test connection y cleanup siguen funcionando. `SANDBOX_DEFAULT_PROVIDER` no tiene
+  ciclo de vida. En el App Chat con el provider por defecto del
+  sistema y sin el profile, las tools de código se ofrecen igualmente: la primera
+  llamada devuelve un error y la respuesta sigue sin código (`turn_config.code_interpreter`
+  = false en `/messages`; true en el evento `metadata` temprano de `/stream`).
+  - `OPENSANDBOX_API_KEY` es **obligatoria** con el profile (>= 32 caracteres; un
+    preflight hace fallar `up` sin ella). `OPENSANDBOX_INSECURE_SERVER=YES` solo ya
+    no basta: el escape de desarrollo exige además `OPENSANDBOX_ALLOW_INSECURE_DEV=1`.
+    La API solo escucha en la red de control. Ruptura para despliegues existentes:
+    definir la key, quitar `OPENSANDBOX_INSECURE_SERVER`, `docker compose --profile
+    opensandbox down` + `up -d` (red recreada, sandboxes vivos perdidos).
+  - Override opcional `docker-compose.sandbox-hardened.yaml` (sin egress, Docker
+    Engine >= 28, rompe `pip install`): `COMPOSE_FILE=docker-compose.yaml:docker-compose.sandbox-hardened.yaml`.
+    Por defecto hay egress y los sandboxes de un mismo servidor OpenSandbox no están
+    aislados entre sí. Detalle: `docker/README.md` y `docs/ai/app-chat.md#code-interpreter`.
 
 ## Domain Model
 
@@ -106,7 +128,8 @@ docker compose down -v           # Parar y borrar volúmenes
 | **OCRAgent** | Agent subclass (STI via `type` column). Dual-LLM: vision model for scanned pages + text model for structuring output. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom). |
 | **EmbeddingService** | Embedding model config for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
-| **Skill** | Reusable markdown prompt block attached to agents (M:N). Injected into system prompt at execution time. |
+| **Skill** | Reusable markdown prompt block attached to agents (M:N). Injected into system prompt at execution time. App-scoped or system-wide (`app_id IS NULL`). |
+| **SkillFile** | One bundled package file (script, reference, template) for a Skill, text/bytes split with checksum. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Dynamically generates a Pydantic model at runtime. |
 | **Conversation** | Chat session. Memory state in LangGraph's PostgreSQL checkpointer; metadata in Conversation table. |
 | **Silo** | Vector store container. Maps to a collection (`silo_{id}`) in PGVector or Qdrant (configurable per silo). |
@@ -148,7 +171,8 @@ backend/
 ├── routers/
 │   ├── internal/        # Frontend-backend API (session/OIDC auth)
 │   ├── public/v1/       # External API (X-API-KEY auth, rate limiting)
-│   └── mcp/             # JSON-RPC 2.0 MCP endpoints (X-API-KEY auth)
+│   ├── mcp/             # JSON-RPC 2.0 MCP endpoints (X-API-KEY auth)
+│   └── a2a_server/      # /a2a/v1/... Agent2Agent JSON-RPC endpoints (X-API-KEY auth, opt-in per agent)
 ├── tools/               # AI/LLM integration utilities
 │   ├── ai/              # LLM provider implementations
 │   └── vector_store_factory.py  # Factory for PGVector/Qdrant backends
@@ -170,13 +194,13 @@ User message + optional files
   → agent_chain.ainvoke() → apply OutputParser → persist conversation → return response
 ```
 
-**Memory**: `AsyncPostgresSaver` in PostgreSQL. Config per agent: `has_memory`, `memory_max_messages` (default 20), `memory_max_tokens` (default 4000), `memory_summarize_threshold` (default 10).
+**Memory**: `AsyncPostgresSaver` in PostgreSQL, on when `has_memory`. History is summarized by `SummarizationMiddleware` (`backend/tools/middleware/factory.py`): an attached summarization middleware, or the defaults — trigger at 85% of the model's input window capped at 150k tokens (32k if the model has no profile), keep the last 20 messages, summarize the whole older history. The legacy `memory_max_messages` / `memory_max_tokens` / `memory_summarize_threshold` columns are kept for export/import but no longer used.
 
 ### Frontend (`frontend/src/`)
 
 ```
 frontend/src/
-├── core/                # ExtensibleBaseApp.tsx — library entry point
+├── core/                # AppRoot.tsx — app shell (routing, providers, layout)
 ├── components/          # Reusable UI (ui/, forms/, playground/)
 ├── pages/               # Page-level components
 ├── services/            # api.ts — centralized HTTP client
@@ -189,15 +213,63 @@ frontend/src/
 - Global state via React Context (`useUser()`, `useTheme()`)
 - Route protection via `ProtectedRoute` and `AdminRoute` components
 
-### Client Projects (`clients/<name>/`)
 
-Frontend-only projects consuming `@lksnext/ai-core-tools-base`. All customization via `src/config/clientConfig.ts` (theme, branding, auth config, API URL, feature flags, custom routes). Never modify the base library for client-specific features.
+### Frontend UI Design Rules
 
-When base library changes:
-```bash
-cd frontend && npm run build:lib
-cd ../clients/<client-name> && npm install
-```
+The Mattin AI frontend redesign is complete.
+
+The current frontend implementation is the visual reference
+for all future UI development.
+
+These rules apply whenever creating or modifying React
+components, pages, forms, or other visual elements,
+including new features and maintenance tasks.
+
+Before implementing UI changes:
+
+1. Read and follow: `.github/instructions/frontend-design.instructions.md`
+2. Check `frontend/src/components/ui` for existing reusable components before creating new ones.
+3. Reuse existing components, props, and variants whenever possible.
+4. Respect the current design tokens, CSS variables, Tailwind CSS 3 conventions, responsive behavior, and light/dark themes.
+5. Preserve existing functionality and visual consistency.
+6. Do not redesign unrelated components or pages.
+7. Follow the project's Storybook conventions for reusable UI components.
+
+These instructions are mandatory for frontend UI tasks,
+not only for explicit redesign requests.
+
+
+### Frontend Internationalization (i18n)
+
+All user-facing text in React components must follow
+the existing project internationalization conventions.
+
+Before creating or modifying UI components, read and follow
+the internationalization rules defined in:
+
+`.github/instructions/react-conventions.instructions.md`
+
+In particular:
+- Reuse existing translation keys whenever possible.
+- Do not create duplicate translation keys.
+- Add new keys to all supported locale files.
+- Never hardcode user-facing text in JSX or TypeScript.
+- Follow the existing i18n naming conventions and namespaces.
+- Verify internationalization before completing UI changes.
+
+Supported languages: `en` (source of truth), `es` and `eu` (Basque), one
+`frontend/src/i18n/locales/<lang>/common.json` each, registered in
+`frontend/src/i18n/index.ts`. Every new key goes into all three with the same
+key path and the same `{{placeholders}}`; `frontend/tests/I18nLocales.test.cjs`
+(run by `npm test`) fails on any difference. Basque (`eu`) conventions: "zu"
+register, technical product terms kept as in `en` (MCP, RAG, embedding, sandbox,
+middleware, API, SharePoint, Teams), plural keys `_one`/`_other`. Never leave
+English or Spanish text in `eu`. Adding a new language = new locale folder +
+`supportedLanguages`/`languageNames`/`resources` in `index.ts` + extend the
+parity test.
+
+These rules apply to all frontend UI development tasks,
+not only explicit translation requests.
 
 ## Environment Configuration
 
@@ -245,6 +317,31 @@ ENTRA_CLIENT_SECRET=...
 # Optional
 LANGSMITH_TRACING=false
 LANGSMITH_API_KEY=...
+
+# A2A (Agent2Agent protocol) server — all optional, defaults shown.
+# Full reference (every variable, deployment runbook): docs/ai/a2a-integration.md
+A2A_ENABLED=true                # Kill switch: false -> every /a2a/* route 404s
+A2A_PUBLIC_BASE_URL=             # Base for absolute card/RPC URLs; falls back to FRONTEND_URL, then Host header
+A2A_MAX_REQUEST_MB=32            # SendMessage/SendStreamingMessage body cap
+A2A_TASK_RETENTION_DAYS=30       # How long terminal tasks/events/links are kept
+
+# Sandbox / code interpreter (all optional, defaults shown). Session caps are per backend process (0 = unlimited);
+# the execution budget is per turn (0 refuses every execution); pull caps are per turn (0 = no cap)
+# Full reference: docs/reference/environment-variables.md#sandbox-providers
+# OPENSANDBOX_API_KEY=            # MANDATORY with the docker `opensandbox` profile (>= 32 chars)
+# SANDBOX_MAX_SESSIONS_PER_USER=3     # App Chat only
+# SANDBOX_MAX_SESSIONS_PER_APP=10     # App Chat only
+# SANDBOX_EVICT_MIN_IDLE_S=60
+# SANDBOX_CHAT_BASH_MAX_TIMEOUT_S=60
+# SANDBOX_MAX_EXECUTIONS_PER_TURN=5
+# SANDBOX_PULL_MAX_FILES=20           # output files, all agents + Chat
+# SANDBOX_PULL_MAX_FILE_BYTES=52428800
+# SANDBOX_PULL_MAX_TOTAL_BYTES=104857600
+# SANDBOX_PULL_TIME_BUDGET_S=20
+# SANDBOX_PULL_MAX_CONCURRENT=2
+
+# Embedding clients — optional, default shown
+# AICT_EMBEDDING_REQUEST_TIMEOUT_SECONDS=120   # Client-side timeout (OpenAI, MistralAI, HuggingFace, Ollama, Bedrock; not Azure AI/Google)
 ```
 
 ### Frontend `.env`
@@ -269,19 +366,25 @@ Local dev: port 5173 (Vite). Docker: port 3000.
 - **Cascade deletion**: `AppService.delete_app()` performs ordered deletion across all entity types
 - **LangSmith tracing**: Per-App key in `App.langsmith_api_key` (project = app name) with optional global env-var fallback (`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` + `LANGSMITH_PROJECT`). Validated via `POST /internal/apps/{id}/langsmith/test`. Central module: `backend/tools/langsmith_config.py`
 - **MCP dual-role**: Mattin AI acts as both MCP server (exposing agents) and MCP client (consuming external tool servers)
+- **A2A server**: per-agent opt-in (`Agent.a2a_enabled`) Agent2Agent protocol v1.0 JSON-RPC server at `/a2a/v1/apps/{app_slug}/agents/{agent_id}` (`backend/services/a2a_server/`, `backend/routers/a2a_server/`). The SDK's task/event tables are Alembic-managed under `a2a_*` names and bound through `backend/services/a2a_server/sdk_models.py` + `storage.py` (narrow injection of three private SDK attributes); the `a2a-sdk` dependency is an **exact pin**, re-validated by `tests/integration/a2a_server/test_sdk_contract.py` on every bump. By convention no module under `backend/` is ever named `a2a` (it would shadow the SDK package on `sys.path`). Full reference: `docs/ai/a2a-integration.md`
+- **No plugin system**: SharePoint sync (`services/sharepoint/`) and agent metrics (`services/agent_metrics_collector.py` + `agent_metrics_recorder.py`, `routers/internal/metrics.py`, dashboards at platform/app/agent level) are regular core features — the former open-core `mattin.plugins` entry-point loader and `/internal/capabilities` endpoint were removed
+- **Scheduled tasks** (DBOS, `backend/scheduling/`): runs execute as the task, not a user (`task_user_context`) — conversations carry `Conversation.scheduled_task_id` with `user_id` NULL, system-LLM usage bills the creator, metrics use the `SCHEDULED_TASK` channel. Each run stores its answer + produced files (`scheduled_task_run.output_text/output_files`); only the newest `max_runs_retained` (default 10) are kept. Deleting a task (or its agent/app) removes its schedule, conversations, history, files and temp silos. Published tasks (`marketplace_visibility`) show read-only results in the marketplace's "Scheduled tasks" tab
+- **Video/audio indexing lives on the silo**: `Silo.transcription_service_id` (required for media) and `Silo.video_ai_service_id` (optional, `supports_video`) drive `tasks/media_tasks.py`. Repositories still configure them in their form, but the values are stored on the repository's silo (`Repository.transcription_service_id` is a read-through property). `Media.silo_id` is always set; `Media.repository_id` is NULL for media sent straight to a silo: the public `POST /silos/{id}/docs/index-file` queues video/audio (202 + `media_id`; status at `GET /silos/{id}/media/{media_id}` while processing — once indexed its file and row are deleted, only the vectors remain, like documents), plus `POST /silos/{id}/media/youtube`; caller `metadata` is attached to every chunk (`Media.custom_metadata`)
+- **Human approvals** (`services/hitl_approval_service.py`): every human-in-the-loop pause gets a `hitl_approval` row (owner, actions by `action_id` = tool call id, `expires_at`). Only the requester (same user / same API key) can answer, once (row compare-and-set); answers go through `/internal/approvals/{id}/…` and `/public/v1/app/{app}/approvals/{id}/decisions`. Unanswered approvals are rejected — never approved — by `services/hitl_expiry_worker.py`; non-interactive channels (MCP, scheduled, OpenAI-compatible, platform chatbot) reject the pause on the spot. Changing an agent's approval rules cancels its pending approvals
+- **Service end-of-service**: AI, embedding and sandbox services have optional `end_of_service_at` (00:00 UTC) + `deprecation_notice` (<=1000 chars; migration `svceos001`). Status active/deprecated/retired is computed at read time (`utils/service_lifecycle.py`; window = setting `service_end_of_service_warning_days`, default 30, env `AICT_SYSTEM_SERVICE_END_OF_SERVICE_WARNING_DAYS`, 0 = no deprecated phase). Retired services are blocked where LLM/transcription/video/embedding clients are built (`ensure_service_active`): HTTP 409 `SERVICE_RETIRED`, SSE `service_retired`, MCP `isError`, A2A failed task, scheduled runs failed without retry. Test connection, delete and cleanup are never blocked; retired services can't be newly selected. Omitted lifecycle field on update keeps its value, explicit null clears it. "Used by" endpoints + `POST /internal/apps/{id}/ai-services/{id}/move-agents` (`expected_count` mismatch -> 409, nothing changes). Internal API only exposes `lifecycle_warnings`. Known limits: silo chunk-neighbour view blocked on retired silos; sandbox export/import is 501. Docs: `docs/guides/chat-bot/kb-ai-services.md`
+- **System skills**: platform-wide skills (`Skill.app_id IS NULL`) are seeded create-if-missing from `backend/system_defaults.yaml`'s `skills:` block on every backend startup, in all deployment modes (self-managed and SaaS alike)
+- **App Chat**: a "Chat" menu entry per App (min role VIEWER) where the user picks AI service, silo, skills and MCP configs per message (`/internal/apps/{app_id}/chat`, `backend/services/internal_chat/`, `routers/internal/internal_chat.py`). It runs on a hidden internal agent per App (`Agent.kind='internal_chat'`, created on first use, never exposed in lists, export, marketplace, MCP, A2A or the public API, 404 on every other surface) that is never modified: each turn builds a frozen `ResolvedChatConfig`. Everything is per user (conversations, files, defaults, threads; no one else can read them). No per-agent approval/PII rules; chat failures log/record only class names + a correlation id. One turn at a time per conversation (a second one gets 409 `CONVERSATION_BUSY`). Attachments are indexed into a hidden per-conversation temp silo with `App.default_embedding_service_id`, else sent whole; temp silos are hidden from every silo/repository/output-parser list and 404 by id. Administrators can now update App settings, except the LangSmith key (owner only). Tables `conversation_turn`/`chat_user_default`/`chat_conversation_state`, migrations `ichat001`..`ichat004` (`ichat004` = `Conversation` indexes; the `ichat001` downgrade deletes Chat data and purges temp repos/silos/vectors/checkpoints (by exact thread id; threads without a Conversation row stay), refuses if a temp silo is in Qdrant, leaves files under `data/tmp` - roll back = downgrade first, then old image). Step limit: `AICT_CHAT_RECURSION_LIMIT` (100; Chat only, ~33 tool-using model calls at ~3 steps each) / `AICT_AGENT_RECURSION_LIMIT` (50, ~16); exhausted -> 422 `STEP_LIMIT_REACHED` / SSE `step_limit_reached`, conversation kept. Per-turn `CHAT_MAX_FILES_PER_TURN` (10; 422 `TOO_MANY_FILES` on both routes), `ATTACHMENT_INDEXING_TURN_BUDGET_S` (120). Removing/leaving an App deletes that member's Chat data of that App. Privacy is DB/API-level only (admins/operators control endpoints, MCP URLs, skills, LangSmith); accepted: the Chat always has `download_url_to_workspace` (prompt-injection exfiltration); image links are signed `/static` URLs without expiry. Hide the entry with `navigation: { remove: ['/apps/:appId/chat'] }` in `clientConfig.ts` (menu only). Playground/public file and chat endpoints now 404 on a `conversation_id` that is not the caller's. **Code interpreter** (opt-in, `App.chat_code_interpreter_enabled`, default false, `ichat003`, changed by ADMINISTRATOR+; hidden agent keeps `enable_code_interpreter=false`, enablement only from the turn config): switch on uses the App default sandbox service (retired -> none, no fallback), else the system default (`SANDBOX_DEFAULT_PROVIDER`); `GET /options` has `code_interpreter {enabled, reason}`, the turn's truth is `turn_config.code_interpreter`. One sandbox per conversation (`conv_{agent}_{conversation}`, destroyed on reset/delete/user deletion), open to every member incl. VIEWER, no approval. Chat-only limits: 3/user and 10/App live sandboxes (per backend process; own idle >= `SANDBOX_EVICT_MIN_IDLE_S` evicted, never another user's), Bash cap 60 s, no background shells; 5 executions per turn (agents' REPL too; shared REPL+Bash in the Chat). Output files (all agents, `services/sandbox_output_pull.py`, `SANDBOX_PULL_*`) are capped; skipped ones become the Chat warning `{kind: "sandbox_output", id: <count>}` / `metadata.outputs_skipped` for agents. Accepted risks (OpenSandbox sandboxes not isolated from each other, default egress, system-default provider charged to the platform, no approval, memory/disk exhaustion by a member): see `docs/ai/app-chat.md#code-interpreter`. Docs: `docs/ai/app-chat.md`, `docs/guides/chat-bot/app-chat.md`
 
 ## Anti-Patterns
 
 - Direct `fetch()` in frontend — use `api.ts`
 - Business logic in routers — belongs in services
 - Raw SQL queries — use SQLAlchemy ORM
-- Modifying base library for client-specific features — use `clientConfig.ts`
 - Skipping migration downgrade tests — always verify rollback works
 - Manual version bumping — use semantic versioning tooling
 
 ## Additional Documentation
 
-- `docs/CLIENT_SETUP_GUIDE.md` — Client project setup
 - `docs/AUTHENTICATION_MIGRATION_GUIDE.md` — Auth system details
 - `docs/EXTERNAL_MCP_SETUP.md` — MCP integration
 - `docs/testing/` — Full testing guide

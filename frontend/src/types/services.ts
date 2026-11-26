@@ -54,9 +54,44 @@ export interface ListProviderModelsResponse {
   readonly requires_manual_input: boolean;
 }
 
-export type ServiceKind = 'ai' | 'embedding';
+export type ServiceKind = 'ai' | 'embedding' | 'sandbox';
 export type ServiceScope = 'app' | 'system';
 export type ServiceWizardMode = 'create' | 'edit-model';
+
+/** Lifecycle status computed by the backend (never recomputed in the browser). */
+export type LifecycleStatus = 'active' | 'deprecated' | 'retired';
+
+/** Read-only lifecycle fields returned on every service. */
+export interface ServiceLifecycleFields {
+  readonly end_of_service_at: string | null;
+  readonly deprecation_notice: string | null;
+  readonly lifecycle_status: LifecycleStatus;
+}
+
+export type ServiceLifecycleWarningKind = 'ai' | 'embedding' | 'sandbox';
+export type ServiceLifecycleWarningRole =
+  | 'llm'
+  | 'ocr_vision'
+  | 'transcription'
+  | 'video'
+  | 'media_embedding'
+  | 'silo_embedding'
+  | 'middleware'
+  | 'embedding'
+  | 'sandbox';
+
+/** Mirrors `ServiceLifecycleWarningSchema` (backend/schemas/service_lifecycle_schemas.py). */
+export interface ServiceLifecycleWarning {
+  readonly service_id: number;
+  readonly service_name: string;
+  readonly kind: ServiceLifecycleWarningKind;
+  readonly role: ServiceLifecycleWarningRole;
+  /** Silo name, middleware name, or "app default". */
+  readonly via?: string | null;
+  readonly lifecycle_status: 'deprecated' | 'retired';
+  readonly end_of_service_at: string;
+  readonly deprecation_notice?: string | null;
+}
 
 /** Shape persisted on create/update — same fields the legacy form sent. */
 export interface ServiceFormData {
@@ -71,10 +106,13 @@ export interface ServiceFormData {
   // via `api_key`; these carry the access key id and region.
   aws_access_key_id?: string;
   aws_region?: string;
+  /** ISO datetime (00:00 UTC of the picked day) or null to clear. Omitted = keep on update. */
+  end_of_service_at?: string | null;
+  deprecation_notice?: string | null;
 }
 
 /** Existing service shape returned by getAIService / getEmbeddingService. */
-export interface ExistingService {
+export interface ExistingService extends Partial<ServiceLifecycleFields> {
   readonly service_id: number;
   readonly name: string;
   readonly provider: string;
@@ -85,4 +123,121 @@ export interface ExistingService {
   readonly api_version?: string;
   readonly aws_access_key_id?: string;
   readonly aws_region?: string;
+}
+
+/**
+ * Shape persisted on create/update for a Sandbox Service. There is no
+ * `model_name` concept — the sandbox providers (OpenSandbox, Daytona, E2B)
+ * expose an isolated code-execution environment, not a language model.
+ * Field names mirror `CreateUpdateSandboxServiceSchema` on the backend
+ * (`backend/schemas/sandbox_service_schemas.py`) exactly so payloads pass
+ * through without renaming.
+ */
+export interface SandboxServiceFormData {
+  name: string;
+  provider: string;
+  api_key: string;
+  base_url: string;
+  // Provider-specific extra_config fields (non-secret).
+  opensandbox_image?: string;
+  daytona_target?: string;
+  daytona_workspace?: string;
+  daytona_cpu?: number;
+  daytona_memory_gb?: number;
+  e2b_template?: string;
+  e2b_workspace?: string;
+  /** ISO datetime (00:00 UTC of the picked day) or null to clear. Omitted = keep on update. */
+  end_of_service_at?: string | null;
+  deprecation_notice?: string | null;
+}
+
+/** Existing sandbox service shape returned by the sandbox service detail endpoints. */
+export interface ExistingSandboxService extends Partial<ServiceLifecycleFields> {
+  readonly service_id: number;
+  readonly name: string;
+  readonly provider: string;
+  readonly api_key: string; // already masked when coming from the backend
+  readonly base_url: string;
+  readonly created_at?: string;
+  readonly is_system?: boolean;
+  readonly needs_api_key?: boolean;
+  readonly opensandbox_image?: string;
+  readonly daytona_target?: string;
+  readonly daytona_workspace?: string;
+  readonly daytona_cpu?: number;
+  readonly daytona_memory_gb?: number;
+  readonly e2b_template?: string;
+  readonly e2b_workspace?: string;
+}
+
+// ==================== "Used by" and bulk move ====================
+
+export type AgentUsageRole =
+  | 'llm'
+  | 'ocr_vision'
+  | 'transcription'
+  | 'video'
+  | 'media_embedding'
+  | 'silo_embedding'
+  | 'sandbox'
+  | 'sandbox_app_default';
+export type SiloUsageRole = 'embedding' | 'transcription' | 'video';
+
+/** Mirrors `ServiceUsageSchema` (backend/schemas/service_lifecycle_schemas.py). `app_name` only in admin views. */
+export interface ServiceUsage {
+  readonly service_id: number;
+  readonly service_name: string;
+  readonly kind: ServiceKind;
+  readonly is_system: boolean;
+  readonly lifecycle_status: LifecycleStatus;
+  readonly end_of_service_at: string | null;
+  readonly deprecation_notice: string | null;
+  readonly agents: readonly {
+    readonly agent_id: number;
+    readonly name: string;
+    readonly roles: readonly AgentUsageRole[];
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly silos: readonly {
+    readonly silo_id: number;
+    readonly name: string;
+    readonly roles: readonly SiloUsageRole[];
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly repositories: readonly {
+    readonly repository_id: number;
+    readonly name: string;
+    readonly silo_id: number;
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly middlewares: readonly {
+    readonly middleware_id: number;
+    readonly name: string;
+    readonly middleware_type: string;
+    readonly agent_ids: readonly number[];
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  readonly scheduled_tasks: readonly {
+    readonly task_id: number;
+    readonly name: string;
+    readonly agent_id: number;
+    readonly app_id: number;
+    readonly app_name?: string | null;
+  }[];
+  /** Sandbox services only: apps that use the service as their default sandbox. */
+  readonly apps_using_as_default?: readonly { readonly app_id: number; readonly app_name: string }[];
+}
+
+export interface MoveAgentsResult {
+  readonly moved_agent_ids: readonly number[];
+  readonly count: number;
+}
+
+export interface MoveSandboxServiceUsageResult {
+  readonly moved_agent_ids: readonly number[];
+  readonly updated_app_ids: readonly number[];
 }

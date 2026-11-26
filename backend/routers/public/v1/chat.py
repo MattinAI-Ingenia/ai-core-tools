@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -26,10 +26,15 @@ from db.database import get_db
 
 from services.agent_execution_service import AgentExecutionService
 from services.agent_streaming_service import AgentStreamingService
+from models.hitl_approval import ApprovalChannel
+from tools.stream_guard import guard_agent_stream
 from services.conversation_service import ConversationService
+from services.chat_attachment_service import ChatAttachmentService
 from services.file_management_service import FileManagementService
+from routers.controls.rate_limit import apply_agent_rate_limit
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = get_logger(__name__)
 
@@ -81,6 +86,7 @@ def _validate_search_params(parsed):
     tags=["Agent Chat"],
     response_model=AgentResponseSchema,
     responses={
+        409: {"description": "A service used by this resource was retired"},
         500: {
             "description": "Agent execution failed",
             "content": {
@@ -97,6 +103,7 @@ async def call_agent(
     message: Annotated[str, Form(..., description="The user message to send to the agent")],
     api_key: Annotated[str, Depends(get_api_key_auth)],
     db: Annotated[Session, Depends(get_db)],
+    response: Response,
     files: Annotated[List[UploadFile], File(description="Optional files to attach (images, PDFs, text files)")] = None,
     file_references: Annotated[Optional[str], Form(description="JSON array of existing file_ids to include. If not provided, all files are included.")] = None,
     search_params: Annotated[Optional[str], Form(description="JSON object with search parameters for silo-based agents")] = None,
@@ -132,6 +139,7 @@ async def call_agent(
     """
     validate_api_key_for_app(app_id, api_key, db)
     agent = validate_agent_ownership(db, agent_id, app_id)
+    apply_agent_rate_limit(agent.app, agent_id, response.headers)
 
     fms = FileManagementService()
     all_file_references: List = []
@@ -141,6 +149,9 @@ async def call_agent(
 
         user_context = create_api_key_user_context(app_id, api_key, user_token=user_token)
 
+        ChatAttachmentService.require_owned_conversation(
+            db, conversation_id, user_context, agent_id, bool(agent.has_memory)
+        )
         all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_file_references,
@@ -159,18 +170,21 @@ async def call_agent(
             user_context=user_context,
             conversation_id=conversation_id,
             db=db,
+            channel=ApprovalChannel.PUBLIC_API,
         )
 
         response_data = AgentResponseSchema(
+            status=result.get("status", "completed"),
             response=result["response"],
             conversation_id=result.get("conversation_id"),
             usage=result["metadata"],
+            pending_approval=result.get("pending_approval"),
         )
 
         logger.info(f"Public API chat request processed for agent {agent_id}, conversation: {result.get('conversation_id')}")
         return response_data
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in public chat endpoint: {str(e)}")
@@ -187,6 +201,7 @@ async def call_agent(
     summary="Call agent (streaming)",
     tags=["Agent Chat"],
     responses={
+        409: {"description": "A service used by this resource was retired"},
         500: {
             "description": "Agent execution failed",
             "content": {
@@ -203,6 +218,7 @@ async def call_agent_stream(
     message: Annotated[str, Form(..., description="The user message to send to the agent")],
     api_key: Annotated[str, Depends(get_api_key_auth)],
     db: Annotated[Session, Depends(get_db)],
+    response: Response,
     files: Annotated[List[UploadFile], File(description="Optional files to attach")] = None,
     file_references: Annotated[Optional[str], Form(description="JSON array of existing file_ids to include")] = None,
     search_params: Annotated[Optional[str], Form(description="JSON object with search parameters")] = None,
@@ -220,14 +236,19 @@ async def call_agent_stream(
     - **tool_start**: A tool invocation has started
     - **tool_end**: A tool invocation has finished
     - **thinking**: Human-readable status message
-    - **done**: Stream complete with full response and generated files
-    - **error**: An error occurred
+    - **hitl_interrupt**: The agent paused for human approval (approval_id, expires_at, actions)
+    - **done**: Stream complete with full response and generated files; ``status`` is
+      ``completed`` or ``requires_approval`` (then answer via ``/approvals/{approval_id}/decisions``)
+    - **error**: An error occurred (``code`` + ``message``)
+
+    While the agent works, SSE comment lines (``: ping``) keep the connection alive.
 
     Supports the same file handling and conversation features as the
     non-streaming `/call` endpoint.
     """
     validate_api_key_for_app(app_id, api_key, db)
     agent = validate_agent_ownership(db, agent_id, app_id)
+    apply_agent_rate_limit(agent.app, agent_id, response.headers)
 
     try:
         parsed_search_params = _validate_search_params(_parse_json_param(search_params, "search_params"))
@@ -236,6 +257,9 @@ async def call_agent_stream(
         user_context = create_api_key_user_context(app_id, api_key, user_token=user_token)
 
         fms = FileManagementService()
+        ChatAttachmentService.require_owned_conversation(
+            db, conversation_id, user_context, agent_id, bool(agent.has_memory)
+        )
         all_file_references = await fms.resolve_chat_files(
             files=files,
             file_reference_ids=parsed_file_references,
@@ -254,13 +278,14 @@ async def call_agent_stream(
             user_context=user_context,
             conversation_id=conversation_id,
             db=db,
+            channel=ApprovalChannel.PUBLIC_API,
         )
 
         # Wrap the upstream generator so ephemeral files uploaded for this
         # turn are removed once the consumer finishes reading (or disconnects).
         async def generator() -> AsyncGenerator[str, None]:
             try:
-                async for chunk in base_generator:
+                async for chunk in guard_agent_stream(base_generator):
                     yield chunk
             finally:
                 # Release the request DB session here: for a StreamingResponse the
@@ -274,13 +299,14 @@ async def call_agent_stream(
             generator(),
             media_type="text/event-stream",
             headers={
+                **response.headers,
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
         )
 
-    except HTTPException:
+    except (HTTPException, ServiceRetiredError):
         raise
     except Exception as e:
         logger.error(f"Error in public streaming chat endpoint: {str(e)}")

@@ -1,3 +1,5 @@
+from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
+from schemas.indexing_schemas import IndexingOptionsSchema, IndexingSettingsInput
 from schemas.media_schemas import MediaResponse
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
@@ -20,6 +22,7 @@ class RepositoryListItemSchema(BaseModel):
     created_at: Optional[datetime] = None
     resource_count: int
     vector_db_type: Optional[str] = None
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -43,11 +46,20 @@ class RepositoryDetailSchema(BaseModel):
     ai_services: List[Dict[str, Any]] = []
     transcription_service_id: Optional[int] = None
     video_ai_service_id: Optional[int] = None
+    # Indexing settings of the repository's silo and what the form can choose from
+    chunk_size: Optional[int] = None
+    chunk_overlap: Optional[int] = None
+    pdf_loader: Optional[str] = None
+    pdf_loader_options: Dict[str, Any] = {}
+    indexing_options: Optional[IndexingOptionsSchema] = None
+    # Recorded failures of the services the repository's silo uses (e.g. a revoked API key)
+    service_warnings: List[str] = []
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
     
     model_config = ConfigDict(from_attributes=True)
 
 
-class CreateRepositorySchema(BaseModel):
+class CreateRepositorySchema(IndexingSettingsInput):
     """Schema for creating a new repository (vector_db_type is settable on creation only)"""
     name: str
     type: Optional[str] = None
@@ -58,7 +70,7 @@ class CreateRepositorySchema(BaseModel):
     video_ai_service_id: Optional[int] = None
 
 
-class UpdateRepositorySchema(BaseModel):
+class UpdateRepositorySchema(IndexingSettingsInput):
     """Schema for updating an existing repository (vector_db_type is immutable after creation)"""
     name: str
     type: Optional[str] = None

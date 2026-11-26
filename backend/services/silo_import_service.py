@@ -2,6 +2,7 @@
 
 from typing import Optional
 from datetime import datetime
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from models.silo import Silo
 from models.embedding_service import EmbeddingService
@@ -17,7 +18,10 @@ from core.export_constants import validate_export_version
 from services.embedding_service_import_service import EmbeddingServiceImportService
 from services.output_parser_import_service import OutputParserImportService
 from repositories.silo_repository import SiloRepository
+from services.silo_service import SiloService
 import logging
+from utils.service_lifecycle import SERVICE_KIND_EMBEDDING, RetiredServiceAssignmentError, ensure_assignable
+from utils.error_handlers import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,43 @@ class SiloImportService:
         self.embedding_service_import = EmbeddingServiceImportService(session)
         self.output_parser_import = OutputParserImportService(session)
 
+    def _ensure_embedding_assignable(
+        self,
+        embedding_service: EmbeddingService,
+        export_data: SiloExportFileSchema,
+        app_id: int,
+        conflict_mode: ConflictMode,
+    ) -> None:
+        """Reject newly assigning a retired embedding service (OVERRIDE may keep the silo's current one)."""
+        current_id = None
+        if conflict_mode == ConflictMode.OVERRIDE:
+            existing_silo = self.get_by_name_and_app(export_data.silo.name, app_id)
+            current_id = existing_silo.embedding_service_id if existing_silo is not None else None
+        try:
+            ensure_assignable(embedding_service, current_id, "embedding_service_id", SERVICE_KIND_EMBEDDING)
+        except RetiredServiceAssignmentError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _find_embedding_service_by_name(self, name: str, app_id: int) -> Optional[EmbeddingService]:
+        """Resolve an embedding service by name: the app's own first, then a system one (app_id NULL).
+
+        Another app's services are never matched; ties resolve to the lowest service_id.
+        """
+        for scope in (EmbeddingService.app_id == app_id, EmbeddingService.app_id.is_(None)):
+            service = (
+                self.session.query(EmbeddingService)
+                .filter(EmbeddingService.name == name, scope)
+                .order_by(EmbeddingService.service_id)
+                .first()
+            )
+            if service is not None:
+                logger.info(
+                    f"Resolved embedding service by name '{name}' -> ID {service.service_id} "
+                    f"({'system' if service.app_id is None else 'app'} service)"
+                )
+                return service
+        return None
+
     def get_by_name_and_app(self, name: str, app_id: int) -> Optional[Silo]:
         """Get Silo by name and app ID.
 
@@ -48,7 +89,7 @@ class SiloImportService:
         """
         return (
             self.session.query(Silo)
-            .filter(Silo.name == name, Silo.app_id == app_id)
+            .filter(Silo.name == name, Silo.app_id == app_id, SiloRepository.visible_clause())
             .first()
         )
 
@@ -130,6 +171,25 @@ class SiloImportService:
             requires_embedding_service_selection=requires_embedding_service_selection,
         )
 
+    @staticmethod
+    def _apply_indexing_settings(silo: Silo, export_silo) -> list[str]:
+        """Copy the exported chunking / PDF loader settings; invalid ones keep the defaults.
+
+        An export from another instance may name a loader this one does not have; the
+        silo is still imported (with defaults) and the summary says so.
+        """
+        settings = {
+            field: getattr(export_silo, field)
+            for field in ("chunk_size", "chunk_overlap", "pdf_loader", "pdf_loader_options")
+            if getattr(export_silo, field, None) is not None
+        }
+        try:
+            SiloService.apply_indexing_settings(silo, settings)
+        except ValidationError as exc:
+            logger.warning("Imported silo keeps default indexing settings: %s", exc)
+            return [f"Indexing settings not applied ({exc}); defaults are used"]
+        return []
+
     def import_silo(
         self,
         export_data: SiloExportFileSchema,
@@ -169,7 +229,12 @@ class SiloImportService:
                 and export_data.silo.embedding_service_name 
                 and export_data.silo.embedding_service_name in embedding_service_id_map
             )
-            if selected_embedding_service_id is None and not has_id_map:
+            resolvable_by_name = (
+                export_data.embedding_service is None
+                and self._find_embedding_service_by_name(export_data.silo.embedding_service_name, app_id)
+                is not None
+            )
+            if selected_embedding_service_id is None and not has_id_map and not resolvable_by_name:
                 raise ValueError(
                     "Embedding service selection required but not provided. "
                     "Please select an existing embedding service to use with this silo."
@@ -192,7 +257,7 @@ class SiloImportService:
                     self.session.query(EmbeddingService)
                     .filter(
                         EmbeddingService.service_id == selected_embedding_service_id,
-                        EmbeddingService.app_id == app_id,
+                        or_(EmbeddingService.app_id == app_id, EmbeddingService.app_id.is_(None)),
                     )
                     .first()
                 )
@@ -201,21 +266,18 @@ class SiloImportService:
                         f"Selected embedding service {selected_embedding_service_id} "
                         f"not found in app {app_id}"
                     )
+                self._ensure_embedding_assignable(embedding_service, export_data, app_id, conflict_mode)
                 embedding_service_id = selected_embedding_service_id
                 logger.info(
                     f"Using selected embedding service '{embedding_service.name}'"
                 )
             # Priority 3: Try to resolve by name (for existing services)
             elif not export_data.embedding_service:
-                existing_service = (
-                    self.session.query(EmbeddingService)
-                    .filter(
-                        EmbeddingService.name == export_data.silo.embedding_service_name,
-                        EmbeddingService.app_id == app_id,
-                    )
-                    .first()
+                existing_service = self._find_embedding_service_by_name(
+                    export_data.silo.embedding_service_name, app_id
                 )
                 if existing_service:
+                    self._ensure_embedding_assignable(existing_service, export_data, app_id, conflict_mode)
                     embedding_service_id = existing_service.service_id
                     logger.info(
                         f"Resolved embedding service by name: '{existing_service.name}'"
@@ -332,6 +394,7 @@ class SiloImportService:
                 existing_silo.metadata_definition_id = metadata_definition_id
                 existing_silo.fixed_metadata = export_data.silo.fixed_metadata
                 existing_silo.description = export_data.silo.description
+                indexing_warnings = self._apply_indexing_settings(existing_silo, export_data.silo)
                 # CRITICAL: Do NOT modify vector collection or vector data!
 
                 self.session.add(existing_silo)
@@ -350,7 +413,7 @@ class SiloImportService:
                     created=False,
                     conflict_detected=True,
                     dependencies_created=dependencies_created,
-                    warnings=["Existing vector data preserved"],
+                    warnings=["Existing vector data preserved", *indexing_warnings],
                     next_steps=[],
                 )
 
@@ -366,6 +429,7 @@ class SiloImportService:
             description=export_data.silo.description,
             status="active",  # Default status
         )
+        indexing_warnings = self._apply_indexing_settings(new_silo, export_data.silo)
 
         self.session.add(new_silo)
         self.session.commit()
@@ -384,7 +448,7 @@ class SiloImportService:
             created=True,
             conflict_detected=existing_silo is not None,
             dependencies_created=dependencies_created,
-            warnings=[],
+            warnings=indexing_warnings,
             next_steps=[
                 "Upload documents to the silo to generate vector embeddings",
                 "Configure embedding service API key if not already set",

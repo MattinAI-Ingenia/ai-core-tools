@@ -12,28 +12,79 @@ Files (PDFs, text) are chunked and indexed directly into the same silo.
 
 import os
 import logging
-from typing import Optional, List, Dict, Any
+import threading
+from contextlib import contextmanager
+from typing import Iterator, Optional, List, Dict, Any
 
 from fastapi import UploadFile, BackgroundTasks
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from models.repository import Repository
+from db.database import engine
+from models.repository import PLAYGROUND_MEDIA_REPO_TYPE, TEMP_REPO_PREFIX, Repository
 from models.media import Media
 from models.agent import Agent
 from services.repository_service import RepositoryService
 from services.media_service import MediaService
 from services.silo_service import SiloService
+from utils.error_handlers import ValidationError
+from utils.service_lifecycle import ServiceRetiredError
 
 logger = logging.getLogger(__name__)
 
-TEMP_REPO_PREFIX = "_playground_"
 
 # File types that should be vectorized instead of injected into context
 VECTORIZABLE_FILE_TYPES = {"pdf", "text"}
+# "document" files whose text is extracted (the rest of the Office family is not)
+VECTORIZABLE_DOCUMENT_EXTENSIONS = {".docx"}
+
+
+def is_vectorizable_file(file_type: Optional[str], filename: Optional[str]) -> bool:
+    """Whether an attached file has extractable text that can be vectorized."""
+    if file_type in VECTORIZABLE_FILE_TYPES:
+        return True
+    ext = os.path.splitext(filename or "")[1].lower()
+    return file_type == "document" and ext in VECTORIZABLE_DOCUMENT_EXTENSIONS
 
 
 def _temp_repo_name(agent_id: int, session_id: str) -> str:
     return f"{TEMP_REPO_PREFIX}{agent_id}_{session_id}"
+
+
+# How long a creator waits for another one that is creating the same conversation's temp repository. Short: the
+# inline playground paths wait on the event loop, and the caller degrades to "not indexed" when it expires.
+_CREATE_LOCK_TIMEOUT = "5s"
+_CREATE_LOCK_WAIT_SECONDS = 5
+# At most this many extra connections are ever checked out for creation locks at once, however many first uploads
+# arrive together: a burst cannot take the whole pool while its sessions already hold one connection each.
+_CREATE_LOCK_CONNECTIONS = threading.BoundedSemaphore(4)
+
+
+class TempSessionGone(Exception):
+    """The conversation no longer binds this session id (deleted or reset while an upload was in flight)."""
+
+
+@contextmanager
+def _temp_repo_creation_lock(app_id: int, agent_id: int, session_id: str) -> Iterator[None]:
+    """Serialise the creation of ONE conversation's temp repository across threads and processes.
+
+    A transaction-scoped advisory lock (``pg_advisory_xact_lock``) keyed by (app, agent, session), taken on a
+    DEDICATED connection: creating the repository commits several times (parser, silo, repository), and a lock owned
+    by the caller's session would be released by the first of those commits, while a competitor could still not see
+    the new repository. The lock lives as long as this context (the connection's transaction is rolled back on exit,
+    which also releases it if anything goes wrong). Waiting is bounded by ``lock_timeout``.
+    """
+    key = f"playground_temp_repo:{app_id}:{agent_id}:{session_id}"
+    if not _CREATE_LOCK_CONNECTIONS.acquire(timeout=_CREATE_LOCK_WAIT_SECONDS):
+        raise TimeoutError("too many temp repositories are being created at once")
+    try:
+        with engine.connect() as lock_conn:
+            lock_conn.execute(text(f"SET LOCAL lock_timeout = '{_CREATE_LOCK_TIMEOUT}'"))
+            lock_conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key})
+            yield
+            lock_conn.rollback()
+    finally:
+        _CREATE_LOCK_CONNECTIONS.release()
 
 
 class PlaygroundMediaService:
@@ -103,8 +154,42 @@ class PlaygroundMediaService:
         return (
             db.query(Repository)
             .filter(Repository.app_id == app_id, Repository.name == name)
+            .order_by(Repository.repository_id)  # deterministic if a race ever left two: the oldest one wins
             .first()
         )
+
+    @staticmethod
+    def _ensure_media_services_active(
+        db: Session,
+        app_id: int,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        embedding_service_id: Optional[int],
+    ) -> None:
+        """Raise ``ServiceRetiredError`` if a media service about to be used is retired.
+
+        The ids can come from the request form, so ownership (the app's own or a system
+        service) is validated first with the generic ownership error; only services the app
+        may use are then checked for retirement, so a foreign id never reveals its lifecycle.
+        A retired own service is a runtime block (409), not a "cannot be newly selected" error.
+        """
+        from repositories.ai_service_repository import AIServiceRepository
+        from repositories.embedding_service_repository import EmbeddingServiceRepository
+        from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, ensure_service_active
+
+        for label, service_id in (
+            ("Transcription service", transcription_service_id),
+            ("Video AI service", video_ai_service_id),
+        ):
+            if service_id:
+                service = AIServiceRepository.get_by_id(db, service_id)
+                if service is None or (service.app_id is not None and service.app_id != app_id):
+                    raise ValidationError(f"{label} {service_id} not found")
+                ensure_service_active(service, SERVICE_KIND_AI)
+        if embedding_service_id:
+            embedding = EmbeddingServiceRepository.get_by_id(db, embedding_service_id)
+            SiloService.ensure_embedding_service_owned(embedding, app_id)
+            ensure_service_active(embedding, SERVICE_KIND_EMBEDDING)
 
     @staticmethod
     def get_or_create_temp_repository(
@@ -124,6 +209,18 @@ class PlaygroundMediaService:
         existing = PlaygroundMediaService.get_temp_repository(
             app_id, agent_id, session_id, db
         )
+        if existing is None:
+            # Two simultaneous uploads of one conversation must not both create it (the second one's repository
+            # would be invisible to every lookup and never cleaned): the loser of the lock re-reads and reuses.
+            with _temp_repo_creation_lock(app_id, agent_id, session_id):
+                existing = PlaygroundMediaService.get_temp_repository(app_id, agent_id, session_id, db)
+                if existing is None:
+                    if not PlaygroundMediaService._session_is_live(app_id, agent_id, session_id, db):
+                        raise TempSessionGone()
+                    return PlaygroundMediaService._create_temp_repository(
+                        app_id, agent_id, session_id, db,
+                        transcription_service_id, video_ai_service_id, embedding_service_id,
+                    )
         if existing:
             # Keep the temp repo in sync with the latest resolved media config
             # (e.g. the agent's transcription/video services were configured
@@ -132,18 +229,25 @@ class PlaygroundMediaService:
             # resolve media services (e.g. file vectorization) pass None and
             # must not wipe an in-flight transcription's service configuration.
             updated = False
-            if (
-                transcription_service_id is not None
-                and existing.transcription_service_id != transcription_service_id
-            ):
-                existing.transcription_service_id = transcription_service_id
-                updated = True
-            if (
-                video_ai_service_id is not None
-                and existing.video_ai_service_id != video_ai_service_id
-            ):
-                existing.video_ai_service_id = video_ai_service_id
-                updated = True
+            silo = existing.silo
+            if silo is not None:
+                PlaygroundMediaService._ensure_media_services_active(
+                    db,
+                    app_id,
+                    transcription_service_id
+                    if transcription_service_id not in (None, silo.transcription_service_id) else None,
+                    video_ai_service_id
+                    if video_ai_service_id not in (None, silo.video_ai_service_id) else None,
+                    None,
+                )
+            if silo is not None and (transcription_service_id is not None or video_ai_service_id is not None):
+                new_t = transcription_service_id or silo.transcription_service_id
+                new_v = video_ai_service_id or silo.video_ai_service_id
+                if (new_t, new_v) != (silo.transcription_service_id, silo.video_ai_service_id):
+                    # Ownership (app or system) and supports_video are validated here; the ids
+                    # come from the request form, so they must not be assigned unchecked.
+                    SiloService.apply_media_services(silo, new_t, new_v, app_id, db)
+                    updated = True
             if updated:
                 db.commit()
                 logger.info(
@@ -155,6 +259,34 @@ class PlaygroundMediaService:
                 )
             return existing
 
+    @staticmethod
+    def _session_is_live(app_id: int, agent_id: int, session_id: str, db: Session) -> bool:
+        """Whether a temp repository may still be created for this session (checked under the creation lock).
+
+        For the hidden App Chat agent the conversation must still exist with THIS session id (a delete or a reset
+        rotates it), otherwise the new repository would be unreachable and never cleaned. Other agents' sessions are
+        not provably tied to a conversation row (marketplace / API flows), so they are not checked.
+        """
+        from models.conversation import Conversation
+
+        kind = db.query(Agent.kind).filter(Agent.agent_id == agent_id, Agent.app_id == app_id).scalar()
+        if kind != "internal_chat":
+            return True
+        return db.query(Conversation.conversation_id).filter(
+            Conversation.agent_id == agent_id, Conversation.session_id == session_id
+        ).first() is not None
+
+    @staticmethod
+    def _create_temp_repository(
+        app_id: int,
+        agent_id: int,
+        session_id: str,
+        db: Session,
+        transcription_service_id: Optional[int],
+        video_ai_service_id: Optional[int],
+        embedding_service_id: Optional[int],
+    ) -> Repository:
+        """Create the temp repository + silo (call under ``_temp_repo_creation_lock``, after a miss)."""
         # Resolve embedding service: explicit request value > the agent's
         # configured media embedding service. There is NO arbitrary app/system
         # fallback — the embedding service is required on the agent so media is
@@ -168,19 +300,23 @@ class PlaygroundMediaService:
                 "the agent's Media Processing configuration before uploading media."
             )
 
+        PlaygroundMediaService._ensure_media_services_active(
+            db, app_id, transcription_service_id, video_ai_service_id, embedding_service_id
+        )
+
         repo = Repository(
             name=_temp_repo_name(agent_id, session_id),
-            type="playground_media",
+            type=PLAYGROUND_MEDIA_REPO_TYPE,
             status="active",
             app_id=app_id,
-            transcription_service_id=transcription_service_id,
-            video_ai_service_id=video_ai_service_id,
         )
 
         created = RepositoryService.create_repository(
             repository=repo,
             embedding_service_id=embedding_service_id,
             db=db,
+            transcription_service_id=transcription_service_id,
+            video_ai_service_id=video_ai_service_id,
         )
         logger.info(
             "Created temp playground repo %s (silo %s) for agent %s session %s",
@@ -393,6 +529,60 @@ class PlaygroundMediaService:
         return []
 
     @staticmethod
+    def _can_use_temp_silo(
+        app_id: int,
+        agent_id: int,
+        session_id: str,
+        db: Session,
+        embedding_service_id: Optional[int],
+    ) -> bool:
+        """Whether the session has (or can create) a temp silo.
+
+        The media embedding service is optional for non-conversational agents:
+        without one (and no temp silo already created) documents are sent in
+        full in the prompt instead of being retrieved via RAG.
+        """
+        if embedding_service_id:
+            return True
+        if PlaygroundMediaService.get_temp_repository(app_id, agent_id, session_id, db):
+            return True
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
+        return bool(getattr(agent, "media_embedding_service_id", None))
+
+    @staticmethod
+    def _index_file_documents(
+        silo_id: int,
+        abs_path: str,
+        filename: str,
+        base_metadata: dict,
+        db: Session,
+    ) -> bool:
+        """Index a file with the proper loaders/chunking; False if it could not be indexed."""
+        if not os.path.exists(abs_path):
+            return False
+        ext = os.path.splitext(filename)[1].lower()
+        try:
+            docs = SiloService.extract_documents_from_file(
+                abs_path, ext, base_metadata, SiloService.indexing_config(silo_id, db)
+            )
+            if not docs:
+                return False
+            SiloService.index_multiple_content(
+                silo_id,
+                [{"content": d.page_content, "metadata": d.metadata} for d in docs],
+                db,
+            )
+            return True
+        except ServiceRetiredError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "File-based extraction failed for %s, falling back to content: %s",
+                filename, exc,
+            )
+            return False
+
+    @staticmethod
     def vectorize_uploaded_file(
         app_id: int,
         agent_id: int,
@@ -423,6 +613,16 @@ class PlaygroundMediaService:
         Returns:
             True if file was successfully vectorized.
         """
+        if not PlaygroundMediaService._can_use_temp_silo(
+            app_id, agent_id, session_id, db, embedding_service_id
+        ):
+            logger.info(
+                "Agent %s has no media embedding service; skipping vectorization of %s",
+                agent_id,
+                filename,
+            )
+            return False
+
         repo = PlaygroundMediaService.get_or_create_temp_repository(
             app_id, agent_id, session_id, db,
             embedding_service_id=embedding_service_id,
@@ -442,29 +642,9 @@ class PlaygroundMediaService:
             "source": "playground_upload",
         }
 
-        docs_indexed = False
-
-        # Try file-based extraction with proper loaders/chunking
-        if file_path:
-            abs_path = os.path.join(tmp_base, file_path)
-            if os.path.exists(abs_path):
-                ext = os.path.splitext(filename)[1].lower()
-                try:
-                    docs = SiloService.extract_documents_from_file(
-                        abs_path, ext, base_metadata
-                    )
-                    if docs:
-                        SiloService.index_multiple_content(
-                            repo.silo_id,
-                            [{"content": d.page_content, "metadata": d.metadata} for d in docs],
-                            db,
-                        )
-                        docs_indexed = True
-                except Exception as exc:
-                    logger.warning(
-                        "File-based extraction failed for %s, falling back to content: %s",
-                        filename, exc,
-                    )
+        docs_indexed = bool(file_path) and PlaygroundMediaService._index_file_documents(
+            repo.silo_id, os.path.join(tmp_base, file_path), filename, base_metadata, db
+        )
 
         # Fallback: use pre-extracted text content
         if not docs_indexed and content:

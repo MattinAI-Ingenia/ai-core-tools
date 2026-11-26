@@ -1,3 +1,4 @@
+import math
 import os
 from dotenv import load_dotenv
 from typing import Optional
@@ -31,7 +32,7 @@ def load_client_config() -> ClientConfig:
 
 CLIENT_CONFIG = load_client_config()
 
-DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URI', 'postgresql://iacoretoolsdev:iacoretoolsdev@localhost:5432/iacoretoolsdev')
+DATABASE_URL = os.getenv('SQLALCHEMY_DATABASE_URI')
 
 # Fails fast at import if SECRET_KEY is absent, too short, or a known weak value.
 SECRET_KEY: str = get_secret_key()
@@ -52,6 +53,8 @@ WEAVIATE_API_KEY = os.getenv('WEAVIATE_API_KEY')
 
 CHROMA_PERSIST_DIR = os.getenv('CHROMA_PERSIST_DIR', './chroma_db')
 
+# MCP Server Configuration
+# Base URL for generating MCP endpoint URLs (e.g., https://your-domain.com)
 MCP_BASE_URL = os.getenv('MCP_BASE_URL', 'http://localhost:8000')
 
 # Cross-encoder reranker (backend/tools/retrieval/strategies/cross_encoder_rerank_strategy.py).
@@ -62,3 +65,160 @@ MCP_BASE_URL = os.getenv('MCP_BASE_URL', 'http://localhost:8000')
 # less-verified multilingual coverage at ~5x the parameter count and latency).
 CROSS_ENCODER_RERANK_MODEL = os.getenv('CROSS_ENCODER_RERANK_MODEL', 'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
 CROSS_ENCODER_RERANK_DEVICE = os.getenv('CROSS_ENCODER_RERANK_DEVICE', 'cpu')
+# ---------------------------------------------------------------------------
+# Sandbox provider configuration (IT-2)
+# ---------------------------------------------------------------------------
+
+# System-wide default provider when an app has no explicit sandbox_provider.
+# Allowed values: 'opensandbox' (self-hosted), 'daytona' (managed SaaS),
+# 'e2b' (managed cloud).
+SANDBOX_DEFAULT_PROVIDER = os.getenv('SANDBOX_DEFAULT_PROVIDER', 'opensandbox').lower()
+
+# Comma-separated list of provider names apps may select in this deployment.
+SANDBOX_ALLOWED_PROVIDERS = [
+    p.strip()
+    for p in os.getenv('SANDBOX_ALLOWED_PROVIDERS', 'opensandbox,daytona,e2b').split(',')
+    if p.strip()
+]
+
+# OpenSandbox server connection.
+OPENSANDBOX_DOMAIN = os.getenv('OPENSANDBOX_DOMAIN', 'localhost:8080')
+OPENSANDBOX_API_KEY = os.getenv('OPENSANDBOX_API_KEY', '')
+OPENSANDBOX_CODE_INTERPRETER_IMAGE = os.getenv(
+    'OPENSANDBOX_CODE_INTERPRETER_IMAGE',
+    'opensandbox/code-interpreter:v1.0.2',
+)
+
+# Timeout for creating/reconnecting a sandbox (seconds).
+SANDBOX_CREATE_TIMEOUT_S = int(os.getenv('SANDBOX_CREATE_TIMEOUT_S', '60'))
+
+# Per-execution timeout (seconds).
+SANDBOX_DEFAULT_TIMEOUT_S = int(os.getenv('SANDBOX_DEFAULT_TIMEOUT_S', '30'))
+
+# Timeout for a skill's bootstrap script (seconds). Deliberately generous (and
+# distinct from SANDBOX_DEFAULT_TIMEOUT_S): bootstrap scripts are explicitly permitted to
+# assume network egress (e.g. `pip install`) to prepare a skill's runtime dependencies
+# (product decision, see skills-boosted plan Decision 12 — this is not an oversight).
+SANDBOX_SKILL_BOOTSTRAP_TIMEOUT_S = int(os.getenv('SANDBOX_SKILL_BOOTSTRAP_TIMEOUT_S', '120'))
+
+# Maximum sandbox session lifetime (hours).
+SANDBOX_SESSION_TTL_H = float(os.getenv('SANDBOX_SESSION_TTL_H', '2'))
+
+# Maximum idle time before cached sandboxes are stopped/destroyed (seconds).
+SANDBOX_IDLE_TIMEOUT_S = int(os.getenv('SANDBOX_IDLE_TIMEOUT_S', '120'))
+
+# How often the in-process sandbox reaper checks for idle sandboxes (seconds).
+SANDBOX_REAPER_INTERVAL_S = int(os.getenv('SANDBOX_REAPER_INTERVAL_S', '30'))
+
+# Maximum number of characters returned by run_code (truncates at this limit).
+SANDBOX_MAX_OUTPUT_CHARS = int(os.getenv('SANDBOX_MAX_OUTPUT_CHARS', '20000'))
+
+# Maximum number of REPL executions per agent turn (budget guard).
+SANDBOX_MAX_EXECUTIONS_PER_TURN = int(os.getenv('SANDBOX_MAX_EXECUTIONS_PER_TURN', '5'))
+
+# --- App Chat code interpreter / sandbox output delivery ------------------------------------------------
+# Output files pulled from a sandbox into the turn's local output folder (all agents; 0 = unlimited for the
+# three size/count caps).
+SANDBOX_PULL_MAX_FILES = max(0, int(os.getenv('SANDBOX_PULL_MAX_FILES', '20')))
+SANDBOX_PULL_MAX_FILE_BYTES = max(0, int(os.getenv('SANDBOX_PULL_MAX_FILE_BYTES', str(50 * 1024 * 1024))))
+SANDBOX_PULL_MAX_TOTAL_BYTES = max(0, int(os.getenv('SANDBOX_PULL_MAX_TOTAL_BYTES', str(100 * 1024 * 1024))))
+# Overall time budget of one turn's pull, and how many pulls may run in worker threads at once (process-wide).
+SANDBOX_PULL_TIME_BUDGET_S = max(0.0, float(os.getenv('SANDBOX_PULL_TIME_BUDGET_S', '20')))  # 0 = no time budget
+SANDBOX_PULL_MAX_CONCURRENT = max(0, int(os.getenv('SANDBOX_PULL_MAX_CONCURRENT', '2')))
+# Live sandbox sessions per user / per App (0 = unlimited). The global cap SANDBOX_MAX_CONCURRENT_SESSIONS is unchanged.
+SANDBOX_MAX_SESSIONS_PER_USER = max(0, int(os.getenv('SANDBOX_MAX_SESSIONS_PER_USER', '3')))
+SANDBOX_MAX_SESSIONS_PER_APP = max(0, int(os.getenv('SANDBOX_MAX_SESSIONS_PER_APP', '10')))
+# Minimum idle time (seconds) before a Chat session of the SAME user may be evicted to make room under the
+# per-user / per-App limits (a session between two tool calls of a running turn is never idle). 0 = no minimum.
+SANDBOX_EVICT_MIN_IDLE_S = max(0, int(os.getenv('SANDBOX_EVICT_MIN_IDLE_S', '60')))
+# App Chat only: ceiling of one Bash call (seconds). The Chat also shares one execution budget between the REPL
+# tools and Bash, and has no background shells.
+SANDBOX_CHAT_BASH_MAX_TIMEOUT_S = max(1, int(os.getenv('SANDBOX_CHAT_BASH_MAX_TIMEOUT_S', '60')))
+
+# App Chat attachments: total time one turn may spend indexing its uploads (seconds; 0 = unlimited; keep it well
+# under the busy-marker TTL) and the maximum number of files one turn may carry (0 = unlimited).
+ATTACHMENT_INDEXING_TURN_BUDGET_S = max(0.0, float(os.getenv('ATTACHMENT_INDEXING_TURN_BUDGET_S', '120')))
+CHAT_MAX_FILES_PER_TURN = max(0, int(os.getenv('CHAT_MAX_FILES_PER_TURN', '10')))
+
+# Maximum number of OpenSandbox code contexts created per language in one
+# sandbox. Values above 1 allow parallel tool executions without sharing a busy
+# interpreter session.
+OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE = int(os.getenv('OPENSANDBOX_MAX_CONTEXTS_PER_LANGUAGE', '4'))
+
+# Daytona SaaS sandbox connection and creation options. The Daytona SDK also
+# reads DAYTONA_API_KEY, DAYTONA_API_URL, and DAYTONA_TARGET directly from the
+# environment; these constants document the integration surface.
+DAYTONA_API_KEY = os.getenv('DAYTONA_API_KEY', '')
+DAYTONA_API_URL = os.getenv('DAYTONA_API_URL', '')
+DAYTONA_TARGET = os.getenv('DAYTONA_TARGET', '')
+DAYTONA_IMAGE = os.getenv('DAYTONA_IMAGE', '')
+DAYTONA_SNAPSHOT = os.getenv('DAYTONA_SNAPSHOT', '')
+DAYTONA_WORKSPACE = os.getenv('DAYTONA_WORKSPACE', 'workspace')
+
+# E2B cloud sandbox connection and creation options. The E2B SDK reads
+# E2B_API_KEY directly from the environment.
+E2B_API_KEY = os.getenv('E2B_API_KEY', '')
+E2B_TEMPLATE = os.getenv('E2B_TEMPLATE', '')
+E2B_WORKSPACE = os.getenv('E2B_WORKSPACE', '/home/user/workspace')
+
+# Minutes before a sandbox TTL is proactively renewed.
+SANDBOX_RENEW_MINUTES = int(os.getenv('SANDBOX_RENEW_MINUTES', '30'))
+
+# --- Skill package import limits (hardened zip reader, backend/utils/safe_zip.py) ---
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read an integer env var, failing fast on unparsable or below-minimum values."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == '':
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise RuntimeError(f"Invalid {name}={raw!r}: expected an integer >= {minimum}") from None
+    if value < minimum:
+        raise RuntimeError(f"Invalid {name}={raw!r}: expected an integer >= {minimum}")
+    return value
+
+
+def _env_float(name: str, default: float, *, minimum: float, finite: bool = True, inclusive: bool = True) -> float:
+    """Read a float env var, failing fast on unparsable, non-finite or out-of-range values.
+
+    ``inclusive=False`` makes ``minimum`` an exclusive bound (value must be strictly greater).
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == '':
+        return default
+    bound = f">= {minimum}" if inclusive else f"> {minimum}"
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        raise RuntimeError(f"Invalid {name}={raw!r}: expected a finite number {bound}") from None
+    if finite and not math.isfinite(value):
+        raise RuntimeError(f"Invalid {name}={raw!r}: expected a finite number {bound}")
+    if math.isnan(value) or value < minimum or (not inclusive and value == minimum):
+        raise RuntimeError(f"Invalid {name}={raw!r}: expected a finite number {bound}")
+    return value
+
+
+# Maximum number of file entries in an uploaded skill package.
+SKILL_IMPORT_MAX_FILES = _env_int('SKILL_IMPORT_MAX_FILES', 500)
+# Maximum cumulative uncompressed size of an uploaded skill package (bytes).
+SKILL_IMPORT_MAX_TOTAL_BYTES = _env_int('SKILL_IMPORT_MAX_TOTAL_BYTES', 50 * 1024 * 1024)
+# Maximum uncompressed size of a single file inside a skill package (bytes).
+SKILL_IMPORT_MAX_FILE_BYTES = _env_int('SKILL_IMPORT_MAX_FILE_BYTES', 10 * 1024 * 1024)
+# Maximum uncompressed/compressed ratio (zip bomb guard), measured against the uploaded archive size.
+SKILL_IMPORT_MAX_RATIO = _env_float('SKILL_IMPORT_MAX_RATIO', 100.0, minimum=1.0, inclusive=False)
+# Maximum size of the uploaded (compressed) archive itself (bytes).
+SKILL_IMPORT_MAX_ARCHIVE_BYTES = _env_int('SKILL_IMPORT_MAX_ARCHIVE_BYTES', 25 * 1024 * 1024)
+# Maximum number of skill package operations (import OR export) processed concurrently per backend
+# process — both hold a whole skill's files in memory at once, so they share this bulkhead.
+SKILL_IMPORT_MAX_CONCURRENCY = _env_int('SKILL_IMPORT_MAX_CONCURRENCY', 2)
+# Maximum number of candidate skills (top-level skills/<name>/ directories) accepted from a single
+# Claude Code plugin archive import. Each candidate gets its own DB transaction + advisory lock
+# acquisition, so this is a hard brake independent of any per-app tier quota — self-managed
+# deployments have NO tier quota at all (TierEnforcementService.check_resource_limit early-returns),
+# so this is the only cap in that mode.
+SKILL_IMPORT_MAX_PLUGIN_SKILLS = _env_int('SKILL_IMPORT_MAX_PLUGIN_SKILLS', 25)
+# Per-app advisory lock timeout (seconds) applied while importing one Claude plugin candidate skill
+# (SkillRepository.lock_app_skills). Bounds how long the shared import/export bulkhead (io_slot,
+# process-wide) can be pinned by one contended import before the caller gives up on that candidate.
+SKILL_IMPORT_LOCK_TIMEOUT_SECONDS = _env_int('SKILL_IMPORT_LOCK_TIMEOUT_SECONDS', 5)

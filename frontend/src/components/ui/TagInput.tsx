@@ -7,6 +7,7 @@ interface TagInputProps {
   readonly onChange: (tags: string[]) => void;
   readonly maxTags?: number;
   readonly placeholder?: string;
+  readonly disabled?: boolean;
 }
 
 /**
@@ -18,11 +19,13 @@ export function TagInput({
   onChange,
   maxTags = 5,
   placeholder = 'Type and press Enter',
+  disabled = false,
 }: TagInputProps) {
   const [inputValue, setInputValue] = useState('');
 
   const addTag = useCallback(
     (value: string) => {
+      if (disabled) return;
       const trimmed = value.trim().toLowerCase();
       if (!trimmed) return;
       if (tags.length >= maxTags) return;
@@ -31,18 +34,20 @@ export function TagInput({
       onChange([...tags, trimmed]);
       setInputValue('');
     },
-    [tags, maxTags, onChange],
+    [tags, maxTags, onChange, disabled],
   );
 
   const removeTag = useCallback(
     (index: number) => {
+      if (disabled) return;
       onChange(tags.filter((_, i) => i !== index));
     },
-    [tags, onChange],
+    [tags, onChange, disabled],
   );
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (disabled) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         addTag(inputValue);
@@ -50,43 +55,51 @@ export function TagInput({
         removeTag(tags.length - 1);
       }
     },
-    [inputValue, tags, addTag, removeTag],
+    [inputValue, tags, addTag, removeTag, disabled],
   );
 
   const atLimit = tags.length >= maxTags;
 
   return (
     <div>
-      <div className="flex flex-wrap items-center gap-2 p-2 border border-gray-300 rounded-xl min-h-[44px] focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500 transition-all duration-200">
+      <div
+        className={`flex flex-wrap items-center gap-2 w-full px-3 py-2 text-sm border rounded-lg focus-within:outline-none focus-within:border-accent dark:border-line-strong-dark dark:focus-within:border-accent ${
+          disabled ? 'bg-surface-hover text-fg-tertiary cursor-not-allowed dark:bg-surface-hover-dark dark:text-fg-tertiary-dark' : 'bg-surface text-fg dark:bg-surface-dark dark:text-fg-dark'
+        }`}
+      >
         {tags.map((tag, idx) => (
           <span
             key={tag}
-            className="inline-flex items-center gap-1 text-sm bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full"
+            className={`inline-flex items-center gap-1 text-sm px-2.5 py-0.5 rounded-full ${
+              disabled ? 'bg-surface-hover text-fg-tertiary cursor-not-allowed dark:bg-surface-hover-dark dark:text-fg-tertiary-dark' : 'text-bronze dark:text-bronze-dark font-medium bg-bronze-bg-soft dark:bg-bronze-bg-soft-dark'
+            }`}
           >
             {tag}
-            <button
-              type="button"
-              onClick={() => removeTag(idx)}
-              className="ml-0.5 text-blue-600 hover:text-blue-900 font-medium"
-              aria-label={`Remove tag ${tag}`}
-            >
-              <X className="w-3 h-3" />
-            </button>
+            {!disabled && (
+              <button
+                type="button"
+                onClick={() => removeTag(idx)}
+                className="ml-0.5 text-bronze dark:text-bronze-dark font-medium bg-bronze-bg-soft dark:bg-bronze-bg-soft-dark"
+                aria-label={`Remove tag ${tag}`}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
           </span>
         ))}
-        {!atLimit && (
-          <input
-            id={id}
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={tags.length === 0 ? placeholder : ''}
-            className="flex-1 min-w-[120px] border-none outline-none text-sm bg-transparent py-1 px-1"
-          />
-        )}
+        <input
+          id={id}
+          type="text"
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={tags.length === 0 && !atLimit ? placeholder : ''}
+          disabled={disabled}
+          readOnly={!disabled && atLimit}
+          className="flex-1 min-w-[120px] border-none outline-none text-sm bg-transparent p-0 text-fg dark:text-fg-dark placeholder:text-fg-faint dark:placeholder:text-fg-faint-dark disabled:cursor-not-allowed disabled:text-fg-tertiary dark:disabled:text-fg-tertiary-dark read-only:cursor-default"
+        />
       </div>
-      <p className="text-xs text-gray-500 mt-1">
+      <p className="text-xs text-fg-tertiary mt-1 dark:text-fg-tertiary-dark" aria-live="polite">
         {tags.length}/{maxTags} tags
         {atLimit ? ' (maximum reached)' : ' — press Enter to add'}
       </p>

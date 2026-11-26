@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
+from schemas.agent_schemas import A2AAgentFieldsMixin
+from schemas.service_lifecycle_schemas import ServiceLifecycleFieldsMixin
+
 
 # ==================== METADATA ====================
 
@@ -26,7 +29,7 @@ class ExportMetadataSchema(BaseModel):
 # ==================== AI SERVICE ====================
 
 
-class ExportAIServiceSchema(BaseModel):
+class ExportAIServiceSchema(ServiceLifecycleFieldsMixin):
     """AI Service export schema"""
 
     name: str = Field(..., min_length=1, max_length=255)
@@ -41,7 +44,7 @@ class ExportAIServiceSchema(BaseModel):
 # ==================== EMBEDDING SERVICE ====================
 
 
-class ExportEmbeddingServiceSchema(BaseModel):
+class ExportEmbeddingServiceSchema(ServiceLifecycleFieldsMixin):
     """Embedding Service export schema"""
 
     name: str = Field(..., min_length=1, max_length=255)
@@ -62,6 +65,7 @@ class ExportOutputParserFieldSchema(BaseModel):
     name: str
     type: str  # 'str', 'int', 'float', 'bool', 'date', 'list', 'dict', 'parser'
     description: str
+    optional: bool = False  # If True, the field is optional (may be absent in LLM output)
     parser_name: Optional[str] = None  # For type='parser' (name-based reference)
     list_item_type: Optional[str] = None  # For type='list'
     list_item_parser_name: Optional[str] = None  # For list of parsers (name-based reference)
@@ -99,6 +103,11 @@ class ExportSiloSchema(BaseModel):
     metadata_definition_name: Optional[str] = None  # Reference to OutputParser
     fixed_metadata: bool = False
     description: Optional[str] = None
+    # Indexing settings (absent in exports made before they existed -> defaults on import)
+    chunk_size: Optional[int] = None
+    chunk_overlap: Optional[int] = None
+    pdf_loader: Optional[str] = None
+    pdf_loader_options: Optional[Dict[str, Any]] = None
     # Exclude: vectors, embeddings (heavy data), collection_name (auto-generated)
 
 
@@ -138,6 +147,23 @@ class ExportRepositorySchema(BaseModel):
     # Exclude: resources, files (heavy data)
 
 
+# ==================== MIDDLEWARE ====================
+
+
+class ExportMiddlewareSchema(BaseModel):
+    """Middleware export schema.
+
+    The AI service a config may reference (summarization model, PII detector) travels by
+    name in ``ai_service_name``; inside ``config`` it is exported as ``agent_llm``.
+    """
+
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    middleware_type: str
+    config: Dict[str, Any] = {}
+    ai_service_name: Optional[str] = None
+
+
 # ==================== AGENT ====================
 
 
@@ -153,8 +179,16 @@ class ExportAgentMCPRefSchema(BaseModel):
     mcp_name: str  # Reference by name
 
 
-class ExportAgentSchema(BaseModel):
-    """Agent export schema (configuration only, no conversations)"""
+class ExportAgentSchema(A2AAgentFieldsMixin):
+    """Agent export schema (configuration only, no conversations).
+
+    Inherits the A2A (Agent2Agent protocol) fields and their validators from
+    ``A2AAgentFieldsMixin`` (step_009) so export/import reuse the exact same caps
+    and normalization instead of duplicating them (FR-24, AC-39). Import always
+    forces ``a2a_enabled=False`` regardless of the exported value (enforced in
+    ``AgentImportService``, never here, so a round-trip export/import of the same
+    file still faithfully reports what was in the file).
+    """
 
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
@@ -165,7 +199,10 @@ class ExportAgentSchema(BaseModel):
     output_parser_name: Optional[str] = None  # Reference by name
     agent_tool_refs: List[ExportAgentToolRefSchema] = []
     agent_mcp_refs: List[ExportAgentMCPRefSchema] = []
+    middleware_names: List[str] = []  # Execution order; definitions travel alongside
+    is_tool: Optional[bool] = False  # Can be used as a tool by other agents
     has_memory: Optional[bool] = False
+    skill_router_enabled: Optional[bool] = False
     memory_max_messages: Optional[int] = 20
     memory_max_tokens: Optional[int] = None
     memory_summarize_threshold: Optional[int] = 10
@@ -248,6 +285,13 @@ class DomainExportFileSchema(BaseModel):
     output_parser: Optional[ExportOutputParserSchema] = None
 
 
+class MiddlewareExportFileSchema(BaseModel):
+    """Middleware export file"""
+
+    metadata: ExportMetadataSchema
+    middleware: ExportMiddlewareSchema
+
+
 class AgentExportFileSchema(BaseModel):
     """Agent export file with dependencies"""
 
@@ -259,6 +303,7 @@ class AgentExportFileSchema(BaseModel):
     silo_output_parser: Optional[ExportOutputParserSchema] = None  # Silo's metadata definition (may differ from agent's parser)
     output_parser: Optional[ExportOutputParserSchema] = None
     mcp_configs: List[ExportMCPConfigSchema] = []
+    middlewares: List[ExportMiddlewareSchema] = []  # The agent's middlewares
     agent_tools: List[ExportAgentSchema] = []  # Referenced agents
 
 
@@ -277,4 +322,5 @@ class AppExportFileSchema(BaseModel):
     silos: List[ExportSiloSchema] = []
     repositories: List[ExportRepositorySchema] = []
     domains: List[ExportDomainSchema] = []
+    middlewares: List[ExportMiddlewareSchema] = []
     agents: List[ExportAgentSchema] = []

@@ -1,7 +1,7 @@
 import enum
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index, Text, Enum, text
+from sqlalchemy.orm import backref, relationship
 from datetime import datetime
 from db.database import Base
 
@@ -10,14 +10,22 @@ class ConversationSource(enum.Enum):
     PLAYGROUND = "playground"
     MARKETPLACE = "marketplace"
     API = "api"
+    SCHEDULED_TASK = "scheduled_task"
+    A2A = "a2a"
+    INTERNAL_CHAT = "internal_chat"
 
 
 class Conversation(Base):
     """Chat session. History lives in LangGraph's checkpointer under thread_id = f"thread_{agent_id}_{session_id}"."""
     __tablename__ = "Conversation"
+    __table_args__ = (
+        # Alembic ichat004: one user's conversations of an agent, newest first; API-key conversation lookup.
+        Index("ix_conversation_agent_user_updated", "agent_id", "user_id", text("updated_at DESC")),
+        Index("ix_conversation_agent_api_key_hash", "agent_id", "api_key_hash"),
+    )
 
     conversation_id = Column(Integer, primary_key=True, autoincrement=True)
-    agent_id = Column(Integer, ForeignKey('Agent.agent_id'), nullable=False)
+    agent_id = Column(Integer, ForeignKey('Agent.agent_id', ondelete='CASCADE'), nullable=False)
     user_id = Column(Integer, ForeignKey('User.user_id', ondelete='SET NULL'), nullable=True)
     title = Column(String(255), nullable=True)
     session_id = Column(String(255), nullable=False, unique=True)
@@ -25,7 +33,9 @@ class Conversation(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     last_message = Column(Text, nullable=True)
     message_count = Column(Integer, default=0, nullable=False)
-    api_key_hash = Column(String(64), nullable=True)  # MD5 hash of the API key; user_id is null for API-key requests
+    # Set for conversations owned by a scheduled task (user_id is then NULL).
+    scheduled_task_id = Column(Integer, ForeignKey('scheduled_task.id', ondelete='CASCADE'), nullable=True)
+    api_key_hash = Column(String(64), nullable=True)  # SHA-256 hash of the API key (utils.security.hash_api_key); user_id is null for API-key requests
 
     source = Column(
         Enum(ConversationSource),
@@ -33,7 +43,14 @@ class Conversation(Base):
         default=ConversationSource.PLAYGROUND
     )
 
-    agent = relationship("Agent", backref="conversations")
+    # Sandbox session tracking (IT-1 / Q5): provider sandbox id for reconnect attempts after a restart.
+    sandbox_session_id = Column(String(255), nullable=True)
+    # Serialized JSON snapshot of the sandbox state (provider, session_key, sandbox_id, updated_at).
+    sandbox_state = Column(Text, nullable=True)
+
+    # The database removes an agent's conversations; AgentService.delete_agent frees their
+    # checkpoints, media and sandboxes first.
+    agent = relationship("Agent", backref=backref("conversations", passive_deletes=True))
     user = relationship("User", backref="conversations", foreign_keys=[user_id])
     
     def __repr__(self):
@@ -51,4 +68,3 @@ class Conversation(Base):
             "last_message": self.last_message,
             "message_count": self.message_count
         }
-

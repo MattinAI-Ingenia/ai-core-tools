@@ -86,7 +86,7 @@ async def create_agent(
 | GET | `/` | List user's apps | user |
 | POST | `/` | Create new app | user |
 | GET | `/{app_id}` | Get app details | viewer |
-| PUT | `/{app_id}` | Update app | owner |
+| PUT | `/{app_id}` | Update app settings (the LangSmith key can only be changed by the owner: 403 otherwise; omitting it keeps the stored key; `default_embedding_service_id` omitted = unchanged, `null` = clear; `chat_code_interpreter_enabled` boolean, omitted = unchanged, `null` = 422) | administrator |
 | DELETE | `/{app_id}` | Delete app | owner |
 | GET | `/{app_id}/usage` | Get app usage stats | viewer |
 | POST | `/{app_id}/export` | Export full app configuration | viewer |
@@ -433,6 +433,46 @@ Content-Type: application/json
 | PUT | `/{service_id}` | Update embedding service | editor |
 | DELETE | `/{service_id}` | Delete embedding service | editor |
 
+### Service End of Service
+
+AI, embedding and sandbox services carry an optional planned end of service (see [Service End of Service](../guides/chat-bot/kb-ai-services.md#service-end-of-service)).
+
+**Fields** (returned by list/detail endpoints, accepted by create/update):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `end_of_service_at` | ISO-8601 datetime \| null | Stored as UTC. A date-only value from the UI means 00:00 UTC of that day |
+| `deprecation_notice` | string \| null | Max 1000 chars. Control, format and line-separator characters are replaced with spaces |
+| `lifecycle_status` | `active` \| `deprecated` \| `retired` | Read-only, computed at read time |
+
+On create/update, an omitted lifecycle field keeps its stored value; an explicit `null` clears it. Assigning a retired service to a field that did not already reference it is rejected with a 4xx error whose `detail` explains why; an unchanged reference is kept.
+
+**Endpoints**:
+
+| Method | Endpoint | Purpose | Min Role |
+|--------|----------|---------|----------|
+| GET | `/internal/apps/{app_id}/ai-services/{id}/used-by` | What uses the AI service | viewer |
+| GET | `/internal/apps/{app_id}/embedding-services/{id}/used-by` | What uses the embedding service | viewer |
+| GET | `/internal/apps/{app_id}/sandbox-services/{id}/used-by` | What uses the sandbox service | viewer |
+| POST | `/internal/apps/{app_id}/ai-services/{id}/move-agents` | Bulk move agents to another AI service | administrator |
+| GET | `/internal/admin/system-ai-services/{id}/used-by` | Same, system AI service | platform admin |
+| GET | `/internal/admin/system-embedding-services/{id}/used-by` | Same, system embedding service | platform admin |
+| GET | `/internal/admin/system-sandbox-services/{id}/used-by` | Same, system sandbox service | platform admin |
+
+`used-by` returns `{service_id, service_name, kind, is_system, lifecycle_status, end_of_service_at, deprecation_notice, agents[], silos[], repositories[], middlewares[], scheduled_tasks[], apps_using_as_default[]}`. `agents[].roles` lists how the service is used (`llm`, `ocr_vision`, `transcription`, `video`, `media_embedding`, `silo_embedding`, `sandbox`, `sandbox_app_default`); `apps_using_as_default` is filled for sandbox services (Apps whose default sandbox it is) and for embedding services (Apps whose `default_embedding_service_id`, used by the App Chat to index attachments, it is).
+
+`move-agents` body: `{"target_service_id": 7, "expected_count": 12}`. It moves only the agents' main LLM. If `expected_count` is given and differs from the number of agents actually moved, the response is `409` and nothing changes (checked atomically, rolled back). Response: `{"moved_agent_ids": [...], "count": 12}`.
+
+**Warnings**: agent, silo, repository and scheduled task responses include `lifecycle_warnings[]` (`service_id`, `service_name`, `kind`, `role`, `via`, `lifecycle_status`, `end_of_service_at`, `deprecation_notice`) for deprecated or retired services they depend on, directly or through a silo or middleware. For sandbox services `kind` is `sandbox` and `via` is `app default` when inherited from the App.
+
+**Retired service error** (`409`, also on the [public API](public-api.md)):
+
+```json
+{ "detail": "Service GPT-4 was retired on 2026-09-30. <notice>", "error_code": "SERVICE_RETIRED" }
+```
+
+Streaming chat sends an SSE `error` event with `code: "service_retired"`. Test connection is never blocked.
+
 ### Conversations
 
 **Base**: `/internal/conversations`
@@ -442,6 +482,25 @@ Content-Type: application/json
 | GET | `/` | List user's conversations | viewer |
 | GET | `/{conversation_id}` | Get conversation history | viewer |
 | DELETE | `/{conversation_id}` | Delete conversation | viewer |
+
+### App Chat
+
+**Base**: `/internal/apps/{app_id}/chat` — every route requires `viewer`. Full reference (selection, SSE events, errors, isolation): [App Chat](../ai/app-chat.md).
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/options` | Models, sources, skills and MCP configs the caller can pick, the caller's default, `attachment_indexing {enabled, reason}` and `code_interpreter {enabled, reason}` |
+| GET / PUT | `/defaults` | The caller's default selection |
+| GET / POST | `/conversations` | List / create the caller's conversations |
+| GET / PATCH / DELETE | `/conversations/{id}` | History with per-message turn snapshot / rename / delete |
+| POST | `/conversations/{id}/reset` | Forget history, keep selection |
+| POST | `/stream` | Send a message (SSE; multipart: `message`, `selection`, `conversation_id?`, `files?`) |
+| POST | `/messages` | Send a message (single JSON answer) |
+| POST / GET | `/conversations/{id}/files` | Upload / list conversation files |
+| DELETE | `/conversations/{id}/files/{file_id}` | Remove a file |
+| GET | `/conversations/{id}/files/{file_id}/download` | Signed link, expires in 5 minutes |
+
+Errors use `{detail, error_code}`: 404 `NOT_FOUND` for anything not owned by the caller, 409 `SERVICE_RETIRED`, 409 `CONVERSATION_BUSY` (another turn of the conversation is in flight; `Retry-After: 5`), 403 on a frozen App, 413 over the App's file size limit, 422 for malformed JSON form fields. One turn at a time per conversation. Chat conversations are not served by `/internal/conversations`.
 
 ### MCP Configs
 

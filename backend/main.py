@@ -23,6 +23,7 @@ if sys.platform == 'win32':
 
 import errno
 from contextlib import asynccontextmanager
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,10 +55,12 @@ from models.resource import Resource
 from routers.internal import internal_router
 from routers.public.v1 import public_v1_router
 from routers.mcp import mcp_router
+from routers.a2a_server import a2a_router
 from utils.provider import initialize_provider, shutdown_provider, get_provider
 from lks_idprovider_fastapi.dependencies import get_default_provider
 
 from utils.logger import get_logger
+from utils.service_lifecycle import ServiceRetiredError
 from utils.auth_config import AuthConfig
 from utils.secret_key import validate_secret_key
 from deployment_mode import is_saas_mode, validate_saas_env
@@ -70,6 +73,9 @@ async def lifespan(app: FastAPI):
     try:
         validate_secret_key()
 
+        from scheduling.periodic_agent_task import initialize_dbos
+        app.state.dbos_enabled = await initialize_dbos()
+
         if is_saas_mode():
             validate_saas_env()
             logger.info("SaaS mode: environment validation passed")
@@ -80,6 +86,17 @@ async def lifespan(app: FastAPI):
                 seed_default_tier_configs(_db)
             finally:
                 _db.close()
+
+        # Unconditional (not SaaS-only): system skills are seeded in every deployment mode.
+        from db.database import SessionLocal
+        from services.system_skills_seeder import seed_system_skills
+        _db = SessionLocal()
+        try:
+            seed_system_skills(_db)
+        except Exception:
+            logger.error("system_skills_seeder: failed to seed system skills at startup", exc_info=True)
+        finally:
+            _db.close()
 
         AuthConfig.load_config()
 
@@ -96,16 +113,6 @@ async def lifespan(app: FastAPI):
                 "EntraID provider NOT initialized (development/testing only)"
             )
         
-        from plugins.registry import plugin_registry
-        app.state.plugin_registry = plugin_registry
-        import importlib.metadata
-        for ep in importlib.metadata.entry_points(group="mattin.plugins"):
-            try:
-                ep.load()(app, plugin_registry)
-                logger.info(f"Plugin loaded: {ep.name}")
-            except Exception as e:
-                logger.error(f"Failed to load plugin '{ep.name}': {e}", exc_info=True)
-
         if AuthConfig.LOGIN_MODE == "LOCAL":
             from db.database import SessionLocal as _SessionLocal
             from services.auth.omniadmin_bootstrap import bootstrap_omniadmins
@@ -124,15 +131,38 @@ async def lifespan(app: FastAPI):
         from services.agent_cache_service import CheckpointerCacheService
         await CheckpointerCacheService.initialize_pool()
 
-        # Ensure vector-store backend tables exist before any background workers run.
-        # Best-effort: try once and log warnings on failure; do not break startup.
+        # A2A (step_017): build the process-wide runtime unconditionally --
+        # even when A2A_ENABLED=false, since the kill switch is per request
+        # (routers/a2a_server/router.py) and the maintenance worker (step_018)
+        # needs a handler to drive cancellation through.
+        # Imported before the try so the except path can always consult it.
+        from utils.a2a_config import get_a2a_config
+
         try:
-            from db.database import db as db_obj
-            from tools.vector_store_factory import VectorStoreFactory
-            VectorStoreFactory.get_vector_store(db_obj)
-            logger.info("VectorStoreFactory: ensured backend readiness at startup")
-        except Exception as _vs_exc:
-            logger.warning("VectorStoreFactory startup readiness check failed: %s", _vs_exc)
+            from services.a2a_server.executor import MattinAgentExecutor
+            from services.a2a_server.runtime import (
+                build_a2a_runtime,
+                configure_sdk_logging,
+                set_runtime,
+            )
+
+            configure_sdk_logging()
+            # get_a2a_config() itself logs a warning if A2A_ROOT_AGENT is set
+            # but malformed (utils/a2a_config.py's _get_root_agent), and
+            # clamps/warns if the worker stream cap is >= uvicorn's own
+            # --limit-concurrency (fix round 1, HIGH-3).
+            a2a_cfg = get_a2a_config()
+            set_runtime(build_a2a_runtime(MattinAgentExecutor()))
+            logger.info("A2A runtime initialized (enabled=%s)", a2a_cfg.enabled)
+        except Exception:
+            logger.exception("Failed to initialize the A2A runtime at startup")
+            # LOW (fix round 1): A2A is opt-in; a build failure while it is
+            # globally disabled (A2A_ENABLED=false) must never take the rest
+            # of the application down with it. `get_runtime()` stays `None`
+            # in that case -- every A2A route already treats that the same
+            # as the kill switch (uniform 404).
+            if get_a2a_config().enabled:
+                raise
 
         # Start crawl workers (job executor + scheduler)
         from services.crawl.worker import start_crawl_workers, stop_crawl_workers
@@ -141,6 +171,18 @@ async def lifespan(app: FastAPI):
 
         from services.file_cleanup_worker import start_file_cleanup_worker
         app.state.file_cleanup_task = start_file_cleanup_worker()
+
+        # A2A maintenance worker (step_018, AD-10): always runs, even when
+        # A2A_ENABLED=false, so retention keeps happening regardless of the
+        # per-request kill switch.
+        from services.a2a_server.maintenance_worker import start_a2a_maintenance_worker
+        app.state.a2a_maintenance_task = start_a2a_maintenance_worker()
+
+        from services.sharepoint.worker import start_sharepoint_worker
+        app.state.sharepoint_tasks = await start_sharepoint_worker()
+
+        from services.hitl_expiry_worker import start_hitl_expiry_worker
+        app.state.hitl_expiry_task = start_hitl_expiry_worker()
 
         print("✅ Application startup complete")
     except Exception as e:
@@ -151,26 +193,72 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
-        crawl_tasks = getattr(app.state, 'crawl_tasks', None)
-        if crawl_tasks:
-            from services.crawl.worker import stop_crawl_workers
-            await stop_crawl_workers(crawl_tasks)
+        # LOW (fix round 1): each shutdown step gets its own try/except, so
+        # one failing step (e.g. a hung worker) never skips the rest --
+        # previously these shared one outer try, with only a handful of
+        # steps individually guarded.
+        try:
+            from scheduling.periodic_agent_task import shutdown_dbos
+            shutdown_dbos()
+        except Exception as exc:
+            logger.warning("DBOS shutdown failed: %s", exc, exc_info=True)
 
-        file_cleanup_task = getattr(app.state, 'file_cleanup_task', None)
-        if file_cleanup_task is not None:
-            from services.file_cleanup_worker import stop_file_cleanup_worker
-            await stop_file_cleanup_worker(file_cleanup_task)
+        try:
+            crawl_tasks = getattr(app.state, 'crawl_tasks', None)
+            if crawl_tasks:
+                from services.crawl.worker import stop_crawl_workers
+                await stop_crawl_workers(crawl_tasks)
+        except Exception as exc:
+            logger.warning("Crawl worker shutdown failed: %s", exc, exc_info=True)
 
-        sharepoint_tasks = getattr(app.state, 'sharepoint_tasks', None)
-        if sharepoint_tasks:
-            try:
-                from mattin_sharepoint.worker import stop_sharepoint_worker
+        try:
+            file_cleanup_task = getattr(app.state, 'file_cleanup_task', None)
+            if file_cleanup_task is not None:
+                from services.file_cleanup_worker import stop_file_cleanup_worker
+                await stop_file_cleanup_worker(file_cleanup_task)
+        except Exception as exc:
+            logger.warning("File cleanup worker shutdown failed: %s", exc, exc_info=True)
+
+        try:
+            from services.chat_attachment_service import shutdown_indexing_executor
+            shutdown_indexing_executor()  # wait=False, cancel_futures=True: a hung provider call must not block exit
+        except Exception as exc:
+            logger.warning("Chat indexing executor shutdown failed: %s", exc, exc_info=True)
+
+        try:
+            sharepoint_tasks = getattr(app.state, 'sharepoint_tasks', None)
+            if sharepoint_tasks:
+                from services.sharepoint.worker import stop_sharepoint_worker
                 await stop_sharepoint_worker(sharepoint_tasks)
-            except ImportError:
-                pass
+        except Exception as exc:
+            logger.warning("SharePoint worker shutdown failed: %s", exc, exc_info=True)
 
-        from services.agent_cache_service import CheckpointerCacheService
-        await CheckpointerCacheService.close_pool()
+        try:
+            from services.hitl_expiry_worker import stop_hitl_expiry_worker
+            await stop_hitl_expiry_worker(getattr(app.state, 'hitl_expiry_task', None))
+        except Exception as exc:
+            logger.warning("HITL expiry worker shutdown failed: %s", exc, exc_info=True)
+
+        try:
+            a2a_maintenance_task = getattr(app.state, 'a2a_maintenance_task', None)
+            if a2a_maintenance_task is not None:
+                from services.a2a_server.maintenance_worker import stop_a2a_maintenance_worker
+                await stop_a2a_maintenance_worker(a2a_maintenance_task)
+        except Exception as exc:
+            logger.warning("A2A maintenance worker shutdown failed: %s", exc, exc_info=True)
+
+        try:
+            from services.a2a_server.runtime import close_runtime
+
+            await close_runtime()
+        except Exception as exc:
+            logger.warning("A2A runtime shutdown (close_runtime) failed: %s", exc, exc_info=True)
+
+        try:
+            from services.agent_cache_service import CheckpointerCacheService
+            await CheckpointerCacheService.close_pool()
+        except Exception as exc:
+            logger.warning("Checkpointer pool shutdown failed: %s", exc, exc_info=True)
 
         try:
             from tools.langsmith_config import flush_langsmith_clients, clear_client_cache
@@ -179,9 +267,12 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("LangSmith flush during shutdown failed: %s", exc)
 
-        if AuthConfig.LOGIN_MODE == "OIDC":
-            await shutdown_provider()
-            logger.info("✅ EntraID provider shutdown complete")
+        try:
+            if AuthConfig.LOGIN_MODE == "OIDC":
+                await shutdown_provider()
+                logger.info("✅ EntraID provider shutdown complete")
+        except Exception as exc:
+            logger.warning("OIDC provider shutdown failed: %s", exc, exc_info=True)
         print("✅ Application shutdown complete")
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
@@ -196,15 +287,26 @@ app = FastAPI(
 )
 
 from utils.config import get_app_config
-from utils.security import verify_signature
+from utils.security import verify_static_access
 
 app_config = get_app_config()
 tmp_base_folder = app_config.get('TMP_BASE_FOLDER', 'data/tmp')
 os.makedirs(tmp_base_folder, exist_ok=True)
 
 @app.get("/static/{file_path:path}")
-async def get_static_file(file_path: str, user: str = None, sig: str = None, filename: str = None):
-    if not user or not sig or not verify_signature(file_path, user, sig):
+async def get_static_file(
+    file_path: str,
+    user: str = None,
+    sig: str = None,
+    filename: str = None,
+    exp: str | None = None,
+):
+    # `exp` is declared as `str | None` (not `int | None`) so that a malformed value
+    # (e.g. "abc") fails the same 403 path below instead of FastAPI's 422 validation
+    # error, which would otherwise leak which query params are well-formed.
+    # All parsing, missing-parameter checks and the expiring/legacy dispatch live in
+    # verify_static_access, which collapses every failure reason to a single False.
+    if not verify_static_access(file_path, user, sig, exp, filename):
         raise HTTPException(status_code=403, detail="Invalid signature or missing parameters")
 
     if ".." in file_path:  # directory traversal guard
@@ -213,10 +315,10 @@ async def get_static_file(file_path: str, user: str = None, sig: str = None, fil
     # os.path.join ignores the base when the suffix starts with '/' — strip it.
     file_path = file_path.lstrip("/\\")
 
-    full_path = os.path.abspath(os.path.join(tmp_base_folder, file_path))
     base_path = os.path.abspath(tmp_base_folder)
+    full_path = os.path.normpath(os.path.join(base_path, file_path))
 
-    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
+    if not full_path.startswith(base_path + os.sep):
         raise HTTPException(status_code=403, detail="Invalid path")
 
     if not os.path.exists(full_path):
@@ -277,10 +379,7 @@ async def _oserror_handler(_request: Request, exc: OSError) -> JSONResponse:
     raise exc
 
 
-@app.exception_handler(SQLAlchemyPoolTimeout)
-async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout) -> JSONResponse:
-    """Map DB connection-pool exhaustion to 503 with Retry-After instead of an opaque 500."""
-    logger.error("Database connection pool exhausted: %s", exc)
+def _database_unavailable_response() -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={"detail": "Service temporarily unavailable, please retry shortly."},
@@ -288,10 +387,33 @@ async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout
     )
 
 
+@app.exception_handler(SQLAlchemyPoolTimeout)
+async def _db_pool_timeout_handler(_request: Request, exc: SQLAlchemyPoolTimeout) -> JSONResponse:
+    """Map DB connection-pool exhaustion to 503 with Retry-After instead of an opaque 500."""
+    logger.error("Database connection pool exhausted: %s", exc)
+    return _database_unavailable_response()
+
+
+@app.exception_handler(SQLAlchemyOperationalError)
+async def _db_operational_error_handler(_request: Request, exc: SQLAlchemyOperationalError) -> JSONResponse:
+    """Map an unreachable or saturated database (e.g. no connection slots left) to 503."""
+    logger.error("Database unavailable: %s", exc.orig if exc.orig is not None else exc)
+    return _database_unavailable_response()
+
+
+@app.exception_handler(ServiceRetiredError)
+async def _service_retired_handler(_request: Request, exc: ServiceRetiredError) -> JSONResponse:
+    """Map a retired service to 409 with its message (the guard already logged it)."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message, "error_code": exc.error_code})
+
+
 # Mount routers - clean structure with no nesting
 app.include_router(internal_router, prefix="/internal")
 app.include_router(public_v1_router, prefix="/public/v1")
 app.include_router(mcp_router, prefix="/mcp/v1", tags=["MCP"])
+# A2A (step_017, AD-14): mounted at root -- its routes carry their own
+# absolute paths (/a2a/v1/... and the root /.well-known/agent-card.json).
+app.include_router(a2a_router)
 
 @app.get("/api/internal/client-config")
 async def get_client_config():
@@ -307,6 +429,20 @@ async def get_client_config():
 _openapi_internal_schema = None
 _openapi_public_schema = None
 
+def _routes_with_prefix(prefix: str):
+    """Routes of the app whose full path starts with ``prefix``.
+
+    Since FastAPI 0.137 ``app.routes`` is a tree (included routers are kept as
+    nodes), so it is walked with ``iter_route_contexts`` to get every route
+    with its effective path.
+    """
+    from fastapi.routing import iter_route_contexts
+
+    return [
+        route for route in iter_route_contexts(app.routes)
+        if route.path and route.path.startswith(prefix)
+    ]
+
 def get_openapi_internal():
     """Generate OpenAPI schema for internal API only."""
     global _openapi_internal_schema
@@ -315,10 +451,7 @@ def get_openapi_internal():
     if _openapi_internal_schema:
         return _openapi_internal_schema
     
-    internal_routes = [
-        route for route in app.routes
-        if hasattr(route, 'path') and route.path.startswith('/internal')
-    ]
+    internal_routes = _routes_with_prefix('/internal')
     
     _openapi_internal_schema = get_openapi(
         title=os.getenv('INTERNAL_API_TITLE', 'IA Core Tools - Internal API'),
@@ -336,10 +469,7 @@ def get_openapi_public():
     if _openapi_public_schema:
         return _openapi_public_schema
     
-    public_routes = [
-        route for route in app.routes
-        if hasattr(route, 'path') and route.path.startswith('/public')
-    ]
+    public_routes = _routes_with_prefix('/public')
     
     _openapi_public_schema = get_openapi(
         title=os.getenv('PUBLIC_API_TITLE', 'IA Core Tools - Public API'),

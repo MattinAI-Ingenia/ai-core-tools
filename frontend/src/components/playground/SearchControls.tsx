@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
+import { FormSelect } from '../ui/FormField';
 
 export interface SearchControlsValue {
   limit: number;
@@ -25,17 +26,6 @@ export const DEFAULT_SEARCH_CONTROLS: SearchControlsValue = {
   similarityThreshold: null,
 };
 
-const SEARCH_METHODS: Array<{ value: SearchControlsValue['searchMethod']; label: string }> = [
-  { value: 'dense', label: 'Dense (embeddings similarity)' },
-  { value: 'bm25', label: 'BM25 (lexical / keyword)' },
-];
-
-const STRATEGIES: Array<{ value: SearchControlsValue['strategy']; label: string }> = [
-  { value: '', label: 'None' },
-  { value: 'rerank', label: 'Rerank (embeddings-based)' },
-  { value: 'cross_encoder_rerank', label: 'Rerank (cross-encoder)' },
-];
-
 interface SearchControlsProps {
   siloId: string | number;
   value: SearchControlsValue;
@@ -47,19 +37,8 @@ function storageKey(siloId: string | number): string {
   return `silo-search-controls-${siloId}`;
 }
 
-function searchTypeLabel(searchType: SearchControlsValue['searchType']): string {
-  switch (searchType) {
-    case 'similarity_score_threshold':
-      return 'Score Threshold';
-    case 'mmr':
-      return 'MMR';
-    default:
-      return 'Cosine Similarity';
-  }
-}
-
 export default function SearchControls({ siloId, value, onChange, disabled }: Readonly<SearchControlsProps>) {
-  const [isOpen, setIsOpen] = useState(false);
+  const { t } = useTranslation('common');
 
   // Load saved state on mount
   useEffect(() => {
@@ -93,230 +72,208 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
     });
   }
 
-  const summary = `Top K: ${value.limit} · ${searchTypeLabel(value.searchType)}`;
+  const labelClass = 'mb-2 flex justify-between gap-3 text-[13px] font-medium text-fg dark:text-fg-dark';
+  const hintClass = 'font-normal text-fg-tertiary dark:text-fg-tertiary-dark';
+  const rangeClass = 'w-full accent-ink disabled:opacity-60 dark:accent-ink-dark';
+  const scaleClass = 'flex justify-between text-[11.5px] text-fg-tertiary dark:text-fg-tertiary-dark';
+  const helpClass = 'mt-1.5 text-[12.5px] text-fg-tertiary dark:text-fg-tertiary-dark';
+  const fieldClass = 'rounded-lg border border-line-strong bg-surface px-3 py-2.5 text-sm text-fg outline-none focus:border-accent disabled:opacity-60 dark:border-line-strong-dark dark:bg-surface-dark dark:text-fg-dark dark:focus:border-accent-dark';
 
   return (
-    <div className="border border-yellow-200 rounded-lg bg-yellow-50 overflow-hidden">
-      {/* Header row */}
-      <button
-        type="button"
-        onClick={() => setIsOpen((prev) => !prev)}
-        disabled={disabled}
-        className="w-full flex items-center justify-between px-4 py-2 text-left hover:bg-yellow-100 transition-colors disabled:opacity-60"
-      >
-        <div className="flex items-center gap-3">
-          <span className="text-sm font-medium text-gray-700">Search Controls</span>
-          {!isOpen && (
-            <span className="text-xs text-gray-500">{summary}</span>
-          )}
+    <div className="flex flex-col gap-5">
+      {/* Top-K slider */}
+      <div>
+        <label htmlFor="top-k-range" className={labelClass}>
+          <span>{t('searchControls.topKResults')}</span>
+          <span>{value.limit}</span>
+        </label>
+        <input
+          id="top-k-range"
+          type="range"
+          min={1}
+          max={200}
+          step={1}
+          value={value.limit}
+          disabled={disabled}
+          onChange={(e) => handleChange({ limit: Number(e.target.value) })}
+          className={rangeClass}
+        />
+        <div className={scaleClass}>
+          <span>1</span>
+          <span>200</span>
         </div>
-        {isOpen ? (
-          <ChevronUp className="w-4 h-4 text-gray-500 shrink-0" />
-        ) : (
-          <ChevronDown className="w-4 h-4 text-gray-500 shrink-0" />
-        )}
-      </button>
+      </div>
 
-      {/* Expanded content */}
-      {isOpen && (
-        <div className="px-4 pb-4 pt-2 space-y-4 border-t border-yellow-200">
-          {/* Top-K slider */}
+      {/* Search method */}
+      <FormSelect
+        label={t('searchControls.searchMethod')}
+        id="search-method-select"
+        value={value.searchMethod}
+        disabled={disabled}
+        onChange={(e) => handleChange({ searchMethod: e.target.value as SearchControlsValue['searchMethod'] })}
+        options={[
+          { value: 'dense', label: t('searchControls.searchMethods.dense') },
+          { value: 'bm25', label: t('searchControls.searchMethods.bm25') },
+          { value: 'hybrid', label: t('searchControls.searchMethods.hybrid') },
+        ]}
+      />
+
+      {/* Search type only governs the dense method; BM25 ignores it, so it is hidden. */}
+      {value.searchMethod !== 'bm25' && (
+        <FormSelect
+          label={t('searchControls.searchStrategy')}
+          id="search-type-select"
+          value={value.searchType}
+          disabled={disabled}
+          onChange={(e) => handleSearchTypeChange(e.target.value as SearchControlsValue['searchType'])}
+          options={[
+            { value: 'similarity', label: t('searchControls.searchTypes.similarity') },
+            { value: 'similarity_score_threshold', label: t('searchControls.searchTypes.scoreThreshold') },
+            { value: 'mmr', label: t('searchControls.searchTypes.mmr') },
+          ]}
+        />
+      )}
+
+      {/* Rerank strategy and its tuning */}
+      <FormSelect
+        label={t('searchControls.rerankStrategy')}
+        id="strategy-select"
+        value={value.strategy}
+        disabled={disabled}
+        onChange={(e) => handleChange({ strategy: e.target.value as SearchControlsValue['strategy'] })}
+        options={[
+          { value: '', label: t('searchControls.strategies.none') },
+          { value: 'rerank', label: t('searchControls.strategies.rerank') },
+          { value: 'cross_encoder_rerank', label: t('searchControls.strategies.crossEncoder') },
+        ]}
+      />
+
+      {(value.strategy === 'rerank' || value.strategy === 'cross_encoder_rerank') && (
+        <div>
+          <label htmlFor="rerank-top-n-input" className={labelClass}>
+            <span>{t('searchControls.rerankTopN')}</span>
+            <span>{value.topN}</span>
+          </label>
+          <input
+            id="rerank-top-n-input"
+            type="number"
+            min={1}
+            max={50}
+            value={value.topN}
+            disabled={disabled}
+            onChange={(e) => {
+              const parsed = Number(e.target.value);
+              if (!Number.isNaN(parsed)) handleChange({ topN: Math.min(50, Math.max(1, parsed)) });
+            }}
+            className={fieldClass}
+          />
+          <p className={helpClass}>{t('searchControls.rerankTopNHelp')}</p>
+        </div>
+      )}
+
+      {value.strategy === 'rerank' && (
+        <div>
+          <label htmlFor="rerank-similarity-threshold-input" className={labelClass}>
+            <span>{t('searchControls.rerankThreshold')}</span>
+            <span className={hintClass}>{t('searchControls.optional')}</span>
+          </label>
+          <input
+            id="rerank-similarity-threshold-input"
+            type="number"
+            step={0.01}
+            min={0}
+            max={1}
+            value={value.similarityThreshold ?? ''}
+            placeholder={t('searchControls.optional')}
+            disabled={disabled}
+            onChange={(e) => {
+              const raw = e.target.value;
+              handleChange({ similarityThreshold: raw === '' ? null : Number(raw) });
+            }}
+            className={fieldClass}
+          />
+          <p className={helpClass}>{t('searchControls.rerankThresholdHelp')}</p>
+        </div>
+      )}
+
+
+      {/* Score threshold — only when similarity_score_threshold */}
+      {value.searchMethod !== 'bm25' && value.searchType === 'similarity_score_threshold' && (
+        <div>
+          <label htmlFor="score-threshold-range" className={labelClass}>
+            <span>{t('searchControls.scoreThreshold')}</span>
+            <span>{value.scoreThreshold.toFixed(2)}</span>
+          </label>
+          <input
+            id="score-threshold-range"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={value.scoreThreshold}
+            disabled={disabled}
+            onChange={(e) => handleChange({ scoreThreshold: Number(e.target.value) })}
+            className={rangeClass}
+          />
+          <div className={scaleClass}>
+            <span>0.0</span>
+            <span>1.0</span>
+          </div>
+          <p className={helpClass}>
+            {t('searchControls.scoreThresholdHelp')}
+          </p>
+        </div>
+      )}
+
+      {/* Fetch K + Lambda — only when mmr */}
+      {value.searchMethod !== 'bm25' && value.searchType === 'mmr' && (
+        <>
           <div>
-            <label className="block text-sm text-gray-700 mb-1">
-              Top K results: <span className="font-semibold">{value.limit}</span>
+            <label htmlFor="fetch-k-input" className={labelClass}>
+              <span>{t('searchControls.candidatePool')} <span className={hintClass}>· fetch_k</span></span>
             </label>
             <input
-              type="range"
-              min={1}
-              max={200}
-              step={1}
-              value={value.limit}
+              id="fetch-k-input"
+              type="number"
+              min={10}
+              max={500}
+              value={value.fetchK}
               disabled={disabled}
-              onChange={(e) => handleChange({ limit: Number(e.target.value) })}
-              className="w-full accent-yellow-600 disabled:opacity-60"
+              onChange={(e) => {
+                const parsed = Number(e.target.value);
+                if (!Number.isNaN(parsed)) {
+                  handleChange({ fetchK: Math.min(500, Math.max(10, parsed)) });
+                }
+              }}
+              className={`w-40 ${fieldClass}`}
             />
-            <div className="flex justify-between text-xs text-gray-500 mt-1">
-              <span>1</span>
-              <span>200</span>
-            </div>
           </div>
 
-          {/* Search Method */}
           <div>
-            <label htmlFor="search-method-select" className="block text-sm text-gray-700 mb-1">Search Method</label>
-            <select
-              id="search-method-select"
-              value={value.searchMethod}
+            <label htmlFor="lambda-mult-range" className={labelClass}>
+              <span>{t('searchControls.diversity')} <span className={hintClass}>· λ</span></span>
+              <span>{value.lambdaMult.toFixed(2)}</span>
+            </label>
+            <input
+              id="lambda-mult-range"
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={value.lambdaMult}
               disabled={disabled}
-              onChange={(e) => handleChange({ searchMethod: e.target.value as SearchControlsValue['searchMethod'] })}
-              className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-            >
-              {SEARCH_METHODS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
+              onChange={(e) => handleChange({ lambdaMult: Number(e.target.value) })}
+              className={rangeClass}
+            />
+            <div className={scaleClass}>
+              <span>0.0</span>
+              <span>1.0</span>
+            </div>
+            <p className={helpClass}>
+              0 = {t('searchControls.maxDiversity')} · 1 = {t('searchControls.maxRelevance')}
+            </p>
           </div>
-
-          {/* Search Type only governs the dense method (similarity/mmr/threshold); BM25
-              ignores it entirely, so it's hidden rather than shown as a dead control. */}
-          {(value.searchMethod === 'dense' || value.searchMethod === 'hybrid') && (
-            <div>
-              <label htmlFor="search-type-select" className="block text-sm text-gray-700 mb-1">Search Type</label>
-              <select
-                id="search-type-select"
-                value={value.searchType}
-                disabled={disabled}
-                onChange={(e) => handleSearchTypeChange(e.target.value as SearchControlsValue['searchType'])}
-                className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-              >
-                <option value="similarity">Cosine Similarity</option>
-                <option value="similarity_score_threshold">Score Threshold</option>
-                <option value="mmr">Max Marginal Relevance (MMR)</option>
-              </select>
-            </div>
-          )}
-
-          {/* Strategy */}
-          <div>
-            <label htmlFor="strategy-select" className="block text-sm text-gray-700 mb-1">Strategy</label>
-            <select
-              id="strategy-select"
-              value={value.strategy}
-              disabled={disabled}
-              onChange={(e) => handleChange({ strategy: e.target.value as SearchControlsValue['strategy'] })}
-              className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-            >
-              {STRATEGIES.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Rerank top N — shared by both rerank strategies */}
-          {(value.strategy === 'rerank' || value.strategy === 'cross_encoder_rerank') && (
-            <div>
-              <label htmlFor="rerank-top-n-input" className="block text-sm text-gray-700 mb-1">
-                Rerank top N
-              </label>
-              <input
-                id="rerank-top-n-input"
-                type="number"
-                min={1}
-                max={50}
-                value={value.topN}
-                disabled={disabled}
-                onChange={(e) => {
-                  const parsed = Number(e.target.value);
-                  if (!Number.isNaN(parsed)) {
-                    handleChange({ topN: Math.min(50, Math.max(1, parsed)) });
-                  }
-                }}
-                className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-              />
-              <p className="text-xs text-gray-500 mt-1">Documents kept after reranking (1-50).</p>
-            </div>
-          )}
-
-          {/* Similarity threshold — only the embeddings-based rerank supports it */}
-          {value.strategy === 'rerank' && (
-            <div>
-              <label htmlFor="rerank-similarity-threshold-input" className="block text-sm text-gray-700 mb-1">
-                Rerank similarity threshold
-              </label>
-              <input
-                id="rerank-similarity-threshold-input"
-                type="number"
-                step={0.01}
-                min={0}
-                max={1}
-                value={value.similarityThreshold ?? ''}
-                placeholder="Optional"
-                disabled={disabled}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  handleChange({ similarityThreshold: raw === '' ? null : Number(raw) });
-                }}
-                className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-              />
-              <p className="text-xs text-gray-500 mt-1">Optional minimum similarity score, 0-1, applied after reranking.</p>
-            </div>
-          )}
-
-          {/* Score threshold — only when similarity_score_threshold */}
-          {(value.searchMethod === 'dense' || value.searchMethod === 'hybrid') && value.searchType === 'similarity_score_threshold' && (
-            <div>
-              <label className="block text-sm text-gray-700 mb-1">
-                Score threshold: <span className="font-semibold">{value.scoreThreshold.toFixed(2)}</span>
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={value.scoreThreshold}
-                disabled={disabled}
-                onChange={(e) => handleChange({ scoreThreshold: Number(e.target.value) })}
-                className="w-full accent-yellow-600 disabled:opacity-60"
-              />
-              <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>0.0</span>
-                <span>1.0</span>
-              </div>
-              <p className="text-xs text-gray-500 mt-1">
-                Only documents with score ≥ threshold are returned.
-              </p>
-            </div>
-          )}
-
-          {/* Fetch K + Lambda — only when mmr */}
-          {(value.searchMethod === 'dense' || value.searchMethod === 'hybrid') && value.searchType === 'mmr' && (
-            <>
-              <div>
-                <label htmlFor="fetch-k-input" className="block text-sm text-gray-700 mb-1">
-                  Candidate pool (fetch_k)
-                </label>
-                <input
-                  id="fetch-k-input"
-                  type="number"
-                  min={10}
-                  max={500}
-                  value={value.fetchK}
-                  disabled={disabled}
-                  onChange={(e) => {
-                    const parsed = Number(e.target.value);
-                    if (!Number.isNaN(parsed)) {
-                      handleChange({ fetchK: Math.min(500, Math.max(10, parsed)) });
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-60"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-gray-700 mb-1">
-                  Diversity (λ): <span className="font-semibold">{value.lambdaMult.toFixed(2)}</span>
-                </label>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={value.lambdaMult}
-                  disabled={disabled}
-                  onChange={(e) => handleChange({ lambdaMult: Number(e.target.value) })}
-                  className="w-full accent-yellow-600 disabled:opacity-60"
-                />
-                <div className="flex justify-between text-xs text-gray-500 mt-1">
-                  <span>0.0</span>
-                  <span>1.0</span>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  0 = max diversity · 1 = max relevance
-                </p>
-              </div>
-            </>
-          )}
-        </div>
+        </>
       )}
     </div>
   );

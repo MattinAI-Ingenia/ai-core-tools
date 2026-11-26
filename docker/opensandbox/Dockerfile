@@ -1,0 +1,44 @@
+# Custom Mattin OpenSandbox server image.
+#
+# Based on the upstream OpenSandbox server Dockerfile shape:
+# https://github.com/alibaba/OpenSandbox/blob/main/server/Dockerfile
+#
+# The upstream image currently bakes a Kubernetes example config as its default.
+# This image installs the released server package and bakes a Docker-runtime
+# config by default, while still allowing operators to override configuration
+# at container instantiation time with:
+#
+#   - SANDBOX_CONFIG_PATH=/path/to/config.toml
+#   - a bind mount over /etc/opensandbox/sandbox.toml
+#   - docker compose command: ["--config", "/path/to/config.toml"]
+
+FROM python:3.10-slim AS runtime
+
+ARG OPENSANDBOX_SERVER_VERSION=0.1.11
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    SANDBOX_CONFIG_PATH=/etc/opensandbox/sandbox.toml \
+    DOCKER_HOST=unix:///var/run/docker.sock
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir "opensandbox-server==${OPENSANDBOX_SERVER_VERSION}"
+
+COPY sandbox.toml /etc/opensandbox/sandbox.toml
+COPY entrypoint.py /usr/local/bin/opensandbox-entrypoint
+
+RUN mkdir -p /var/lib/opensandbox && chmod 0755 /usr/local/bin/opensandbox-entrypoint
+
+EXPOSE 8080
+
+# SECURITY: the toml is a template. entrypoint.py renders it (API key from
+# OPENSANDBOX_API_KEY, API bound to the control-network address only), refuses
+# to start without an API key, and then execs opensandbox-server.
+ENTRYPOINT ["/usr/local/bin/opensandbox-entrypoint"]
+CMD ["--config", "/etc/opensandbox/sandbox.toml"]

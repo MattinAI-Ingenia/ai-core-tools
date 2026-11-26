@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
@@ -18,6 +19,7 @@ from typing import List
 from langchain_core.documents import Document
 from tools.embeddingTools import get_embeddings_model
 from utils.logger import get_logger
+from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, ensure_service_active
 
 load_dotenv()
 
@@ -27,6 +29,7 @@ logger = get_logger(__name__)
 
 def get_embedding(text, embedding_service=None):
     """Get embeddings using the configured service"""
+    ensure_service_active(embedding_service, SERVICE_KIND_EMBEDDING)
     embeddings = get_embeddings_model(embedding_service)
         
     return embeddings.embed_query(text)
@@ -53,7 +56,10 @@ def create_llm_from_service(ai_service, temperature=0, is_vision=False):
         ai_service: AIService model instance
         temperature: float
         is_vision: boolean
+    Raises:
+        ServiceRetiredError: if the service is past its end of service
     """
+    ensure_service_active(ai_service, SERVICE_KIND_AI)
     provider_builders = {
         ProviderEnum.OpenAI.value: lambda: _build_openai_llm(ai_service, temperature),
         ProviderEnum.Anthropic.value: lambda: _build_anthropic_llm(ai_service, temperature),
@@ -77,14 +83,18 @@ def create_llm_from_service(ai_service, temperature=0, is_vision=False):
 
     return builder()
 
-def get_llm(agent, is_vision=False):
+def get_llm(agent, is_vision=False, ai_service_override=None):
     """
     Función base para obtener cualquier modelo LLM
     Args:
         agent: Agent object with model configuration
         is_vision: Boolean que indica si es un modelo de visión
+        ai_service_override: AIService to use instead of the agent's own (flexible chat,
+            per turn). Never assigned on the agent. Ignored when ``is_vision`` is True.
     """
-    if is_vision:
+    if ai_service_override is not None and not is_vision:
+        ai_service = ai_service_override
+    elif is_vision:
         ai_service = agent.vision_service_rel
     else:
         ai_service = agent.ai_service
@@ -112,13 +122,36 @@ class VoidRetriever(BaseRetriever):
         return []
 
 
+# OpenAI reasoning families (o1/o3/o4…, gpt-5 and later) reject `temperature` unless it
+# is 1; the "-chat" variants accept it. langchain-openai only strips it for names starting
+# with "gpt-5", so newer families (e.g. gpt-6-luna) reached OpenAI with the agent's
+# temperature and failed with "Unsupported parameter: 'temperature'".
+_OPENAI_REASONING_MODEL = re.compile(r"^(o\d|gpt-([5-9]|[0-4]\d))", re.IGNORECASE)
+
+
+def _openai_temperature(model, temperature):
+    """The temperature to send to OpenAI, or None (not sent) for reasoning models."""
+    model = model or ""
+    if _OPENAI_REASONING_MODEL.match(model) and "chat" not in model.lower():
+        return None
+    return temperature
+
+
 def _build_openai_llm(ai_service, temperature):
     base_url = ai_service.endpoint if ai_service.endpoint else None
     return ChatOpenAI(
         model=ai_service.description,
-        temperature=temperature,
+        temperature=_openai_temperature(ai_service.description, temperature),
         api_key=ai_service.api_key,
         base_url=base_url,
+        # Reasoning models reject function tools on /v1/chat/completions ("Function tools
+        # with reasoning_effort are not supported ... use /v1/responses or set
+        # reasoning_effort to 'none'"), and every agent here is built with tools. The
+        # Responses API keeps reasoning on (unlike reasoning_effort='none') and is what
+        # the provider-side server tools (web_search, image_generation, code_interpreter)
+        # already expect. Only for OpenAI itself: a custom endpoint is an OpenAI-compatible
+        # gateway, and those speak /v1/chat/completions but not necessarily /v1/responses.
+        use_responses_api=base_url is None,
     )
 
 
@@ -152,10 +185,25 @@ def _build_openrouter_llm(ai_service, temperature):
     )
 
 
+# Anthropic rejects `temperature` (HTTP 400 "`temperature` is deprecated for this model")
+# on the Claude 5 family and on Opus 4.7+; older models still accept it.
+_ANTHROPIC_NO_TEMPERATURE_MODEL = re.compile(
+    r"^claude-(?:[a-z]+-)?(?:[5-9]|\d{2,})(?!\d)|^claude-opus-4-(?:[7-9]|\d{2,})(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def _anthropic_temperature(model, temperature):
+    """The temperature to send to Anthropic, or None (not sent) for models that reject it."""
+    if _ANTHROPIC_NO_TEMPERATURE_MODEL.match(model or ""):
+        return None
+    return temperature
+
+
 def _build_anthropic_llm(ai_service, temperature):
     return ChatAnthropic(
         model=ai_service.description,
-        temperature=temperature,
+        temperature=_anthropic_temperature(ai_service.description, temperature),
         api_key=ai_service.api_key,
     )
 

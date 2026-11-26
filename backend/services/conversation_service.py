@@ -1,23 +1,28 @@
+import asyncio
 import uuid
-import hashlib
 import ast
 import json
 import re
 from typing import List, Optional, Dict
 from numpy import isin
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc
+from sqlalchemy import and_, or_, desc, update
 from datetime import datetime
 
-from models.conversation import Conversation
+from models.conversation import Conversation, ConversationSource
 from repositories.conversation_repository import ConversationRepository
 from models.agent import Agent
 from schemas.conversation_schemas import ConversationCreate, ConversationUpdate
 from services.agent_cache_service import CheckpointerCacheService
+from utils.error_handlers import ValidationError
 from utils.logger import get_logger
+from utils.security import hash_api_key
 from lks_idprovider import AuthContext
 
 logger = get_logger(__name__)
+
+# Keeps background checkpoint deletions referenced until they finish.
+_background_cleanups: set = set()
 
 
 async def _resolve_image_placeholders(
@@ -66,7 +71,11 @@ class ConversationService:
         db: Session,
         agent_id: int,
         user_context: Dict,
-        title: Optional[str] = None
+        title: Optional[str] = None,
+        source: ConversationSource = ConversationSource.PLAYGROUND,
+        scheduled_task_id: Optional[int] = None,
+        auto_title: bool = True,
+        commit: bool = True,
     ) -> Conversation:
         """
         Create a new conversation for a user and agent
@@ -76,10 +85,26 @@ class ConversationService:
             agent_id: ID of the agent
             user_context: User context (user_id or api_key)
             title: Optional title for the conversation
+            source: Origin of the conversation. ``INTERNAL_CHAT`` is tied one-to-one to the hidden
+                internal chat agent: it is only valid for that agent, and that agent only accepts it.
+            auto_title: generate a timestamp title when ``title`` is empty (the App Chat passes
+                False and keeps ``title=None`` so the UI can derive it)
+            commit: when False the row is only flushed and refreshed, so the caller can create other rows
+                in the same transaction and commit (or roll back) once
             
         Returns:
             Created Conversation object
+
+        Raises:
+            ValidationError: ``source`` and agent kind disagree (App Chat source on a normal agent, or a
+                normal source on the internal chat agent)
         """
+        from repositories.agent_repository import AgentRepository
+
+        is_internal_agent = bool(AgentRepository.get_internal_chat_ids(db, [agent_id]))
+        if is_internal_agent != (source == ConversationSource.INTERNAL_CHAT):
+            raise ValidationError("Conversation source does not match the agent kind")
+
         # Generate unique conversation UUID
         conversation_uuid = str(uuid.uuid4())
         session_id = f"conv_{agent_id}_{conversation_uuid}"
@@ -97,10 +122,10 @@ class ConversationService:
         
         if api_key:
             # Hash the API key for tracking (without storing the actual key)
-            api_key_hash = hashlib.md5(api_key.encode()).hexdigest()
+            api_key_hash = hash_api_key(api_key)
         
         # Generate auto-title if not provided
-        if not title:
+        if not title and auto_title:
             title = f"Conversación {datetime.utcnow().strftime('%d/%m/%Y %H:%M')}"
         
         # Create conversation
@@ -110,11 +135,16 @@ class ConversationService:
             session_id=session_id,
             title=title,
             api_key_hash=api_key_hash,
+            source=source,
+            scheduled_task_id=scheduled_task_id,
             message_count=0
         )
         
         db.add(conversation)
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         db.refresh(conversation)
         
         logger.info(f"Created conversation {conversation.conversation_id} for agent {agent_id}")
@@ -125,16 +155,22 @@ class ConversationService:
         db: Session,
         conversation_id: int,
         user_context: Dict,
-        agent_id: int = None
+        agent_id: int = None,
+        include_internal_chat: bool = False,
     ) -> Optional[Conversation]:
         """
         Get a conversation by ID with user validation
+
+        App Chat conversations (``source == INTERNAL_CHAT`` or owned by the hidden internal chat agent)
+        are "not found" unless ``include_internal_chat`` is True (only the App Chat endpoints and the
+        execution choke point pass it).
 
         Args:
             db: Database session
             conversation_id: ID of the conversation
             user_context: User context for validation
             agent_id: Optional agent ID to validate the conversation belongs to this agent
+            include_internal_chat: also return App Chat conversations
 
         Returns:
             Conversation object or None if not found/unauthorized
@@ -142,6 +178,8 @@ class ConversationService:
         query = db.query(Conversation).filter(
             Conversation.conversation_id == conversation_id
         )
+        if not include_internal_chat:
+            query = ConversationService._exclude_internal_chat(query)
         if agent_id is not None:
             query = query.filter(Conversation.agent_id == agent_id)
         conversation = query.first()
@@ -155,6 +193,14 @@ class ConversationService:
             return None
         
         return conversation
+
+    @staticmethod
+    def _exclude_internal_chat(query):
+        """Restrict a Conversation query to non-App-Chat rows (by source and by owning agent)."""
+        return query.join(Agent, Agent.agent_id == Conversation.agent_id).filter(
+            Conversation.source != ConversationSource.INTERNAL_CHAT,
+            Agent.visible_clause(),
+        )
 
     @staticmethod
     def get_marketplace_conversation(
@@ -181,7 +227,8 @@ class ConversationService:
         agent_id: int,
         user_context: AuthContext|dict,
         limit: int = 50,
-        offset: int = 0
+        offset: int = 0,
+        include_internal_chat: bool = False,
     ) -> tuple[List[Conversation], int]:
         """
         List conversations for a user with a specific agent
@@ -198,6 +245,9 @@ class ConversationService:
         """
         # Build query with user filtering
         query = db.query(Conversation).filter(Conversation.agent_id == agent_id)
+        if not include_internal_chat:
+            # Listing by the hidden internal chat agent id yields nothing (same as a missing agent).
+            query = ConversationService._exclude_internal_chat(query)
         
         # Filter by user - handle both AuthContext and dict
         if isinstance(user_context, AuthContext):
@@ -206,7 +256,7 @@ class ConversationService:
         elif isinstance(user_context, dict) and user_context.get('api_key'):
             # API key users are identified by api_key_hash, not user_id
             api_key = user_context.get('api_key')
-            api_key_hash = hashlib.md5(api_key.encode()).hexdigest()
+            api_key_hash = hash_api_key(api_key)
             query = query.filter(Conversation.api_key_hash == api_key_hash)
         elif isinstance(user_context, dict) and user_context.get('user_id'):
             # OAuth user via dict context
@@ -235,7 +285,8 @@ class ConversationService:
         db: Session,
         conversation_id: int,
         user_context: Dict,
-        update_data: ConversationUpdate
+        update_data: ConversationUpdate,
+        include_internal_chat: bool = False,
     ) -> Optional[Conversation]:
         """
         Update a conversation
@@ -249,7 +300,9 @@ class ConversationService:
         Returns:
             Updated Conversation object or None if not found/unauthorized
         """
-        conversation = ConversationService.get_conversation(db, conversation_id, user_context)
+        conversation = ConversationService.get_conversation(
+            db, conversation_id, user_context, include_internal_chat=include_internal_chat
+        )
         
         if not conversation:
             return None
@@ -271,10 +324,91 @@ class ConversationService:
         return conversation
     
     @staticmethod
+    def release_conversation_resources(
+        db: Session, conversation: Conversation, session_id: Optional[str] = None,
+        clear_sandbox_state: bool = True,
+    ) -> None:
+        """Drop a conversation's temp media (silo + repo + vectors) and its sandbox. Best effort.
+
+        ``session_id`` overrides ``conversation.session_id`` for the temp-media lookup (the App Chat reset
+        rotates the session id and must clean up the previous one).
+        """
+        conversation_id = conversation.conversation_id
+        session_id = session_id or conversation.session_id
+        try:
+            from services.playground_media_service import PlaygroundMediaService
+            PlaygroundMediaService.cleanup(
+                conversation.agent.app_id, conversation.agent_id, session_id, db
+            )
+            logger.info(
+                f"Cleaned up playground media for conversation {conversation_id} "
+                f"(agent {conversation.agent_id}, session {session_id})"
+            )
+        except Exception as e:
+            logger.error(f"Error cleaning up playground media during delete: {e}")
+
+        # Sandbox key: conv_{agent_id}_{conversation_id}
+        try:
+            from services.sandbox_session_service import sandbox_session_service, SandboxSessionService
+            sandbox_key = SandboxSessionService.session_key(conversation.agent_id, conversation_id)
+            sandbox_session_service.destroy(sandbox_key)
+            if clear_sandbox_state:  # False: an unconfirmed remote destroy must stay findable by the DB reaper
+                conversation.sandbox_session_id = None
+                conversation.sandbox_state = None
+        except Exception as e:
+            logger.error(f"Error destroying sandbox on conversation delete: {e}")
+
+    @staticmethod
+    def release_agent_conversations(db: Session, agent_id: int) -> List[tuple]:
+        """Free the media and sandboxes of every conversation of an agent.
+
+        Returns their ``(agent_id, session_id)`` checkpointer threads; the rows themselves
+        go with the agent (``Conversation.agent_id`` is ON DELETE CASCADE).
+        """
+        conversations = db.query(Conversation).filter(Conversation.agent_id == agent_id).all()
+        for conversation in conversations:
+            ConversationService.release_conversation_resources(db, conversation)
+        return [(conversation.agent_id, conversation.session_id) for conversation in conversations]
+
+    @staticmethod
+    def delete_thread_histories_in_background(threads: List[tuple]) -> None:
+        """Delete the checkpoints of ``(agent_id, session_id)`` threads without blocking a sync caller."""
+        if not threads:
+            return
+
+        async def _delete_all() -> None:
+            for agent_id, session_id in threads:
+                await ConversationService.delete_thread_history(agent_id, session_id)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(_delete_all())
+            return
+        task = loop.create_task(_delete_all())
+        _background_cleanups.add(task)
+        task.add_done_callback(_background_cleanups.discard)
+
+    @staticmethod
+    async def delete_conversation_history(conversation: Conversation) -> None:
+        """Delete the conversation's LangGraph checkpoints. Best effort."""
+        await ConversationService.delete_thread_history(conversation.agent_id, conversation.session_id)
+
+    @staticmethod
+    async def delete_thread_history(agent_id: int, session_id: str) -> None:
+        """Delete the checkpoints of thread_{agent_id}_{session_id}. Best effort."""
+        try:
+            await CheckpointerCacheService.invalidate_checkpointer_async(agent_id=agent_id, session_id=session_id)
+            logger.info(f"Deleted chat history thread_{agent_id}_{session_id}")
+        except Exception as e:
+            logger.error(f"Error deleting chat history: {e}")
+
+    @staticmethod
     async def delete_conversation(
         db: Session,
         conversation_id: int,
-        user_context: Dict
+        user_context: Dict,
+        include_internal_chat: bool = False,
     ) -> bool:
         """
         Delete a conversation and its associated chat history
@@ -287,37 +421,16 @@ class ConversationService:
         Returns:
             True if deleted successfully, False otherwise
         """
-        conversation = ConversationService.get_conversation(db, conversation_id, user_context)
+        conversation = ConversationService.get_conversation(
+            db, conversation_id, user_context, include_internal_chat=include_internal_chat
+        )
         
         if not conversation:
             return False
         
-        # Clean up playground temp media repositories (silo + repo + vectors)
-        try:
-            from services.playground_media_service import PlaygroundMediaService
-            app_id = conversation.agent.app_id
-            PlaygroundMediaService.cleanup(
-                app_id, conversation.agent_id, conversation.session_id, db
-            )
-            logger.info(
-                f"Cleaned up playground media for conversation {conversation_id} "
-                f"(agent {conversation.agent_id}, session {conversation.session_id})"
-            )
-        except Exception as e:
-            logger.error(f"Error cleaning up playground media during delete: {e}")
-        
-        # Delete the chat history from PostgreSQL checkpointer
-        try:
-            # Use the full session_id as-is (don't remove the conv_ prefix)
-            # The thread_id format is: thread_{agent_id}_{full_session_id}
-            await CheckpointerCacheService.invalidate_checkpointer_async(
-                agent_id=conversation.agent_id,
-                session_id=conversation.session_id
-            )
-            logger.info(f"Deleted chat history for conversation {conversation_id} (thread_id: thread_{conversation.agent_id}_{conversation.session_id})")
-        except Exception as e:
-            logger.error(f"Error deleting chat history: {e}")
-        
+        ConversationService.release_conversation_resources(db, conversation)
+        await ConversationService.delete_conversation_history(conversation)
+
         # Delete the conversation record
         db.delete(conversation)
         db.commit()
@@ -329,7 +442,9 @@ class ConversationService:
     async def get_conversation_history(
         db: Session,
         conversation_id: int,
-        user_context: Dict
+        user_context: Dict,
+        include_internal_chat: bool = False,
+        include_message_ids: bool = False,
     ) -> Optional[List[Dict]]:
         """
         Get the message history for a conversation
@@ -338,23 +453,52 @@ class ConversationService:
             db: Database session
             conversation_id: ID of the conversation
             user_context: User context for validation
+            include_message_ids: add ``message_id`` to each message (App chat turn pairing)
             
         Returns:
             List of messages or None if not found/unauthorized
         """
-        conversation = ConversationService.get_conversation(db, conversation_id, user_context)
+        conversation = ConversationService.get_conversation(
+            db, conversation_id, user_context, include_internal_chat=include_internal_chat
+        )
         
         if not conversation:
             return None
-        
-        # Use the full session_id as-is (don't remove the conv_ prefix)
-        # The thread_id format is: thread_{agent_id}_{full_session_id}
-        
-        # Get history from PostgreSQL checkpointer
+        return await ConversationService.history_of_conversation(
+            conversation, user_context, include_message_ids=include_message_ids
+        )
+
+    @staticmethod
+    async def history_of_conversation(
+        conversation: Conversation,
+        user_context: Dict,
+        include_message_ids: bool = False,
+    ) -> List[Dict]:
+        """Message history of an already loaded (and access-checked) conversation.
+
+        Same output as ``get_conversation_history``; lets a caller that holds the row avoid loading it again.
+        """
+        conversation_id = conversation.conversation_id
+        # Scheduled runs and interactive runs can arrive with either the
+        # canonical conversation session id or its UUID suffix, depending on
+        # which session-management path created the LangGraph checkpoint.
+        # Read the canonical key first and use the suffix as a compatibility
+        # fallback so an existing scheduled conversation is never shown empty.
+        id_kwargs = {"include_message_ids": True} if include_message_ids else {}
         history = await CheckpointerCacheService.get_conversation_history_async(
             agent_id=conversation.agent_id,
-            session_id=conversation.session_id
+            session_id=conversation.session_id,
+            **id_kwargs,
         )
+        if not history and conversation.session_id.startswith(f"conv_{conversation.agent_id}_"):
+            session_suffix = conversation.session_id.replace(
+                f"conv_{conversation.agent_id}_", "", 1
+            )
+            history = await CheckpointerCacheService.get_conversation_history_async(
+                agent_id=conversation.agent_id,
+                session_id=session_suffix,
+                **id_kwargs,
+            )
         
         if not history:
             return []
@@ -424,6 +568,32 @@ class ConversationService:
         return resolved_history
     
     @staticmethod
+    async def get_pending_approval(
+        db: Session, conversation_id: int, user_context: Dict, include_internal_chat: bool = False
+    ) -> Optional[Dict]:
+        """The human-in-the-loop approval this conversation is waiting for, if any.
+
+        Lets the chat UI restore the approval card after a reload (an approval past its
+        deadline is returned with ``status="expired"`` until the server resolves it).
+        """
+        conversation = ConversationService.get_conversation(
+            db, conversation_id, user_context, include_internal_chat=include_internal_chat
+        )
+        if not conversation:
+            return None
+        return ConversationService.pending_approval_of_conversation(db, conversation, user_context)
+
+    @staticmethod
+    def pending_approval_of_conversation(db: Session, conversation: Conversation, user_context: Dict) -> Optional[Dict]:
+        """``get_pending_approval`` for an already loaded (and access-checked) conversation."""
+        from services import hitl_approval_service as approvals
+
+        approval = approvals.get_pending_for_conversation(db, conversation.conversation_id)
+        if approval is None or not approvals.Requester.from_user_context(user_context).owns(approval):
+            return None
+        return approvals.sse_payload(approval)
+
+    @staticmethod
     def _clean_attached_files_content(text: str) -> str:
         """
         Remove attached file content from message text.
@@ -489,18 +659,18 @@ class ConversationService:
             last_message: Optional last message preview
             increment_by: Number to increment message count by (default 1, use 2 for user+agent)
         """
-        conversation = db.query(Conversation).filter(
-            Conversation.conversation_id == conversation_id
-        ).first()
-        
-        if conversation:
-            conversation.message_count += increment_by
-            conversation.updated_at = datetime.utcnow()
-            
-            if last_message:
-                # Store preview (first 200 characters)
-                conversation.last_message = last_message[:200]
-            
+        # Atomic in SQL: a Python read-modify-write loses increments of concurrent turns.
+        values = {
+            "message_count": Conversation.message_count + increment_by,
+            "updated_at": datetime.utcnow(),
+        }
+        if last_message:
+            # Store preview (first 200 characters)
+            values["last_message"] = last_message[:200]
+        result = db.execute(
+            update(Conversation).where(Conversation.conversation_id == conversation_id).values(**values)
+        )
+        if result.rowcount:
             db.commit()
     
     @staticmethod
@@ -515,9 +685,20 @@ class ConversationService:
         Returns:
             True if user has access, False otherwise
         """
+        # Server-side resolution of an expired approval: access to that one conversation only.
+        if isinstance(user_context, dict) and user_context.get('hitl_conversation_id') is not None:
+            return user_context['hitl_conversation_id'] == conversation.conversation_id
+
+        # Scheduled-task executions own their conversations; users never do.
+        if conversation.scheduled_task_id is not None:
+            return (
+                isinstance(user_context, dict)
+                and user_context.get('scheduled_task_id') == conversation.scheduled_task_id
+            )
+
         # Check API key user first (they have user_id as string like "apikey_xxx")
         if isinstance(user_context, dict) and user_context.get('api_key'):
-            api_key_hash = hashlib.md5(user_context['api_key'].encode()).hexdigest()
+            api_key_hash = hash_api_key(user_context['api_key'])
             if conversation.api_key_hash == api_key_hash:
                 return True
             return False
@@ -538,4 +719,3 @@ class ConversationService:
             return True
         
         return False
-

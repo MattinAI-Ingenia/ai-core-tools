@@ -3,9 +3,12 @@
 import jwt
 from fastapi import Cookie, HTTPException, status, Depends, Request, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from lks_idprovider_fastapi import get_auth_context
+from lks_idprovider_fastapi.dependencies import get_default_provider
+from lks_idprovider_fastapi.security import get_bearer_token
 from lks_idprovider.models.auth import AuthContext
+from lks_idprovider.protocols import IdentityProvider
 from lks_idprovider.models.identity import User as LksUser
 from lks_idprovider.models.token import TokenInfo
 from db.database import get_db
@@ -123,11 +126,31 @@ def _enrich_auth_context_with_db_user(
     return _create_enriched_auth_context(db_user, user_email, auth_context, provider=provider)
 
 
+async def get_oidc_auth_context(
+    token: str = Depends(get_bearer_token),
+    provider: IdentityProvider = Depends(get_default_provider),
+) -> AuthContext:
+    """Validate the OIDC bearer token. The rejection reason is logged, never returned to the client."""
+    try:
+        return await provider.get_auth_context(token)
+    except Exception as exc:
+        logger.info("OIDC token rejected: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AUTH_FAILED_MESSAGE,
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
 def get_current_user_oidc(
-    auth_context: AuthContext = Depends(get_auth_context),
+    auth_context: AuthContext = Depends(get_oidc_auth_context),
     db: Session = Depends(get_db),
 ) -> AuthContext:
-    """Validate OIDC token, sync user to DB on first login, and return enriched AuthContext."""
+    """Validate OIDC token, sync user to DB on first login, and return enriched AuthContext.
+
+    Database errors propagate so main.py answers 503: an unavailable database must not
+    look like rejected credentials, which would end the user's session.
+    """
     try:
         user_email = auth_context.identity.email
         if not user_email:
@@ -151,8 +174,8 @@ def get_current_user_oidc(
             f"EntraID: {auth_context.token_info.subject if auth_context.token_info else 'N/A'})"
         )
         return enriched_context
-        
-    except HTTPException:
+
+    except (HTTPException, SQLAlchemyError):
         raise
     except Exception as e:
         logger.error(f"Error in authentication: {str(e)}", exc_info=True)
@@ -250,7 +273,7 @@ def get_current_user_local(
             allow_user_creation=False,
             provider="local",
         )
-    except HTTPException:
+    except (HTTPException, SQLAlchemyError):
         raise
     except Exception as exc:
         logger.error("LOCAL auth: unexpected error enriching context — %s", exc, exc_info=True)
@@ -281,28 +304,46 @@ from typing import Annotated
 from utils.config import is_omniadmin as _is_omniadmin
 
 
+_VIEWER_WRITABLE_ATTR = "_viewer_writable"
+
+
+def viewer_writable(endpoint):
+    """Mark an endpoint as a write that viewer-role users may perform.
+
+    The mark is checked on the endpoint FastAPI resolved for the request, so it
+    doesn't depend on route paths or on how routers are nested (since FastAPI
+    0.137 ``scope["route"].path`` is relative to its router).
+    """
+    setattr(endpoint, _VIEWER_WRITABLE_ATTR, True)
+    return endpoint
+
+
+def _is_viewer_writable_route(request: Request) -> bool:
+    return getattr(request.scope.get("endpoint"), _VIEWER_WRITABLE_ATTR, False) is True
+
+
 async def require_editor_for_writes(
     request: Request,
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     db: Annotated[Session, Depends(get_db)],
-) -> AuthContext:
+) -> None:
     """Block viewer-role users from write operations (POST/PUT/PATCH/DELETE).
 
+    Router-level guard: it either lets the request through or raises 403.
+
     Exemptions — viewer-legitimate writes:
-      - POST .../invitations/{id}/respond  (accept or decline a collaboration invite)
+      - POST /collaboration/invitations/{id}/respond  (accept or decline a collaboration invite)
     """
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
-        return auth_context
-    # Viewers may accept/decline their own invitations
-    if request.url.path.endswith("/respond"):
-        return auth_context
+        return
+    if _is_viewer_writable_route(request):
+        return
     email = auth_context.identity.email
     if _is_omniadmin(email):
-        return auth_context
+        return
     user = UserService.get_user_by_email(db, email)
     if user and user.platform_role == 'viewer':
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Viewer role cannot create or modify resources",
         )
-    return auth_context

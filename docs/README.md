@@ -44,15 +44,17 @@ The project aims to simplify the integration and use of AI technologies within L
 - [LLM Integration](ai/llm-integration.md) — Supported LLM providers, configuration, and structured output
 - [RAG & Vector Stores](ai/rag-vector-stores.md) — Silo system, vector database backends (PGVector, Qdrant), and retrieval
 - [Agent System](ai/agent-system.md) — Agent execution engine, memory management, skills, and tools
+- [Scheduled Task Output Providers RFC](ai/rfc-scheduled-task-output-providers.md) — Extensible delivery, Teams channels, retries, permissions, and retention
+- [Scheduled Task Webhooks RFC](ai/rfc-scheduled-task-webhooks.md) — Proposed generic webhook provider alongside Teams, JSON/multipart contract, optional attachments, authentication, and recovery
+- [Teams Channel Attachments — Future Design](ai/rfc-teams-channel-attachments.md) — Deferred native attachments, SharePoint uploads, Graph authorization, and recovery
 - [MCP Integration](ai/mcp-integration.md) — Model Context Protocol servers, handlers, and configuration
+- [A2A Integration](ai/a2a-integration.md) — Agent2Agent protocol JSON-RPC server, visibility, task lifecycle, and deployment runbook
 
 ### API Reference
 - [Internal API](api/internal-api.md) — Frontend-backend communication endpoints (session/OIDC auth)
 - [Public API](api/public-api.md) — External programmatic API (API key auth, rate limiting)
 
 ### Guides
-- [Client Project Setup](guides/client-setup.md) — Creating and customizing client frontends
-- [Plugin Development](guides/plugin-development.md) — Building plugins for client projects
 - [Deployment Guide](guides/deployment.md) — Docker, Docker Compose, and Kubernetes deployment
 - [Authentication Guide](guides/authentication.md) — OIDC (Entra ID) and LOCAL (admin-provisioned email+password) modes, cookie transport, provisioning workflow, and FAKE-mode migration
 - [App Export and Import](guides/app-export-import.md) — Export app configuration and import into a new workspace

@@ -2,6 +2,8 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from schemas.embedding_service_schemas import EmbeddingServiceOptionSchema
+from schemas.service_lifecycle_schemas import ServiceLifecycleWarningSchema
+from schemas.indexing_schemas import IndexingOptionsSchema, IndexingSettingsInput
 
 
 class SiloListItemSchema(BaseModel):
@@ -14,6 +16,7 @@ class SiloListItemSchema(BaseModel):
     docs_count: int
     vector_db_type: Optional[str] = None
     is_frozen: bool = False
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,18 +33,30 @@ class SiloDetailSchema(BaseModel):
     # Current values for editing
     metadata_definition_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
+    # Media (video/audio) indexing services
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
+    # Indexing settings (tools.document_loaders) and what the form can choose from
+    chunk_size: Optional[int] = None
+    chunk_overlap: Optional[int] = None
+    pdf_loader: Optional[str] = None
+    pdf_loader_options: Dict[str, Any] = {}
+    indexing_options: Optional[IndexingOptionsSchema] = None
     # Form data
     output_parsers: List[Dict[str, Any]]
     embedding_services: List[EmbeddingServiceOptionSchema]
     vector_db_options: List[Dict[str, Any]] = []
+    # AI services usable for media: [{service_id, name, supports_video}]
+    ai_services: List[Dict[str, Any]] = []
     # Metadata definition fields for playground
     metadata_fields: Optional[List[Dict[str, Any]]] = None
     is_frozen: bool = False
+    lifecycle_warnings: List[ServiceLifecycleWarningSchema] = []
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class CreateSiloSchema(BaseModel):
+class CreateSiloSchema(IndexingSettingsInput):
     """Schema for creating a new silo (vector_db_type is settable on creation only)"""
     name: str
     description: Optional[str] = None
@@ -49,14 +64,20 @@ class CreateSiloSchema(BaseModel):
     output_parser_id: Optional[int] = None
     embedding_service_id: Optional[int] = None
     vector_db_type: Optional[str] = None
+    # Optional: needed only to index video/audio into the silo
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
 
 
-class UpdateSiloSchema(BaseModel):
+class UpdateSiloSchema(IndexingSettingsInput):
     """Schema for updating an existing silo (vector_db_type and embedding_service_id are immutable after creation)"""
     name: str
     description: Optional[str] = None
     type: Optional[str] = None
     output_parser_id: Optional[int] = None
+    # Optional media services; omitted fields keep their value, null clears them
+    transcription_service_id: Optional[int] = None
+    video_ai_service_id: Optional[int] = None
 
 
 # Kept for backward compatibility with the public API router
