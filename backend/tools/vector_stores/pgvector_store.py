@@ -6,6 +6,7 @@ wrapping LangChain's PGVector functionality while conforming to our abstract int
 """
 
 import json
+import re
 import logging
 import threading
 import numpy as np
@@ -519,6 +520,76 @@ class PGVectorStore(VectorStoreInterface):
         except Exception as exc:
             logger.error("PGVector get_all_documents error: %s", exc)
             raise
+
+    # Lexical search runs inside Postgres (full-text search) instead of rebuilding an in-memory BM25 index
+    # per query. BM25SearchMethod checks this flag; stores without it keep the in-memory path.
+    supports_lexical_search = True
+    LEXICAL_MAX_CANDIDATES = 1000
+    _lexical_index_ready = False
+    _lexical_index_lock = threading.Lock()
+
+    def _ensure_lexical_index(self) -> None:
+        """Create the full-text GIN index once per process when missing (fresh databases, where
+        langchain_pg_embedding did not exist yet when migration lexfts001 ran)."""
+        if PGVectorStore._lexical_index_ready:
+            return
+        with PGVectorStore._lexical_index_lock:
+            if PGVectorStore._lexical_index_ready:
+                return
+            with self.engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_langchain_pg_embedding_document_fts "
+                    "ON langchain_pg_embedding USING gin (to_tsvector('simple', coalesce(document, '')))"
+                ))
+            PGVectorStore._lexical_index_ready = True
+
+    def lexical_search(
+        self,
+        collection_name: str,
+        query: str,
+        k: int,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Document]:
+        """Keyword search: Postgres full-text search picks candidates, BM25 ranks them.
+
+        Uses the language-agnostic 'simple' text search config (no stemming) and ORs
+        the query terms; the expression matches the GIN index created by migration
+        lexfts001, so candidate selection does not scan the table. The top candidates
+        by ts_rank are then BM25-ranked in memory (IDF over the candidate set).
+        """
+        terms = [t for t in re.findall(r"\w+", (query or "").lower()) if t]
+        if not terms:
+            return []
+        self._ensure_lexical_index()
+        params: Dict[str, Any] = {"name": collection_name, "tsq": " | ".join(terms), "k": self.LEXICAL_MAX_CANDIDATES}
+        where_extra = self._build_filter_sql(filter_metadata, params) if filter_metadata else ""
+        sql = text(
+            "SELECT e.id, e.document, e.cmetadata, "
+            "ts_rank(to_tsvector('simple', coalesce(e.document, '')), to_tsquery('simple', :tsq)) AS rank "
+            "FROM langchain_pg_embedding AS e "
+            "WHERE e.collection_id = (SELECT uuid FROM langchain_pg_collection WHERE name = :name) "
+            "AND to_tsvector('simple', coalesce(e.document, '')) @@ to_tsquery('simple', :tsq)"
+            f"{where_extra} ORDER BY rank DESC LIMIT :k"
+        )
+        try:
+            with self.engine.connect() as connection:
+                rows = connection.execute(sql, params).fetchall()
+        except Exception as exc:
+            logger.error("PGVector lexical_search error: %s", exc)
+            raise
+        candidates = [
+            Document(page_content=row[1] or "", metadata={**(row[2] or {}), "_id": str(row[0])})
+            for row in rows
+        ]
+        if not candidates:
+            return []
+        # ts_rank has no IDF, so it only picks the candidates; BM25 orders them (IDF over the candidate set).
+        from rank_bm25 import BM25Okapi
+
+        tokenized = [re.findall(r"\w+", d.page_content.lower()) for d in candidates]
+        scores = BM25Okapi(tokenized).get_scores(terms)
+        ranked = sorted(zip(scores, range(len(candidates))), key=lambda pair: pair[0], reverse=True)
+        return [candidates[i] for _, i in ranked[:k]]
 
     def get_distinct_metadata_values(
         self,

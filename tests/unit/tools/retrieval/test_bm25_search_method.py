@@ -121,3 +121,34 @@ class TestBM25Preprocess:
 
     def test_stems_verb_conjugation(self):
         assert _preprocess("running") == _preprocess("run")
+
+
+class TestBM25StoreLexicalDelegation:
+
+    def test_delegates_to_store_lexical_search_when_supported(self):
+        store = MagicMock()
+        store.supports_lexical_search = True
+        store.lexical_search.return_value = [Document(page_content="engrasa la cadena")]
+        ctx = RetrievalContext(
+            vector_store=store,
+            collection_name="silo_1",
+            search_kwargs={"k": 4, "filter": {"resource_id": {"$eq": 7}}},
+        )
+
+        docs = BM25SearchMethod().build(ctx).invoke("cadena")
+
+        assert [d.page_content for d in docs] == ["engrasa la cadena"]
+        store.lexical_search.assert_called_once_with(
+            "silo_1", "cadena", 4, filter_metadata={"resource_id": {"$eq": 7}}
+        )
+        store.get_all_documents.assert_not_called()
+
+    def test_store_without_flag_keeps_in_memory_bm25(self):
+        from langchain_community.retrievers import BM25Retriever
+
+        store = MagicMock()  # a mock attribute is truthy but not `True`: must not count as support
+        store.get_all_documents.return_value = [Document(page_content="the cat sat on the mat")]
+        ctx = RetrievalContext(vector_store=store, collection_name="silo_1")
+
+        assert isinstance(BM25SearchMethod().build(ctx), BM25Retriever)
+        store.lexical_search.assert_not_called()

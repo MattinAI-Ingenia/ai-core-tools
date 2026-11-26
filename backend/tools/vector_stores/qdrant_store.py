@@ -574,6 +574,70 @@ class QdrantStore(VectorStoreInterface):
 
         return documents
 
+    # Keyword search: Qdrant's full-text payload index selects the candidates that contain any query term,
+    # then only those are BM25-ranked in memory, instead of loading and indexing the whole silo per query.
+    supports_lexical_search = True
+    LEXICAL_MAX_CANDIDATES = 1000
+    _lexical_indexed_collections: set = set()
+
+    def _ensure_lexical_index(self, collection_name: str) -> None:
+        if collection_name in QdrantStore._lexical_indexed_collections:
+            return
+        from qdrant_client.models import TextIndexParams, TextIndexType, TokenizerType
+
+        self.client.create_payload_index(
+            collection_name=collection_name,
+            field_name="page_content",
+            field_schema=TextIndexParams(type=TextIndexType.TEXT, tokenizer=TokenizerType.WORD, lowercase=True),
+        )
+        QdrantStore._lexical_indexed_collections.add(collection_name)
+
+    def lexical_search(
+        self,
+        collection_name: str,
+        query: str,
+        k: int,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Document]:
+        """Keyword search: full-text-filtered candidates, BM25-ranked in memory.
+
+        IDF is computed over the candidate set (documents containing at least one
+        query term), an approximation of collection-wide BM25 that keeps ranking
+        sensible without a sparse-vector reindex.
+        """
+        import re
+        from qdrant_client.models import FieldCondition, Filter, MatchText
+        from rank_bm25 import BM25Okapi
+
+        terms = list(dict.fromkeys(t for t in re.findall(r"\w+", (query or "").lower()) if t))
+        if not terms:
+            return []
+        self._ensure_lexical_index(collection_name)
+
+        base_filter = self._build_qdrant_filter(filter_metadata) if filter_metadata else None
+        text_filter = Filter(
+            must=[base_filter] if base_filter else None,
+            should=[FieldCondition(key="page_content", match=MatchText(text=t)) for t in terms],
+        )
+
+        candidates: List[Document] = []
+        for batch in self._iter_filtered_points(collection_name, text_filter):
+            for point in batch:
+                payload = point.payload or {}
+                candidates.append(Document(
+                    page_content=payload.get("page_content", "") or "",
+                    metadata={**(payload.get("metadata") or {}), "_id": str(point.id)},
+                ))
+            if len(candidates) >= self.LEXICAL_MAX_CANDIDATES:
+                break
+        if not candidates:
+            return []
+
+        tokenized = [re.findall(r"\w+", d.page_content.lower()) for d in candidates]
+        scores = BM25Okapi(tokenized).get_scores(terms)
+        ranked = sorted(zip(scores, range(len(candidates))), key=lambda pair: pair[0], reverse=True)
+        return [candidates[i] for _, i in ranked[:k]]
+
     def _apply_metadata_updates(
         self,
         collection_name: str,

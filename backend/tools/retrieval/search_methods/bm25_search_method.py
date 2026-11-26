@@ -1,8 +1,9 @@
 import re
 import threading
-from typing import List
+from typing import Any, List, Optional
 
 import snowballstemmer
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
@@ -36,6 +37,18 @@ def _preprocess(text: str) -> List[str]:
     return _get_stemmer().stemWords(tokens)
 
 
+class _StoreLexicalRetriever(BaseRetriever):
+    """Delegates keyword search to a vector store that runs it natively (e.g. Postgres full-text search)."""
+
+    store: Any
+    collection_name: str
+    k: int
+    filter_metadata: Optional[dict] = None
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> List[Document]:
+        return self.store.lexical_search(self.collection_name, query, self.k, filter_metadata=self.filter_metadata)
+
+
 class BM25SearchMethod(SearchMethod):
     """Produce an in-memory BM25 (lexical) retriever over the silo's corpus."""
 
@@ -51,6 +64,15 @@ class BM25SearchMethod(SearchMethod):
         k = ctx.search_kwargs.get("k", DEFAULT_K)
         filter_metadata = ctx.search_kwargs.get("filter")
         max_docs = ctx.params.get("bm25_max_docs", DEFAULT_MAX_DOCS)
+
+        # `is True` on purpose: a MagicMock store answers any attribute with a truthy mock.
+        if getattr(ctx.vector_store, "supports_lexical_search", False) is True:
+            return _StoreLexicalRetriever(
+                store=ctx.vector_store,
+                collection_name=ctx.collection_name,
+                k=k,
+                filter_metadata=filter_metadata,
+            )
 
         documents: List[Document] = ctx.vector_store.get_all_documents(
             ctx.collection_name,
