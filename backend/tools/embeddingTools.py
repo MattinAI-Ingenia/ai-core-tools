@@ -3,6 +3,7 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
 from langchain_azure_ai.embeddings import AzureAIEmbeddingsModel
 from huggingface_hub import InferenceClient
+from langchain_core.embeddings import Embeddings
 from models.embedding_service import EmbeddingProvider
 from utils.config import Config
 from utils.logger import get_logger
@@ -26,7 +27,8 @@ def get_embedding_request_timeout() -> int:
     return Config.get_int_env_var(EMBEDDING_REQUEST_TIMEOUT_ENV, default=EMBEDDING_REQUEST_TIMEOUT_DEFAULT_SECONDS)
 
 
-class HuggingFaceEmbeddingsAdapter:
+# Subclasses LangChain Embeddings so consumers that type-check it (e.g. the rerank strategy's EmbeddingsFilter) accept it.
+class HuggingFaceEmbeddingsAdapter(Embeddings):
     def __init__(self, client):
         self.client = client
         
@@ -51,6 +53,18 @@ def _build_mistral_embeddings(embedding_service, model_id):
         model=model_id,
         api_key=embedding_service.api_key,
         timeout=get_embedding_request_timeout(),
+    )
+
+
+def _build_openai_compatible_embeddings(embedding_service, model_id):
+    # Any server speaking the OpenAI /embeddings API (e.g. Infinity, vLLM, LiteLLM). The OpenAI client appends
+    # /embeddings to base_url, and check_embedding_ctx_length=False sends raw text instead of tiktoken ids.
+    return OpenAIEmbeddings(
+        model=model_id,
+        api_key=embedding_service.api_key or "not-needed",
+        base_url=embedding_service.endpoint,
+        timeout=get_embedding_request_timeout(),
+        check_embedding_ctx_length=False,
     )
 
 
@@ -155,6 +169,7 @@ _EMBEDDING_BUILDERS = {
     EmbeddingProvider.OpenAI.value: _build_openai_embeddings,
     EmbeddingProvider.MistralAI.value: _build_mistral_embeddings,
     EmbeddingProvider.Custom.value: _build_huggingface_embeddings,
+    EmbeddingProvider.OpenAICompatible.value: _build_openai_compatible_embeddings,
     EmbeddingProvider.Ollama.value: _build_ollama_embeddings,
     EmbeddingProvider.Azure.value: _build_azure_embeddings,
     EmbeddingProvider.Google.value: _build_google_embeddings,

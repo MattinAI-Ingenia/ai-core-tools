@@ -10,6 +10,7 @@ class EmbeddingProvider(enum.Enum):
     MistralAI = "MistralAI"
     Ollama = "Ollama"
     Custom = "Custom"
+    OpenAICompatible = "OpenAICompatible"
     Azure = "Azure"
     Google = "Google"
     GoogleCloud = "GoogleCloud"
