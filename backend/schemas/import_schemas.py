@@ -21,6 +21,7 @@ class ComponentType(str, Enum):
 
     AI_SERVICE = "ai_service"
     EMBEDDING_SERVICE = "embedding_service"
+    RERANK_SERVICE = "rerank_service"
     OUTPUT_PARSER = "output_parser"
     MCP_CONFIG = "mcp_config"
     MIDDLEWARE = "middleware"
@@ -90,6 +91,7 @@ class ComponentSelectionSchema(BaseModel):
 
     import_ai_services: bool = True
     import_embedding_services: bool = True
+    import_rerank_services: bool = True
     import_output_parsers: bool = True
     import_mcp_configs: bool = True
     import_silos: bool = True
@@ -172,6 +174,7 @@ class AppImportPreviewSchema(BaseModel):
     app_name: str
     ai_services: List[ComponentPreviewItem] = []
     embedding_services: List[ComponentPreviewItem] = []
+    rerank_services: List[ComponentPreviewItem] = []
     output_parsers: List[ComponentPreviewItem] = []
     mcp_configs: List[ComponentPreviewItem] = []
     silos: List[ComponentPreviewItem] = []

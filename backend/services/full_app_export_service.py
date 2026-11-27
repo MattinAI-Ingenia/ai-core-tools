@@ -10,6 +10,7 @@ from schemas.export_schemas import (
     ExportAppSchema,
     ExportAIServiceSchema,
     ExportEmbeddingServiceSchema,
+    ExportRerankServiceSchema,
     ExportOutputParserSchema,
     ExportMCPConfigSchema,
     ExportSiloSchema,
@@ -20,6 +21,7 @@ from schemas.export_schemas import (
 from services.base_export_service import BaseExportService
 from services.ai_service_export_service import AIServiceExportService
 from services.embedding_service_export_service import EmbeddingServiceExportService
+from services.rerank_service_export_service import RerankServiceExportService
 from services.output_parser_export_service import OutputParserExportService
 from services.mcp_config_export_service import MCPConfigExportService
 from services.silo_export_service import SiloExportService
@@ -61,6 +63,7 @@ class FullAppExportService(BaseExportService):
         # Initialize component export services
         self.ai_service_export = AIServiceExportService(session)
         self.embedding_export = EmbeddingServiceExportService(session)
+        self.rerank_export = RerankServiceExportService(session)
         self.parser_export = OutputParserExportService(session)
         self.mcp_export = MCPConfigExportService(session)
         self.silo_export = SiloExportService(session)
@@ -94,6 +97,7 @@ class FullAppExportService(BaseExportService):
         # Export all components in dependency order
         ai_services = self._export_all_ai_services(app_id)
         embedding_services = self._export_all_embedding_services(app_id)
+        rerank_services = self._export_all_rerank_services(app_id)
         output_parsers = self._export_all_output_parsers(app_id)
         mcp_configs = self._export_all_mcp_configs(app_id)
         silos = self._export_all_silos(app_id)
@@ -102,11 +106,16 @@ class FullAppExportService(BaseExportService):
         middlewares = self.middleware_export.export_all(app_id)
         agents = self._export_all_agents(app_id)
 
+        # The app default rerank service is referenced by name (never by id); a system one is flagged.
+        default_rerank = app.default_rerank_service
+
         # Build app metadata
         app_schema = ExportAppSchema(
             name=app.name,
             agent_rate_limit=app.agent_rate_limit,
             enable_langsmith=bool(app.langsmith_api_key),
+            default_rerank_service_name=default_rerank.name if default_rerank else None,
+            default_rerank_service_is_system=bool(default_rerank and default_rerank.app_id is None),
         )
 
         # Build export metadata
@@ -118,6 +127,7 @@ class FullAppExportService(BaseExportService):
             app=app_schema,
             ai_services=ai_services,
             embedding_services=embedding_services,
+            rerank_services=rerank_services,
             output_parsers=output_parsers,
             mcp_configs=mcp_configs,
             silos=silos,
@@ -194,6 +204,32 @@ class FullAppExportService(BaseExportService):
                     exc_info=True
                 )
         logger.info(f"Successfully exported {len(exported)}/{len(services)} embedding services")
+        return exported
+
+    def _export_all_rerank_services(
+        self, app_id: int
+    ) -> List[ExportRerankServiceSchema]:
+        """Export all rerank services owned by the app (API keys stripped).
+
+        Args:
+            app_id: App ID
+
+        Returns:
+            List of rerank service export schemas
+        """
+        services = self.app_repo.get_rerank_services_by_app_id(app_id)
+        logger.info(f"Found {len(services)} rerank services for app {app_id}")
+        exported = []
+        for service in services:
+            try:
+                export_file = self.rerank_export.export_rerank_service(service.service_id, app_id)
+                exported.append(export_file.rerank_service)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to export rerank service {service.service_id}: {e}",
+                    exc_info=True
+                )
+        logger.info(f"Successfully exported {len(exported)}/{len(services)} rerank services")
         return exported
 
     def _export_all_output_parsers(

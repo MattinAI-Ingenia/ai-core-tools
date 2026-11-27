@@ -1,3 +1,4 @@
+from fastapi.concurrency import run_in_threadpool
 from fastapi import APIRouter, Depends, Form, HTTPException, status, UploadFile, File, Query
 from typing import List, Tuple, Optional, Annotated
 from sqlalchemy.orm import Session
@@ -183,7 +184,8 @@ async def import_full_app(
 
     service = FullAppImportService(db)
     try:
-        summary = service.import_full_app(
+        summary = await run_in_threadpool(
+            service.import_full_app,
             export_data=export_data,
             user_id=user_id,
             conflict_mode=conflict_mode,

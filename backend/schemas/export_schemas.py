@@ -56,6 +56,19 @@ class ExportEmbeddingServiceSchema(ServiceLifecycleFieldsMixin):
     api_version: Optional[str] = None
 
 
+# ==================== RERANK SERVICE ====================
+
+
+class ExportRerankServiceSchema(ServiceLifecycleFieldsMixin):
+    """Rerank Service export schema"""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    api_key: Optional[str] = None  # Always None (security)
+    provider: str
+    model_name: str = Field(..., min_length=1, max_length=255)
+    endpoint: Optional[str] = Field(None, max_length=255)
+
+
 # ==================== OUTPUT PARSER ====================
 
 
@@ -223,6 +236,9 @@ class ExportAppSchema(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     agent_rate_limit: Optional[int] = None
     enable_langsmith: bool = False
+    # App default rerank service, referenced by name (an old file without it keeps the app default empty).
+    default_rerank_service_name: Optional[str] = None
+    default_rerank_service_is_system: bool = False
 
 
 # ==================== COMPONENT-SPECIFIC EXPORT FILE SCHEMAS ====================
@@ -240,6 +256,13 @@ class EmbeddingServiceExportFileSchema(BaseModel):
 
     metadata: ExportMetadataSchema
     embedding_service: ExportEmbeddingServiceSchema
+
+
+class RerankServiceExportFileSchema(BaseModel):
+    """Rerank Service export file"""
+
+    metadata: ExportMetadataSchema
+    rerank_service: ExportRerankServiceSchema
 
 
 class OutputParserExportFileSchema(BaseModel):
@@ -317,6 +340,7 @@ class AppExportFileSchema(BaseModel):
     app: ExportAppSchema
     ai_services: List[ExportAIServiceSchema] = []
     embedding_services: List[ExportEmbeddingServiceSchema] = []
+    rerank_services: List[ExportRerankServiceSchema] = Field(default_factory=list, max_length=100)  # default keeps old export files valid
     output_parsers: List[ExportOutputParserSchema] = []
     mcp_configs: List[ExportMCPConfigSchema] = []
     silos: List[ExportSiloSchema] = []

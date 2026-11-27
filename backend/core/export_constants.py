@@ -7,6 +7,7 @@ SUPPORTED_EXPORT_VERSIONS = ["1.0.0"]
 # Component type identifiers
 COMPONENT_AI_SERVICE = "ai_service"
 COMPONENT_EMBEDDING_SERVICE = "embedding_service"
+COMPONENT_RERANK_SERVICE = "rerank_service"
 COMPONENT_OUTPUT_PARSER = "output_parser"
 COMPONENT_MCP_CONFIG = "mcp_config"
 COMPONENT_SILO = "silo"
@@ -59,7 +60,9 @@ def get_component_type_from_file(file_data: dict) -> str:
     Raises:
         ValueError: If component type cannot be determined
     """
-    if "ai_service" in file_data:
+    if "rerank_service" in file_data:
+        return COMPONENT_RERANK_SERVICE
+    elif "ai_service" in file_data:
         return COMPONENT_AI_SERVICE
     elif "embedding_service" in file_data:
         return COMPONENT_EMBEDDING_SERVICE

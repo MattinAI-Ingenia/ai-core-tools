@@ -1,12 +1,17 @@
+import json
+import re
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 from lks_idprovider import AuthContext
 from sqlalchemy.orm import Session
 
 from db.database import get_db
 from routers.controls.role_authorization import AppRole, require_min_role
+from schemas.export_schemas import RerankServiceExportFileSchema
+from schemas.import_schemas import ConflictMode, ImportResponseSchema
 from schemas.rerank_service_schemas import (
     CreateUpdateRerankServiceSchema,
     RerankServiceDetailSchema,
@@ -19,6 +24,8 @@ from services.rerank_service_service import (
     RerankServiceService,
 )
 from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from services.rerank_service_export_service import RerankServiceExportService
+from services.rerank_service_import_service import RerankServiceConflictError, RerankServiceImportService
 from services.service_lifecycle_service import ServiceLifecycleService
 from utils.service_lifecycle import SERVICE_KIND_RERANK
 from utils.logger import get_logger
@@ -89,7 +96,73 @@ async def test_rerank_service_connection_with_config(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error testing rerank service")
 
 
+@rerank_services_router.post(
+    "/import", summary="Import Rerank Service", tags=["Rerank Services", "Export/Import"],
+    response_model=ImportResponseSchema, status_code=status.HTTP_201_CREATED,
+)
+async def import_rerank_service(
+    app_id: int,
+    file: Annotated[UploadFile, File(...)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("administrator"))],
+    conflict_mode: Annotated[ConflictMode, Query()] = ConflictMode.FAIL,
+    new_name: Annotated[Optional[str], Query()] = None,
+):
+    """Import a Rerank Service from a JSON file (the API key becomes a CHANGE_ME placeholder)."""
+    try:
+        content = await file.read()
+        export_data = RerankServiceExportFileSchema(**json.loads(content))
+        summary = await run_in_threadpool(
+            RerankServiceImportService(db).import_rerank_service,
+            export_data, app_id, conflict_mode, new_name, int(auth_context.identity.id),
+        )
+        return ImportResponseSchema(
+            success=True,
+            message=f"Rerank Service '{summary.component_name}' imported successfully",
+            summary=summary,
+        )
+    except RerankServiceConflictError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Rerank service import error: %s", type(exc).__name__, exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Import failed")
+
+
 # ==================== DYNAMIC ROUTES ====================
+
+
+@rerank_services_router.post(
+    "/{service_id}/export", summary="Export Rerank Service", tags=["Rerank Services", "Export/Import"],
+    status_code=status.HTTP_200_OK,
+)
+async def export_rerank_service(
+    app_id: int,
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    db: Annotated[Session, Depends(get_db)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Export a Rerank Service configuration to a JSON file (without the API key)."""
+    try:
+        export_data = RerankServiceExportService(db).export_rerank_service(
+            service_id, app_id, int(auth_context.identity.id)
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    except Exception as exc:
+        logger.error("Rerank service export error: %s", type(exc).__name__, exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Export failed")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", export_data.rerank_service.name)
+    filename = f"{safe_name}_rerank_service.json"
+    return JSONResponse(
+        content=export_data.model_dump(mode="json"),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @rerank_services_router.get(

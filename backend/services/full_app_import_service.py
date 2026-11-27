@@ -18,6 +18,7 @@ from services.ai_service_import_service import AIServiceImportService
 from services.embedding_service_import_service import (
     EmbeddingServiceImportService,
 )
+from services.rerank_service_import_service import RerankServiceImportService
 from services.output_parser_import_service import OutputParserImportService
 from services.mcp_config_import_service import MCPConfigImportService
 from services.silo_import_service import SiloImportService
@@ -27,6 +28,7 @@ from services.agent_import_service import AgentImportService
 from repositories.app_repository import AppRepository
 from models.app import App
 import logging
+from utils.service_lifecycle import is_retired
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ class FullAppImportService:
     IMPORT_ORDER = [
         "ai_services",
         "embedding_services",
+        "rerank_services",
         "output_parsers",
         "mcp_configs",
         "silos",
@@ -63,6 +66,7 @@ class FullAppImportService:
         # Initialize component import services
         self.ai_service_import = AIServiceImportService(session)
         self.embedding_import = EmbeddingServiceImportService(session)
+        self.rerank_import = RerankServiceImportService(session)
         self.parser_import = OutputParserImportService(session)
         self.mcp_import = MCPConfigImportService(session)
         self.silo_import = SiloImportService(session)
@@ -120,6 +124,7 @@ class FullAppImportService:
             "embedding_services": len(
                 export_data.embedding_services
             ),
+            "rerank_services": len(export_data.rerank_services),
             "output_parsers": len(export_data.output_parsers),
             "mcp_configs": len(export_data.mcp_configs),
             "silos": len(export_data.silos),
@@ -145,6 +150,17 @@ class FullAppImportService:
         for svc in export_data.embedding_services:
             embedding_previews.append(ComponentPreviewItem(
                 component_type=ComponentType.EMBEDDING_SERVICE,
+                component_name=svc.name,
+                bundled=True,
+                needs_api_key=True,
+                provider=svc.provider,
+            ))
+
+        # Preview rerank services
+        rerank_previews = []
+        for svc in export_data.rerank_services:
+            rerank_previews.append(ComponentPreviewItem(
+                component_type=ComponentType.RERANK_SERVICE,
                 component_name=svc.name,
                 bundled=True,
                 needs_api_key=True,
@@ -333,6 +349,7 @@ class FullAppImportService:
             app_name=export_data.app.name,
             ai_services=ai_service_previews,
             embedding_services=embedding_previews,
+            rerank_services=rerank_previews,
             output_parsers=parser_previews,
             mcp_configs=mcp_previews,
             silos=silo_previews,
@@ -381,6 +398,7 @@ class FullAppImportService:
             _TYPE_TO_FIELD: Dict[str, str] = {
                 "ai_service": "ai_services",
                 "embedding_service": "embedding_services",
+                "rerank_service": "rerank_services",
                 "output_parser": "output_parsers",
                 "mcp_config": "mcp_configs",
                 "silo": "silos",
@@ -441,6 +459,7 @@ class FullAppImportService:
         component_id_mappings = {
             "ai_services": {},  # name -> new service_id
             "embedding_services": {},  # name -> new service_id
+            "rerank_services": {},  # name -> new service_id
             "output_parsers": {},  # name -> new parser_id
             "silos": {},  # name -> new silo_id
             "middlewares": {},  # name -> new middleware_id
@@ -475,6 +494,18 @@ class FullAppImportService:
                     # Skip remaining components of this type
                     components_skipped[component_type] = len(component_data)
 
+            # The app default rerank service is set once its components exist.
+            if not all_errors:
+                try:
+                    all_warnings.extend(
+                        self._apply_default_rerank_service(
+                            export_data, app_id, component_id_mappings["rerank_services"]
+                        )
+                    )
+                except Exception as e:
+                    all_errors.append(f"default_rerank_service: {str(e)}")
+                    logger.error(f"Failed to set default rerank service: {e}", exc_info=True)
+
             # Commit transaction if no errors
             if not all_errors:
                 self.session.commit()
@@ -504,6 +535,52 @@ class FullAppImportService:
             total_errors=all_errors,
             duration_seconds=round(duration, 2),
         )
+
+    def _apply_default_rerank_service(
+        self, export_data: AppExportFileSchema, app_id: int, rerank_mapping: Dict[str, int]
+    ) -> List[str]:
+        """Set the new app's default rerank service from the exported by-name reference.
+
+        A non-system default maps to the imported service of that name. A system default maps to the
+        target installation's system service with that name; when it does not exist (or the referenced
+        service was not imported) the default is left empty and a warning is returned.
+
+        Args:
+            export_data: (Possibly filtered) export file data
+            app_id: The newly created app ID
+            rerank_mapping: Original rerank service name -> new service_id
+
+        Returns:
+            Warnings to add to the import summary
+        """
+        name = export_data.app.default_rerank_service_name
+        if not name:
+            return []
+        from models.rerank_service import RerankService
+
+        target_id: Optional[int] = None
+        if export_data.app.default_rerank_service_is_system:
+            system_service = (
+                self.session.query(RerankService)
+                .filter(RerankService.app_id.is_(None), RerankService.name == name)
+                .first()
+            )
+            if system_service is not None and is_retired(system_service):
+                return [
+                    f"System rerank service '{name}' (the exported app default) is retired on this installation; "
+                    "the app default rerank service was left empty"
+                ]
+            target_id = system_service.service_id if system_service else None
+            missing = f"System rerank service '{name}' (the exported app default) does not exist on this installation"
+        else:
+            target_id = rerank_mapping.get(name)
+            missing = f"Rerank service '{name}' (the exported app default) was not imported"
+        if target_id is None:
+            return [f"{missing}; the app default rerank service was left empty"]
+        app = self.session.get(App, app_id)
+        app.default_rerank_service_id = target_id
+        self.session.flush()
+        return []
 
     def _get_app_name(self, app_id: int) -> str:
         """Get app name by ID.
@@ -706,6 +783,35 @@ class FullAppImportService:
                             f"Applied API key for embedding service"
                             f" '{original_name}'"
                         )
+                count += 1
+
+        elif component_type == "rerank_services":
+            for item in component_data:
+                from schemas.export_schemas import RerankServiceExportFileSchema
+
+                item_export = RerankServiceExportFileSchema(
+                    metadata=export_data.metadata, rerank_service=item
+                )
+                original_name = item.name
+                logger.debug(f"Importing rerank service: {original_name}")
+                supplied_key = api_keys.get(original_name) if api_keys else None
+                if supplied_key:
+                    # Validate the endpoint against the key that will really be used, before assigning it.
+                    self.rerank_import.checked_endpoint(item, supplied_key)
+                result = self.rerank_import.import_rerank_service(
+                    export_data=item_export,
+                    app_id=app_id,
+                    conflict_mode=conflict_mode,
+                )
+                warnings.extend(result.warnings)
+                new_mappings[original_name] = result.component_id
+                # Apply user-supplied API key if provided (the outer commit persists it)
+                if api_keys and api_keys.get(original_name):
+                    from models.rerank_service import RerankService as _RerankService
+                    rr_obj = self.session.get(_RerankService, result.component_id)
+                    if rr_obj:
+                        rr_obj.api_key = api_keys[original_name]
+                        logger.debug(f"Applied API key for rerank service '{original_name}'")
                 count += 1
 
         elif component_type == "output_parsers":
