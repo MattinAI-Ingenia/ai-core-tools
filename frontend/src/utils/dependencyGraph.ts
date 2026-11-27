@@ -126,6 +126,7 @@ function formatLabel(type: string): string {
   const labels: Record<string, string> = {
     ai_service: 'AI Service',
     embedding_service: 'Embedding Service',
+    rerank_service: 'Rerank Service',
     output_parser: 'Output Parser',
     mcp_config: 'MCP Config',
     silo: 'Silo',

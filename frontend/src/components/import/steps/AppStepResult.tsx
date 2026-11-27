@@ -17,6 +17,7 @@ interface Props {
 const COMPONENT_TYPE_TRANSLATION_KEYS: Record<string, string> = {
   ai_service: 'aiServices',
   embedding_service: 'embeddingServices',
+  rerank_service: 'rerankServices',
   output_parser: 'outputParsers',
   mcp_config: 'mcpConfigs',
   silo: 'silos',

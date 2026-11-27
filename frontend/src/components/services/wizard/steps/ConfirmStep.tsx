@@ -10,6 +10,7 @@ import type {
 } from '../../../../types/services';
 import type { CredentialsState } from './CredentialsStep';
 import type { TestConnectionResult } from '../../serviceApi';
+import RerankEgressNotice from '../../RerankEgressNotice';
 import { ButtonApp } from '../../../ui/ButtonApp';
 import { CardApp } from '../../../ui/CardApp';
 
@@ -165,6 +166,8 @@ function ConfirmStep({
           helpText={t('serviceWizard.confirmStep.videoAnalysisHelp')}
         />
       )}
+
+      {kind === 'rerank' && <RerankEgressNotice />}
 
       <TestConnectionPanel
         onTest={onTest}

@@ -28,6 +28,7 @@ export type ConflictMode = 'fail' | 'rename' | 'override';
 export type ComponentType = 
   | 'ai_service'
   | 'embedding_service'
+  | 'rerank_service'
   | 'output_parser'
   | 'mcp_config'
   | 'middleware'

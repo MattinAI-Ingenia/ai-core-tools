@@ -113,6 +113,9 @@ function ModelSelectionStep({
       manualHelpKey = 'manualHelp.azure';
       manualFieldLabelKey = 'deploymentName';
       manualPlaceholder = 'my-gpt-4o-deployment';
+    } else if (kind === 'rerank') {
+      manualHelpKey = 'manualHelp.rerank';
+      manualPlaceholder = 'BAAI/bge-reranker-v2-m3';
     } else if (provider === 'GoogleCloud') {
       if (kind === 'embedding') {
         manualHelpKey = 'manualHelp.googleCloudEmbedding';

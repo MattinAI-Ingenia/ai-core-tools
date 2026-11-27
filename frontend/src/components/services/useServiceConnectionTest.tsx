@@ -12,7 +12,7 @@ interface TestService {
   readonly name: string;
 }
 
-export type ServiceKindLabel = 'AI' | 'embedding' | 'sandbox';
+export type ServiceKindLabel = 'AI' | 'embedding' | 'sandbox' | 'rerank';
 
 export function useServiceConnectionTest(serviceKind: ServiceKindLabel) {
   const { t } = useTranslation('common');

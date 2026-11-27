@@ -1,5 +1,5 @@
 import React from 'react';
-import {
+import { ListOrdered,
   Home,
   Store,
   LayoutDashboard,
@@ -178,6 +178,12 @@ export const defaultNavigation: NavigationConfig = {
       section: 'settings'
     },
     {
+      path: '/apps/:appId/settings/rerank-services',
+      name: 'Rerank Services',
+      icon: <ListOrdered size={16} />,
+      section: 'settings'
+    },
+    {
       path: '/apps/:appId/settings/sandbox-services',
       name: 'Sandbox Services',
       icon: <Box size={16} />,
@@ -257,6 +263,13 @@ export const defaultNavigation: NavigationConfig = {
       path: '/admin/system-embedding-services',
       name: 'System Embedding Services',
       icon: <Brain size={16} />,
+      section: 'admin',
+      adminOnly: true,
+    },
+    {
+      path: '/admin/system-rerank-services',
+      name: 'System Rerank Services',
+      icon: <ListOrdered size={16} />,
       section: 'admin',
       adminOnly: true,
     },

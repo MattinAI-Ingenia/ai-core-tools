@@ -16,6 +16,8 @@ import AppAvatar from '../../components/ui/AppAvatar';
 import ImageUploadControl from '../../components/ui/ImageUploadControl';
 import { useAuthenticatedImage } from '../../hooks/useAuthenticatedImage';
 import { ServiceOptionStatus, serviceStatusId } from '../../components/ui/ServiceOptionStatus';
+import RerankEgressNotice from '../../components/services/RerankEgressNotice';
+import type { RerankServiceOption } from '../../types/services';
 import { selectableServiceOptions, serviceOptionLabel, type ServiceOptionLike } from '../../utils/serviceLifecycle';
 
 type LangsmithTestStatus = 'ok' | 'unauthorized' | 'network' | 'unknown';
@@ -55,6 +57,7 @@ function AppSettingsPage() {
     default_sandbox_service_id: null as number | null,  // null = inherit system default
     chat_code_interpreter_enabled: false,
     default_embedding_service_id: null as number | null,  // null = none (Chat attachments are not indexed)
+    default_rerank_service_id: null as number | null,  // null = agents use the platform default (explicit null clears)
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -79,6 +82,10 @@ function AppSettingsPage() {
   const [savedEmbeddingServiceId, setSavedEmbeddingServiceId] = useState<number | null>(null);
   const [embeddingServices, setEmbeddingServices] = useState<EmbeddingServiceOption[]>([]);
   const [embeddingServicesFailed, setEmbeddingServicesFailed] = useState(false);
+  const [savedRerankServiceId, setSavedRerankServiceId] = useState<number | null>(null);
+  const [rerankOptions, setRerankOptions] = useState<readonly RerankServiceOption[]>([]);
+  const [platformRerankDefault, setPlatformRerankDefault] = useState<RerankServiceOption | null>(null);
+  const [rerankServicesFailed, setRerankServicesFailed] = useState(false);
 
   // Load app data on mount
   useEffect(() => {
@@ -87,6 +94,7 @@ function AppSettingsPage() {
       void loadSlugData();
       void loadSandboxServices();
       void loadEmbeddingServices();
+      void loadRerankServices();
     }
   }, [appId]);
 
@@ -97,6 +105,19 @@ function AppSettingsPage() {
       setSandboxServices(services ?? []);
     } catch (err) {
       console.error('Error loading sandbox services:', err);
+    }
+  }
+
+  async function loadRerankServices() {
+    if (!appId) return;
+    try {
+      const result = await apiService.getRerankServiceOptions(Number.parseInt(appId));
+      setRerankOptions(result.options ?? []);
+      setPlatformRerankDefault(result.platform_default ?? null);
+      setRerankServicesFailed(false);
+    } catch (err) {
+      setRerankServicesFailed(true);
+      console.error('Error loading rerank services:', err);
     }
   }
 
@@ -130,10 +151,12 @@ function AppSettingsPage() {
         default_sandbox_service_id: app.default_sandbox_service_id ?? null,
         chat_code_interpreter_enabled: app.chat_code_interpreter_enabled ?? false,
         default_embedding_service_id: app.default_embedding_service_id ?? null,
+        default_rerank_service_id: app.default_rerank_service_id ?? null,
       });
       setImageVersion(app.image_updated_at ?? null);
       setSavedSandboxServiceId(app.default_sandbox_service_id ?? null);
       setSavedEmbeddingServiceId(app.default_embedding_service_id ?? null);
+      setSavedRerankServiceId(app.default_rerank_service_id ?? null);
       setOriginalLangsmithKey(langsmithKey);
       setLangsmithKeyChanged(false);
     } catch (err) {
@@ -206,9 +229,13 @@ function AppSettingsPage() {
         default_sandbox_service_id: formData.default_sandbox_service_id,
         chat_code_interpreter_enabled: formData.chat_code_interpreter_enabled,
         default_embedding_service_id: formData.default_embedding_service_id,
+        // Explicit null clears the app default (the key is always sent).
+        default_rerank_service_id: formData.default_rerank_service_id,
       });
       setSavedSandboxServiceId(formData.default_sandbox_service_id);
       setSavedEmbeddingServiceId(formData.default_embedding_service_id);
+      setSavedRerankServiceId(formData.default_rerank_service_id);
+      void loadRerankServices();
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
@@ -579,6 +606,47 @@ function AppSettingsPage() {
                   {embeddingServicesFailed && (
                     <Alert type="warning" message={t('appSettingsPage.embeddingServicesLoadFailed')} className="mt-2" />
                   )}
+                </div>
+
+                {/* Default rerank service (optional second retrieval stage for the agents of this App) */}
+                <div>
+                  <FormSelect
+                    label={t('appSettingsPage.rerankService')}
+                    id="default_rerank_service_id"
+                    value={formData.default_rerank_service_id ?? ''}
+                    onChange={(e) => setFormData(prev => ({
+                      ...prev,
+                      default_rerank_service_id: e.target.value ? Number.parseInt(e.target.value) : null,
+                    }))}
+                    disabled={!canEdit}
+                    ariaDescribedBy={serviceStatusId(rerankOptions, formData.default_rerank_service_id, 'default_rerank_service_id')}
+                    options={[
+                      {
+                        value: '',
+                        label: platformRerankDefault
+                          ? t('appSettingsPage.noDefaultRerankServiceWithPlatform', { name: platformRerankDefault.name })
+                          : t('appSettingsPage.noDefaultRerankServiceNoPlatform'),
+                      },
+                      ...selectableServiceOptions(rerankOptions, savedRerankServiceId).map((service) => ({
+                        value: service.service_id,
+                        label: serviceOptionLabel(
+                          service,
+                          `${service.is_system ? t('appSettingsPage.systemServiceOption', { name: service.name }) : service.name} (${service.provider ?? service.model_name})`,
+                        ),
+                      })),
+                    ]}
+                    helpText={(
+                      <>
+                        {t('appSettingsPage.rerankServiceHelpBeforeSettings')}{' '}
+                        <span className="font-medium">{t('appSettingsPage.rerankServicesSettings')}</span>.
+                      </>
+                    )}
+                  />
+                  <ServiceOptionStatus selectId="default_rerank_service_id" options={rerankOptions} selectedId={formData.default_rerank_service_id} />
+                  {rerankServicesFailed && (
+                    <Alert type="warning" message={t('appSettingsPage.rerankServicesLoadFailed')} className="mt-2" />
+                  )}
+                  <RerankEgressNotice className="mt-2" />
                 </div>
               </div>
 

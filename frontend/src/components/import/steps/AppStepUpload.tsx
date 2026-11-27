@@ -49,6 +49,14 @@ function AppStepUpload({
             preview.component_counts.embedding_services ?? 0,
         },
         {
+          key: 'rerankServices',
+          icon: COMPONENT_TYPE_ICONS.rerank_service,
+          label: t('importModal.appUpload.components.rerankServices', {
+            count: preview.component_counts.rerank_services ?? 0,
+          }),
+          count: preview.component_counts.rerank_services ?? 0,
+        },
+        {
           key: 'outputParsers',
           icon: COMPONENT_TYPE_ICONS.output_parser,
           label: t('importModal.appUpload.components.outputParsers', {

@@ -3,6 +3,7 @@ export type ConflictMode = 'fail' | 'rename' | 'override';
 export type ComponentType =
   | 'ai_service'
   | 'embedding_service'
+  | 'rerank_service'
   | 'output_parser'
   | 'mcp_config'
   | 'silo'
@@ -53,6 +54,7 @@ export interface AppImportPreview {
   app_name: string;
   ai_services: ComponentPreviewItem[];
   embedding_services: ComponentPreviewItem[];
+  rerank_services: ComponentPreviewItem[];
   output_parsers: ComponentPreviewItem[];
   mcp_configs: ComponentPreviewItem[];
   silos: ComponentPreviewItem[];
@@ -114,6 +116,7 @@ export interface FullAppImportResponse {
 export const COMPONENT_TYPE_LABELS: Record<string, string> = {
   ai_service: 'AI Service',
   embedding_service: 'Embedding Service',
+  rerank_service: 'Rerank Service',
   output_parser: 'Output Parser',
   mcp_config: 'MCP Config',
   silo: 'Silo',
@@ -126,6 +129,7 @@ export const COMPONENT_TYPE_LABELS: Record<string, string> = {
 export const COMPONENT_TYPE_ICONS: Record<string, string> = {
   ai_service: 'Bot',
   embedding_service: 'Globe',
+  rerank_service: 'ListOrdered',
   output_parser: 'Webhook',
   mcp_config: 'Plug',
   silo: 'Database',

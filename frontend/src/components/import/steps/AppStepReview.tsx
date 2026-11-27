@@ -35,6 +35,7 @@ type ReviewSkippedItem = {
 const COMPONENT_TYPE_TRANSLATION_KEYS: Record<string, string> = {
   ai_service: 'aiServices',
   embedding_service: 'embeddingServices',
+  rerank_service: 'rerankServices',
   output_parser: 'outputParsers',
   mcp_config: 'mcpConfigs',
   silo: 'silos',
@@ -62,6 +63,7 @@ function buildReviewRows(
   const categories = [
     { type: 'ai_service', items: preview.ai_services },
     { type: 'embedding_service', items: preview.embedding_services },
+    { type: 'rerank_service', items: preview.rerank_services ?? [] },
     { type: 'output_parser', items: preview.output_parsers },
     { type: 'mcp_config', items: preview.mcp_configs },
     { type: 'silo', items: preview.silos },

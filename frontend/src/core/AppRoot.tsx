@@ -44,6 +44,7 @@ import AIServicesPage from '../pages/settings/AIServicesPage';
 import APIKeysPage from '../pages/settings/APIKeysPage';
 import CollaborationPage from '../pages/settings/CollaborationPage';
 import EmbeddingServicesPage from '../pages/settings/EmbeddingServicesPage';
+import RerankServicesPage from '../pages/settings/RerankServicesPage';
 import SandboxServicesPage from '../pages/settings/SandboxServicesPage';
 import AppSettingsPage from '../pages/settings/AppSettingsPage';
 import OutputDestinationsPage from '../pages/settings/OutputDestinationsPage';
@@ -69,6 +70,7 @@ import SubscriptionPage from '../pages/SubscriptionPage';
 import SaasUserListPage from '../pages/admin/SaasUserListPage';
 import SystemAIServicesPage from '../pages/admin/SystemAIServicesPage';
 import SystemEmbeddingServicesPage from '../pages/admin/SystemEmbeddingServicesPage';
+import SystemRerankServicesPage from '../pages/admin/SystemRerankServicesPage';
 import SystemSandboxServicesPage from '../pages/admin/SystemSandboxServicesPage';
 import SystemSkillsPage from '../pages/admin/SystemSkillsPage';
 import SystemSkillFormPage from '../pages/admin/SystemSkillFormPage';
@@ -456,6 +458,12 @@ export const AppRoot: React.FC<AppRootProps> = ({ config }) => {
                   </EditorLayoutRoute>
                 } />
 
+                <Route path="/apps/:appId/settings/rerank-services" element={
+                  <EditorLayoutRoute {...commonLayoutProps}>
+                      <SettingsLayout><RerankServicesPage /></SettingsLayout>
+                  </EditorLayoutRoute>
+                } />
+
                 <Route path="/apps/:appId/settings/sandbox-services" element={
                   <EditorLayoutRoute {...commonLayoutProps}>
                       <SettingsLayout><SandboxServicesPage /></SettingsLayout>
@@ -525,6 +533,12 @@ export const AppRoot: React.FC<AppRootProps> = ({ config }) => {
                 <Route path="/admin/system-embedding-services" element={
                   <AdminLayoutRoute {...commonLayoutProps}>
                     <SystemEmbeddingServicesPage />
+                  </AdminLayoutRoute>
+                } />
+
+                <Route path="/admin/system-rerank-services" element={
+                  <AdminLayoutRoute {...commonLayoutProps}>
+                    <SystemRerankServicesPage />
                   </AdminLayoutRoute>
                 } />
 

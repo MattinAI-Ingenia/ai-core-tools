@@ -128,6 +128,10 @@ function AppImportStepper({
             type: 'embedding_service',
             name: c.component_name,
           })),
+          ...(result.rerank_services ?? []).map((c) => ({
+            type: 'rerank_service',
+            name: c.component_name,
+          })),
           ...result.output_parsers.map((c) => ({
             type: 'output_parser',
             name: c.component_name,
@@ -172,7 +176,7 @@ function AppImportStepper({
 
   const hasServicesNeedingKeys = (): boolean => {
     if (!preview) return false;
-    return [...preview.ai_services, ...preview.embedding_services].some(
+    return [...preview.ai_services, ...preview.embedding_services, ...(preview.rerank_services ?? [])].some(
       (svc) => {
         const key = `${svc.component_type}:${svc.component_name}`;
         return selection[key] && svc.needs_api_key;
@@ -262,8 +266,9 @@ function AppImportStepper({
 
     try {
       // Build component selection map: type -> list of selected names
+      // The backend reads an absent type as "deselect all", so the rerank key is always sent (even empty).
       const componentSelection: Record<string, string[]> =
-        {};
+        { rerank_service: [] };
       for (const [key, selected] of Object.entries(
         selection
       )) {

@@ -43,6 +43,7 @@ function makeKey(type: string, name: string): string {
 const COMPONENT_TYPE_TRANSLATION_KEYS: Record<string, string> = {
   ai_service: 'aiServices',
   embedding_service: 'embeddingServices',
+  rerank_service: 'rerankServices',
   output_parser: 'outputParsers',
   mcp_config: 'mcpConfigs',
   silo: 'silos',
@@ -90,6 +91,21 @@ function AppStepSelect({
         deps: preview.dependencies.filter(
           (d) =>
             d.source_type === 'embedding_service' &&
+            d.source_name === c.component_name
+        ),
+      })),
+    },
+    {
+      type: 'rerank_service',
+      label: t('importModal.appUpload.components.rerankServices', { count: (preview.rerank_services ?? []).length }),
+      icon: COMPONENT_TYPE_ICONS.rerank_service,
+      items: (preview.rerank_services ?? []).map((c) => ({
+        key: makeKey('rerank_service', c.component_name),
+        name: c.component_name,
+        needsApiKey: c.needs_api_key,
+        deps: preview.dependencies.filter(
+          (d) =>
+            d.source_type === 'rerank_service' &&
             d.source_name === c.component_name
         ),
       })),

@@ -132,6 +132,7 @@ export interface App {
   default_sandbox_service_id?: number | null;
   chat_code_interpreter_enabled?: boolean;
   default_embedding_service_id?: number | null;
+  default_rerank_service_id?: number | null;
   agent_count: number;
   repository_count: number;
   domain_count: number;
@@ -885,7 +886,7 @@ class ApiService {
     });
   }
 
-  async updateApp(appId: number, data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string; enable_openai_api?: boolean; default_sandbox_service_id?: number | null; chat_code_interpreter_enabled?: boolean; default_embedding_service_id?: number | null }): Promise<App> {
+  async updateApp(appId: number, data: { name: string; langsmith_api_key?: string; agent_rate_limit?: number; max_file_size_mb?: number; agent_cors_origins?: string; enable_openai_api?: boolean; default_sandbox_service_id?: number | null; chat_code_interpreter_enabled?: boolean; default_embedding_service_id?: number | null; default_rerank_service_id?: number | null }): Promise<App> {
     return this.request(`/internal/apps/${appId}`, {
       method: 'PUT',
       body: JSON.stringify(data),

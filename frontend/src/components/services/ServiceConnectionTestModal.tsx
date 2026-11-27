@@ -28,6 +28,7 @@ function ServiceConnectionTestModal({
     AI: 'connectionTestResult.serviceKinds.ai',
     embedding: 'connectionTestResult.serviceKinds.embedding',
     sandbox: 'connectionTestResult.serviceKinds.sandbox',
+    rerank: 'connectionTestResult.serviceKinds.rerank',
   }[serviceKind];
 
   return (

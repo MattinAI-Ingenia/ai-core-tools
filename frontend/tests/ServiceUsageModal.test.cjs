@@ -44,12 +44,13 @@ const strings = {
   sections: {
     agents: 'Agents',
     appsDefault: 'Apps using it as default',
+    appsDefaultRerank: 'Apps using it as default reranker',
     silos: 'Silos',
     repositories: 'Repositories',
     middlewares: 'Middlewares',
     scheduledTasks: 'Scheduled tasks',
   },
-  agentRoles: { llm: 'LLM' },
+  agentRoles: { llm: 'LLM', rerank: 'Reranker', rerank_app_default: 'Reranker (app default)' },
   siloRoles: {},
   moveTitle: 'Move agents',
   moveCount: (count) => `${count} agents use this service`,
@@ -66,13 +67,14 @@ const strings = {
   moveConfirming: 'Moving',
   moveCancel: 'Cancel',
   moveNote: 'Some references are not moved',
+  platformDefaultBadge: 'Platform default',
 };
 
 function deferredFlush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function mount(apiService) {
+function mount(apiService, overrides = {}) {
   const states = [];
   const refs = [];
   const memoValues = [];
@@ -130,12 +132,13 @@ function mount(apiService) {
     '../ui/FormField': { FormSelect: 'FormSelect' },
     '../ui/Alert': { __esModule: true, default: 'Alert' },
     '../ui/CardApp': { __esModule: true, default: 'CardApp' },
+    '../ui/Badge': { Badge: 'Badge' },
     '../../services/api': {
       apiService,
       ApiError: class ApiError extends Error {},
     },
     '../../utils/serviceLifecycle': {
-      SERVICE_LIFECYCLE_STRINGS: {},
+      SERVICE_LIFECYCLE_STRINGS: { rerankWarning: (date) => `Rerank ends ${date}` },
       SERVICE_USAGE_STRINGS: strings,
       formatEndOfServiceDate: (date) => date,
     },
@@ -160,6 +163,7 @@ function mount(apiService) {
         serviceId: 10,
         serviceName: 'Source service',
         canMove: true,
+        ...overrides,
       });
       for (const effect of effects) {
         if (effect?.pending) {
@@ -221,4 +225,59 @@ test('shows target-load errors and retries loading target services', async () =>
   assert.ok(elements(recoveredView).some(
     (node) => node.type === 'FormSelect' && node.props.options.some((option) => option.value === 20),
   ));
+});
+
+test('rerank kind loads usage from the rerank endpoint, shows roles, default apps and platform badge, and offers no move', async () => {
+  const calls = [];
+  const rerankUsage = {
+    ...usage,
+    service_id: 11,
+    kind: 'rerank',
+    is_system: true,
+    is_platform_default: true,
+    agents: [{ agent_id: 1, name: 'Agent', roles: ['rerank', 'rerank_app_default'], app_id: 2 }],
+    apps_using_as_default: [{ app_id: 2, app_name: 'Workspace' }],
+  };
+  const page = mount({
+    getRerankServiceUsedBy: async (appId, serviceId) => {
+      calls.push(['app', appId, serviceId]);
+      return rerankUsage;
+    },
+    getSystemRerankServiceUsedBy: async (serviceId) => {
+      calls.push(['system', serviceId]);
+      return rerankUsage;
+    },
+    getAIServices: async () => assert.fail('rerank must not load move targets'),
+    getSandboxServices: async () => assert.fail('rerank must not load move targets'),
+  }, { kind: 'rerank', serviceId: 11 });
+
+  page.render();
+  await deferredFlush();
+  const view = page.render();
+  const text = textContent(view);
+  const props = elements(view).map((n) => n.props ?? {});
+  const has = (key, value) => props.some((p) => p[key] === value);
+
+  assert.deepEqual(calls, [['app', 2, 11]]);
+  assert.ok(has('detail', 'Reranker, Reranker (app default)'));
+  assert.ok(has('title', 'Apps using it as default reranker'));
+  assert.ok(has('name', 'Workspace'));
+  assert.ok(elements(view).some((n) => n.type === 'Badge' && n.props.label === 'Platform default'));
+  assert.ok(!elements(view).some((n) => n.type === 'FormSelect'), 'no move target select for rerank');
+  assert.ok(!has('title', 'Silos') && !has('title', 'Repositories') && !has('title', 'Middlewares'));
+  assert.doesNotMatch(text, /Silos/);
+});
+
+test('rerank kind with system scope uses the admin used-by endpoint', async () => {
+  const calls = [];
+  const page = mount({
+    getSystemRerankServiceUsedBy: async (serviceId) => {
+      calls.push(serviceId);
+      return { ...usage, kind: 'rerank', agents: [] };
+    },
+  }, { kind: 'rerank', scope: 'system', appId: undefined, serviceId: 11 });
+  page.render();
+  await deferredFlush();
+  page.render();
+  assert.deepEqual(calls, [11]);
 });

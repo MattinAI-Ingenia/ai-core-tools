@@ -27,6 +27,7 @@ function ProviderStep({
   let subtitleKey = 'serviceWizard.providerStep.subtitleEmbedding';
   if (kind === 'ai') subtitleKey = 'serviceWizard.providerStep.subtitleAi';
   else if (kind === 'sandbox') subtitleKey = 'serviceWizard.providerStep.subtitleSandbox';
+  else if (kind === 'rerank') subtitleKey = 'serviceWizard.providerStep.subtitleRerank';
 
   return (
     <div className="space-y-4">

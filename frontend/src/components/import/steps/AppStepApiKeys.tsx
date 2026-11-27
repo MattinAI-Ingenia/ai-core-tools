@@ -23,6 +23,7 @@ function AppStepApiKeys({
   const servicesNeedingKeys = [
     ...preview.ai_services,
     ...preview.embedding_services,
+    ...(preview.rerank_services ?? []),
   ].filter((svc) => {
     const key = `${svc.component_type}:${svc.component_name}`;
     return selection[key] && svc.needs_api_key;
