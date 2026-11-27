@@ -1,7 +1,5 @@
 from typing import Optional
 
-KINDS = {"auth", "http", "timeout", "connect", "invalid_response", "unknown_provider", "config", "busy"}
-
 
 class RerankError(Exception):
     """Base rerank failure. `message` is short and never contains bodies, credentials or the key."""

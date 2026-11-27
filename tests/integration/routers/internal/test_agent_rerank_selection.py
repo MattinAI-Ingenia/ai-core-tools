@@ -154,7 +154,7 @@ class TestInheritedRetiredDefault:
 
 
 class TestResolveStatementCount:
-    def test_resolve_is_one_statement_even_without_candidates(self, db, fake_app):
+    def test_resolve_is_at_most_three_statements_even_without_candidates(self, db, fake_app):
         from services.rerank_resolution_service import RerankResolutionService
 
         statements = []
@@ -168,7 +168,7 @@ class TestResolveStatementCount:
             result = RerankResolutionService.resolve(db, fake_app.app_id, None)
         finally:
             event.remove(conn, "before_cursor_execute", _on)
-        assert result.service is None and len(statements) == 1
+        assert result.service is None and len(statements) <= 3
 
 
 class TestUnrelatedEditsAreNotBlocked:

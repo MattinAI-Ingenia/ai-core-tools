@@ -846,7 +846,7 @@ class AgentService:
         # agent that inherits must not be blocked because an admin later retired or removed the default.
         rerank_settings_changed = 'rag_rerank_enabled' in data or 'rag_rerank_service_id' in data
         if rerank_settings_changed and enabled and not service_id:
-            resolution = RerankResolutionService.effective_default(db, app_id)
+            resolution = RerankResolutionService.resolve(db, app_id, None)
             if resolution.service is None:
                 raise ValueError(
                     "Reranking is enabled but no rerank service is available: select a rerank service, or ask "

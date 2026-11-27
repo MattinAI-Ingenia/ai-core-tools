@@ -15,7 +15,7 @@ from langchain_core.retrievers import BaseRetriever
 from pydantic import ConfigDict
 
 from tools.rerank import RerankTarget, rerank_async, rerank_sync
-from tools.rerank.errors import RerankError, RerankTimeoutError
+from tools.rerank.errors import RerankBusyError, RerankError, RerankTimeoutError
 from tools.retrieval.retrieval_component import RetrievalTransformer
 from tools.retrieval.retrieval_context import RetrievalContext
 
@@ -32,7 +32,6 @@ SkippedReason = Literal[
 
 @dataclass
 class RerankOutcome:
-    requested: bool = True
     applied: bool = False
     service_id: Optional[int] = None
     service_name: Optional[str] = None
@@ -160,7 +159,7 @@ class RerankRetriever(BaseRetriever):
     def _fallback(self, docs: List[Document], exc: Exception, latency_ms: int) -> List[Document]:
         plan = self.plan
         reason = "timeout" if isinstance(exc, RerankTimeoutError) else "service_error"
-        if isinstance(exc, RerankError) and exc.kind == "busy":
+        if isinstance(exc, RerankBusyError):
             reason = "busy"
         message = exc.message if isinstance(exc, RerankError) else type(exc).__name__
         logger.warning(

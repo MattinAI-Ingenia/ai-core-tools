@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, List, Dict, Any
 import os
 import re
@@ -183,6 +184,32 @@ def _build_pipeline_retriever(
 _RESOLUTION_SKIP_TO_PLAN = {"no_service_configured": "not_configured"}
 
 
+@dataclass(frozen=True)
+class RerankRequest:
+    """Rerank settings of one retrieval: stage on/off, explicit service (None = inherit) and top-N (None = default)."""
+
+    enabled: bool = False
+    service_id: Optional[int] = None
+    top_n: Optional[int] = None
+
+
+def _rerank_report(plan: Optional["RerankPlan"], requested: bool) -> Optional[Dict[str, Any]]:
+    """The ``rerank`` block of a search response; None when reranking was not requested."""
+    if not requested:
+        return None
+    if plan is None:
+        # Nothing was searched (e.g. the collection does not exist): report the stage as not applied.
+        return {
+            "requested": True, "applied": False, "service_id": None, "service_name": None,
+            "source": None, "skipped_reason": "no_candidates", "latency_ms": None,
+        }
+    out = plan.outcome
+    return {
+        "requested": True, "applied": out.applied, "service_id": out.service_id, "service_name": out.service_name,
+        "source": out.source, "skipped_reason": out.skipped_reason, "latency_ms": out.latency_ms,
+    }
+
+
 def _build_rerank_plan(
     session: Session,
     silo: Silo,
@@ -360,8 +387,8 @@ def resolve_search_params(
     Returns ``(search_params, pinned_filter)`` where:
     - ``search_params``: tuning-only dict (no 'filter' key) — k, search_type,
       score_threshold, fetch_k, lambda_mult, search_method, plus the agent's rerank settings
-      (``rerank_enabled``, ``rerank_service_id``, ``rerank_top_n``; taken from the agent only, any
-      caller-supplied rerank key is ignored).
+      as one ``rerank`` :class:`RerankRequest` (taken from the agent only, any caller-supplied rerank key is
+      ignored).
     - ``pinned_filter``: backend-ready ``{field: {op: value}}`` dict — the AND
       combination of caller flat filter and ``agent.rag_fixed_filters``. The
       agent's fixed filters WIN on (field, op) conflict: they are an
@@ -422,11 +449,11 @@ def resolve_search_params(
 
     # Rerank (AD-10): agent-only. Caller-supplied rerank keys are ignored so a public API caller cannot
     # turn reranking on/off or pick a service; the resolved service is chosen at retrieval time (AD-9).
-    from tools.retrieval.rerank_transformer import DEFAULT_RERANK_TOP_N
-
-    resolved["rerank_enabled"] = bool(getattr(agent, "rag_rerank_enabled", False))
-    resolved["rerank_service_id"] = getattr(agent, "rag_rerank_service_id", None)
-    resolved["rerank_top_n"] = getattr(agent, "rag_rerank_top_n", None) or DEFAULT_RERANK_TOP_N
+    resolved["rerank"] = RerankRequest(
+        enabled=bool(getattr(agent, "rag_rerank_enabled", False)),
+        service_id=getattr(agent, "rag_rerank_service_id", None),
+        top_n=getattr(agent, "rag_rerank_top_n", None),
+    )
 
     # Threshold search without a threshold silently degrades to plain similarity — normalize
     # and warn instead of a silent no-op (legacy agents, or a caller that cleared the value).
@@ -559,7 +586,7 @@ class SiloService:
                 # Known retriever parameters that should not be wrapped in 'filter'
                 known_params = {
                     'k', 'filter', 'score_threshold', 'fetch_k', 'lambda_mult', 'search_type',
-                    'search_method', 'rerank_enabled', 'rerank_service_id', 'rerank_top_n',
+                    'search_method',
                 }
                 
                 # Separate known params from filter fields
@@ -567,6 +594,8 @@ class SiloService:
                 direct_params = {}
                 
                 for key, value in search_params.items():
+                    if key == 'rerank':
+                        continue  # RerankRequest, consumed below (never a filter field)
                     if key in known_params:
                         direct_params[key] = value
                     else:
@@ -587,13 +616,11 @@ class SiloService:
                 
                 logger.debug(f"Merged search_kwargs: {merged_search_kwargs}")
             
-            rerank_enabled = bool(merged_search_kwargs.pop('rerank_enabled', False))
-            rerank_service_id = merged_search_kwargs.pop('rerank_service_id', None)
-            rerank_top_n = merged_search_kwargs.pop('rerank_top_n', None)
+            rerank_req = (search_params or {}).get('rerank')
             rerank_plan = None
-            if rerank_enabled:
+            if rerank_req is not None and rerank_req.enabled:
                 rerank_plan = _build_rerank_plan(
-                    session, silo, rerank_service_id, rerank_top_n, merged_search_kwargs.get('k', 30)
+                    session, silo, rerank_req.service_id, rerank_req.top_n, merged_search_kwargs.get('k', 30)
                 )
                 # First stage must supply max(rag_k, top_n) candidates.
                 merged_search_kwargs['k'] = rerank_plan.candidate_limit
@@ -1941,9 +1968,7 @@ class SiloService:
         max_content_length: Optional[int],
         db: Session,
         search_method: Optional[str],
-        rerank: bool,
-        rerank_service_id: Optional[int],
-        rerank_top_n: Optional[int],
+        rerank: Optional[RerankRequest],
     ) -> tuple[List[Document], List[Optional[float]], Optional["RerankPlan"]]:
         """Run the search; return ``(docs, rerank_scores, plan)`` with the scores aligned to ``docs``.
 
@@ -1968,15 +1993,16 @@ class SiloService:
             results_limit = MAX_SEARCH_LIMIT
 
         plan = None
-        if rerank:
-            if rerank_service_id is not None and not RerankServiceRepository.get_visible_by_id(
-                db, rerank_service_id, silo.app_id
+        rerank_on = rerank is not None and rerank.enabled
+        if rerank_on:
+            if rerank.service_id is not None and not RerankServiceRepository.get_visible_by_id(
+                db, rerank.service_id, silo.app_id
             ):
-                raise ValidationError(f"Rerank service {rerank_service_id} not found")
+                raise ValidationError(f"Rerank service {rerank.service_id} not found")
             # ``limit`` only sizes the first stage; an unset limit must not request the default 100 candidates.
-            plan = _build_rerank_plan(db, silo, rerank_service_id, rerank_top_n, limit if limit and limit > 0 else 0)
+            plan = _build_rerank_plan(db, silo, rerank.service_id, rerank.top_n, limit if limit and limit > 0 else 0)
 
-        uses_pipeline = rerank or bool(search_method and search_method != "dense")
+        uses_pipeline = rerank_on or bool(search_method and search_method != "dense")
         scores: List[Optional[float]]
 
         if not uses_pipeline:
@@ -2041,33 +2067,29 @@ class SiloService:
         max_content_length: Optional[int] = None,
         db: Session = None,
         search_method: Optional[str] = None,
-        rerank: bool = False,
-        rerank_service_id: Optional[int] = None,
-        rerank_top_n: Optional[int] = None,
+        rerank: Optional[RerankRequest] = None,
     ) -> List[Document]:
         """Search a silo's collection for documents matching *query*.
 
-        By default (``search_method`` is ``None``/``"dense"`` and ``rerank`` is False) this uses the exact
+        By default (``search_method`` is ``None``/``"dense"`` and ``rerank`` is not enabled) this uses the exact
         same dense-similarity code path as before — ``vector_store.search_similar_documents`` — including the
         ``_score`` it stamps into each ``Document.metadata``. Only when a non-dense ``search_method``
-        (e.g. ``"bm25"``) or ``rerank=True`` is requested does this route through the
+        (e.g. ``"bm25"``) or an enabled ``rerank`` is requested does this route through the
         ``RetrievalPipeline`` instead (no ``_score`` is set in that case).
 
         Args:
             filter_metadata: Backend-ready ``{field: {op: value}}`` filter dict
                 (same shape used for both code paths — never translated here).
-            rerank: Rerank the candidates with the resolved rerank service (second stage). Failure falls back
-                to the first-stage order cut to the top N.
-            rerank_service_id: Explicit service (must be visible to the silo's app) or None to inherit the
-                app / platform default.
-            rerank_top_n: Documents kept after reranking (runtime default when None).
+            rerank: Rerank the candidates (second stage) with the explicit service (must be visible to the silo's
+                app) or, when its ``service_id`` is None, the app / platform default. Failure falls back to the
+                first-stage order cut to the top N (``top_n``, runtime default when None).
 
         Raises:
-            ValidationError: ``rerank_service_id`` does not exist or is not visible to the silo's app.
+            ValidationError: ``rerank.service_id`` does not exist or is not visible to the silo's app.
         """
         docs, _scores, _plan = SiloService._search_docs(
             silo_id, query, filter_metadata, limit, search_type, score_threshold, fetch_k, lambda_mult,
-            min_content_length, max_content_length, db, search_method, rerank, rerank_service_id, rerank_top_n,
+            min_content_length, max_content_length, db, search_method, rerank,
         )
         return docs
 
@@ -2085,9 +2107,7 @@ class SiloService:
         max_content_length: Optional[int] = None,
         db: Session = None,
         search_method: Optional[str] = None,
-        rerank: bool = False,
-        rerank_service_id: Optional[int] = None,
-        rerank_top_n: Optional[int] = None,
+        rerank: Optional[RerankRequest] = None,
     ) -> List[Document]:
         """
         Search for documents in a silo using semantic search
@@ -2117,8 +2137,6 @@ class SiloService:
             db=db,
             search_method=search_method,
             rerank=rerank,
-            rerank_service_id=rerank_service_id,
-            rerank_top_n=rerank_top_n,
         )
 
     @staticmethod
@@ -2415,7 +2433,8 @@ class SiloService:
         # Perform the search with metadata filtering
         results, scores, plan = SiloService._search_docs(
             silo_id, query, filter_metadata, limit, search_type, score_threshold, fetch_k, lambda_mult,
-            min_content_length, max_content_length, db, search_method, rerank, rerank_service_id, rerank_top_n,
+            min_content_length, max_content_length, db, search_method,
+            RerankRequest(True, rerank_service_id, rerank_top_n) if rerank else None,
         )
 
         # Convert results to response format
@@ -2436,23 +2455,9 @@ class SiloService:
             "total_results": len(response_results),
             "filter_metadata": filter_metadata,
         }
-        if rerank and plan is None:
-            # Nothing was searched (e.g. the collection does not exist): report the stage as not applied.
-            response["rerank"] = {
-                "requested": True, "applied": False, "service_id": None, "service_name": None,
-                "source": None, "skipped_reason": "no_candidates", "latency_ms": None,
-            }
-        elif rerank and plan is not None:
-            out = plan.outcome
-            response["rerank"] = {
-                "requested": True,
-                "applied": out.applied,
-                "service_id": out.service_id,
-                "service_name": out.service_name,
-                "source": out.source,
-                "skipped_reason": out.skipped_reason,
-                "latency_ms": out.latency_ms,
-            }
+        report = _rerank_report(plan, rerank)
+        if report is not None:
+            response["rerank"] = report
         return response
 
     @staticmethod

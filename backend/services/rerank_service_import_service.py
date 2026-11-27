@@ -9,21 +9,13 @@ from sqlalchemy.orm import Session
 from core.export_constants import PLACEHOLDER_API_KEY, validate_export_version
 from models.rerank_service import RerankProvider, RerankService
 from schemas.export_schemas import ExportRerankServiceSchema, RerankServiceExportFileSchema
-from schemas.import_schemas import (
-    ComponentType,
-    ConflictMode,
-    ImportSummarySchema,
-    ValidateImportResponseSchema,
-)
-from services.rerank_service_service import RerankServiceError, RerankServiceService, _origin
+from schemas.import_schemas import ComponentType, ConflictMode, ImportSummarySchema
+from services.rerank_service_service import RerankServiceError, RerankServiceService, _check_key_reuse
 from services.service_lifecycle_service import ServiceLifecycleService
 from tools.rerank.endpoints import normalize_endpoint
 from utils.service_lifecycle import SERVICE_KIND_RERANK
 
 logger = logging.getLogger(__name__)
-
-_KEY_HOST_CHANGE_MSG = "Re-enter the API key when changing the endpoint host."
-
 
 class RerankServiceConflictError(ValueError):
     """A rerank service with the same name already exists in the app (FAIL conflict mode)."""
@@ -68,31 +60,6 @@ class RerankServiceImportService:
             raise ValueError(f"Rerank Service '{item.name}': {exc}") from None
         return endpoint
 
-    def validate_import(
-        self, export_data: RerankServiceExportFileSchema, app_id: int
-    ) -> ValidateImportResponseSchema:
-        """Validate a Rerank Service import without importing.
-
-        Args:
-            export_data: Parsed export file
-            app_id: Target app ID
-
-        Returns:
-            ValidateImportResponseSchema: Validation result
-        """
-        validate_export_version(export_data.metadata.export_version)
-        existing = self.get_by_name_and_app(export_data.rerank_service.name, app_id)
-        warnings = []
-        if export_data.rerank_service.api_key is None:
-            warnings.append("API key must be configured after import")
-        return ValidateImportResponseSchema(
-            component_type=ComponentType.RERANK_SERVICE,
-            component_name=export_data.rerank_service.name,
-            has_conflict=existing is not None,
-            warnings=warnings,
-            missing_dependencies=[],
-        )
-
     def import_rerank_service(
         self,
         export_data: RerankServiceExportFileSchema,
@@ -116,9 +83,8 @@ class RerankServiceImportService:
         Raises:
             ValueError: On conflict in FAIL mode, or a rejected provider/endpoint.
         """
-        self.validate_import(export_data, app_id)
+        validate_export_version(export_data.metadata.export_version)
         item = export_data.rerank_service
-        endpoint = None  # validated per branch against the key that will actually be used
 
         final_name = item.name
         existing = self.get_by_name_and_app(final_name, app_id)
@@ -139,8 +105,10 @@ class RerankServiceImportService:
             elif conflict_mode == ConflictMode.OVERRIDE:
                 endpoint = self.checked_endpoint(item, existing.api_key)
                 # The stored key must never follow an endpoint to a different origin.
-                if existing.api_key and _origin(existing.endpoint) != _origin(endpoint):
-                    raise ValueError(f"Rerank Service '{item.name}': {_KEY_HOST_CHANGE_MSG}")
+                try:
+                    _check_key_reuse(existing, endpoint)
+                except RerankServiceError as exc:
+                    raise ValueError(f"Rerank Service '{item.name}': {exc.message}") from None
                 existing.provider = item.provider
                 existing.model_name = item.model_name
                 existing.endpoint = endpoint

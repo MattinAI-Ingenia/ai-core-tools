@@ -14,7 +14,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.retrievers import BaseRetriever
 
-from services.silo_service import SiloService
+from services.silo_service import RerankRequest, SiloService
 
 
 def _make_silo() -> MagicMock:
@@ -147,7 +147,7 @@ def test_rerank_with_dense_routes_through_sync_pipeline_with_plan():
          patch("services.silo_service._build_rerank_plan", return_value=plan) as mock_plan, \
          patch("services.silo_service._build_pipeline_retriever", return_value=retriever) as mock_build:
         SiloService.find_docs_in_collection(
-            silo_id=7, query="invoice", rerank=True, rerank_top_n=5, limit=10, db=db
+            silo_id=7, query="invoice", rerank=RerankRequest(True, None, 5), limit=10, db=db
         )
 
     vector_store.search_similar_documents.assert_not_called()
@@ -172,7 +172,7 @@ def test_explicit_rerank_service_not_visible_raises_validation_error():
          patch("services.silo_service._build_pipeline_retriever") as mock_build:
         try:
             SiloService.find_docs_in_collection(
-                silo_id=7, query="q", rerank=True, rerank_service_id=99, db=MagicMock()
+                silo_id=7, query="q", rerank=RerankRequest(True, 99), db=MagicMock()
             )
         except ValidationError:
             pass
@@ -287,7 +287,7 @@ def test_router_default_path_returns_score_from_metadata():
     assert "rerank" not in result
     # search_method / rerank flags default and are forwarded positionally
     args = mock_search.call_args.args
-    assert args[11] is None and args[12] is False and args[13] is None and args[14] is None
+    assert args[11] is None and args[12] is None
 
 
 def test_router_pipeline_path_returns_none_score_when_absent():

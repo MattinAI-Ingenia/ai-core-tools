@@ -73,7 +73,7 @@ def _make_agent(
 # Import under test
 # ---------------------------------------------------------------------------
 
-from services.silo_service import resolve_search_params  # noqa: E402
+from services.silo_service import RerankRequest, resolve_search_params  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -234,16 +234,14 @@ class TestRerankFromAgentOnly:
     def test_defaults_when_agent_has_no_rerank(self):
         sp, _ = resolve_search_params(_make_agent(silo=_make_silo()), {})
 
-        assert sp["rerank_enabled"] is False
-        assert sp["rerank_service_id"] is None
-        assert sp["rerank_top_n"] == 30
+        assert sp["rerank"] == RerankRequest(False, None, None)
 
     def test_agent_values_emitted(self):
         agent = _make_agent(rag_rerank_enabled=True, rag_rerank_service_id=9, rag_rerank_top_n=5, silo=_make_silo())
 
         sp, _ = resolve_search_params(agent, {})
 
-        assert (sp["rerank_enabled"], sp["rerank_service_id"], sp["rerank_top_n"]) == (True, 9, 5)
+        assert sp["rerank"] == RerankRequest(True, 9, 5)
 
     def test_caller_cannot_set_rerank_keys(self):
         agent = _make_agent(rag_rerank_enabled=False, rag_rerank_service_id=None, rag_rerank_top_n=7, silo=_make_silo())
@@ -252,9 +250,8 @@ class TestRerankFromAgentOnly:
             agent, {"rerank_enabled": True, "rerank_service_id": 123, "rerank_top_n": 50}
         )
 
-        assert sp["rerank_enabled"] is False
-        assert sp["rerank_service_id"] is None
-        assert sp["rerank_top_n"] == 7
+        assert sp["rerank"] == RerankRequest(False, None, 7)
+        assert "rerank_enabled" not in sp
 
     def test_legacy_keys_are_not_emitted(self):
         sp, _ = resolve_search_params(

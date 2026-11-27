@@ -19,7 +19,7 @@ from tools.rerank.errors import (
     InvalidRerankResponseError, RerankAuthError, RerankConnectError, RerankHTTPError,
     RerankTimeoutError, UnknownRerankProviderError,
 )
-from tools.rerank.providers import CohereCompatibleAdapter, get_adapter
+from tools.rerank.providers import build_request, parse_response
 from tools.rerank.types import RerankTarget
 
 KEY = "sk-super-secret-key-123"
@@ -60,9 +60,9 @@ def test_from_service_and_repr_hides_key():
 
 
 def test_dispatch_and_unknown_provider():
-    assert isinstance(get_adapter("CohereCompatible"), CohereCompatibleAdapter)
+    assert build_request(make_target(), "q", ["a"], 1).url
     with pytest.raises(UnknownRerankProviderError):
-        get_adapter("Voyage")
+        build_request(make_target(provider="Voyage"), "q", ["a"], 1)
     with pytest.raises(UnknownRerankProviderError):
         rerank_sync(make_target(provider="Nope"), "q", ["a"], 1)
 
@@ -140,17 +140,17 @@ def test_normalize_endpoint_invalid(raw):
 ])
 def test_invalid_responses(body):
     with pytest.raises(InvalidRerankResponseError):
-        CohereCompatibleAdapter().parse_response(200, body, 3, 3)
+        parse_response(200, body, 3, 3)
 
 
 def test_sorting_stable_and_truncation():
     body = {"results": [
         {"index": 1, "relevance_score": 0.5}, {"index": 0, "relevance_score": 0.9},
         {"index": 2, "relevance_score": 0.5}]}
-    res = CohereCompatibleAdapter().parse_response(200, body, 3, 3)
+    res = parse_response(200, body, 3, 3)
     assert [r.index for r in res] == [0, 1, 2]
-    assert [r.index for r in CohereCompatibleAdapter().parse_response(200, body, 3, 2)] == [0, 1]
-    assert len(CohereCompatibleAdapter().parse_response(200, {"results": body["results"][:1]}, 3, 3)) == 1
+    assert [r.index for r in parse_response(200, body, 3, 2)] == [0, 1]
+    assert len(parse_response(200, {"results": body["results"][:1]}, 3, 3)) == 1
 
 
 def test_status_mapping_sync():
@@ -286,12 +286,12 @@ def test_normalize_keeps_path_and_lowercases_scheme():
 def test_top_n_and_repr_and_overflow():
     from tools.rerank.errors import RerankError
     with pytest.raises(RerankError) as e:
-        CohereCompatibleAdapter().build_request(make_target(), "q", DOCS, 0)
+        build_request(make_target(), "q", DOCS, 0)
     assert e.value.kind == "config"
-    req = CohereCompatibleAdapter().build_request(make_target(), QUERY, DOCS, 1)
+    req = build_request(make_target(), QUERY, DOCS, 1)
     assert KEY not in repr(req) and QUERY not in repr(req)
     with pytest.raises(InvalidRerankResponseError):
-        CohereCompatibleAdapter().parse_response(200, {"results": [{"index": 0, "relevance_score": 10**400}]}, 1, 1)
+        parse_response(200, {"results": [{"index": 0, "relevance_score": 10**400}]}, 1, 1)
 
 
 def test_clients_ignore_env():

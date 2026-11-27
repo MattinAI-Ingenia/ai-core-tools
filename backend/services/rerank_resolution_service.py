@@ -8,11 +8,12 @@ by the next level (a silent fallback would send the app's documents to a provide
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.app import App
 from models.rerank_service import RerankService
+from repositories.rerank_service_repository import RerankServiceRepository
 from utils.service_lifecycle import is_retired
 
 SOURCE_AGENT = "agent"
@@ -81,36 +82,18 @@ class RerankResolutionService:
 
     @staticmethod
     def resolve(db: Session, app_id: int, explicit_service_id: Optional[int]) -> RerankResolution:
-        """Resolve the service for an agent of ``app_id`` with ONE query for all three candidates."""
-        # Driven from App with an outer join: ONE statement always returns the app's default id (even when no
-        # service row matches) plus every matching candidate.
-        conditions = [RerankService.service_id == App.default_rerank_service_id,
-                      RerankService.is_platform_default.is_(True)]
-        if explicit_service_id is not None:
-            conditions.append(RerankService.service_id == explicit_service_id)
-        stmt = (
-            select(App.default_rerank_service_id, RerankService)
-            .select_from(App)
-            .outerjoin(RerankService, or_(*conditions))
-            .where(App.app_id == app_id)
+        """Resolve the service for an agent of ``app_id``: app default id, explicit service, platform default."""
+        app_default_id = db.execute(
+            select(App.default_rerank_service_id).where(App.app_id == app_id)
+        ).scalar_one_or_none()
+        explicit = (
+            RerankServiceRepository.get_visible_by_id(db, explicit_service_id, app_id)
+            if explicit_service_id is not None else None
         )
-        rows = db.execute(stmt).all()
-
-        app_default_id: Optional[int] = rows[0][0] if rows else None
-        rows = [(row[1], row[0]) for row in rows if row[1] is not None]
-        by_id = {row[0].service_id: row[0] for row in rows}
-        platform_default = next((row[0] for row in rows if row[0].is_platform_default), None)
+        app_default = (
+            RerankServiceRepository.get_visible_by_id(db, app_default_id, app_id) if app_default_id is not None else None
+        )
         return choose_rerank_service(
-            explicit_service_id,
-            by_id.get(explicit_service_id) if explicit_service_id is not None else None,
-            by_id.get(app_default_id) if app_default_id is not None else None,
-            platform_default,
-            app_id,
+            explicit_service_id, explicit, app_default, RerankServiceRepository.get_platform_default(db), app_id,
             app_default_id,
         )
-
-    @staticmethod
-    def effective_default(db: Session, app_id: int) -> RerankResolution:
-        """What an agent that inherits would use (app default, then platform default); used by the options
-        endpoint and by save-time validation."""
-        return RerankResolutionService.resolve(db, app_id, None)

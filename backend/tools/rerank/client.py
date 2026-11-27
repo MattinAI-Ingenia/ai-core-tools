@@ -16,7 +16,7 @@ from tools.rerank.errors import (
     InvalidRerankResponseError, RerankAuthError, RerankBusyError, RerankConnectError, RerankError, RerankLocalError,
     RerankHTTPError, RerankTimeoutError,
 )
-from tools.rerank.providers import get_adapter
+from tools.rerank.providers import build_request, parse_response
 from tools.rerank.types import RerankResult, RerankTarget
 from utils import ssrf_guard
 
@@ -111,12 +111,12 @@ def _check_status(response: httpx.Response) -> None:
             pass  # malformed header: the streaming cap still applies
 
 
-def _parse(adapter, target, status, raw: bytes, n_docs, top_n, start) -> list[RerankResult]:
+def _parse(target, status, raw: bytes, n_docs, top_n, start) -> list[RerankResult]:
     try:
         body = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         raise InvalidRerankResponseError("Response body is not valid JSON") from None
-    results = adapter.parse_response(status, body, n_docs, top_n)
+    results = parse_response(status, body, n_docs, top_n)
     logger.info(
         "rerank.call service_id=%s app_id=%s provider=%s candidates=%d top_n=%d latency_ms=%d outcome=ok",
         target.service_id, target.app_id, target.provider, n_docs, top_n, _ms(start),
@@ -132,14 +132,13 @@ def _needs_guard(target: RerankTarget) -> bool:
 
 
 def _prepare(target, query, documents, top_n):
-    adapter = get_adapter(target.provider)
     try:
-        req = adapter.build_request(target, query, documents, top_n)
+        req = build_request(target, query, documents, top_n)
     except ValueError as exc:  # invalid endpoint
         raise RerankError(str(exc), kind="config") from None
     logger.debug("rerank.request service_id=%s provider=%s candidates=%d top_n=%d",
                  target.service_id, target.provider, len(documents), top_n)
-    return adapter, req
+    return req
 
 
 _warned_sites: set = set()
@@ -188,7 +187,7 @@ def rerank_sync(target: RerankTarget, query: str, documents: list[str], top_n: i
 
 async def rerank_async(target: RerankTarget, query: str, documents: list[str], top_n: int,
                        caller_app_id=None) -> list[RerankResult]:
-    adapter, req = _prepare(target, query, documents, top_n)
+    req = _prepare(target, query, documents, top_n)
     start = time.monotonic()
     cap = config.RERANK_MAX_RESPONSE_BYTES
     try:
@@ -211,7 +210,7 @@ async def rerank_async(target: RerankTarget, query: str, documents: list[str], t
         raise RerankTimeoutError(f"Reranker timed out after {_total():g}s") from None
     except Exception as exc:
         raise _map_exc(exc) from None
-    return _parse(adapter, target, status, bytes(buf), len(documents), top_n, start)
+    return _parse(target, status, bytes(buf), len(documents), top_n, start)
 
 
 async def test_rerank_connection(target: RerankTarget) -> dict:
