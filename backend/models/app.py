@@ -46,6 +46,8 @@ class App(Base):
     ai_services = relationship('AIService', back_populates='app', lazy=True)
     embedding_services = relationship('EmbeddingService', back_populates='app',
                         foreign_keys='EmbeddingService.app_id', lazy=True)
+    rerank_services = relationship('RerankService', back_populates='app',
+                        foreign_keys='RerankService.app_id', lazy=True)
     sandbox_services = relationship('SandboxService',
                         back_populates='app',
                         foreign_keys='SandboxService.app_id',
@@ -88,6 +90,20 @@ class App(Base):
                         nullable=True)
     default_embedding_service = relationship('EmbeddingService',
                         foreign_keys=[default_embedding_service_id])
+
+    # Default rerank service for the app's agents. NULL = no app default; agents then inherit the platform
+    # default. use_alter=True for the App<->RerankService creation cycle (rerank_service.app_id -> App.app_id);
+    # the rerank001 migration adds/drops this FK as a separate, named step.
+    default_rerank_service_id = Column(Integer,
+                        ForeignKey(
+                            'rerank_service.service_id',
+                            ondelete='SET NULL',
+                            use_alter=True,
+                            name='App_default_rerank_service_id_fkey',
+                        ),
+                        nullable=True)
+    default_rerank_service = relationship('RerankService',
+                        foreign_keys=[default_rerank_service_id])
 
     # Opt-in for the App Chat code interpreter: the Chat only gets one when this is true. It then uses the App
     # default sandbox service or, when the App has none, the system default (like agents); a retired App default

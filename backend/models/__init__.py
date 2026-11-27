@@ -4,6 +4,7 @@ from .app_collaborator import AppCollaborator
 from .api_key import APIKey
 from .ai_service import AIService
 from .embedding_service import EmbeddingService
+from .rerank_service import RerankService
 from .sandbox_service import SandboxService
 from .output_parser import OutputParser
 from .mcp_config import MCPConfig
@@ -46,11 +47,11 @@ from .output_delivery import OutputArtifact, OutputDestination, ScheduledTaskOut
 
 __all__ = [
     'User', 'App', 'AppCollaborator', 'APIKey',
-    'AIService', 'EmbeddingService', 'OutputParser', 'MCPConfig', 'Silo', 'Skill', 'SkillFile',
+    'AIService', 'EmbeddingService', 'RerankService', 'OutputParser', 'MCPConfig', 'Silo', 'Skill', 'SkillFile',
     'Agent', 'AgentMarketplaceProfile', 'ConversationStarter', 'AgentMarketplaceRating', 'OCRAgent', 'Conversation', 'HITLApproval',
     'Repository', 'Resource', 'Folder', 'Domain',
     'DomainUrl', 'CrawlPolicy', 'CrawlJob', 'SharePointSource', 'SharePointFile',
-    'AIService', 'EmbeddingService', 'OutputParser', 'MCPConfig', 'Silo',
+    'AIService', 'EmbeddingService', 'RerankService', 'OutputParser', 'MCPConfig', 'Silo',
     'Agent', 'Skill', 'OCRAgent', 'Conversation', 'Repository', 'Resource', 'Folder', 'Domain',
     'Media',
     'MCPServer', 'MCPServerAgent',

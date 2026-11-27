@@ -103,10 +103,12 @@ class Agent(Base):
     rag_fixed_filters = Column(JSON, nullable=True)     # list of {field, op, value} filter clauses applied on every retrieval
     exposed_chat_filters = Column(JSON, default=list, nullable=False, server_default='[]')  # list of metadata field names the designer exposes as end-user chat-time dropdown filters
     rag_max_retrieval_calls = Column(Integer, nullable=True)  # NULL = legacy unbounded behaviour
-    rag_search_method = Column(JSON(none_as_null=True), default=lambda: ["dense"], nullable=False, server_default='["dense"]')  # raw capability set, e.g. ["dense"], ["dense","bm25"] (values from SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS); none_as_null=True + a fresh-list default keep this column's invariants consistent with rag_strategy below (no JSON null, no shared mutable default)
-    rag_strategy = Column(JSON(none_as_null=True), nullable=True)  # list of post-retrieval strategies, e.g. ["rerank"] or [] / SQL NULL for none (values from StrategyFactory.IMPLEMENTED_STRATEGIES); none_as_null=True keeps "no strategy" as a single SQL NULL representation instead of JSON null
-    rag_rerank_top_n = Column(Integer, nullable=True)  # documents kept after reranking; only used when 'rerank' is in rag_strategy
-    rag_rerank_similarity_threshold = Column(Float, nullable=True)  # optional score floor for reranked candidates; only used when 'rerank' is in rag_strategy
+    rag_search_method = Column(JSON(none_as_null=True), default=lambda: ["dense"], nullable=False, server_default='["dense"]')  # raw capability set, e.g. ["dense"], ["dense","bm25"] (values from SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS); none_as_null=True + a fresh-list default (no JSON null, no shared mutable default)
+    rag_rerank_enabled = Column(Boolean, nullable=False, default=False, server_default='false')  # post-retrieval rerank on/off
+    rag_rerank_top_n = Column(Integer, nullable=True)  # documents kept after reranking (1..50); NULL = 30 at runtime; used when rag_rerank_enabled
+    # NULL = inherit (app default, then platform default). No ondelete (NO ACTION) on purpose: an explicit choice must never silently become "inherit".
+    rag_rerank_service_id = Column(Integer, ForeignKey('rerank_service.service_id', name='Agent_rag_rerank_service_id_fkey'), nullable=True, index=True)
+    rag_rerank_service = relationship('RerankService', foreign_keys=[rag_rerank_service_id])
 
     # Memory management via LangChain SummarizationMiddleware (when has_memory=True)
     memory_max_messages = Column(Integer, default=20, nullable=False)  # SummarizationMiddleware.keep=("messages", N) — messages to preserve after summarization
