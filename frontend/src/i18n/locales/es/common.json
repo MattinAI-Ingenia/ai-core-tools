@@ -2333,6 +2333,7 @@
       "description": "Puedes proporcionar claves API para los servicios seleccionados. También puedes configurarlas después de importar.",
       "keyLabel": "Clave API para {{service}}",
       "keyPlaceholder": "Clave API (opcional)",
+      "keyDestination": "La clave se enviará a: {{endpoint}}",
       "missingKeysInfo": "Los servicios sin clave API usarán el valor provisional \"CHANGE_ME\" y deberán configurarse después de importar."
     },
     "appReview": {

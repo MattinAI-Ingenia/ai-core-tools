@@ -154,6 +154,7 @@ class FullAppImportService:
                 bundled=True,
                 needs_api_key=True,
                 provider=svc.provider,
+                endpoint=svc.endpoint,
             ))
 
         # Preview rerank services
@@ -165,6 +166,7 @@ class FullAppImportService:
                 bundled=True,
                 needs_api_key=True,
                 provider=svc.provider,
+                endpoint=svc.endpoint,
             ))
 
         # Preview output parsers

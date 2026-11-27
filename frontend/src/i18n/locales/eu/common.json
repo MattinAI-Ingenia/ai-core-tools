@@ -2357,6 +2357,7 @@
       "description": "Aukeran, eman hautatutako zerbitzuen API gakoak. Inportatu ondoren ere konfigura ditzakezu.",
       "keyLabel": "{{service}} zerbitzuaren API gakoa",
       "keyPlaceholder": "API gakoa (aukerakoa)",
+      "keyDestination": "Gakoa hona bidaliko da: {{endpoint}}",
       "missingKeysInfo": "API gakorik gabeko zerbitzuek \"CHANGE_ME\" balio-marka erabiliko dute eta inportatu ondoren konfiguratu behar dira."
     },
     "appReview": {

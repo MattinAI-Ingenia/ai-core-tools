@@ -135,6 +135,8 @@ class ComponentPreviewItem(BaseModel):
     warnings: List[str] = []
     needs_api_key: bool = False
     provider: Optional[str] = None
+    # Normalized scheme+host+port+path (never credentials); set for embedding/rerank services only.
+    endpoint: Optional[str] = None
 
 
 class DependencyInfo(BaseModel):

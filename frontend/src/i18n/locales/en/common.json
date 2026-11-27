@@ -2333,6 +2333,7 @@
       "description": "Optionally provide API keys for the selected services. You can also configure them after import.",
       "keyLabel": "API key for {{service}}",
       "keyPlaceholder": "API key (optional)",
+      "keyDestination": "The key will be sent to: {{endpoint}}",
       "missingKeysInfo": "Services without API keys will use the placeholder value \"CHANGE_ME\" and must be configured after import."
     },
     "appReview": {

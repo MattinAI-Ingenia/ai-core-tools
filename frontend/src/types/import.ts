@@ -21,6 +21,8 @@ export interface ComponentPreviewItem {
   warnings: string[];
   needs_api_key: boolean;
   provider: string | null;
+  /** Endpoint the API key will be sent to; only set for rerank and embedding services. */
+  endpoint?: string | null;
 }
 
 export interface DependencyInfo {

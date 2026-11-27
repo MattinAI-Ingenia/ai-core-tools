@@ -796,6 +796,13 @@ class ApiService {
       if (detail && typeof detail === 'object' && typeof (detail as Record<string, unknown>)['message'] === 'string') {
         return (detail as Record<string, unknown>)['message'] as string;
       }
+      // FastAPI/pydantic 422: array of {loc, msg} items.
+      if (Array.isArray(detail)) {
+        const msgs = detail
+          .map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>)['msg'] : undefined))
+          .filter((m): m is string => typeof m === 'string');
+        if (msgs.length > 0) return msgs.join('; ');
+      }
       return JSON.stringify(detail);
     }
     if (typeof data['message'] === 'string') return data['message'];

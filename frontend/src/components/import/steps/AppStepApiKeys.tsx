@@ -63,6 +63,15 @@ function AppStepApiKeys({
                 </span>
               )}
             </div>
+            {svc.endpoint &&
+              (svc.component_type === 'rerank_service' ||
+                svc.component_type === 'embedding_service') && (
+                <p className="text-xs text-fg-secondary dark:text-fg-secondary-dark mb-2 break-all">
+                  {t('importModal.appApiKeys.keyDestination', {
+                    endpoint: svc.endpoint,
+                  })}
+                </p>
+              )}
             <FormField
               id={`api-key-${svc.component_type}-${svc.component_name}`}
               type="password"

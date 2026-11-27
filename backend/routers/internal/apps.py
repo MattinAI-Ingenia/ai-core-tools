@@ -87,7 +87,12 @@ async def preview_import_app(
         import_service = FullAppImportService(db)
         user_id = int(auth_context.identity.id)
         return import_service.preview_import(export_data, user_id)
-    except (json.JSONDecodeError, ValidationError) as e:
+    except ValidationError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Invalid export file: {e}",
+        )
+    except json.JSONDecodeError as e:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"Invalid export file: {e}",
@@ -154,7 +159,7 @@ async def import_full_app(
         )
     except ValidationError as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid export format: {str(e)}",
         )
 

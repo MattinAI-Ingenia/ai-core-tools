@@ -6,7 +6,7 @@ These schemas define the structure of exported data with:
 - Heavy data excluded (vectors, files, conversations, crawled content)
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -348,3 +348,17 @@ class AppExportFileSchema(BaseModel):
     domains: List[ExportDomainSchema] = []
     middlewares: List[ExportMiddlewareSchema] = []
     agents: List[ExportAgentSchema] = []
+
+    @model_validator(mode="after")
+    def _reject_duplicate_rerank_service_names(self) -> "AppExportFileSchema":
+        """Reject two rerank services with the same name (case-sensitive).
+
+        In RENAME mode, two same-named entries would let a single supplied API key
+        (keyed by name) land on two different hosts.
+        """
+        seen: set[str] = set()
+        for svc in self.rerank_services:
+            if svc.name in seen:
+                raise ValueError(f"Duplicate rerank service name in export file: {svc.name!r}")
+            seen.add(svc.name)
+        return self
