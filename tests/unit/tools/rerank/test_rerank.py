@@ -4,6 +4,7 @@ import http.server
 import logging
 import threading
 import time
+from unittest.mock import MagicMock
 from types import SimpleNamespace
 
 import httpx
@@ -64,6 +65,27 @@ def test_dispatch_and_unknown_provider():
         get_adapter("Voyage")
     with pytest.raises(UnknownRerankProviderError):
         rerank_sync(make_target(provider="Nope"), "q", ["a"], 1)
+
+
+def test_top_n_is_capped_to_the_number_of_documents():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
+
+    install(handler)
+    rerank_sync(make_target(), QUERY, DOCS[:2], 50)
+    import json as _j
+    assert _j.loads(seen[0].content)["top_n"] == 2
+
+
+def test_background_loop_unavailable_is_a_local_error(monkeypatch):
+    from tools.rerank.errors import RerankLocalError
+    monkeypatch.setattr(http_clients, "get_background_loop", MagicMock(side_effect=RuntimeError("closed")))
+    with pytest.raises(RerankLocalError) as e:
+        rerank_sync(make_target(), QUERY, DOCS, 2)
+    assert e.value.service_failure is False and e.value.message == "Rerank background loop unavailable"
 
 
 def test_request_body_exact_and_auth():

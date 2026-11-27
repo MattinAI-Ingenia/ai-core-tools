@@ -160,7 +160,10 @@ def _warn_running_loop_once() -> None:
 def rerank_sync(target: RerankTarget, query: str, documents: list[str], top_n: int,
                 caller_app_id=None) -> list[RerankResult]:
     """Blocking entry point: runs rerank_async on the single dedicated background loop (one implementation)."""
-    loop = http_clients.get_background_loop()
+    try:
+        loop = http_clients.get_background_loop()
+    except RuntimeError:
+        raise RerankLocalError("Rerank background loop unavailable") from None
     try:
         if asyncio.get_running_loop() is loop:
             raise RerankLocalError("rerank_sync must not be called from the rerank background loop")
@@ -168,7 +171,12 @@ def rerank_sync(target: RerankTarget, query: str, documents: list[str], top_n: i
         pass  # no running loop in this thread: the normal case
     else:
         _warn_running_loop_once()
-    fut = asyncio.run_coroutine_threadsafe(rerank_async(target, query, documents, top_n, caller_app_id), loop)
+    coro = rerank_async(target, query, documents, top_n, caller_app_id)
+    try:
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    except RuntimeError:  # loop closed / stopped
+        coro.close()
+        raise RerankLocalError("Rerank background loop unavailable") from None
     try:
         return fut.result(timeout=_total() + 0.5)
     except concurrent.futures.TimeoutError:

@@ -172,7 +172,8 @@ class RerankRetriever(BaseRetriever):
         out = plan.outcome
         out.service_id, out.service_name, out.source = plan.target.service_id, plan.target.name, plan.source
         out.latency_ms = latency_ms
-        if not (isinstance(exc, RerankError) and not exc.service_failure):  # local errors never count
+        # Only a genuine service failure is recorded; anything else (local error, bug) never touches the row.
+        if isinstance(exc, RerankError) and exc.service_failure:
             _safe_record(plan, "record_failure", message)
         return self._skip(docs, reason)
 

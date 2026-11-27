@@ -121,8 +121,30 @@ ERRORS = [
     (RerankTimeoutError("timed out"), "timeout"),
     (InvalidRerankResponseError("bad body"), "service_error"),
     (UnknownRerankProviderError("unknown provider"), "service_error"),
-    (ValueError("boom " + SECRET_QUERY), "service_error"),
 ]
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom " + SECRET_QUERY), ValueError("bug")])
+def test_non_rerank_exception_falls_back_without_touching_health(exc, caplog):
+    rec = MagicMock()
+    plan = _plan(top_n=2, recorder=rec)
+    base = _Fake(docs=_docs(5))
+    with patch(f"{MOD}.rerank_sync", side_effect=exc), caplog.at_level(logging.DEBUG, logger=MOD):
+        out = RerankRetriever(base_retriever=base, plan=plan).invoke(SECRET_QUERY)
+    assert out == base.docs[:2]
+    assert not plan.outcome.applied and plan.outcome.skipped_reason == "service_error"
+    rec.record_failure.assert_not_called()
+    assert SECRET_QUERY not in caplog.text
+
+
+def test_service_failure_rerank_error_still_records():
+    rec = MagicMock()
+    plan = _plan(top_n=2, recorder=rec)
+    err = RerankHTTPError("HTTP 500", status_code=500)
+    assert err.service_failure is True
+    with patch(f"{MOD}.rerank_sync", side_effect=err):
+        RerankRetriever(base_retriever=_Fake(docs=_docs(5)), plan=plan).invoke("q")
+    rec.record_failure.assert_called_once()
 
 
 @pytest.mark.parametrize("exc,reason", ERRORS)

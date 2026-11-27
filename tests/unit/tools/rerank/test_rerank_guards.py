@@ -48,7 +48,7 @@ async def test_rerank_sync_from_running_loop_warns(caplog, monkeypatch):
     client._warned_sites.clear()
     with caplog.at_level(logging.WARNING, logger=client.logger.name):
         for _ in range(3):  # same call site: logged once
-            with pytest.raises(RuntimeError):
+            with pytest.raises(RerankLocalError):  # a RuntimeError from the loop is mapped to a local error
                 client.rerank_sync(_target(), "q", ["a"], 1)
 
     assert len([r for r in caplog.records if "running event loop" in r.getMessage()]) == 1

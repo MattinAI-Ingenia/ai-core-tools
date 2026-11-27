@@ -40,7 +40,8 @@ class CohereCompatibleAdapter(RerankAdapter):
         return PreparedRequest(
             url=rerank_url(target.endpoint),
             headers=headers,
-            json={"model": target.model, "query": query, "documents": list(documents), "top_n": top_n},
+            json={"model": target.model, "query": query, "documents": list(documents),
+                  "top_n": min(top_n, len(documents))},
         )
 
     def parse_response(self, status_code, body, n_documents, top_n) -> list[RerankResult]:

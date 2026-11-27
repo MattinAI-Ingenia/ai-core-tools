@@ -22,9 +22,24 @@ class RerankServiceRepository:
         return db.execute(stmt).scalars().first()
 
     @staticmethod
-    def get_by_id(db: Session, service_id: int) -> Optional[RerankService]:
-        """Get a rerank service by ID regardless of scope."""
+    def get_by_id(db: Session, service_id: int, for_share: bool = False) -> Optional[RerankService]:
+        """Get a rerank service by ID regardless of scope.
+
+        ``for_share`` reads the row FOR SHARE: used when something is about to reference the service (app
+        default, agent selection) so it waits for an in-flight delete, which holds the row FOR UPDATE.
+        """
         stmt = select(RerankService).where(RerankService.service_id == service_id)
+        if for_share:
+            stmt = stmt.with_for_update(read=True).execution_options(populate_existing=True)
+        return db.execute(stmt).scalars().first()
+
+    @staticmethod
+    def get_for_update(db: Session, service_id: int) -> Optional[RerankService]:
+        """Lock the row (SELECT ... FOR UPDATE) for the delete usage-check-then-delete sequence."""
+        stmt = (
+            select(RerankService).where(RerankService.service_id == service_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )
         return db.execute(stmt).scalars().first()
 
     @staticmethod
