@@ -9,6 +9,8 @@ export interface SearchResult {
   page_content: string;
   metadata: Record<string, unknown>;
   score?: number;
+  /** Set only when the rerank stage was applied. */
+  rerank_score?: number | null;
   id?: string;
 }
 
@@ -286,6 +288,12 @@ export default function ResultCard({
           </div>
           <span className="shrink-0 text-xs text-fg-tertiary dark:text-fg-tertiary-dark">{t('resultCard.score', { score: score.toFixed(3) })}</span>
         </div>
+      )}
+
+      {result.rerank_score != null && (
+        <p className="mb-3 text-xs font-medium text-fg-secondary dark:text-fg-secondary-dark">
+          {t('rerankControls.resultScore', { score: result.rerank_score.toFixed(3) })}
+        </p>
       )}
 
       {/* FR-2.3 Content */}

@@ -1,6 +1,9 @@
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FormSelect } from '../ui/FormField';
+import RerankSelector from '../services/RerankSelector';
+import type { RerankServiceOptions } from '../../types/services';
+import { RERANK_TOP_N_DEFAULT, clampRerankTopN } from '../../utils/rerankSelection';
 
 export interface SearchControlsValue {
   limit: number;
@@ -9,9 +12,11 @@ export interface SearchControlsValue {
   fetchK: number;
   lambdaMult: number;
   searchMethod: 'dense' | 'bm25' | 'hybrid';
-  strategy: '' | 'rerank' | 'cross_encoder_rerank';
-  topN: number;
-  similarityThreshold: number | null;
+  /** Optional rerank second stage (sends the query and candidate chunks to the rerank service). */
+  rerank: boolean;
+  /** null = inherit the app default, then the platform default. */
+  rerankServiceId: number | null;
+  rerankTopN: number;
 }
 
 export const DEFAULT_SEARCH_CONTROLS: SearchControlsValue = {
@@ -21,9 +26,9 @@ export const DEFAULT_SEARCH_CONTROLS: SearchControlsValue = {
   fetchK: 100,
   lambdaMult: 0.5,
   searchMethod: 'dense',
-  strategy: '',
-  topN: 5,
-  similarityThreshold: null,
+  rerank: false,
+  rerankServiceId: null,
+  rerankTopN: RERANK_TOP_N_DEFAULT,
 };
 
 interface SearchControlsProps {
@@ -31,13 +36,25 @@ interface SearchControlsProps {
   value: SearchControlsValue;
   onChange: (v: SearchControlsValue) => void;
   disabled?: boolean;
+  /** Rerank services selectable in this app; null while loading or when loading failed. */
+  rerankOptions?: RerankServiceOptions | null;
 }
 
 function storageKey(siloId: string | number): string {
   return `silo-search-controls-${siloId}`;
 }
 
-export default function SearchControls({ siloId, value, onChange, disabled }: Readonly<SearchControlsProps>) {
+/** Keep only known keys: values saved by older versions (strategy, topN, ...) must not leak into the state. */
+export function sanitizeSearchControls(saved: Partial<SearchControlsValue>): SearchControlsValue {
+  const merged: SearchControlsValue = { ...DEFAULT_SEARCH_CONTROLS };
+  for (const key of Object.keys(DEFAULT_SEARCH_CONTROLS) as Array<keyof SearchControlsValue>) {
+    if (saved[key] !== undefined) (merged as unknown as Record<string, unknown>)[key] = saved[key];
+  }
+  merged.rerankTopN = clampRerankTopN(merged.rerankTopN);
+  return merged;
+}
+
+export default function SearchControls({ siloId, value, onChange, disabled, rerankOptions = null }: Readonly<SearchControlsProps>) {
   const { t } = useTranslation('common');
 
   // Load saved state on mount
@@ -46,7 +63,7 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
       const raw = localStorage.getItem(storageKey(siloId));
       if (raw) {
         const saved = JSON.parse(raw) as Partial<SearchControlsValue>;
-        onChange({ ...DEFAULT_SEARCH_CONTROLS, ...saved });
+        onChange(sanitizeSearchControls(saved));
       }
     } catch {
       // ignore parse errors
@@ -134,68 +151,21 @@ export default function SearchControls({ siloId, value, onChange, disabled }: Re
         />
       )}
 
-      {/* Rerank strategy and its tuning */}
-      <FormSelect
-        label={t('searchControls.rerankStrategy')}
-        id="strategy-select"
-        value={value.strategy}
+      {/* Optional rerank second stage: None / Rerank service, inherited default, Top N */}
+      <RerankSelector
+        idPrefix="rerank"
+        value={{ enabled: value.rerank, serviceId: value.rerankServiceId, topN: value.rerankTopN }}
+        options={rerankOptions}
         disabled={disabled}
-        onChange={(e) => handleChange({ strategy: e.target.value as SearchControlsValue['strategy'] })}
-        options={[
-          { value: '', label: t('searchControls.strategies.none') },
-          { value: 'rerank', label: t('searchControls.strategies.rerank') },
-          { value: 'cross_encoder_rerank', label: t('searchControls.strategies.crossEncoder') },
-        ]}
+        helpText={t('rerankControls.playgroundHelp')}
+        onChange={(patch) =>
+          handleChange({
+            ...(patch.enabled !== undefined ? { rerank: patch.enabled } : {}),
+            ...(patch.serviceId !== undefined ? { rerankServiceId: patch.serviceId } : {}),
+            ...(patch.topN !== undefined ? { rerankTopN: patch.topN } : {}),
+          })
+        }
       />
-
-      {(value.strategy === 'rerank' || value.strategy === 'cross_encoder_rerank') && (
-        <div>
-          <label htmlFor="rerank-top-n-input" className={labelClass}>
-            <span>{t('searchControls.rerankTopN')}</span>
-            <span>{value.topN}</span>
-          </label>
-          <input
-            id="rerank-top-n-input"
-            type="number"
-            min={1}
-            max={50}
-            value={value.topN}
-            disabled={disabled}
-            onChange={(e) => {
-              const parsed = Number(e.target.value);
-              if (!Number.isNaN(parsed)) handleChange({ topN: Math.min(50, Math.max(1, parsed)) });
-            }}
-            className={fieldClass}
-          />
-          <p className={helpClass}>{t('searchControls.rerankTopNHelp')}</p>
-        </div>
-      )}
-
-      {value.strategy === 'rerank' && (
-        <div>
-          <label htmlFor="rerank-similarity-threshold-input" className={labelClass}>
-            <span>{t('searchControls.rerankThreshold')}</span>
-            <span className={hintClass}>{t('searchControls.optional')}</span>
-          </label>
-          <input
-            id="rerank-similarity-threshold-input"
-            type="number"
-            step={0.01}
-            min={0}
-            max={1}
-            value={value.similarityThreshold ?? ''}
-            placeholder={t('searchControls.optional')}
-            disabled={disabled}
-            onChange={(e) => {
-              const raw = e.target.value;
-              handleChange({ similarityThreshold: raw === '' ? null : Number(raw) });
-            }}
-            className={fieldClass}
-          />
-          <p className={helpClass}>{t('searchControls.rerankThresholdHelp')}</p>
-        </div>
-      )}
-
 
       {/* Score threshold — only when similarity_score_threshold */}
       {value.searchMethod !== 'bm25' && value.searchType === 'similarity_score_threshold' && (

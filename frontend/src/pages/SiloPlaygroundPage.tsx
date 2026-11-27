@@ -6,6 +6,8 @@ import SearchControls from '../components/playground/SearchControls';
 import SiloAPISnippets from '../components/playground/SiloAPISnippets';
 import SearchFilters from '../components/playground/SearchFilters';
 import ResultCard from '../components/playground/ResultCard';
+import RerankStatusLine from '../components/playground/RerankStatusLine';
+import RerankSelector from '../components/services/RerankSelector';
 import Modal from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
 import ServiceLifecycleAlert from '../components/services/ServiceLifecycleAlert';
@@ -75,6 +77,8 @@ function SiloPlaygroundPage() {
     maxContentLength,
     setMaxContentLength,
     searchControls,
+    rerankOptions,
+    rerankStatus,
     setSearchControls,
     selectedIds,
     setSelectedIds,
@@ -174,6 +178,19 @@ function SiloPlaygroundPage() {
   ) {
     const panelSelectClass = 'min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1.5 text-xs text-fg outline-none focus:border-accent disabled:opacity-60 dark:border-line-dark dark:bg-surface-dark dark:text-fg-dark dark:focus:border-accent-dark';
     const effectiveMethod = panel.searchMethod ?? searchControls.searchMethod;
+    const panelRerank = {
+      enabled: panel.rerank ?? searchControls.rerank,
+      serviceId: panel.rerankServiceId === undefined ? searchControls.rerankServiceId : panel.rerankServiceId,
+      topN: panel.rerankTopN ?? searchControls.rerankTopN,
+    };
+    // The panel's own settings (not only the shared controls) drive its search, so A and B stay independent.
+    const runSearch = () => void searchPanel(panel.query, setter, {
+      searchMethod: effectiveMethod,
+      searchType: panel.searchType,
+      rerank: panelRerank.enabled,
+      rerankServiceId: panelRerank.serviceId,
+      rerankTopN: panelRerank.topN,
+    });
     const panelMax = panel.results.length > 0 ? Math.max(...panel.results.map((r) => r.score ?? 0)) : 0;
     return (
       <div className="flex flex-col gap-3 rounded-md border border-line bg-surface p-4 dark:border-line-dark dark:bg-surface-dark">
@@ -191,7 +208,7 @@ function SiloPlaygroundPage() {
             type="text"
             value={panel.query}
             onChange={(e) => setter((p) => ({ ...p, query: e.target.value }))}
-            onKeyDown={(e) => { if (e.key === 'Enter') void searchPanel(panel.query, setter); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }}
             placeholder={t('siloPlayground.queryPlaceholder')}
             aria-label={t('siloPlayground.queryForPanel', { label })}
             className="min-w-0 flex-1 rounded-md border border-line bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-tertiary outline-none focus:border-accent disabled:opacity-60 dark:border-line-dark dark:bg-surface-dark dark:text-fg-dark dark:placeholder:text-fg-tertiary-dark dark:focus:border-accent-dark"
@@ -199,7 +216,7 @@ function SiloPlaygroundPage() {
           />
           <ButtonApp
             label={t('siloPlayground.search')}
-            onClick={() => void searchPanel(panel.query, setter)}
+            onClick={runSearch}
             loading={panel.isSearching}
             size="small"
           />
@@ -217,17 +234,6 @@ function SiloPlaygroundPage() {
             <option value="bm25">{t('searchControls.searchMethods.bm25')}</option>
             <option value="hybrid">{t('searchControls.searchMethods.hybrid')}</option>
           </select>
-          <select
-            aria-label={`${label} ${t('searchControls.rerankStrategy')}`}
-            value={panel.strategy ?? searchControls.strategy}
-            onChange={(e) => setter((p) => ({ ...p, strategy: e.target.value as PanelState['strategy'] }))}
-            disabled={panel.isSearching}
-            className={panelSelectClass}
-          >
-            <option value="">{t('searchControls.strategies.none')}</option>
-            <option value="rerank">{t('searchControls.strategies.rerank')}</option>
-            <option value="cross_encoder_rerank">{t('searchControls.strategies.crossEncoder')}</option>
-          </select>
           {effectiveMethod !== 'bm25' && (
             <select
               aria-label={`${label} ${t('searchControls.searchStrategy')}`}
@@ -243,7 +249,26 @@ function SiloPlaygroundPage() {
           )}
         </div>
 
+        <RerankSelector
+          idPrefix={`compare-${label}-rerank`}
+          variant="compact"
+          labelPrefix={label}
+          value={panelRerank}
+          options={rerankOptions}
+          disabled={panel.isSearching}
+          onChange={(patch) =>
+            setter((p) => ({
+              ...p,
+              ...(patch.enabled !== undefined ? { rerank: patch.enabled } : {}),
+              ...(patch.serviceId !== undefined ? { rerankServiceId: patch.serviceId } : {}),
+              ...(patch.topN !== undefined ? { rerankTopN: patch.topN } : {}),
+            }))
+          }
+        />
+
         {panel.error && <p className="text-xs text-error dark:text-error-dark">{panel.error}</p>}
+
+        <RerankStatusLine status={panel.rerankStatus} />
 
         {panel.results.length === 0 && !panel.isSearching && (
           <p className="text-xs italic text-fg-tertiary dark:text-fg-tertiary-dark">{t('siloPlayground.noResultsYet')}</p>
@@ -347,6 +372,8 @@ function SiloPlaygroundPage() {
             </div>
           </div>
 
+          <RerankStatusLine status={rerankStatus} />
+
           {/* Response time + agent shortcut */}
           {(lastClientMs !== null || appAgentsForSilo.length > 0) && (
             <div className="flex min-h-[18px] flex-wrap items-center gap-3.5 text-[12.5px] text-fg-tertiary dark:text-fg-tertiary-dark">
@@ -411,6 +438,7 @@ function SiloPlaygroundPage() {
                 siloId={siloId ?? ''}
                 value={searchControls}
                 onChange={setSearchControls}
+                rerankOptions={rerankOptions}
                 disabled={isSearching}
               />
 

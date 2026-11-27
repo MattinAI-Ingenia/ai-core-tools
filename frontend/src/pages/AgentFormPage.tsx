@@ -16,6 +16,8 @@ import { selectableServiceOptions, serviceOptionLabel, type ServiceOptionLike } 
 import type { TabItem } from '../components/ui/Tabs';
 import { FormCheckbox, FormField, FormSelect, FormTextArea } from '../components/ui/FormField';
 import ButtonCard from '../components/ui/ButtonCard';
+import { rerankResolves } from '../utils/rerankSelection';
+import type { RerankServiceOptions } from '../types/services';
 import RagConfigSection from '../components/forms/RagConfigSection';
 import type { RagConfigValue, RagFixedFilter, RagSearchMethod, RagSearchType } from '../components/forms/RagConfigSection';
 import ExposedChatFiltersSection from '../components/forms/ExposedChatFiltersSection';
@@ -83,9 +85,9 @@ interface Agent {
   rag_max_retrieval_calls?: number | null;
   rag_fixed_filters?: RagFixedFilter[];
   rag_search_method?: RagSearchMethod[];
-  rag_strategy?: string[] | null;
+  rag_rerank_enabled?: boolean;
+  rag_rerank_service_id?: number | null;
   rag_rerank_top_n?: number | null;
-  rag_rerank_similarity_threshold?: number | null;
   // Media processing configuration (playground media upload)
   transcription_service_id?: number | null;
   video_ai_service_id?: number | null;
@@ -136,9 +138,9 @@ interface AgentFormData {
   rag_max_retrieval_calls: number | null;
   rag_fixed_filters: RagFixedFilter[];
   rag_search_method: RagSearchMethod[];
-  rag_strategy: string[] | null;
+  rag_rerank_enabled: boolean;
+  rag_rerank_service_id: number | null;
   rag_rerank_top_n: number | null;
-  rag_rerank_similarity_threshold: number | null;
   // Media processing configuration (playground media upload)
   transcription_service_id?: number;
   video_ai_service_id?: number;
@@ -255,6 +257,7 @@ const AGENT_FIELDS = {
   prompt_template: { tab: 'prompts', id: 'prompt_template' },
   service_id: { tab: 'configuration', id: 'ai_service' },
   rag_score_threshold: { tab: 'configuration', id: 'rag_score_threshold' },
+  rag_rerank: { tab: 'configuration', id: 'rag_rerank-mode' },
   media_embedding_service_id: { tab: 'configuration', id: 'media_embedding_service' },
 } as const;
 type AgentFieldKey = keyof typeof AGENT_FIELDS;
@@ -310,6 +313,8 @@ function AgentFormPage() {
   const [saving, setSaving] = useState(false);
   /** Load / server errors (not field validation) — banner at the top of the page. */
   const [error, setError] = useState<string | null>(null);
+  const [rerankOptions, setRerankOptions] = useState<RerankServiceOptions | null>(null);
+  const [savedRerankServiceId, setSavedRerankServiceId] = useState<number | null>(null);
   const errorBannerRef = useRef<HTMLDivElement>(null);
   /** Field validation shows only after the first save attempt; from then on it updates live. */
   const [submitAttempted, setSubmitAttempted] = useState(false);
@@ -349,9 +354,9 @@ function AgentFormPage() {
     rag_max_retrieval_calls: 4,
     rag_fixed_filters: [],
     rag_search_method: ['dense'],
-    rag_strategy: null,
+    rag_rerank_enabled: false,
+    rag_rerank_service_id: null,
     rag_rerank_top_n: null,
-    rag_rerank_similarity_threshold: null,
     media_embedding_service_id: undefined,
     media_chunk_min_duration: 30,
     media_chunk_max_duration: 120,
@@ -419,6 +424,23 @@ function AgentFormPage() {
     };
   }, [appId]);
 
+  // Rerank services the agent can pick (app + platform); null until loaded or if loading fails.
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    apiService
+      .getRerankServiceOptions(Number.parseInt(appId))
+      .then((result) => {
+        if (!cancelled) setRerankOptions(result);
+      })
+      .catch(() => {
+        if (!cancelled) setRerankOptions(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
+
   // Load the selected silo's metadata fields to power the fixed-filter editor.
   useEffect(() => {
     const siloId = formData.silo_id;
@@ -452,6 +474,7 @@ function AgentFormPage() {
       setError(null);
       const response = await apiService.getAgent(Number.parseInt(appId), Number.parseInt(agentId));
       setAgent(response);
+      setSavedRerankServiceId(response.rag_rerank_service_id ?? null);
 
       // Initialize form data
       setFormData({
@@ -482,9 +505,9 @@ function AgentFormPage() {
         // RAG retrieval config
         rag_k: response.rag_k ?? 10,
         rag_search_method: response.rag_search_method?.length ? response.rag_search_method : ['dense'],
-        rag_strategy: response.rag_strategy?.length ? response.rag_strategy : null,
+        rag_rerank_enabled: response.rag_rerank_enabled ?? false,
+        rag_rerank_service_id: response.rag_rerank_service_id ?? null,
         rag_rerank_top_n: response.rag_rerank_top_n ?? null,
-        rag_rerank_similarity_threshold: response.rag_rerank_similarity_threshold ?? null,
         rag_search_type: response.rag_search_type ?? 'similarity',
         rag_score_threshold: response.rag_score_threshold ?? null,
         rag_max_retrieval_calls: response.rag_max_retrieval_calls ?? 4,
@@ -683,6 +706,10 @@ function AgentFormPage() {
     if (formData.rag_search_method.includes('dense') && formData.rag_search_type === 'similarity_score_threshold' && formData.rag_score_threshold == null) {
       errors.rag_score_threshold = t('agentFormPage.validation.scoreThresholdRequired');
     }
+    // Mirror the backend 422: reranking is on but no service resolves (no explicit pick, no default).
+    if (formData.silo_id && formData.rag_rerank_enabled && !rerankResolves(formData.rag_rerank_service_id, rerankOptions)) {
+      errors.rag_rerank = t('rerankControls.unavailable');
+    }
     // Mirror the backend invariant: conversational agents keep uploaded documents in a
     // per-conversation temp silo, which needs an embedding service.
     if (formData.has_memory && !formData.media_embedding_service_id) {
@@ -769,9 +796,10 @@ function AgentFormPage() {
       rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
       rag_fixed_filters: hasSilo ? cleanedFilters : [],
       rag_search_method: formData.rag_search_method,
-      rag_strategy: formData.rag_strategy,
-      rag_rerank_top_n: formData.rag_strategy?.includes('rerank') ? formData.rag_rerank_top_n : null,
-      rag_rerank_similarity_threshold: formData.rag_strategy?.includes('rerank') ? formData.rag_rerank_similarity_threshold : null,
+      // Rerank second stage (only with a silo). A null service id inherits the app/platform default.
+      rag_rerank_enabled: hasSilo && formData.rag_rerank_enabled,
+      rag_rerank_service_id: hasSilo && formData.rag_rerank_enabled ? formData.rag_rerank_service_id : null,
+      rag_rerank_top_n: hasSilo && formData.rag_rerank_enabled ? formData.rag_rerank_top_n : null,
       // Media processing configuration
       transcription_service_id: formData.transcription_service_id,
       video_ai_service_id: formData.video_ai_service_id,
@@ -1102,15 +1130,17 @@ function AgentFormPage() {
                         rag_max_retrieval_calls: formData.rag_max_retrieval_calls,
                         rag_fixed_filters: formData.rag_fixed_filters,
             rag_search_method: formData.rag_search_method,
-            rag_strategy: formData.rag_strategy,
+            rag_rerank_enabled: formData.rag_rerank_enabled,
+            rag_rerank_service_id: formData.rag_rerank_service_id,
             rag_rerank_top_n: formData.rag_rerank_top_n,
-            rag_rerank_similarity_threshold: formData.rag_rerank_similarity_threshold,
                       }}
                       onChange={(patch: Partial<RagConfigValue>) =>
                         setFormData((prev) => ({ ...prev, ...patch }))
                       }
                       metadataFields={siloMetadataFields}
                       loadingMetadata={loadingSiloMetadata}
+                      rerankOptions={rerankOptions}
+                      savedRerankServiceId={savedRerankServiceId}
                     />
                   )}
 

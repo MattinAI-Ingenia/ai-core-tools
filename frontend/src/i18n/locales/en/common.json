@@ -1,5 +1,39 @@
 {
   "rerankEgressNotice": { "message": "The reranker receives your document chunks and the user's query. With an external API this data leaves your organisation's infrastructure; a self-hosted reranker (e.g. Infinity) keeps it inside." },
+  "rerankControls": {
+    "label": "Rerank",
+    "none": "None",
+    "useService": "Rerank service",
+    "service": "Rerank service",
+    "defaultOption": "Default ({{name}})",
+    "defaultOptionNone": "Default (not configured)",
+    "topN": "Top N",
+    "topNHelp": "Documents kept after reranking (1–50). Default 30.",
+    "help": "Second stage applied after the selected search method(s): the reranker rescores the \"documents to retrieve\" candidates and keeps the top N.",
+    "playgroundHelp": "Second stage applied after the search: the reranker rescores the candidates and keeps the top N. Top K only sizes the first stage, so the results can be more than Top K.",
+    "unavailable": "No reranker is configured. App administrators can add one in App settings > Rerank services; platform administrators can set a platform default.",
+    "resultScore": "Rerank score: {{score}}",
+    "status": {
+      "applied": "Reranked by {{name}} ({{source}}) in {{ms}} ms",
+      "skipped": "Rerank skipped: {{reason}}",
+      "sources": {
+        "agent": "agent",
+        "request": "this search",
+        "app_default": "app default",
+        "platform_default": "platform default"
+      },
+      "reasons": {
+        "not_configured": "no reranker is configured",
+        "no_service_configured": "no reranker is configured",
+        "service_unavailable": "the rerank service is unavailable",
+        "service_retired": "the rerank service is retired",
+        "service_error": "the rerank service returned an error",
+        "timeout": "the rerank service timed out",
+        "no_candidates": "there were no candidates to rerank",
+        "busy": "the rerank service is busy"
+      }
+    }
+  },
   "save": "Save",
   "confirm": "Confirm",
   "cancel": "Cancel",
@@ -4229,13 +4263,6 @@
     "ragConfig": {
       "searchMethod": "Search method",
       "searchMethodHelp": "Select both for hybrid retrieval (dense + lexical, fused via RRF).",
-      "rerankStrategy": "Rerank strategy",
-      "rerankStrategyHelp": "Only one rerank strategy can be active at a time.",
-      "rerankTopN": "Rerank top N",
-      "rerankTopNHelp": "Documents kept after reranking (1–50). Empty uses the server default.",
-      "rerankThreshold": "Rerank similarity threshold",
-      "rerankThresholdHelp": "Optional minimum similarity score, 0–1, applied after reranking."
-,
       "title": "Retrieval (RAG)",
       "subtitle": "How this agent searches its knowledge base",
       "documentsToRetrieve": "Documents to retrieve (k)",
@@ -4599,18 +4626,6 @@
       "bm25": "BM25 (lexical / keyword)",
       "hybrid": "Hybrid (dense + BM25)"
     },
-    "rerankStrategy": "Rerank strategy",
-    "strategies": {
-      "none": "None",
-      "rerank": "Rerank (embeddings-based)",
-      "crossEncoder": "Rerank (cross-encoder)"
-    },
-    "rerankTopN": "Rerank top N",
-    "rerankTopNHelp": "Documents kept after reranking (1–50).",
-    "rerankThreshold": "Rerank similarity threshold",
-    "rerankThresholdHelp": "Optional minimum similarity score, 0–1, applied after reranking.",
-    "optional": "Optional"
-,
     "topKResults": "Number of results (Top K)",
     "searchStrategy": "Search strategy",
     "searchTypes": {

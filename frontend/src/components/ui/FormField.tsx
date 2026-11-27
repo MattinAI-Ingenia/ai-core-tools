@@ -342,7 +342,7 @@ interface FormSelectProps {
   id: string;
   value: string | number;
   onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void;
-  options: Array<{ value: string | number; label: string }>;
+  options: Array<{ value: string | number; label: string; disabled?: boolean }>;
   disabled?: boolean;
   required?: boolean;
   error?: string;
@@ -406,7 +406,7 @@ export function FormSelect({
         } ${selectClassName}`}
       >
         {options.map(option => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
         ))}

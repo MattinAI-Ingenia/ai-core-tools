@@ -6,6 +6,9 @@ import { randomId } from '../../utils/randomId';
 import CardApp from '../ui/CardApp';
 import FormField, { FormSelect } from '../ui/FormField';
 import ButtonApp from '../ui/ButtonApp';
+import RerankSelector from '../services/RerankSelector';
+import type { RerankServiceOptions } from '../../types/services';
+import { RERANK_TOP_N_DEFAULT } from '../../utils/rerankSelection';
 
 export type RagSearchType = 'similarity' | 'mmr' | 'similarity_score_threshold';
 // Atomic search methods. Selecting both fuses them (hybrid) via Reciprocal Rank Fusion.
@@ -25,9 +28,11 @@ export interface RagConfigValue {
   rag_max_retrieval_calls: number | null;
   rag_fixed_filters: RagFixedFilter[];
   rag_search_method: RagSearchMethod[];
-  rag_strategy: string[] | null;
+  rag_rerank_enabled: boolean;
+  /** null = inherit the app default, then the platform default. */
+  rag_rerank_service_id: number | null;
+  /** null = the runtime default (30). Candidates reranked = max(rag_k, top N). */
   rag_rerank_top_n: number | null;
-  rag_rerank_similarity_threshold: number | null;
 }
 
 interface RagConfigSectionProps {
@@ -35,6 +40,10 @@ interface RagConfigSectionProps {
   onChange: (patch: Partial<RagConfigValue>) => void;
   metadataFields: SearchFilterMetadataField[];
   loadingMetadata?: boolean;
+  /** Rerank services selectable by the agent; null while loading or when loading failed. */
+  rerankOptions?: RerankServiceOptions | null;
+  /** The agent's saved rerank service: a retired one stays visible (marked) for this agent only. */
+  savedRerankServiceId?: number | null;
 }
 
 // Mirrors backend SYSTEM_METADATA_FIELDS — always filterable regardless of metadata_definition.
@@ -46,14 +55,6 @@ const SEARCH_METHODS: Array<{ value: RagSearchMethod; labelKey: string }> = [
   { value: 'dense', labelKey: 'searchControls.searchMethods.dense' },
   { value: 'bm25', labelKey: 'searchControls.searchMethods.bm25' },
 ];
-
-const STRATEGIES: Array<{ value: 'rerank' | 'cross_encoder_rerank'; labelKey: string }> = [
-  { value: 'rerank', labelKey: 'searchControls.strategies.rerank' },
-  { value: 'cross_encoder_rerank', labelKey: 'searchControls.strategies.crossEncoder' },
-];
-
-// Mutually exclusive: both rerankers truncate to top_n, so chaining them would double-rerank.
-const RERANK_STRATEGIES = new Set<string>(['rerank', 'cross_encoder_rerank']);
 
 // Shared between the inline field error and the form-level submit guard.
 export const SCORE_THRESHOLD_REQUIRED_MSG =
@@ -85,7 +86,14 @@ function inputToFilterValue(op: MetadataOperator, raw: string): unknown {
  * the caller renders this conditionally. Values are persisted on the Agent and resolved
  * at execution time (caller > agent > system).
  */
-function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = false }: Readonly<RagConfigSectionProps>) {
+function RagConfigSection({
+  value,
+  onChange,
+  metadataFields,
+  loadingMetadata = false,
+  rerankOptions = null,
+  savedRerankServiceId = null,
+}: Readonly<RagConfigSectionProps>) {
   const { t } = useTranslation('common');
   const fieldOptions = [...SYSTEM_FIELDS, ...metadataFields.map((f) => f.name)];
   const filters = value.rag_fixed_filters;
@@ -149,17 +157,6 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
       : value.rag_search_method.filter((m) => m !== method);
     // At least one method must remain selected.
     if (next.length > 0) onChange({ rag_search_method: next });
-  };
-
-  const toggleStrategy = (strategy: string, checked: boolean) => {
-    const current = value.rag_strategy ?? [];
-    const withoutOtherRerankers = checked
-      ? current.filter((s) => !RERANK_STRATEGIES.has(s) || s === strategy)
-      : current;
-    const next = checked
-      ? [...withoutOtherRerankers, strategy]
-      : withoutOtherRerankers.filter((s) => s !== strategy);
-    onChange({ rag_strategy: next.length > 0 ? next : null });
   };
 
   const addFilter = () => {
@@ -246,7 +243,7 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
         )}
       </div>
 
-      {/* Search method and rerank strategy: methods can combine (hybrid), rerankers are exclusive */}
+      {/* Search method (methods can combine, hybrid) and the optional rerank second stage */}
       <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
         <fieldset>
           <legend className="block text-sm font-medium text-fg dark:text-fg-dark mb-2">
@@ -276,65 +273,26 @@ function RagConfigSection({ value, onChange, metadataFields, loadingMetadata = f
           </p>
         </fieldset>
 
-        <fieldset>
-          <legend className="block text-sm font-medium text-fg dark:text-fg-dark mb-2">
-            {t('agentFormPage.ragConfig.rerankStrategy')}
-          </legend>
-          <div className="space-y-2">
-            {STRATEGIES.map((s) => (
-              <label key={s.value} htmlFor={`rag_strategy_${s.value}`} className="flex items-center gap-2">
-                <input
-                  id={`rag_strategy_${s.value}`}
-                  type="checkbox"
-                  checked={value.rag_strategy?.includes(s.value) ?? false}
-                  onChange={(e) => toggleStrategy(s.value, e.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                />
-                <span className="text-sm text-fg dark:text-fg-dark">{t(s.labelKey)}</span>
-              </label>
-            ))}
-          </div>
-          <p className="text-xs text-fg-secondary dark:text-fg-secondary-dark mt-2">
-            {t('agentFormPage.ragConfig.rerankStrategyHelp')}
-          </p>
-        </fieldset>
-
-        {value.rag_strategy?.includes('rerank') && (
-          <FormField
-            label={t('agentFormPage.ragConfig.rerankTopN')}
-            id="rag_rerank_top_n"
-            type="number"
-            min={1}
-            max={50}
-            value={value.rag_rerank_top_n ?? ''}
-            placeholder="5"
-            helpText={t('agentFormPage.ragConfig.rerankTopNHelp')}
-            onChange={(e) =>
+        <div>
+          <RerankSelector
+            idPrefix="rag_rerank"
+            value={{
+              enabled: value.rag_rerank_enabled,
+              serviceId: value.rag_rerank_service_id,
+              topN: value.rag_rerank_top_n ?? RERANK_TOP_N_DEFAULT,
+            }}
+            onChange={(patch) =>
               onChange({
-                rag_rerank_top_n: e.target.value ? clampInt(e.target.value, 1, 50, 5) : null,
+                ...(patch.enabled !== undefined ? { rag_rerank_enabled: patch.enabled } : {}),
+                ...(patch.serviceId !== undefined ? { rag_rerank_service_id: patch.serviceId } : {}),
+                ...(patch.topN !== undefined ? { rag_rerank_top_n: patch.topN } : {}),
               })
             }
+            options={rerankOptions}
+            savedServiceId={savedRerankServiceId}
+            helpText={t('rerankControls.help')}
           />
-        )}
-
-        {value.rag_strategy?.includes('rerank') && (
-          <FormField
-            label={t('agentFormPage.ragConfig.rerankThreshold')}
-            id="rag_rerank_similarity_threshold"
-            type="number"
-            step={0.01}
-            min={0}
-            max={1}
-            value={value.rag_rerank_similarity_threshold ?? ''}
-            placeholder={t('searchControls.optional')}
-            helpText={t('agentFormPage.ragConfig.rerankThresholdHelp')}
-            onChange={(e) =>
-              onChange({
-                rag_rerank_similarity_threshold: e.target.value === '' ? null : Math.min(1, Math.max(0, Number(e.target.value))),
-              })
-            }
-          />
-        )}
+        </div>
       </div>
 
       {/* Fixed filters — always-applied scoping the caller cannot loosen */}

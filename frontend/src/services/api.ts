@@ -158,9 +158,9 @@ export interface AgentRagFixedFilter {
 
 export interface Agent {
   rag_search_method?: Array<'dense' | 'bm25'>;
-  rag_strategy?: string[] | null;
+  rag_rerank_enabled?: boolean;
+  rag_rerank_service_id?: number | null;
   rag_rerank_top_n?: number | null;
-  rag_rerank_similarity_threshold?: number | null;
   lifecycle_warnings?: ServiceLifecycleWarning[];
   agent_id: number;
   name: string;
@@ -432,8 +432,22 @@ export interface SearchResult {
   page_content: string;
   metadata: Record<string, unknown>;
   score?: number;
+  /** Present only when the rerank stage was applied. */
+  rerank_score?: number | null;
   id?: string;
 }
+
+/** Outcome of the rerank stage of one playground search (mirrors `RerankStatusSchema`). */
+export interface RerankStatus {
+  requested: boolean;
+  applied: boolean;
+  service_id?: number | null;
+  service_name?: string | null;
+  source?: string | null;
+  skipped_reason?: string | null;
+  latency_ms?: number | null;
+}
+
 
 export interface Folder {
   folder_id: number;
@@ -2420,11 +2434,11 @@ class ApiService {
       minContentLength?: number;
       maxContentLength?: number;
       searchMethod?: string;
-      strategy?: string;
-      topN?: number;
-      similarityThreshold?: number;
+      rerank?: boolean;
+      rerankServiceId?: number | null;
+      rerankTopN?: number;
     },
-  ): Promise<{ results: SearchResult[] }> {
+  ): Promise<{ results: SearchResult[]; rerank?: RerankStatus | null }> {
     return this.request(`/internal/apps/${appId}/silos/${siloId}/search`, {
       method: 'POST',
       body: JSON.stringify({
@@ -2438,9 +2452,9 @@ class ApiService {
         ...(searchOptions?.minContentLength != null && { min_content_length: searchOptions.minContentLength }),
         ...(searchOptions?.maxContentLength != null && { max_content_length: searchOptions.maxContentLength }),
         ...(searchOptions?.searchMethod !== undefined ? { search_method: searchOptions.searchMethod } : {}),
-        ...(searchOptions?.strategy ? { strategy: searchOptions.strategy } : {}),
-        ...(searchOptions?.topN !== undefined ? { top_n: searchOptions.topN } : {}),
-        ...(searchOptions?.similarityThreshold !== undefined ? { similarity_threshold: searchOptions.similarityThreshold } : {}),
+        ...(searchOptions?.rerank
+          ? { rerank: true, rerank_service_id: searchOptions.rerankServiceId ?? null, rerank_top_n: searchOptions.rerankTopN }
+          : {}),
       }),
     });
   }
@@ -2459,12 +2473,12 @@ class ApiService {
       minContentLength?: number;
       maxContentLength?: number;
       searchMethod?: string;
-      strategy?: string;
-      topN?: number;
-      similarityThreshold?: number;
+      rerank?: boolean;
+      rerankServiceId?: number | null;
+      rerankTopN?: number;
     },
     _isRetryAfterRefresh = false,
-  ): Promise<{ data: { results: SearchResult[] }; serverMs: number | null }> {
+  ): Promise<{ data: { results: SearchResult[]; rerank?: RerankStatus | null }; serverMs: number | null }> {
     const url = `${this.baseURL}/internal/apps/${appId}/silos/${siloId}/search`;
     const body = JSON.stringify({
       query,
@@ -2481,9 +2495,9 @@ class ApiService {
       ...(searchOptions?.minContentLength != null && { min_content_length: searchOptions.minContentLength }),
       ...(searchOptions?.maxContentLength != null && { max_content_length: searchOptions.maxContentLength }),
       ...(searchOptions?.searchMethod !== undefined ? { search_method: searchOptions.searchMethod } : {}),
-      ...(searchOptions?.strategy ? { strategy: searchOptions.strategy } : {}),
-      ...(searchOptions?.topN !== undefined ? { top_n: searchOptions.topN } : {}),
-      ...(searchOptions?.similarityThreshold !== undefined ? { similarity_threshold: searchOptions.similarityThreshold } : {}),
+      ...(searchOptions?.rerank
+        ? { rerank: true, rerank_service_id: searchOptions.rerankServiceId ?? null, rerank_top_n: searchOptions.rerankTopN }
+        : {}),
     });
     const headers = this.buildAuthHeaders('POST', false);
     const response = await fetch(url, { method: 'POST', body, credentials: 'include', headers });

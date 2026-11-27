@@ -1,5 +1,39 @@
 {
   "rerankEgressNotice": { "message": "Rerankerrak zure dokumentuen zatiak eta erabiltzailearen kontsulta jasotzen ditu. Kanpoko API batekin, datu horiek zure erakundearen azpiegituratik ateratzen dira; auto-ostatatutako reranker batek (adib. Infinity) barruan mantentzen ditu." },
+  "rerankControls": {
+    "label": "Rerank",
+    "none": "Bat ere ez",
+    "useService": "Rerank zerbitzua",
+    "service": "Rerank zerbitzua",
+    "defaultOption": "Lehenetsia ({{name}})",
+    "defaultOptionNone": "Lehenetsia (konfiguratu gabe)",
+    "topN": "Top N",
+    "topNHelp": "Rerank ondoren mantentzen diren dokumentuak (1–50). Lehenetsia 30.",
+    "help": "Hautatutako bilaketa-metodoen ondoren aplikatzen den bigarren fasea: rerankerrak «berreskuratu beharreko dokumentuak» hautagaiak berriro puntuatzen ditu eta N onenak mantentzen ditu.",
+    "playgroundHelp": "Bilaketaren ondoren aplikatzen den bigarren fasea: rerankerrak hautagaiak berriro puntuatzen ditu eta N onenak mantentzen ditu. Top K-k lehen fasea soilik neurtzen du, beraz emaitzak Top K baino gehiago izan daitezke.",
+    "unavailable": "Ez dago rerankerrik konfiguratuta. Aplikazioko administratzaileek bat gehitu dezakete Aplikazioaren ezarpenak > Rerank zerbitzuak atalean; plataformako administratzaileek lehenetsi bat ezarri dezakete.",
+    "resultScore": "Rerank puntuazioa: {{score}}",
+    "status": {
+      "applied": "{{name}}(e)k berrordenatu du ({{source}}), {{ms}} ms-tan",
+      "skipped": "Rerank saltatu da: {{reason}}",
+      "sources": {
+        "agent": "agentea",
+        "request": "bilaketa hau",
+        "app_default": "aplikazioaren lehenetsia",
+        "platform_default": "plataformaren lehenetsia"
+      },
+      "reasons": {
+        "not_configured": "ez dago rerankerrik konfiguratuta",
+        "no_service_configured": "ez dago rerankerrik konfiguratuta",
+        "service_unavailable": "rerank zerbitzua ez dago erabilgarri",
+        "service_retired": "rerank zerbitzua erretiratuta dago",
+        "service_error": "rerank zerbitzuak errorea itzuli du",
+        "timeout": "rerank zerbitzuak denbora-muga gainditu du",
+        "no_candidates": "ez zegoen berrordenatzeko hautagairik",
+        "busy": "rerank zerbitzua okupatuta dago"
+      }
+    }
+  },
   "save": "Gorde",
   "confirm": "Berretsi",
   "cancel": "Utzi",
@@ -4253,13 +4287,6 @@
     "ragConfig": {
       "searchMethod": "Bilaketa metodoa",
       "searchMethodHelp": "Hautatu biak errekuperazio hibridorako (dentsoa + lexikoa, RRF bidez fusionatuak).",
-      "rerankStrategy": "Rerank estrategia",
-      "rerankStrategyHelp": "Rerank estrategia bat bakarrik izan daiteke aktibo aldi berean.",
-      "rerankTopN": "Rerank top N",
-      "rerankTopNHelp": "Rerank ondoren mantentzen diren dokumentuak (1–50). Hutsik uzteak zerbitzariaren balio lehenetsia erabiltzen du.",
-      "rerankThreshold": "Rerank antzekotasun-atalasea",
-      "rerankThresholdHelp": "Aukerazko gutxieneko antzekotasuna, 0–1, rerank ondoren aplikatua."
-,
       "title": "Berreskurapena (RAG)",
       "subtitle": "Agente honek bere ezagutza-basean nola bilatzen duen",
       "documentsToRetrieve": "Berreskuratu beharreko dokumentuak (k)",
@@ -4623,18 +4650,6 @@
       "bm25": "BM25 (lexikoa / gako-hitzak)",
       "hybrid": "Hibridoa (dentsoa + BM25)"
     },
-    "rerankStrategy": "Rerank estrategia",
-    "strategies": {
-      "none": "Bat ere ez",
-      "rerank": "Rerank (embedding-etan oinarrituta)",
-      "crossEncoder": "Rerank (cross-encoder)"
-    },
-    "rerankTopN": "Rerank top N",
-    "rerankTopNHelp": "Rerank ondoren mantentzen diren dokumentuak (1–50).",
-    "rerankThreshold": "Rerank antzekotasun-atalasea",
-    "rerankThresholdHelp": "Aukerazko gutxieneko antzekotasuna, 0–1, rerank ondoren aplikatua.",
-    "optional": "Aukerakoa"
-,
     "topKResults": "Emaitza kopurua (Top K)",
     "searchStrategy": "Bilaketa-estrategia",
     "searchTypes": {

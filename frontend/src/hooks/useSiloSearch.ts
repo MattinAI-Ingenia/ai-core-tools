@@ -2,11 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import type { FormEvent, Dispatch, SetStateAction } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiService } from '../services/api';
-import { DEFAULT_SEARCH_CONTROLS } from '../components/playground/SearchControls';
+import { DEFAULT_SEARCH_CONTROLS, sanitizeSearchControls } from '../components/playground/SearchControls';
+import type { RerankStatus } from '../services/api';
 import type { SearchControlsValue } from '../components/playground/SearchControls';
 import type { SearchResult } from '../components/playground/ResultCard';
 import type { SearchFilterMetadataField } from '../components/playground/SearchFilters';
-import type { ServiceLifecycleWarning } from '../types/services';
+import type { RerankServiceOptions, ServiceLifecycleWarning } from '../types/services';
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -38,7 +39,12 @@ export interface PanelState {
   error: string | null;
   clientMs: number | null;
   searchMethod?: 'dense' | 'bm25' | 'hybrid';
-  strategy?: '' | 'rerank' | 'cross_encoder_rerank';
+  /** Rerank settings of this panel; undefined falls back to the shared controls. */
+  rerank?: boolean;
+  rerankServiceId?: number | null;
+  rerankTopN?: number;
+  /** Rerank outcome of the last search of this panel (null when reranking was not requested). */
+  rerankStatus?: RerankStatus | null;
   searchType?: SearchControlsValue['searchType'];
   scoreThreshold?: number;
   fetchK?: number;
@@ -67,6 +73,10 @@ export interface SiloSearchState {
   maxContentLength: number | null;
   setMaxContentLength: Dispatch<SetStateAction<number | null>>;
   searchControls: SearchControlsValue;
+  /** Rerank services selectable in this app; null while loading or when loading failed. */
+  rerankOptions: RerankServiceOptions | null;
+  /** Rerank outcome of the last main search (null when reranking was not requested). */
+  rerankStatus: RerankStatus | null;
   setSearchControls: Dispatch<SetStateAction<SearchControlsValue>>;
 
   // Selection / delete
@@ -134,7 +144,9 @@ export interface SiloSearchState {
     setter: Dispatch<SetStateAction<PanelState>>,
     panelOverrides?: {
       searchMethod?: 'dense' | 'bm25' | 'hybrid';
-      strategy?: '' | 'rerank' | 'cross_encoder_rerank';
+      rerank?: boolean;
+      rerankServiceId?: number | null;
+      rerankTopN?: number;
       searchType?: SearchControlsValue['searchType'];
       scoreThreshold?: number;
       fetchK?: number;
@@ -176,6 +188,8 @@ export function useSiloSearch(
   const [minContentLength, setMinContentLength] = useState<number | null>(null);
   const [maxContentLength, setMaxContentLength] = useState<number | null>(null);
   const [searchControls, setSearchControls] = useState<SearchControlsValue>(DEFAULT_SEARCH_CONTROLS);
+  const [rerankOptions, setRerankOptions] = useState<RerankServiceOptions | null>(null);
+  const [rerankStatus, setRerankStatus] = useState<RerankStatus | null>(null);
 
   // Multi-select (FR-4.1)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -219,6 +233,16 @@ export function useSiloSearch(
       void loadSilo();
     }
   }, [appId, siloId]);
+
+  // Rerank services are loaded once per app and shared by the controls and both compare panels.
+  useEffect(() => {
+    if (!appId) return;
+    let cancelled = false;
+    apiService.getRerankServiceOptions(Number.parseInt(appId))
+      .then((result) => { if (!cancelled) setRerankOptions(result); })
+      .catch(() => { if (!cancelled) setRerankOptions(null); });
+    return () => { cancelled = true; };
+  }, [appId]);
 
   useEffect(() => {
     if (!siloId) return;
@@ -284,7 +308,7 @@ export function useSiloSearch(
 
   function rerunHistoryEntry(entry: QueryHistoryEntry) {
     setSearchQuery(entry.query);
-    setSearchControls(entry.controls);
+    setSearchControls(sanitizeSearchControls(entry.controls));
     if (entry.filterMetadata !== undefined) handleFilterMetadataChange(entry.filterMetadata);
     setMinContentLength(entry.minContentLength);
     setMaxContentLength(entry.maxContentLength);
@@ -298,6 +322,7 @@ export function useSiloSearch(
       setIsSearching(true);
       setSearchError(null);
       setSearchResults([]);
+      setRerankStatus(null);
       setHasSearched(true);
       const t0 = performance.now();
       const { data: response, serverMs } = await apiService.searchSiloDocumentsWithTiming(
@@ -314,9 +339,9 @@ export function useSiloSearch(
           minContentLength: minContentLength ?? undefined,
           maxContentLength: maxContentLength ?? undefined,
           searchMethod: searchControls.searchMethod,
-          strategy: searchControls.strategy || undefined,
-          topN: searchControls.strategy ? searchControls.topN : undefined,
-          similarityThreshold: searchControls.strategy === 'rerank' ? (searchControls.similarityThreshold ?? undefined) : undefined,
+          rerank: searchControls.rerank || undefined,
+          rerankServiceId: searchControls.rerank ? searchControls.rerankServiceId : undefined,
+          rerankTopN: searchControls.rerank ? searchControls.rerankTopN : undefined,
         },
       );
       const clientMs = Math.round(performance.now() - t0);
@@ -336,6 +361,7 @@ export function useSiloSearch(
         id: result.metadata?._id as string | undefined,
       }));
       setSearchResults(resultsWithIds);
+      setRerankStatus(searchControls.rerank ? (response.rerank ?? null) : null);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Search failed');
       console.error('Error searching silo:', err);
@@ -473,7 +499,9 @@ export function useSiloSearch(
     setter: Dispatch<SetStateAction<PanelState>>,
     panelOverrides?: {
       searchMethod?: 'dense' | 'bm25' | 'hybrid';
-      strategy?: '' | 'rerank' | 'cross_encoder_rerank';
+      rerank?: boolean;
+      rerankServiceId?: number | null;
+      rerankTopN?: number;
       searchType?: SearchControlsValue['searchType'];
       scoreThreshold?: number;
       fetchK?: number;
@@ -482,7 +510,11 @@ export function useSiloSearch(
   ) {
     if (!appId || !siloId) return;
     const resolvedSearchMethod = panelOverrides?.searchMethod ?? searchControls.searchMethod;
-    const resolvedStrategy = panelOverrides?.strategy ?? searchControls.strategy;
+    const resolvedRerank = panelOverrides?.rerank ?? searchControls.rerank;
+    const resolvedRerankServiceId = panelOverrides?.rerankServiceId !== undefined
+      ? panelOverrides.rerankServiceId
+      : searchControls.rerankServiceId;
+    const resolvedRerankTopN = panelOverrides?.rerankTopN ?? searchControls.rerankTopN;
     const resolvedSearchType = panelOverrides?.searchType ?? searchControls.searchType;
     const resolvedScoreThreshold = panelOverrides?.scoreThreshold ?? searchControls.scoreThreshold;
     const resolvedFetchK = panelOverrides?.fetchK ?? searchControls.fetchK;
@@ -504,9 +536,9 @@ export function useSiloSearch(
           minContentLength: minContentLength ?? undefined,
           maxContentLength: maxContentLength ?? undefined,
           searchMethod: resolvedSearchMethod,
-          strategy: resolvedStrategy || undefined,
-          topN: resolvedStrategy ? searchControls.topN : undefined,
-          similarityThreshold: resolvedStrategy === 'rerank' ? (searchControls.similarityThreshold ?? undefined) : undefined,
+          rerank: resolvedRerank || undefined,
+          rerankServiceId: resolvedRerank ? resolvedRerankServiceId : undefined,
+          rerankTopN: resolvedRerank ? resolvedRerankTopN : undefined,
         },
       );
       const clientMs = Math.round(performance.now() - t0);
@@ -521,6 +553,7 @@ export function useSiloSearch(
         isSearching: false,
         error: null,
         clientMs,
+        rerankStatus: resolvedRerank ? (data.rerank ?? null) : null,
       }));
     } catch (err) {
       setter((p) => ({ ...p, isSearching: false, error: err instanceof Error ? err.message : 'Search failed' }));
@@ -584,6 +617,8 @@ export function useSiloSearch(
     maxContentLength,
     setMaxContentLength,
     searchControls,
+    rerankOptions,
+    rerankStatus,
     setSearchControls,
     selectedIds,
     setSelectedIds,
