@@ -26,7 +26,18 @@ from schemas.admin_schemas import (
 )
 from schemas.system_setting_schemas import SystemSettingRead, SystemSettingUpdate
 from services.marketplace_quota_service import MarketplaceQuotaService
+from schemas.rerank_service_schemas import (
+    CreateUpdateRerankServiceSchema,
+    RerankServiceDetailSchema,
+    RerankServiceListItemSchema,
+    SetPlatformDefaultSchema,
+)
 from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from services.rerank_service_service import (
+    RERANK_SERVICE_NOT_FOUND_MSG,
+    RerankServiceError,
+    RerankServiceService,
+)
 from services.service_lifecycle_service import ServiceLifecycleService
 from services.system_settings_service import SystemSettingsService
 from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING
@@ -1748,3 +1759,119 @@ async def test_system_embedding_service_connection_with_config(
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail="Test failed")
+
+
+
+# ==================== SYSTEM RERANK SERVICES (OMNIADMIN) ====================
+
+
+def _rerank_http_error(exc: RerankServiceError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
+@router.get("/system-rerank-services", response_model=List[RerankServiceDetailSchema])
+async def list_system_rerank_services(
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """List all platform-level rerank services (OMNIADMIN only; keys masked)."""
+    return RerankServiceService.get_system_services_detail(db)
+
+
+@router.post("/system-rerank-services", response_model=RerankServiceListItemSchema, status_code=201)
+async def create_system_rerank_service(
+    body: CreateUpdateRerankServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Create a platform-level rerank service (OMNIADMIN only)."""
+    try:
+        svc = await run_in_threadpool(
+            RerankServiceService.create_system_service, db, body, int(auth_context.identity.id)
+        )
+    except RerankServiceError as exc:
+        raise _rerank_http_error(exc)
+    return RerankServiceService.to_list_item(svc, warning_days=ServiceLifecycleService.warning_days(db))
+
+
+# Static routes before the {service_id} ones.
+@router.put("/system-rerank-services/platform-default", response_model=List[RerankServiceDetailSchema])
+async def set_system_rerank_platform_default(
+    body: SetPlatformDefaultSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Mark a system rerank service as the platform default, or clear it with null (OMNIADMIN only)."""
+    try:
+        await run_in_threadpool(
+            RerankServiceService.set_platform_default, db, body.service_id, int(auth_context.identity.id)
+        )
+    except RerankServiceError as exc:
+        raise _rerank_http_error(exc)
+    return RerankServiceService.get_system_services_detail(db)
+
+
+@router.post("/system-rerank-services/test-connection")
+async def test_system_rerank_service_connection_with_config(
+    config: CreateUpdateRerankServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    service_id: Annotated[Optional[int], Query(description="Edit-mode: recover the stored API key when masked")] = None,
+):
+    """Test a system rerank service configuration (OMNIADMIN). Falls back to the stored key when masked/empty."""
+    try:
+        return await RerankServiceService.test_connection_with_config(
+            db, config, app_scoped=False, service_id=service_id
+        )
+    except RerankServiceError as exc:
+        raise _rerank_http_error(exc)
+    except Exception as exc:
+        logger.error("Error testing system rerank service connection: %s", type(exc).__name__, exc_info=True)
+        raise HTTPException(status_code=500, detail="Test failed")
+
+
+@router.get("/system-rerank-services/{service_id}", response_model=RerankServiceDetailSchema)
+async def get_system_rerank_service(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Get a platform-level rerank service (OMNIADMIN only; key masked)."""
+    detail = RerankServiceService.get_system_service_detail(db, service_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=RERANK_SERVICE_NOT_FOUND_MSG)
+    return detail
+
+
+@router.put("/system-rerank-services/{service_id}", response_model=RerankServiceListItemSchema)
+async def update_system_rerank_service(
+    service_id: int,
+    body: CreateUpdateRerankServiceSchema,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Update a platform-level rerank service (OMNIADMIN only)."""
+    try:
+        svc = await run_in_threadpool(
+            RerankServiceService.update_system_service, db, service_id, body, int(auth_context.identity.id)
+        )
+    except RerankServiceError as exc:
+        raise _rerank_http_error(exc)
+    if svc is None:
+        raise HTTPException(status_code=404, detail=RERANK_SERVICE_NOT_FOUND_MSG)
+    return RerankServiceService.to_list_item(svc, warning_days=ServiceLifecycleService.warning_days(db))
+
+
+@router.delete("/system-rerank-services/{service_id}", status_code=204)
+async def delete_system_rerank_service(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Delete a platform-level rerank service (OMNIADMIN only)."""
+    try:
+        deleted = await run_in_threadpool(RerankServiceService.delete_system_service, db, service_id)
+    except RerankServiceError as exc:
+        raise _rerank_http_error(exc)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=RERANK_SERVICE_NOT_FOUND_MSG)

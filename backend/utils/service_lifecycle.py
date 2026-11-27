@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 SERVICE_KIND_AI = "ai"
 SERVICE_KIND_EMBEDDING = "embedding"
 SERVICE_KIND_SANDBOX = "sandbox"
+SERVICE_KIND_RERANK = "rerank"
 
 _UNKNOWN = "unknown"
 
@@ -116,10 +117,17 @@ def sandbox_retired_message(name: str, eos: datetime, notice: Optional[str] = No
     )
 
 
+def rerank_retired_message(name: str, eos: datetime, notice: Optional[str] = None) -> str:
+    return _with_notice(
+        f"{_retired_on(name, eos)} Reranking is skipped until another rerank service is selected.", notice
+    )
+
+
 _MESSAGE_BUILDERS = {
     SERVICE_KIND_AI: ai_retired_message,
     SERVICE_KIND_EMBEDDING: embedding_retired_message,
     SERVICE_KIND_SANDBOX: sandbox_retired_message,
+    SERVICE_KIND_RERANK: rerank_retired_message,
 }
 
 
