@@ -2042,6 +2042,9 @@
       "manual": "Manual"
     },
     "credentialsStep": {
+      "rerankBaseUrl": "Server URL",
+      "rerankManualModelTitle": "Model name",
+      "rerankManualModelMessage": "Reranker APIs do not list their models here. Type the model identifier you want to use, for example BAAI/bge-reranker-v2-m3.",
       "providerNotFound": "Provider not found",
       "pickProviderFirst": "Go back and pick a provider before continuing.",
       "title": "Enter credentials for {{provider}}",

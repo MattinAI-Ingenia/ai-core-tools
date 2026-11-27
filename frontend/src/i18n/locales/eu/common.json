@@ -2066,6 +2066,9 @@
       "manual": "Eskuzkoa"
     },
     "credentialsStep": {
+      "rerankBaseUrl": "Zerbitzariaren URL-a",
+      "rerankManualModelTitle": "Modeloaren izena",
+      "rerankManualModelMessage": "Rerank APIek ez dituzte beren modeloak hemen zerrendatzen. Idatzi erabili nahi duzun modeloaren identifikatzailea, adibidez BAAI/bge-reranker-v2-m3.",
       "providerNotFound": "Ez da hornitzailea aurkitu",
       "pickProviderFirst": "Itzuli atzera eta aukeratu hornitzaile bat jarraitu aurretik.",
       "title": "Sartu {{provider}} hornitzailearen kredentzialak",

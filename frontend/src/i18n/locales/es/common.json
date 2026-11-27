@@ -2042,6 +2042,9 @@
       "manual": "Manual"
     },
     "credentialsStep": {
+      "rerankBaseUrl": "URL del servidor",
+      "rerankManualModelTitle": "Nombre del modelo",
+      "rerankManualModelMessage": "Las APIs de rerank no listan sus modelos aquí. Escribe el identificador del modelo que quieras usar, por ejemplo BAAI/bge-reranker-v2-m3.",
       "providerNotFound": "No se encontró el proveedor",
       "pickProviderFirst": "Vuelve atrás y selecciona un proveedor para continuar.",
       "title": "Introduce las credenciales de {{provider}}",

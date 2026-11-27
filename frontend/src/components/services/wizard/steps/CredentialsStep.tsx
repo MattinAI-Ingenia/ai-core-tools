@@ -28,6 +28,7 @@ const API_KEY_HELP_KEYS: Record<string, string> = {
   'ai:Bedrock': 'bedrock',
   'embedding:Bedrock': 'bedrock',
   'sandbox:opensandbox': 'openSandbox',
+  'rerank:CohereCompatible': 'cohereCompatible',
   'sandbox:daytona': 'daytona',
   'sandbox:e2b': 'e2b',
 };
