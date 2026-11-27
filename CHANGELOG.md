@@ -5,6 +5,14 @@ All notable changes to the Mattin AI project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Rerank services (unreleased)
+
+Upgrade notes:
+- Migration `rerank001`: the local cross-encoder reranker and its dependencies (torch, sentence-transformers) are removed. Agents that used reranking are migrated to "rerank enabled, inherited default". Create a rerank service (system service, then set it as the platform default) before or right after upgrading, otherwise reranking is skipped and search results come from the first stage only.
+- App-owned rerank endpoints on private addresses require `AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS=true`.
+- Agents with reranking and no stored top N now rerank the top 30 (previously 5); the first stage fetches at least that many candidates.
+- Rollback: run `alembic downgrade` below `rerank001` before redeploying the previous image.
+
 ## [Unreleased]
 
 ### Added
