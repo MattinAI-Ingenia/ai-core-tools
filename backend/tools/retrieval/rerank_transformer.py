@@ -114,6 +114,13 @@ class RerankRetriever(BaseRetriever):
         limit = self.plan.candidate_limit
         return docs[:limit] if limit else docs
 
+    def _caller_kwargs(self) -> dict:
+        """Calling app for the per-tenant sub-limit of shared (system) services; empty otherwise."""
+        plan = self.plan
+        if plan.target is not None and plan.target.system and plan.app_id is not None:
+            return {"caller_app_id": plan.app_id}
+        return {}
+
     def _reset(self) -> None:
         self.plan.outcome = RerankOutcome()
 
@@ -165,7 +172,7 @@ class RerankRetriever(BaseRetriever):
         out = plan.outcome
         out.service_id, out.service_name, out.source = plan.target.service_id, plan.target.name, plan.source
         out.latency_ms = latency_ms
-        if not (isinstance(exc, RerankError) and not exc.service_failure):
+        if not (isinstance(exc, RerankError) and not exc.service_failure):  # local errors never count
             _safe_record(plan, "record_failure", message)
         return self._skip(docs, reason)
 
@@ -179,7 +186,8 @@ class RerankRetriever(BaseRetriever):
         plan = self.plan
         start = time.perf_counter()
         try:
-            results = rerank_sync(plan.target, query, [d.page_content for d in docs], plan.top_n)
+            results = rerank_sync(plan.target, query, [d.page_content for d in docs], plan.top_n,
+                                  **self._caller_kwargs())
             out = self._apply(docs, results, int((time.perf_counter() - start) * 1000))
         except asyncio.CancelledError:
             raise
@@ -201,7 +209,8 @@ class RerankRetriever(BaseRetriever):
         plan = self.plan
         start = time.perf_counter()
         try:
-            results = await rerank_async(plan.target, query, [d.page_content for d in docs], plan.top_n)
+            results = await rerank_async(plan.target, query, [d.page_content for d in docs], plan.top_n,
+                                         **self._caller_kwargs())
             out = self._apply(docs, results, int((time.perf_counter() - start) * 1000))
         except asyncio.CancelledError:
             raise

@@ -3,14 +3,17 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import sys
+import threading
 import time
+from contextlib import contextmanager
 
 import httpx
 
 import config
 from tools.rerank import http_clients
 from tools.rerank.errors import (
-    InvalidRerankResponseError, RerankAuthError, RerankBusyError, RerankConnectError, RerankError,
+    InvalidRerankResponseError, RerankAuthError, RerankBusyError, RerankConnectError, RerankError, RerankLocalError,
     RerankHTTPError, RerankTimeoutError,
 )
 from tools.rerank.providers import get_adapter
@@ -21,6 +24,35 @@ logger = logging.getLogger(__name__)
 
 _TEST_QUERY = "What is the capital of France?"
 _TEST_DOCS = ["Paris is the capital of France.", "Berlin is the capital of Germany."]
+
+
+# Per-target in-flight cap: one hung endpoint must not take the whole shared connection pool (50).
+MAX_INFLIGHT_PER_TARGET = 8
+_inflight: dict = {}
+_inflight_lock = threading.Lock()
+# A shared (system) service also has a per-calling-app sub-limit of half the cap so one tenant cannot starve others.
+_SUB_LIMIT = max(1, MAX_INFLIGHT_PER_TARGET // 2)
+
+
+@contextmanager
+def _inflight_slot(target: RerankTarget, caller_app_id=None):
+    key = target.service_id if target.service_id is not None else target.endpoint
+    sub = (key, caller_app_id) if target.system and caller_app_id is not None else None
+    with _inflight_lock:
+        if _inflight.get(key, 0) >= MAX_INFLIGHT_PER_TARGET or (sub is not None and _inflight.get(sub, 0) >= _SUB_LIMIT):
+            raise RerankBusyError("Too many concurrent rerank calls for this service")
+        for k in (key, sub):
+            if k is not None:
+                _inflight[k] = _inflight.get(k, 0) + 1
+    try:
+        yield
+    finally:
+        with _inflight_lock:
+            for k in (key, sub):
+                if k is not None:
+                    _inflight[k] -= 1
+                    if _inflight[k] <= 0:
+                        _inflight.pop(k, None)
 
 
 def _ms(start: float) -> int:
@@ -53,7 +85,7 @@ def _map_exc(exc: Exception) -> RerankError:
         return RerankError("Invalid reranker endpoint URL", kind="config")
     if isinstance(exc, httpx.TransportError):
         return RerankConnectError("Could not connect to the reranker")
-    return RerankError("Reranker request failed", kind="config")
+    return RerankLocalError("Reranker request failed")
 
 
 def _headers(req) -> dict:
@@ -110,40 +142,61 @@ def _prepare(target, query, documents, top_n):
     return adapter, req
 
 
-def rerank_sync(target: RerankTarget, query: str, documents: list[str], top_n: int) -> list[RerankResult]:
+_warned_sites: set = set()
+
+
+def _warn_running_loop_once() -> None:
+    """Log the running-loop misuse once per call site (rate limit)."""
+    frame = sys._getframe(2)
+    site = (frame.f_code.co_filename, frame.f_lineno)
+    if site in _warned_sites:
+        return
+    _warned_sites.add(site)
+    logger.warning("rerank_sync called from a thread with a running event loop: it blocks that loop "
+                   "(use rerank_async or asyncio.to_thread); further calls from %s:%s are not logged",
+                   site[0], site[1])
+
+
+def rerank_sync(target: RerankTarget, query: str, documents: list[str], top_n: int,
+                caller_app_id=None) -> list[RerankResult]:
     """Blocking entry point: runs rerank_async on the single dedicated background loop (one implementation)."""
     loop = http_clients.get_background_loop()
     try:
         if asyncio.get_running_loop() is loop:
-            raise RerankError("rerank_sync must not be called from the rerank background loop", kind="config")
+            raise RerankLocalError("rerank_sync must not be called from the rerank background loop")
     except RuntimeError:
         pass  # no running loop in this thread: the normal case
-    fut = asyncio.run_coroutine_threadsafe(rerank_async(target, query, documents, top_n), loop)
+    else:
+        _warn_running_loop_once()
+    fut = asyncio.run_coroutine_threadsafe(rerank_async(target, query, documents, top_n, caller_app_id), loop)
     try:
         return fut.result(timeout=_total() + 0.5)
     except concurrent.futures.TimeoutError:
         fut.cancel()
         raise RerankTimeoutError(f"Reranker timed out after {_total():g}s") from None
     except concurrent.futures.CancelledError:
-        raise RerankError("Rerank call was cancelled", kind="config") from None
+        raise RerankLocalError("Rerank call was cancelled") from None
 
 
-async def rerank_async(target: RerankTarget, query: str, documents: list[str], top_n: int) -> list[RerankResult]:
+async def rerank_async(target: RerankTarget, query: str, documents: list[str], top_n: int,
+                       caller_app_id=None) -> list[RerankResult]:
     adapter, req = _prepare(target, query, documents, top_n)
     start = time.monotonic()
     cap = config.RERANK_MAX_RESPONSE_BYTES
     try:
-        async with asyncio.timeout(_total()):
-            client = http_clients.get_async_client(guarded=_needs_guard(target))
-            async with client.stream(
-                    "POST", req.url, headers=_headers(req), json=req.json, timeout=http_clients.build_timeout()) as resp:
-                _check_status(resp)
-                buf = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    buf += chunk
-                    if len(buf) > cap:
-                        raise _too_large()
-                status = resp.status_code
+        with _inflight_slot(target, caller_app_id):
+            async with asyncio.timeout(_total()):
+                client = http_clients.get_async_client(guarded=_needs_guard(target))
+                async with client.stream(
+                        "POST", req.url, headers=_headers(req), json=req.json,
+                        timeout=http_clients.build_timeout()) as resp:
+                    _check_status(resp)
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        buf += chunk
+                        if len(buf) > cap:
+                            raise _too_large()
+                    status = resp.status_code
     except RerankError:
         raise
     except TimeoutError:

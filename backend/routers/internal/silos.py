@@ -14,7 +14,7 @@ from models.silo import Silo
 
 from schemas.silo_schemas import (
     SiloListItemSchema, SiloDetailSchema, CreateUpdateSiloSchema,
-    CreateSiloSchema, UpdateSiloSchema, SiloSearchSchema, SiloCountRequestSchema
+    CreateSiloSchema, UpdateSiloSchema, PlaygroundSiloSearchSchema, SiloSearchResponseSchema, SiloCountRequestSchema
 )
 from schemas.import_schemas import ConflictMode, ImportResponseSchema
 from schemas.export_schemas import SiloExportFileSchema
@@ -351,13 +351,14 @@ async def export_silo(
 
 
 @silos_router.post("/{silo_id}/search",
+                   response_model=SiloSearchResponseSchema,
                    summary="Search documents in silo",
                    tags=["Silos", "Playground"],
                    responses={409: {"description": "A service used by this resource was retired"}})
 async def search_silo_documents(
     app_id: int,
     silo_id: int,
-    search_query: SiloSearchSchema,
+    search_query: PlaygroundSiloSearchSchema,
     auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
     db: Annotated[Session, Depends(get_db)],
     role: Annotated[AppRole, Depends(require_min_role("viewer"))],
@@ -367,7 +368,12 @@ async def search_silo_documents(
     Search for documents in a silo using semantic search with optional metadata filtering.
     """
     logger.info(f"Search request received - app_id: {app_id}, silo_id: {silo_id}, user_id: {auth_context.identity.id}")
-    logger.info(f"Search query: {search_query.query}, limit: {search_query.limit}, filter_metadata: {search_query.filter_metadata}")
+    # Never log the query text or filter values (user content); lengths and field names only.
+    logger.info(
+        "Search query_len=%d limit=%s filter_fields=%s rerank=%s rerank_service_id=%s rerank_top_n=%s",
+        len(search_query.query), search_query.limit, sorted((search_query.filter_metadata or {}).keys()),
+        search_query.rerank, search_query.rerank_service_id, search_query.rerank_top_n,
+    )
         
     _validate_silo_app_ownership(silo_id, app_id, db)
     
@@ -375,8 +381,8 @@ async def search_silo_documents(
         logger.info(f"Getting silo {silo_id} for validation")
         
         t0 = time.perf_counter()
-        # Reranking (especially the cross-encoder strategy, which runs local CPU-bound
-        # model inference) can take long enough to starve the event loop of every other
+        # The search is synchronous (vector store I/O plus the blocking rerank call to the external rerank
+        # service, bounded by the rerank timeout) and would block the event loop for every other
         # request on this worker, so this runs off-loop like the other retrieval paths
         # (see tools/agentTools.py's _run_retrieval and reindex_silo_resource above).
         result = await asyncio.to_thread(
@@ -393,9 +399,9 @@ async def search_silo_documents(
             search_query.max_content_length,
             db,
             search_method=search_query.search_method,
-            strategy=search_query.strategy,
-            top_n=search_query.top_n,
-            similarity_threshold=search_query.similarity_threshold,
+            rerank=search_query.rerank,
+            rerank_service_id=search_query.rerank_service_id,
+            rerank_top_n=search_query.rerank_top_n,
         )
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
         
@@ -414,6 +420,9 @@ async def search_silo_documents(
     except ServiceRetiredError:
         # Already logged once by the lifecycle guard; mapped to 409 by the global handler.
         raise
+    except ValidationError as e:
+        # e.g. unknown / foreign rerank_service_id: same message for both, nothing about other apps.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.message)
     except HTTPException:
         logger.error("HTTPException in search_silo_documents, re-raising")
         raise

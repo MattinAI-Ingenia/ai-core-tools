@@ -229,6 +229,11 @@ RERANK_CONNECT_TIMEOUT_SECONDS = _env_float_or_default('AICT_RERANK_CONNECT_TIME
 RERANK_TIMEOUT_SECONDS = max(_env_float_or_default('AICT_RERANK_TIMEOUT_SECONDS', 5.0, maximum=60.0), RERANK_CONNECT_TIMEOUT_SECONDS)
 # Maximum rerank response body (bytes); larger bodies are rejected while streaming.
 RERANK_MAX_RESPONSE_BYTES = _env_int_or_default('AICT_RERANK_MAX_RESPONSE_BYTES', 1024 * 1024)
+# Upper bound on candidates sent to a reranker in one call (clamps max(rag_k, top_n)); bounded 1..200.
+RERANK_MAX_CANDIDATES = _env_int_or_default('AICT_RERANK_MAX_CANDIDATES', 100)
+if RERANK_MAX_CANDIDATES > 200:
+    logging.getLogger(__name__).warning("Invalid AICT_RERANK_MAX_CANDIDATES (expected 1..200); using default 100")
+    RERANK_MAX_CANDIDATES = 100
 # App-scoped services may not target private/loopback endpoints unless this is true (system services are exempt).
 RERANK_ALLOW_PRIVATE_ENDPOINTS = os.getenv('AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 

@@ -50,9 +50,9 @@ def _make_agent(
     rag_fixed_filters: list | None = None,
     rag_max_retrieval_calls: int | None = None,
     rag_search_method: str = "dense",
-    rag_strategy: str | None = None,
+    rag_rerank_enabled: bool = False,
+    rag_rerank_service_id: int | None = None,
     rag_rerank_top_n: int | None = None,
-    rag_rerank_similarity_threshold: float | None = None,
     silo: Any = None,
 ) -> Any:
     return types.SimpleNamespace(
@@ -62,9 +62,9 @@ def _make_agent(
         rag_fixed_filters=rag_fixed_filters,
         rag_max_retrieval_calls=rag_max_retrieval_calls,
         rag_search_method=rag_search_method,
-        rag_strategy=rag_strategy,
+        rag_rerank_enabled=rag_rerank_enabled,
+        rag_rerank_service_id=rag_rerank_service_id,
         rag_rerank_top_n=rag_rerank_top_n,
-        rag_rerank_similarity_threshold=rag_rerank_similarity_threshold,
         silo=silo,
     )
 
@@ -185,7 +185,7 @@ class TestAgentFallback:
 
 
 # ---------------------------------------------------------------------------
-# search_method / strategy / top_n / similarity_threshold — caller > agent >
+# search_method — caller > agent >
 # system precedence (same style as k / search_type above).
 # ---------------------------------------------------------------------------
 
@@ -228,100 +228,41 @@ class TestSearchMethodPrecedence:
         assert sp["search_method"] == ["dense", "bm25"]
 
 
-class TestStrategyPrecedence:
-    def test_caller_strategy_overrides_agent(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_strategy=None, silo=silo)
+class TestRerankFromAgentOnly:
+    """AD-10: rerank settings come from the agent only; callers cannot set them."""
 
-        sp, _ = resolve_search_params(agent, {"strategy": "rerank"})
+    def test_defaults_when_agent_has_no_rerank(self):
+        sp, _ = resolve_search_params(_make_agent(silo=_make_silo()), {})
 
-        assert sp["strategy"] == "rerank"
+        assert sp["rerank_enabled"] is False
+        assert sp["rerank_service_id"] is None
+        assert sp["rerank_top_n"] == 30
 
-    def test_caller_strategy_none_clears_agent_value(self):
-        """Explicit None in caller for strategy clears the agent's configured
-        strategy and leaves no residual key."""
-        silo = _make_silo()
-        agent = _make_agent(rag_strategy="rerank", silo=silo)
-
-        sp, _ = resolve_search_params(agent, {"strategy": None})
-
-        assert "strategy" not in sp
-
-    def test_agent_strategy_used_when_caller_omits(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_strategy="rerank", silo=silo)
+    def test_agent_values_emitted(self):
+        agent = _make_agent(rag_rerank_enabled=True, rag_rerank_service_id=9, rag_rerank_top_n=5, silo=_make_silo())
 
         sp, _ = resolve_search_params(agent, {})
 
-        assert sp["strategy"] == "rerank"
+        assert (sp["rerank_enabled"], sp["rerank_service_id"], sp["rerank_top_n"]) == (True, 9, 5)
 
-    def test_strategy_absent_when_neither_caller_nor_agent_sets_it(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_strategy=None, silo=silo)
+    def test_caller_cannot_set_rerank_keys(self):
+        agent = _make_agent(rag_rerank_enabled=False, rag_rerank_service_id=None, rag_rerank_top_n=7, silo=_make_silo())
 
-        sp, _ = resolve_search_params(agent, {})
+        sp, _ = resolve_search_params(
+            agent, {"rerank_enabled": True, "rerank_service_id": 123, "rerank_top_n": 50}
+        )
 
-        assert "strategy" not in sp
+        assert sp["rerank_enabled"] is False
+        assert sp["rerank_service_id"] is None
+        assert sp["rerank_top_n"] == 7
 
+    def test_legacy_keys_are_not_emitted(self):
+        sp, _ = resolve_search_params(
+            _make_agent(silo=_make_silo()), {"strategy": "rerank", "top_n": 3, "similarity_threshold": 0.4}
+        )
 
-class TestRerankTopNPrecedence:
-    def test_caller_top_n_overrides_agent(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_top_n=5, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {"top_n": 3})
-
-        assert sp["top_n"] == 3
-
-    def test_agent_top_n_used_when_caller_omits(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_top_n=8, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {})
-
-        assert sp["top_n"] == 8
-
-    def test_top_n_absent_when_neither_caller_nor_agent_sets_it(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_top_n=None, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {})
-
-        assert "top_n" not in sp
-
-
-class TestRerankSimilarityThresholdPrecedence:
-    def test_caller_similarity_threshold_overrides_agent(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_similarity_threshold=0.7, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {"similarity_threshold": 0.4})
-
-        assert sp["similarity_threshold"] == pytest.approx(0.4)
-
-    def test_caller_similarity_threshold_none_clears_agent_value(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_similarity_threshold=0.7, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {"similarity_threshold": None})
-
-        assert "similarity_threshold" not in sp
-
-    def test_agent_similarity_threshold_used_when_caller_omits(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_similarity_threshold=0.6, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {})
-
-        assert sp["similarity_threshold"] == pytest.approx(0.6)
-
-    def test_similarity_threshold_absent_when_neither_caller_nor_agent_sets_it(self):
-        silo = _make_silo()
-        agent = _make_agent(rag_rerank_similarity_threshold=None, silo=silo)
-
-        sp, _ = resolve_search_params(agent, {})
-
-        assert "similarity_threshold" not in sp
+        for key in ("strategy", "top_n", "similarity_threshold"):
+            assert key not in sp
 
 
 class TestThresholdFallback:

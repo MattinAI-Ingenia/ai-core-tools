@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from schemas.embedding_service_schemas import EmbeddingServiceOptionSchema
@@ -102,8 +102,8 @@ class SiloSearchSchema(BaseModel):
     `search_method` — one of SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS ("dense", "bm25").
         None/"dense" keeps the default similarity-search code path unchanged (same `_score`
         in results); any other value routes the search through the RetrievalPipeline instead.
-    `strategy`, `top_n`, `similarity_threshold` — legacy rerank fields; `strategy` is rejected until
-        step_007/008 replace them with rerank service selection.
+    Reranking is not part of this schema (the public API never exposes it); the silo playground uses
+    `PlaygroundSiloSearchSchema`.
     """
     query: str
     limit: Optional[int] = None
@@ -115,9 +115,6 @@ class SiloSearchSchema(BaseModel):
     min_content_length: Optional[int] = None   # inclusive lower bound on chunk character count
     max_content_length: Optional[int] = None   # inclusive upper bound on chunk character count
     search_method: Optional[str] = None
-    strategy: Optional[str] = None
-    top_n: Optional[int] = None
-    similarity_threshold: Optional[float] = None
 
     @field_validator("search_type")
     @classmethod
@@ -135,28 +132,6 @@ class SiloSearchSchema(BaseModel):
             raise ValueError(
                 f"search_method must be one of {sorted(SearchMethodFactory.IMPLEMENTED_SEARCH_METHODS)}"
             )
-        return v
-
-    @field_validator("strategy")
-    @classmethod
-    def validate_strategy(cls, v: Optional[str]) -> Optional[str]:
-        # Temporary (removed in step_007/008): the old strategies are gone.
-        if v:
-            raise ValueError("strategy is no longer supported; use a rerank service")
-        return v
-
-    @field_validator("top_n")
-    @classmethod
-    def validate_top_n(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and not (1 <= v <= 50):
-            raise ValueError("top_n must be between 1 and 50")
-        return v
-
-    @field_validator("similarity_threshold")
-    @classmethod
-    def validate_similarity_threshold(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and not (0.0 <= v <= 1.0):
-            raise ValueError("similarity_threshold must be between 0 and 1")
         return v
 
     @model_validator(mode="after")
@@ -180,3 +155,63 @@ class SiloSearchSchema(BaseModel):
         ):
             raise ValueError("min_content_length must be <= max_content_length")
         return self
+
+class PlaygroundSiloSearchSchema(SiloSearchSchema):
+    """Silo playground search (internal API only): adds the optional rerank second stage.
+
+    `rerank` — rerank the first-stage candidates with a rerank service. The query and the candidate chunks
+        are sent to that service's endpoint (data egress), so it is opt-in per request.
+    `rerank_service_id` — explicit service (owned by the app or a platform service); None inherits the app
+        default, then the platform default.
+    `rerank_top_n` — documents kept after reranking (1-50); None uses the default (30).
+    With rerank on, `limit` only sizes the first stage (candidates = max(limit, top N), capped by the server);
+    the response holds up to `rerank_top_n` documents even when it is larger than `limit`.
+    """
+    rerank: bool = Field(
+        default=False,
+        description="Rerank the candidates as a second stage. Sends the query and candidate chunks to the "
+                    "rerank service endpoint (data egress).",
+    )
+    rerank_service_id: Optional[int] = Field(
+        default=None, description="Explicit rerank service; None inherits the app default, then the platform default."
+    )
+    rerank_top_n: Optional[int] = Field(
+        default=None, description="Documents kept after reranking (1-50); None uses the default (30). The response is cut to "
+                    "this value, not to 'limit', which only sizes the first stage when reranking."
+    )
+
+    @field_validator("rerank_top_n")
+    @classmethod
+    def validate_rerank_top_n(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1 <= v <= 50):
+            raise ValueError("rerank_top_n must be between 1 and 50")
+        return v
+
+
+class RerankStatusSchema(BaseModel):
+    """Outcome of the rerank stage of one search."""
+    requested: bool = True
+    applied: bool = False
+    service_id: Optional[int] = None
+    service_name: Optional[str] = None
+    source: Optional[str] = None
+    skipped_reason: Optional[str] = None
+    latency_ms: Optional[int] = None
+
+
+class SiloSearchResultSchema(BaseModel):
+    """One search hit; `rerank_score` is set only when the rerank stage was applied."""
+    page_content: str
+    metadata: Dict[str, Any] = {}
+    score: Optional[float] = None
+    rerank_score: Optional[float] = None
+
+
+class SiloSearchResponseSchema(BaseModel):
+    """Internal (playground) search response; `rerank` is present only when reranking was requested."""
+    query: str
+    results: List[SiloSearchResultSchema]
+    total_results: int
+    filter_metadata: Optional[Dict[str, Any]] = None
+    rerank: Optional[RerankStatusSchema] = None
+

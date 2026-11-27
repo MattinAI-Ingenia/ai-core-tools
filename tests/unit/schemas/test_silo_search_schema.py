@@ -87,7 +87,7 @@ def test_zero_min_content_length_is_valid():
 
 
 # ---------------------------------------------------------------------------
-# search_method / strategy / top_n / similarity_threshold (RetrievalPipeline)
+# search_method (RetrievalPipeline) and rerank (playground schema only)
 # ---------------------------------------------------------------------------
 
 def test_search_method_defaults_to_none():
@@ -110,78 +110,40 @@ def test_invalid_search_method_raises():
         SiloSearchSchema(query="test", search_method="sparse")
 
 
-def test_strategy_defaults_to_none():
-    s = SiloSearchSchema(query="test")
-    assert s.strategy is None
+def test_public_schema_has_no_rerank_or_legacy_fields():
+    for name in ("strategy", "top_n", "similarity_threshold", "rerank", "rerank_service_id", "rerank_top_n"):
+        assert name not in SiloSearchSchema.model_fields
 
 
-def test_valid_strategy_rerank():
-    s = SiloSearchSchema(query="test", strategy="rerank")
-    assert s.strategy == "rerank"
+def test_public_schema_ignores_rerank_payload():
+    s = SiloSearchSchema(query="test", rerank=True, rerank_service_id=3, strategy="rerank", top_n=5)
+    dumped = s.model_dump()
+    for name in ("strategy", "top_n", "rerank", "rerank_service_id"):
+        assert name not in dumped
 
 
-def test_invalid_strategy_raises():
-    with pytest.raises(ValidationError, match="strategy"):
-        SiloSearchSchema(query="test", strategy="hybrid")
+def test_playground_schema_rerank_defaults():
+    from schemas.silo_schemas import PlaygroundSiloSearchSchema
+    s = PlaygroundSiloSearchSchema(query="test")
+    assert s.rerank is False
+    assert s.rerank_service_id is None
+    assert s.rerank_top_n is None
 
 
-def test_top_n_defaults_to_none():
-    s = SiloSearchSchema(query="test")
-    assert s.top_n is None
+def test_playground_schema_accepts_rerank_fields():
+    from schemas.silo_schemas import PlaygroundSiloSearchSchema
+    s = PlaygroundSiloSearchSchema(query="test", rerank=True, rerank_service_id=4, rerank_top_n=20)
+    assert (s.rerank, s.rerank_service_id, s.rerank_top_n) == (True, 4, 20)
 
 
-def test_valid_top_n_passes():
-    s = SiloSearchSchema(query="test", top_n=5)
-    assert s.top_n == 5
+@pytest.mark.parametrize("value", [0, 51])
+def test_playground_schema_rerank_top_n_bounds(value):
+    from schemas.silo_schemas import PlaygroundSiloSearchSchema
+    with pytest.raises(ValidationError, match="rerank_top_n"):
+        PlaygroundSiloSearchSchema(query="test", rerank_top_n=value)
 
 
-def test_top_n_below_min_raises():
-    with pytest.raises(ValidationError, match="top_n"):
-        SiloSearchSchema(query="test", top_n=0)
-
-
-def test_top_n_above_max_raises():
-    with pytest.raises(ValidationError, match="top_n"):
-        SiloSearchSchema(query="test", top_n=51)
-
-
-def test_similarity_threshold_defaults_to_none():
-    s = SiloSearchSchema(query="test")
-    assert s.similarity_threshold is None
-
-
-def test_valid_similarity_threshold_passes():
-    s = SiloSearchSchema(query="test", similarity_threshold=0.5)
-    assert s.similarity_threshold == 0.5
-
-
-def test_similarity_threshold_below_min_raises():
-    with pytest.raises(ValidationError, match="similarity_threshold"):
-        SiloSearchSchema(query="test", similarity_threshold=-0.1)
-
-
-def test_similarity_threshold_above_max_raises():
-    with pytest.raises(ValidationError, match="similarity_threshold"):
-        SiloSearchSchema(query="test", similarity_threshold=1.1)
-
-
-# ---------------------------------------------------------------------------
-# SiloCountRequestSchema
-# ---------------------------------------------------------------------------
-
-def test_count_schema_defaults_are_none():
-    s = SiloCountRequestSchema()
-    assert s.filter_metadata is None
-    assert s.min_content_length is None
-    assert s.max_content_length is None
-
-
-def test_count_schema_accepts_filter_and_length():
-    s = SiloCountRequestSchema(
-        filter_metadata={"type": "pdf"},
-        min_content_length=50,
-        max_content_length=1000,
-    )
-    assert s.filter_metadata == {"type": "pdf"}
-    assert s.min_content_length == 50
-    assert s.max_content_length == 1000
+def test_playground_schema_old_fields_absent():
+    from schemas.silo_schemas import PlaygroundSiloSearchSchema
+    for name in ("strategy", "top_n", "similarity_threshold"):
+        assert name not in PlaygroundSiloSearchSchema.model_fields

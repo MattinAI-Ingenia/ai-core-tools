@@ -314,7 +314,8 @@ def test_exception_mapping(exc, kind, fragment):
     with pytest.raises(RerankError) as e:
         rerank_sync(make_target(), "q", DOCS, 2)
     assert e.value.kind == kind and fragment in e.value.message
-    assert e.value.service_failure is (kind != "busy")
+    # busy (local pool) and the unmapped fallback ("Reranker request failed", local) never count against the service
+    assert e.value.service_failure is (kind != "busy" and fragment != "failed")
 
 
 @pytest.fixture

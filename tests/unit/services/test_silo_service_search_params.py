@@ -161,7 +161,7 @@ def test_search_silo_documents_router_forwards_all_search_params():
     db = MagicMock()
 
     with patch("services.silo_service.SiloService.get_silo", return_value=silo), \
-         patch("services.silo_service.SiloService.find_docs_in_collection", return_value=[]) as mock_find:
+         patch("services.silo_service.SiloService._search_docs", return_value=([], [], None)) as mock_find:
         SiloService.search_silo_documents_router(
             silo_id=1,
             query="test",
@@ -177,11 +177,13 @@ def test_search_silo_documents_router_forwards_all_search_params():
         )
 
     mock_find.assert_called_once()
-    _, call_kwargs = mock_find.call_args
-    assert call_kwargs["limit"] == 5
-    assert call_kwargs["search_type"] == "mmr"
-    assert call_kwargs["score_threshold"] == 0.6
-    assert call_kwargs["fetch_k"] == 20
-    assert call_kwargs["lambda_mult"] == 0.7
-    assert call_kwargs["min_content_length"] == 10
-    assert call_kwargs["max_content_length"] == 500
+    args = mock_find.call_args.args
+    # (silo_id, query, filter_metadata, limit, search_type, score_threshold, fetch_k, lambda_mult,
+    #  min_content_length, max_content_length, db, ...)
+    assert args[3] == 5
+    assert args[4] == "mmr"
+    assert args[5] == 0.6
+    assert args[6] == 20
+    assert args[7] == 0.7
+    assert args[8] == 10
+    assert args[9] == 500

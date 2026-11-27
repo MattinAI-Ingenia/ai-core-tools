@@ -118,41 +118,102 @@ def test_bm25_search_method_routes_through_pipeline():
     assert docs[0].page_content == "bm25 hit"
 
 
-def test_rerank_strategy_routes_through_pipeline():
+def _patched(silo, vector_store, retriever, plan=None):
+    """Patch the collaborators of the search path; returns the patch list (entered by the caller)."""
+    return [
+        patch("services.silo_service.SiloRepository.get_by_id", return_value=silo),
+        patch("services.silo_service.SiloService.check_silo_collection_exists", return_value=True),
+        patch("services.silo_service.SiloRepository.get_embedding_service_by_id", return_value="emb"),
+        patch("services.silo_service._get_vector_store", return_value=vector_store),
+        patch("services.silo_service._build_pipeline_retriever", return_value=retriever),
+    ]
+
+
+def test_rerank_with_dense_routes_through_sync_pipeline_with_plan():
+    """Regression (sync mode): dense + rerank must go through the pipeline, built with use_async=False."""
+    from tools.retrieval.rerank_transformer import RerankPlan
+
     silo = _make_silo()
     vector_store = MagicMock()
     db = MagicMock()
-
-    mock_retriever = MagicMock()
-    mock_retriever.invoke.return_value = []
+    plan = RerankPlan(top_n=5, candidate_limit=20)
+    retriever = MagicMock()
+    retriever.invoke.return_value = []
 
     with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo), \
          patch("services.silo_service.SiloService.check_silo_collection_exists", return_value=True), \
          patch("services.silo_service.SiloRepository.get_embedding_service_by_id", return_value="emb"), \
          patch("services.silo_service._get_vector_store", return_value=vector_store), \
-         patch("services.silo_service._build_pipeline_retriever", return_value=mock_retriever) as mock_build_pipeline:
+         patch("services.silo_service._build_rerank_plan", return_value=plan) as mock_plan, \
+         patch("services.silo_service._build_pipeline_retriever", return_value=retriever) as mock_build:
         SiloService.find_docs_in_collection(
-            silo_id=7,
-            query="invoice",
-            strategy="rerank",
-            top_n=5,
-            similarity_threshold=0.4,
-            db=db,
+            silo_id=7, query="invoice", rerank=True, rerank_top_n=5, limit=10, db=db
         )
 
     vector_store.search_similar_documents.assert_not_called()
-    mock_build_pipeline.assert_called_once()
-    _, _, _, called_kwargs = mock_build_pipeline.call_args[0]
-    assert called_kwargs["strategy"] == "rerank"
-    assert called_kwargs["top_n"] == 5
-    assert called_kwargs["similarity_threshold"] == 0.4
-    # Regression: this call site invokes the retriever synchronously (.invoke()),
-    # so it must build it in sync mode — an async-mode retriever raises "This
-    # method must be called without async_mode" when invoked this way.
-    assert mock_build_pipeline.call_args.kwargs["use_async"] is False
+    mock_plan.assert_called_once()
+    assert mock_plan.call_args.args[2:] == (None, 5, 10)
+    mock_build.assert_called_once()
+    assert mock_build.call_args.kwargs["use_async"] is False
+    assert mock_build.call_args.kwargs["rerank_plan"] is plan
+    # first stage supplies the candidate limit
+    assert mock_build.call_args.args[3]["k"] == 20
 
 
-# The dense+rerank sync-mode regression test returns in step_008 with the new rerank wiring.
+def test_explicit_rerank_service_not_visible_raises_validation_error():
+    from utils.error_handlers import ValidationError
+
+    silo = _make_silo()
+    silo.app_id = 3
+    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo), \
+         patch("services.silo_service.SiloService.check_silo_collection_exists", return_value=True), \
+         patch("services.silo_service.SiloRepository.get_embedding_service_by_id", return_value="emb"), \
+         patch("services.silo_service.RerankServiceRepository.get_visible_by_id", return_value=None) as mock_vis, \
+         patch("services.silo_service._build_pipeline_retriever") as mock_build:
+        try:
+            SiloService.find_docs_in_collection(
+                silo_id=7, query="q", rerank=True, rerank_service_id=99, db=MagicMock()
+            )
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("expected ValidationError")
+
+    mock_vis.assert_called_once()
+    assert mock_vis.call_args.args[1:] == (99, 3)
+    mock_build.assert_not_called()
+
+
+def test_rerank_scores_stay_aligned_after_content_length_filter():
+    from tools.retrieval.rerank_transformer import RerankOutcome, RerankPlan
+
+    silo = _make_silo()
+    plan = RerankPlan(top_n=3, candidate_limit=10)
+    retriever = MagicMock()
+
+    def _invoke(_q):
+        plan.outcome = RerankOutcome(applied=True, scores=[0.9, 0.8, 0.7])
+        return [
+            Document(page_content="x" * 200, metadata={}),
+            Document(page_content="short", metadata={}),
+            Document(page_content="y" * 300, metadata={}),
+        ]
+
+    retriever.invoke.side_effect = _invoke
+    with patch("services.silo_service.SiloService.get_silo", return_value=silo), \
+         patch("services.silo_service.SiloRepository.get_by_id", return_value=silo), \
+         patch("services.silo_service.SiloService.check_silo_collection_exists", return_value=True), \
+         patch("services.silo_service.SiloRepository.get_embedding_service_by_id", return_value="emb"), \
+         patch("services.silo_service._get_vector_store", return_value=MagicMock()), \
+         patch("services.silo_service._build_rerank_plan", return_value=plan), \
+         patch("services.silo_service._build_pipeline_retriever", return_value=retriever):
+        result = SiloService.search_silo_documents_router(
+            1, "q", rerank=True, min_content_length=100, db=MagicMock()
+        )
+
+    assert [r["rerank_score"] for r in result["results"]] == [0.9, 0.7]
+    assert result["rerank"]["requested"] is True
+    assert result["rerank"]["applied"] is True
 
 
 def test_pipeline_path_forwards_filter_and_search_type():
@@ -210,41 +271,58 @@ def test_pipeline_path_still_applies_content_length_post_filter():
 # search_silo_documents_router — same routing, response shape unaffected
 # ---------------------------------------------------------------------------
 
-def test_router_default_path_returns_score_from_metadata():
+def _router_search(docs_scores, plan=None, **kwargs):
     silo = _make_silo()
-    db = MagicMock()
-
     with patch("services.silo_service.SiloService.get_silo", return_value=silo), \
-         patch(
-             "services.silo_service.SiloService.find_docs_in_collection",
-             return_value=[Document(page_content="hit", metadata={"_score": 0.42})],
-         ) as mock_find:
-        result = SiloService.search_silo_documents_router(1, "query", db=db)
+         patch("services.silo_service.SiloService._search_docs", return_value=(*docs_scores, plan)) as mock_search:
+        result = SiloService.search_silo_documents_router(1, "query", db=MagicMock(), **kwargs)
+    return result, mock_search
+
+
+def test_router_default_path_returns_score_from_metadata():
+    result, mock_search = _router_search(([Document(page_content="hit", metadata={"_score": 0.42})], [None]))
 
     assert result["results"][0]["score"] == 0.42
-    # search_method/strategy/top_n/similarity_threshold default to None and are forwarded
-    _, kwargs = mock_find.call_args
-    assert kwargs["search_method"] is None
-    assert kwargs["strategy"] is None
+    assert result["results"][0]["rerank_score"] is None
+    assert "rerank" not in result
+    # search_method / rerank flags default and are forwarded positionally
+    args = mock_search.call_args.args
+    assert args[11] is None and args[12] is False and args[13] is None and args[14] is None
 
 
 def test_router_pipeline_path_returns_none_score_when_absent():
-    silo = _make_silo()
-    db = MagicMock()
-
-    with patch("services.silo_service.SiloService.get_silo", return_value=silo), \
-         patch(
-             "services.silo_service.SiloService.find_docs_in_collection",
-             return_value=[Document(page_content="hit", metadata={})],
-         ) as mock_find:
-        result = SiloService.search_silo_documents_router(
-            1, "query", search_method="bm25", strategy="rerank", top_n=3,
-            similarity_threshold=0.6, db=db,
-        )
+    result, mock_search = _router_search(([Document(page_content="hit", metadata={})], [None]), search_method="bm25")
 
     assert result["results"][0]["score"] is None
-    _, kwargs = mock_find.call_args
-    assert kwargs["search_method"] == "bm25"
-    assert kwargs["strategy"] == "rerank"
-    assert kwargs["top_n"] == 3
-    assert kwargs["similarity_threshold"] == 0.6
+    assert mock_search.call_args.args[11] == "bm25"
+
+
+def test_router_reports_rerank_outcome_and_scores():
+    from tools.retrieval.rerank_transformer import RerankOutcome, RerankPlan
+
+    plan = RerankPlan(top_n=2)
+    plan.outcome = RerankOutcome(
+        applied=True, service_id=4, service_name="svc", source="app_default", latency_ms=12, scores=[0.9, 0.1]
+    )
+    result, _ = _router_search(
+        ([Document(page_content="a", metadata={}), Document(page_content="b", metadata={})], [0.9, 0.1]),
+        plan=plan, rerank=True,
+    )
+
+    assert [r["rerank_score"] for r in result["results"]] == [0.9, 0.1]
+    assert result["rerank"] == {
+        "requested": True, "applied": True, "service_id": 4, "service_name": "svc",
+        "source": "app_default", "skipped_reason": None, "latency_ms": 12,
+    }
+
+
+def test_router_reports_skipped_rerank():
+    from tools.retrieval.rerank_transformer import RerankOutcome, RerankPlan
+
+    plan = RerankPlan(top_n=2)
+    plan.outcome = RerankOutcome(applied=False, skipped_reason="timeout", service_id=4)
+    result, _ = _router_search(([Document(page_content="a", metadata={})], [None]), plan=plan, rerank=True)
+
+    assert result["rerank"]["applied"] is False
+    assert result["rerank"]["skipped_reason"] == "timeout"
+    assert result["results"][0]["rerank_score"] is None

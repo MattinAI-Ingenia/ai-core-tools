@@ -17,6 +17,12 @@ class RerankError(Exception):
             self.kind = kind
 
 
+class RerankLocalError(RerankError):
+    """Local (non-service) failure: misuse, cancellation or an unmapped exception. Never a health failure."""
+    kind = "config"
+    service_failure = False
+
+
 class RerankAuthError(RerankError):
     kind = "auth"
 

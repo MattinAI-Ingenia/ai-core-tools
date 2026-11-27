@@ -115,7 +115,7 @@ class TestParseJsonParam:
 # ---------------------------------------------------------------------------
 
 class TestValidateSearchParams:
-    """rag_search_method/rag_strategy/rag_rerank_* are agent-config-only and must
+    """rag_search_method/rag_rerank_* are agent-config-only and must
     never be settable by a public-API caller (see resolve_search_params precedence
     in services/silo_service.py) — regression coverage for that boundary."""
 
@@ -140,9 +140,13 @@ class TestValidateSearchParams:
             "strategy": "rerank",
             "top_n": 999999,
             "similarity_threshold": -50,
+            "rerank_enabled": True,
+            "rerank_service_id": 1,
+            "rerank_top_n": 50,
         })
         assert result == {"k": 5}
-        for leaked_key in ("search_method", "strategy", "top_n", "similarity_threshold"):
+        for leaked_key in ("search_method", "strategy", "top_n", "similarity_threshold",
+                           "rerank_enabled", "rerank_service_id", "rerank_top_n"):
             assert leaked_key not in result
 
     def test_out_of_range_value_raises_422(self):
