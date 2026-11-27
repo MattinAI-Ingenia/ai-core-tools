@@ -37,6 +37,17 @@ class TestCanonicalizeEntityName:
         assert canonicalize_entity_name("MCF\u00ad40") == "mcf 40"  # soft hyphen
         assert canonicalize_entity_name("MCF\u201040") == "mcf 40"  # unicode hyphen
 
+    def test_glyph_variants_and_trailing_punctuation_fold(self):
+        assert canonicalize_entity_name("\u2205 80") == canonicalize_entity_name("\u00d8 80")
+        assert canonicalize_entity_name("90\u00ba elbow") == canonicalize_entity_name("90\u00b0 elbow")
+        assert canonicalize_entity_name("30 min.") == canonicalize_entity_name("30 min")
+
+    def test_inner_punctuation_keeps_meaning(self):
+        assert canonicalize_entity_name("80/125") != canonicalize_entity_name("80-125")
+        assert canonicalize_entity_name("Plus/Minus") != canonicalize_entity_name("Plus Minus")
+        assert canonicalize_entity_name("30%") != canonicalize_entity_name("-30")
+        assert canonicalize_entity_name("...") == "..."  # never folds to empty
+
     def test_no_separator_vs_separator_stays_distinct(self):
         # "MCF40" (no separator) is a different token than "MCF-40" — folding
         # only unifies variants of the SAME spelled name, not compact forms.

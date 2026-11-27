@@ -63,6 +63,10 @@ _HYPHEN_LIKE_RE = re.compile(
     "[\u002d\u00ad\u058a\u05be\u1400\u1806\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d]+"
 )
 _WHITESPACE_RE = re.compile(r"\s+")
+# Glyph variants of the SAME symbol (diameter sign, degree sign). Deliberately
+# NOT folded: "/", ",", "+", "%", "~": in part codes they carry meaning
+# (80/125 is not 80-125). NFKC already turns "º" into "o", so "°" joins it.
+_GLYPH_FOLD = str.maketrans({"\u2205": "\u00f8", "\u2300": "\u00f8", "\u00b0": "o"})
 
 # contextvars slot: holds the active collector during an indexing run,
 # or None outside one (e.g. during query). Same pattern as
@@ -89,6 +93,7 @@ def canonicalize_entity_name(raw: str) -> str:
     Order matters: NFKC first (full-width/compatibility chars → ASCII),
     NFKD + combining-mark strip (accents → base letter), casefold, then
     hyphen-like runs → single space and whitespace runs → single space.
+    Also folds diameter/degree glyph variants and drops trailing ``.``/``,``.
     Returns ``""`` only when the input was empty; a name that folds to
     nothing (e.g. ``"-"``) is passed through as-is by the caller.
     """
@@ -98,8 +103,11 @@ def canonicalize_entity_name(raw: str) -> str:
     decomposed = unicodedata.normalize("NFKD", text)
     stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     text = unicodedata.normalize("NFC", stripped).casefold()
+    text = text.translate(_GLYPH_FOLD)
     text = _HYPHEN_LIKE_RE.sub(" ", text)
-    return _WHITESPACE_RE.sub(" ", text).strip()
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    # Trailing sentence punctuation ("30 min." == "30 min"); never inner marks.
+    return text.rstrip(".,").rstrip() or text
 
 
 class EntityNameVariantCollector:
