@@ -134,7 +134,14 @@ class ServiceUsageRepository:
             select(App.default_sandbox_service_id, App.default_embedding_service_id, App.default_rerank_service_id)
             .where(App.app_id == app_id)
         ).first()
-        return AppDefaults(*row) if row else AppDefaults(None, None, None)
+        if row is None:
+            return AppDefaults(None, None, None)
+        # Named attributes, not *row: a row-like mock (or a future column reorder) must not silently misalign.
+        return AppDefaults(
+            sandbox_service_id=row.default_sandbox_service_id,
+            embedding_service_id=row.default_embedding_service_id,
+            rerank_service_id=row.default_rerank_service_id,
+        )
 
     @staticmethod
     def app_default_sandbox_in_use(db: Session, app_id: int) -> bool:

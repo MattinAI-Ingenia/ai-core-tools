@@ -58,7 +58,7 @@ def _parse_json_param(value: Optional[str], param_name: str):
 def _validate_search_params(parsed):
     """Bound caller search params (DoS guard). Returns a dict rebuilt from the validated
     model — NOT the raw input — so any key not declared on RuntimeSearchParamsSchema
-    (e.g. search_method/strategy/top_n/similarity_threshold, which are agent-config-only
+    (e.g. search_method and the rerank settings, which are agent-config-only
     and must never be caller-overridable) is stripped before it can reach
     resolve_search_params. ``exclude_unset`` preserves which of the declared fields the
     caller actually sent (including explicit nulls), keeping the caller>agent precedence

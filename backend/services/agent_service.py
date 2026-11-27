@@ -253,9 +253,9 @@ class AgentService:
             rag_max_retrieval_calls=getattr(agent, 'rag_max_retrieval_calls', None) if isinstance(getattr(agent, 'rag_max_retrieval_calls', None), (int, type(None))) else None,
             rag_fixed_filters=getattr(agent, 'rag_fixed_filters', None) if isinstance(getattr(agent, 'rag_fixed_filters', None), (list, type(None))) else None,
             rag_search_method=getattr(agent, 'rag_search_method', None) if isinstance(getattr(agent, 'rag_search_method', None), (list, type(None))) else None,
-            rag_strategy=getattr(agent, 'rag_strategy', None) if isinstance(getattr(agent, 'rag_strategy', None), (list, type(None))) else None,
+            rag_rerank_enabled=bool(_typed_attr(agent, 'rag_rerank_enabled', bool, False)),
+            rag_rerank_service_id=_typed_attr(agent, 'rag_rerank_service_id', int),
             rag_rerank_top_n=getattr(agent, 'rag_rerank_top_n', None) if isinstance(getattr(agent, 'rag_rerank_top_n', None), (int, type(None))) else None,
-            rag_rerank_similarity_threshold=getattr(agent, 'rag_rerank_similarity_threshold', None) if isinstance(getattr(agent, 'rag_rerank_similarity_threshold', None), (float, int, type(None))) else None,
             exposed_chat_filters=getattr(agent, 'exposed_chat_filters', None) or [],
             # A2A (Agent2Agent protocol) configuration (step_009, FR-3)
             a2a_enabled=bool(_typed_attr(agent, 'a2a_enabled', bool, False)),
@@ -778,6 +778,8 @@ class AgentService:
                 sandbox_service, _current('sandbox_service_id'), 'sandbox_service_id', SERVICE_KIND_SANDBOX
             )
 
+        self._validate_rerank_selection(db, data, existing_agent)
+
         silo_id = data.get('silo_id') or None
         if silo_id:
             from repositories.silo_repository import SiloRepository
@@ -811,6 +813,45 @@ class AgentService:
                 embedding_service, _current('media_embedding_service_id'),
                 'media_embedding_service_id', SERVICE_KIND_EMBEDDING,
             )
+
+    def _validate_rerank_selection(self, db: Session, data: dict, existing_agent: Optional[Agent]) -> None:
+        """Validate the rerank fields of an agent payload (AD-17).
+
+        An explicit ``rag_rerank_service_id`` must be visible to the app (own or system service); a retired one
+        is accepted only when the agent already has it selected. It is read FOR SHARE so a concurrent delete of
+        the service (which locks it FOR UPDATE) cannot leave a dangling reference. With rerank enabled and no
+        explicit service, an app default or platform default must resolve, otherwise the save is rejected.
+
+        Raises:
+            ValueError: mapped to a 4xx by the callers.
+        """
+        from repositories.rerank_service_repository import RerankServiceRepository
+        from services.rerank_resolution_service import RerankResolutionService
+        from utils.service_lifecycle import ensure_assignable, SERVICE_KIND_RERANK
+
+        app_id = data['app_id']
+        current_id = getattr(existing_agent, 'rag_rerank_service_id', None) if existing_agent is not None else None
+        service_id = data.get('rag_rerank_service_id') if 'rag_rerank_service_id' in data else current_id
+        service_id = service_id or None
+        enabled = data.get('rag_rerank_enabled')
+        if enabled is None:
+            enabled = bool(getattr(existing_agent, 'rag_rerank_enabled', False)) if existing_agent is not None else False
+
+        if service_id and 'rag_rerank_service_id' in data:
+            # FOR SHARE only for a new choice (closes the delete race); an unchanged save takes no lock.
+            service = RerankServiceRepository.get_by_id(db, service_id, for_share=service_id != current_id)
+            self._validate_owned_resource(service, app_id, 'rag_rerank_service_id', allow_system=True)
+            ensure_assignable(service, current_id, 'rag_rerank_service_id', SERVICE_KIND_RERANK)
+        # Only an explicit change of the rerank settings is judged here: an unrelated edit (e.g. a rename) of an
+        # agent that inherits must not be blocked because an admin later retired or removed the default.
+        rerank_settings_changed = 'rag_rerank_enabled' in data or 'rag_rerank_service_id' in data
+        if rerank_settings_changed and enabled and not service_id:
+            resolution = RerankResolutionService.effective_default(db, app_id)
+            if resolution.service is None:
+                raise ValueError(
+                    "Reranking is enabled but no rerank service is available: select a rerank service, or ask "
+                    "an administrator to set an app default or a platform default."
+                )
 
     @staticmethod
     def _resolve_prompt_template(new_value: Optional[str], current_value: Optional[str]) -> str:
@@ -940,14 +981,17 @@ class AgentService:
         if 'rag_fixed_filters' in data:
             agent.rag_fixed_filters = data['rag_fixed_filters']
 
-        # strategy and rerank tuning: clear-able via explicit None, so a caller can
-        # deactivate the rerank strategy by sending rag_strategy=None explicitly.
-        if 'rag_strategy' in data:
-            agent.rag_strategy = data['rag_strategy']
+        # Rerank (optional second stage). enabled: only an explicit value changes it (new agents: off).
+        # service_id and top_n are clear-able via explicit None: a NULL service id means "inherit the app
+        # default, then the platform default"; a NULL top_n means DEFAULT_RERANK_TOP_N at runtime.
+        if data.get('rag_rerank_enabled') is not None:
+            agent.rag_rerank_enabled = bool(data['rag_rerank_enabled'])
+        elif is_new:
+            agent.rag_rerank_enabled = False
+        if 'rag_rerank_service_id' in data:
+            agent.rag_rerank_service_id = data['rag_rerank_service_id'] or None
         if 'rag_rerank_top_n' in data:
             agent.rag_rerank_top_n = data['rag_rerank_top_n']
-        if 'rag_rerank_similarity_threshold' in data:
-            agent.rag_rerank_similarity_threshold = data['rag_rerank_similarity_threshold']
         # exposed_chat_filters (orchestrator-level chat dropdown whitelist): the
         # column is NOT NULL, so always coerce to a list, clearing via explicit [].
         if 'exposed_chat_filters' in data:

@@ -162,6 +162,10 @@ class RagConfigFieldsMixin(BaseModel):
     validation bounds are defined exactly once. Values are persisted on the Agent
     model; precedence (caller > agent > system) is resolved at execution time by
     ``resolve_search_params``.
+
+    Reranking is an optional second stage applied after the configured search method (dense, BM25 or hybrid)
+    to the rag_k candidates; the top N are kept. Leave rag_rerank_service_id empty to inherit the app default,
+    then the platform default.
     """
     rag_k: Optional[int] = None
     rag_search_type: Optional[str] = None
@@ -169,9 +173,9 @@ class RagConfigFieldsMixin(BaseModel):
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
     rag_search_method: Optional[List[str]] = None
-    rag_strategy: Optional[List[str]] = None
-    rag_rerank_top_n: Optional[int] = None
-    rag_rerank_similarity_threshold: Optional[float] = None
+    rag_rerank_enabled: Optional[bool] = Field(default=None, description="Reranking is an optional second stage applied after the configured search method (dense, BM25 or hybrid) to the rag_k candidates; the top N are kept. Leave rag_rerank_service_id empty to inherit the app default, then the platform default.")
+    rag_rerank_service_id: Optional[int] = Field(default=None, description="Rerank service to use; empty inherits the app default, then the platform default.")
+    rag_rerank_top_n: Optional[int] = Field(default=None, description="Documents kept after reranking, 1..50; NULL means 30.")
 
     @field_validator("rag_k")
     @classmethod
@@ -230,26 +234,11 @@ class RagConfigFieldsMixin(BaseModel):
             )
         return deduped
 
-    @field_validator("rag_strategy")
-    @classmethod
-    def validate_rag_strategy(cls, v: Optional[List[str]]) -> Optional[List[str]]:
-        # Temporary (removed in step_007/008): the old strategies are gone.
-        if not v:
-            return None
-        raise ValueError("rag_strategy is no longer supported; use a rerank service")
-
     @field_validator("rag_rerank_top_n")
     @classmethod
     def validate_rag_rerank_top_n(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and not (1 <= v <= 50):
             raise ValueError("rag_rerank_top_n must be between 1 and 50")
-        return v
-
-    @field_validator("rag_rerank_similarity_threshold")
-    @classmethod
-    def validate_rag_rerank_similarity_threshold(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and not (0.0 <= v <= 1.0):
-            raise ValueError("rag_rerank_similarity_threshold must be between 0 and 1")
         return v
 
 
@@ -281,7 +270,7 @@ class RuntimeSearchParamsSchema(BaseModel):
     Acts as a validation gate only: a DoS guard so an API-key holder cannot force a
     huge retrieval (k/fetch_k) per turn. Tuning fields share the agent-config bounds;
     `filter` values are whitelisted later in the retrieval pipeline. Fields not declared
-    here (e.g. search_method/strategy/top_n/similarity_threshold, which are agent-config
+    here (e.g. search_method and the rerank settings, which are agent-config
     -only and never caller-overridable) MUST be stripped by the caller of this schema
     (see ``_validate_search_params`` in ``routers/public/v1/chat.py``, which rebuilds its
     return value from ``model_dump(exclude_unset=True)`` rather than the raw input dict)
@@ -400,9 +389,9 @@ class AgentDetailSchema(BaseModel):
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
     rag_search_method: Optional[List[str]] = None
-    rag_strategy: Optional[List[str]] = None
+    rag_rerank_enabled: Optional[bool] = None
+    rag_rerank_service_id: Optional[int] = None
     rag_rerank_top_n: Optional[int] = None
-    rag_rerank_similarity_threshold: Optional[float] = None
     exposed_chat_filters: List[str] = []
     # A2A (Agent2Agent protocol) configuration (step_009, FR-3)
     a2a_enabled: bool = False
@@ -535,9 +524,9 @@ class PublicAgentDetailSchema(BaseModel):
     rag_max_retrieval_calls: Optional[int] = None
     rag_fixed_filters: Optional[List[dict]] = None
     rag_search_method: Optional[List[str]] = None
-    rag_strategy: Optional[List[str]] = None
+    rag_rerank_enabled: Optional[bool] = None
+    rag_rerank_service_id: Optional[int] = None
     rag_rerank_top_n: Optional[int] = None
-    rag_rerank_similarity_threshold: Optional[float] = None
 
 
 class CreateAgentRequestSchema(RagConfigFieldsMixin):

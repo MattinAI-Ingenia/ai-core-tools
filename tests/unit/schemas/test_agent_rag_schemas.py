@@ -256,39 +256,6 @@ class TestRagSearchMethod:
 # rag_strategy
 # ---------------------------------------------------------------------------
 
-class TestRagStrategy:
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_valid_strategy_passes(self, schema_fn):
-        schema_fn(rag_strategy=["rerank"])
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_cross_encoder_rerank_passes(self, schema_fn):
-        schema_fn(rag_strategy=["cross_encoder_rerank"])
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_combining_both_rerank_strategies_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_strategy"):
-            schema_fn(rag_strategy=["rerank", "cross_encoder_rerank"])
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_none_strategy_passes(self, schema_fn):
-        schema_fn(rag_strategy=None)
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_empty_list_normalizes_to_none(self, schema_fn):
-        obj = schema_fn(rag_strategy=[])
-        assert obj.rag_strategy is None
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_invalid_strategy_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_strategy"):
-            schema_fn(rag_strategy=["hybrid"])
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_empty_string_element_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_strategy"):
-            schema_fn(rag_strategy=[""])
-
 
 # ---------------------------------------------------------------------------
 # rag_rerank_top_n
@@ -319,27 +286,6 @@ class TestRagRerankTopN:
 # ---------------------------------------------------------------------------
 # rag_rerank_similarity_threshold
 # ---------------------------------------------------------------------------
-
-class TestRagRerankSimilarityThreshold:
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_valid_threshold_passes(self, schema_fn):
-        schema_fn(rag_rerank_similarity_threshold=0.0)
-        schema_fn(rag_rerank_similarity_threshold=0.5)
-        schema_fn(rag_rerank_similarity_threshold=1.0)
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_none_passes(self, schema_fn):
-        schema_fn(rag_rerank_similarity_threshold=None)
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_below_zero_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_rerank_similarity_threshold"):
-            schema_fn(rag_rerank_similarity_threshold=-0.01)
-
-    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
-    def test_above_one_raises(self, schema_fn):
-        with pytest.raises(ValidationError, match="rag_rerank_similarity_threshold"):
-            schema_fn(rag_rerank_similarity_threshold=1.01)
 
 
 # ---------------------------------------------------------------------------
@@ -379,3 +325,40 @@ class TestRuntimeSearchParams:
     def test_out_of_range_score_threshold_raises(self, value):
         with pytest.raises(ValidationError):
             self._schema()(score_threshold=value)
+
+
+# ---------------------------------------------------------------------------
+# rerank fields (rerank-services, AC-10 backend)
+# ---------------------------------------------------------------------------
+
+class TestRagRerank:
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    @pytest.mark.parametrize("n", [1, 30, 50])
+    def test_top_n_in_range_passes(self, schema_fn, n):
+        assert schema_fn(rag_rerank_top_n=n).rag_rerank_top_n == n
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    @pytest.mark.parametrize("n", [0, 51])
+    def test_top_n_out_of_range_raises(self, schema_fn, n):
+        with pytest.raises(ValidationError, match="rag_rerank_top_n"):
+            schema_fn(rag_rerank_top_n=n)
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_enabled_and_service_id_accepted(self, schema_fn):
+        s = schema_fn(rag_rerank_enabled=True, rag_rerank_service_id=4)
+        assert s.rag_rerank_enabled is True and s.rag_rerank_service_id == 4
+        assert schema_fn().rag_rerank_service_id is None
+
+    @pytest.mark.parametrize("schema_fn", [_cu, _create, _update])
+    def test_removed_fields_are_gone(self, schema_fn):
+        fields = type(schema_fn()).model_fields
+        assert "rag_strategy" not in fields
+        assert "rag_rerank_similarity_threshold" not in fields
+
+
+def test_top_n_description_matches_the_default_constant():
+    from schemas.agent_schemas import CreateUpdateAgentSchema
+    from tools.retrieval.rerank_transformer import DEFAULT_RERANK_TOP_N
+
+    desc = CreateUpdateAgentSchema.model_fields["rag_rerank_top_n"].description
+    assert f"NULL means {DEFAULT_RERANK_TOP_N}" in desc

@@ -415,9 +415,6 @@ async def create_or_update_agent(
         'rag_max_retrieval_calls': agent_data.rag_max_retrieval_calls,
         'rag_fixed_filters': agent_data.rag_fixed_filters,
         'rag_search_method': agent_data.rag_search_method,
-        'rag_strategy': agent_data.rag_strategy,
-        'rag_rerank_top_n': agent_data.rag_rerank_top_n,
-        'rag_rerank_similarity_threshold': agent_data.rag_rerank_similarity_threshold,
         # Orchestrator-level chat-time dropdown filter whitelist
         'exposed_chat_filters': agent_data.exposed_chat_filters,
         # Media processing configuration (playground media upload)
@@ -442,6 +439,12 @@ async def create_or_update_agent(
     ):
         if a2a_field in agent_data.model_fields_set:
             agent_dict[a2a_field] = getattr(agent_data, a2a_field)
+
+    # Rerank config: only keys the caller sent, so an update that omits them keeps the stored selection and top N;
+    # an explicit null rag_rerank_service_id still means "inherit".
+    for rerank_field in ('rag_rerank_enabled', 'rag_rerank_service_id', 'rag_rerank_top_n'):
+        if rerank_field in agent_data.model_fields_set:
+            agent_dict[rerank_field] = getattr(agent_data, rerank_field)
 
     # Avoid logging full prompt bodies / filter values at INFO; log identity + shape only.
     logger.info(
