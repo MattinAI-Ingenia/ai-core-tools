@@ -11,6 +11,7 @@ from core.export_constants import PLACEHOLDER_API_KEY
 from models.rerank_service import RerankProvider, RerankService
 from repositories.app_repository import AppRepository
 from repositories.rerank_service_repository import RerankServiceRepository
+from schemas.service_lifecycle_schemas import ServiceUsageSchema
 from schemas.rerank_service_schemas import (
     CreateUpdateRerankServiceSchema,
     RerankServiceDetailSchema,
@@ -36,6 +37,10 @@ from utils.ssrf_guard import endpoint_is_disallowed
 logger = get_logger(__name__)
 
 RERANK_SERVICE_NOT_FOUND_MSG = "Rerank service not found"
+IN_USE_MESSAGE = (
+    "This rerank service is in use (agents, an app default or the platform default). "
+    "Move or clear those references first."
+)
 
 
 class RerankServiceError(Exception):
@@ -45,6 +50,24 @@ class RerankServiceError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+    def detail(self) -> Any:
+        """The HTTP error detail the router sends."""
+        return self.message
+
+
+
+
+class RerankServiceInUseError(RerankServiceError):
+    """The service is referenced explicitly by an agent, is an app default or is the platform default (HTTP 409)."""
+
+    def __init__(self, usage: ServiceUsageSchema):
+        super().__init__(IN_USE_MESSAGE, 409)
+        self.usage = usage
+
+    def detail(self) -> Any:
+        """The 409 body: a message plus the full usage so the UI can list what blocks the delete."""
+        return {"message": self.message, "usage": self.usage.model_dump(mode="json")}
 
 
 def _is_real_key(key: Optional[str]) -> bool:
@@ -309,27 +332,64 @@ class RerankServiceService:
 
     @staticmethod
     def _delete_row(db: Session, service: RerankService) -> None:
+        """Delete the row. The FK is the safety net: on a violation roll back, recompute usage and answer with the
+        same 409 body as the pre-check."""
+        service_id, app_id = service.service_id, service.app_id
         try:
             RerankServiceRepository.delete(db, service)
         except IntegrityError:
             db.rollback()
-            raise RerankServiceError("Rerank service is in use", 409) from None
+            usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_RERANK, service_id, app_id)
+            if usage is None:
+                raise RerankServiceError("Rerank service is in use", 409) from None
+            raise RerankServiceInUseError(usage) from None
+
+    @staticmethod
+    def _ensure_not_in_use(db: Session, service: RerankService) -> None:
+        """Raise RerankServiceInUseError on an explicit agent reference, an app default or the platform flag.
+
+        Agents that only inherit the service do not block: the default reference that makes them inherit does.
+        A system service is checked across every app, an app-owned one within its app.
+        """
+        usage = ServiceLifecycleService.get_usage(db, SERVICE_KIND_RERANK, service.service_id, service.app_id)
+        if usage is None:
+            return
+        explicit = any("rerank" in agent.roles for agent in usage.agents)
+        if explicit or usage.apps_using_as_default or usage.is_platform_default:
+            raise RerankServiceInUseError(usage)  # the request session closes and releases the row lock
 
     @staticmethod
     def delete_rerank_service(db: Session, app_id: int, service_id: int) -> bool:
-        """Delete an app-owned service; False when not found in the app."""
-        service = RerankServiceRepository.get_by_id_and_app_id(db, service_id, app_id)
-        if not service:
+        """Delete an app-owned service; False when not found in the app.
+
+        Raises:
+            RerankServiceInUseError: an agent references it explicitly or it is the app default.
+        """
+        # Row lock first (held until the delete commits): a concurrent default/agent assignment reads the row FOR
+        # SHARE and therefore waits for this transaction instead of slipping a reference in after the usage check.
+        service = RerankServiceRepository.get_for_update(db, service_id)
+        if not service or service.app_id != app_id:
             return False
+        RerankServiceService._ensure_not_in_use(db, service)
         RerankServiceService._delete_row(db, service)
         return True
 
     @staticmethod
+    def delete_for_app_cascade(db: Session, service: RerankService) -> None:
+        """Delete an app-owned service while the app is being deleted. No usage guard: the app's agents and its
+        default reference are already gone. Flushes but never commits: the caller (AppService.delete_app) owns the
+        transaction, so a later failure rolls the whole deletion back. An IntegrityError propagates (it is not
+        turned into a 409)."""
+        db.delete(service)
+        db.flush()
+
+    @staticmethod
     def delete_system_service(db: Session, service_id: int) -> bool:
         """Delete a platform-level service; False when not found or not a system service."""
-        service = RerankServiceRepository.get_by_id(db, service_id)
+        service = RerankServiceRepository.get_for_update(db, service_id)  # see delete_rerank_service
         if not service or service.app_id is not None:
             return False
+        RerankServiceService._ensure_not_in_use(db, service)
         RerankServiceService._delete_row(db, service)
         return True
 

@@ -112,6 +112,8 @@ class AppRepository:
             app.default_sandbox_service_id = data['default_sandbox_service_id']
         if 'default_embedding_service_id' in data:
             app.default_embedding_service_id = data['default_embedding_service_id']
+        if 'default_rerank_service_id' in data:
+            app.default_rerank_service_id = data['default_rerank_service_id']
         if 'chat_code_interpreter_enabled' in data:
             app.chat_code_interpreter_enabled = bool(data['chat_code_interpreter_enabled'])
         if 'onboarding_dismissed' in data:
@@ -179,6 +181,11 @@ class AppRepository:
         """Get all embedding services for an app"""
         from models.embedding_service import EmbeddingService
         return self.db.query(EmbeddingService).filter(EmbeddingService.app_id == app_id).all()
+
+    def get_rerank_services_by_app_id(self, app_id: int):
+        """Get all rerank services for an app"""
+        from models.rerank_service import RerankService
+        return self.db.query(RerankService).filter(RerankService.app_id == app_id).all()
 
     def get_sandbox_services_by_app_id(self, app_id: int):
         """Get all sandbox services for an app"""

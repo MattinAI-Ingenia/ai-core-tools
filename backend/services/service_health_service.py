@@ -1,15 +1,20 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional, Type, Union
+
+from sqlalchemy import or_
 
 from db.database import SessionLocal
 from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
+from models.rerank_service import RerankService
 from utils.logger import get_logger
 from utils.provider_errors import ProviderError
 
 logger = get_logger(__name__)
 
-ServiceModel = Type[Union[AIService, EmbeddingService]]
+ServiceModel = Type[Union[AIService, EmbeddingService, RerankService]]
+
+FAILURE_MESSAGE_THROTTLE_SECONDS = 60
 
 
 class ServiceHealthService:
@@ -35,6 +40,40 @@ class ServiceHealthService:
                 {model.last_error: error.message, model.last_error_at: datetime.now()},
                 synchronize_session=False,
             )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.warning("Could not record failure on %s %s: %s", model.__name__, service_id, exc)
+        finally:
+            session.close()
+
+    @staticmethod
+    def record_failure_message(
+        model: ServiceModel,
+        service_id: Optional[int],
+        message: str,
+        throttle_seconds: int = FAILURE_MESSAGE_THROTTLE_SECONDS,
+    ) -> None:
+        """Store a short, key-free failure message on a service whatever the failure kind (rerank: 5xx, timeouts,
+        invalid bodies as well as auth errors).
+
+        One bulk UPDATE in its own session. The same message already written less than ``throttle_seconds`` ago is
+        skipped in SQL, so an outage costs about one write per minute instead of one per request.
+        """
+        if not service_id or not message:
+            return
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=throttle_seconds)
+        session = SessionLocal()
+        try:
+            session.query(model).filter(
+                model.service_id == service_id,
+                or_(
+                    model.last_error.is_distinct_from(message),
+                    model.last_error_at.is_(None),
+                    model.last_error_at < cutoff,
+                ),
+            ).update({model.last_error: message, model.last_error_at: now}, synchronize_session=False)
             session.commit()
         except Exception as exc:
             session.rollback()

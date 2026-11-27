@@ -93,11 +93,12 @@ class App(Base):
 
     # Default rerank service for the app's agents. NULL = no app default; agents then inherit the platform
     # default. use_alter=True for the App<->RerankService creation cycle (rerank_service.app_id -> App.app_id);
-    # the rerank001 migration adds/drops this FK as a separate, named step.
+    # the rerank001 migration adds/drops this FK as a separate, named step; rerank002 made it ON DELETE
+    # RESTRICT so the DB refuses to delete a service still used as an app default (FR-16 guard backstop).
     default_rerank_service_id = Column(Integer,
                         ForeignKey(
                             'rerank_service.service_id',
-                            ondelete='SET NULL',
+                            ondelete='RESTRICT',
                             use_alter=True,
                             name='App_default_rerank_service_id_fkey',
                         ),

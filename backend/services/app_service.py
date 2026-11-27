@@ -89,6 +89,32 @@ class AppService:
             )
         ensure_assignable(service, current_id, "default_embedding_service_id", SERVICE_KIND_EMBEDDING)
 
+    def validate_default_rerank_service(
+        self, app_id: int, rerank_service_id: Optional[int], current_id: Optional[int]
+    ) -> None:
+        """Validate an app's ``default_rerank_service_id`` (``None`` = no default, always valid).
+
+        Same rules as the embedding default: the service must exist and be system-scoped or owned by this app
+        (a foreign id and a missing one are indistinguishable); a retired service can only be kept.
+
+        Raises:
+            ValueError: the service is not valid for this app, or is retired and not the current one.
+        """
+        if rerank_service_id is None:
+            return
+        from repositories.rerank_service_repository import RerankServiceRepository
+        from utils.service_lifecycle import SERVICE_KIND_RERANK, ensure_assignable
+
+        # FOR SHARE on purpose: a concurrent delete holds the row FOR UPDATE, so this waits for it and then sees the
+        # row gone, instead of assigning a default to a service that is being deleted (FR-16).
+        service = RerankServiceRepository.get_by_id(self.db, rerank_service_id, for_share=True)
+        if service is None or (service.app_id is not None and service.app_id != app_id):
+            raise ValueError(
+                f"default_rerank_service_id '{rerank_service_id}' does not "
+                "reference a valid rerank service for this app."
+            )
+        ensure_assignable(service, current_id, "default_rerank_service_id", SERVICE_KIND_RERANK)
+
     def create_or_update_app(self, app_data: dict, user_id: int = None) -> App:
         """Create a new app or update an existing one.
 
@@ -122,6 +148,7 @@ class AppService:
         from .silo_service import SiloService
         from .embedding_service_service import EmbeddingServiceService
         from .sandbox_service_service import SandboxServiceService
+        from .rerank_service_service import RerankServiceService
         from .api_key_service import APIKeyService
         from .mcp_config_service import MCPConfigService
         from .middleware_service import MiddlewareService
@@ -252,6 +279,14 @@ class AppService:
             for service in sandbox_services:
                 logger.info(f"Deleting sandbox service {service.service_id}: {service.name}")
                 sandbox_service_service.delete_sandbox_service(self.db, app_id, service.service_id)
+
+            # 13c. Delete rerank services. Agents (step 1) are gone; clear the app default first so the delete
+            # needs no usage guard.
+            app.default_rerank_service_id = None
+            self.db.flush()
+            for service in self.app_repo.get_rerank_services_by_app_id(app_id):
+                logger.info(f"Deleting rerank service {service.service_id}: {service.name}")
+                RerankServiceService.delete_for_app_cascade(self.db, service)
 
             # 14. Delete collaborations
             collaborations = self.collaboration_repo.get_collaborations_by_app(app_id)

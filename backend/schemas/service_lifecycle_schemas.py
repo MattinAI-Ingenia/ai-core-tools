@@ -34,12 +34,13 @@ class ServiceLifecycleWarningSchema(BaseModel):
 
     service_id: int
     service_name: str
-    kind: Literal["ai", "embedding", "sandbox"]
+    kind: Literal["ai", "embedding", "sandbox", "rerank"]
     role: Literal[
         "llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding", "middleware", "embedding",
-        "sandbox",
+        "sandbox", "rerank",
     ]
-    # Silo name (role silo_embedding), middleware name (role middleware) or "app default" (role sandbox).
+    # Silo name (role silo_embedding), middleware name (role middleware) or "app default" / "platform default"
+    # (roles sandbox, rerank).
     via: Optional[str] = None
     lifecycle_status: Literal["deprecated", "retired"]
     end_of_service_at: datetime
@@ -48,10 +49,10 @@ class ServiceLifecycleWarningSchema(BaseModel):
 
 # ==================== "Used by" and bulk service usage moves ====================
 
-ServiceUsageKind = Literal["ai", "embedding", "sandbox"]
+ServiceUsageKind = Literal["ai", "embedding", "sandbox", "rerank"]
 AgentUsageRole = Literal[
     "llm", "ocr_vision", "transcription", "video", "media_embedding", "silo_embedding", "sandbox",
-    "sandbox_app_default",
+    "sandbox_app_default", "rerank", "rerank_app_default", "rerank_platform_default",
 ]
 SiloUsageRole = Literal["embedding", "transcription", "video"]
 ServiceLifecycleStatusLiteral = Literal["active", "deprecated", "retired"]
@@ -121,8 +122,10 @@ class ServiceUsageSchema(BaseModel):
     repositories: List[ServiceUsageRepositorySchema] = Field(default_factory=list)
     middlewares: List[ServiceUsageMiddlewareSchema] = Field(default_factory=list)
     scheduled_tasks: List[ServiceUsageScheduledTaskSchema] = Field(default_factory=list)
-    # Sandbox services only: apps that use the service as their default sandbox.
+    # Sandbox / embedding / rerank services: apps that use the service as their default.
     apps_using_as_default: List[ServiceUsageAppSchema] = Field(default_factory=list)
+    # Rerank services only: the service is the platform default.
+    is_platform_default: bool = False
 
 
 class MoveAgentsRequestSchema(BaseModel):

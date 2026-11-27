@@ -6,7 +6,7 @@ columns (no ORM entities), so the results stay cheap and detached from the sessi
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from models.ocr_agent import OCRAgent
 from models.repository import Repository
 from repositories.repository_repository import RepositoryRepository
 from repositories.silo_repository import SiloRepository
+from models.rerank_service import RerankService
 from models.sandbox_service import SandboxService
 from models.scheduled_task import ScheduledTask
 from models.silo import Silo
@@ -60,6 +61,17 @@ class AgentRefs:
     silo_id: Optional[int]
     sandbox_service_id: Optional[int] = None
     enable_code_interpreter: bool = False
+    rag_rerank_enabled: bool = False
+    rag_rerank_service_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class AppDefaults:
+    """The App-level default service ids."""
+
+    sandbox_service_id: Optional[int]
+    embedding_service_id: Optional[int]
+    rerank_service_id: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -98,9 +110,31 @@ class ServiceUsageRepository:
         return ServiceUsageRepository._snapshots(db, SandboxService, app_id)
 
     @staticmethod
-    def app_default_sandbox_service_id(db: Session, app_id: int) -> Optional[int]:
-        """The app's ``default_sandbox_service_id``. One query."""
-        return db.execute(select(App.default_sandbox_service_id).where(App.app_id == app_id)).scalar_one_or_none()
+    def rerank_service_snapshots(db: Session, app_id: int) -> Tuple[Dict[int, ServiceSnapshot], Optional[int]]:
+        """Rerank services visible to the app (its own + system), keyed by id, plus the platform default id.
+
+        One query: the platform default is always a system row, so it is part of the visible set.
+        """
+        stmt = select(
+            RerankService.service_id, RerankService.name, RerankService.app_id, RerankService.end_of_service_at,
+            RerankService.deprecation_notice, RerankService.is_platform_default,
+        ).where(or_(RerankService.app_id == app_id, RerankService.app_id.is_(None)))
+        snapshots: Dict[int, ServiceSnapshot] = {}
+        platform_default: Optional[int] = None
+        for row in db.execute(stmt):
+            snapshots[row.service_id] = ServiceSnapshot(*row[:5])
+            if row.is_platform_default:
+                platform_default = row.service_id
+        return snapshots, platform_default
+
+    @staticmethod
+    def app_defaults(db: Session, app_id: int) -> "AppDefaults":
+        """The app's default sandbox, embedding and rerank service ids. One query."""
+        row = db.execute(
+            select(App.default_sandbox_service_id, App.default_embedding_service_id, App.default_rerank_service_id)
+            .where(App.app_id == app_id)
+        ).first()
+        return AppDefaults(*row) if row else AppDefaults(None, None, None)
 
     @staticmethod
     def app_default_sandbox_in_use(db: Session, app_id: int) -> bool:
@@ -120,11 +154,6 @@ class ServiceUsageRepository:
                 select(or_(App.chat_code_interpreter_enabled.is_(True), agent_uses)).where(App.app_id == app_id)
             ).scalar_one_or_none()
         )
-
-    @staticmethod
-    def app_default_embedding_service_id(db: Session, app_id: int) -> Optional[int]:
-        """The app's ``default_embedding_service_id`` (Chat attachment indexing). One query."""
-        return db.execute(select(App.default_embedding_service_id).where(App.app_id == app_id)).scalar_one_or_none()
 
     @staticmethod
     def silo_refs(db: Session, app_id: int) -> Dict[int, SiloRefs]:
@@ -184,7 +213,8 @@ class ServiceUsageRepository:
             select(
                 Agent.agent_id, Agent.service_id, ocr.c.vision_service_id, Agent.transcription_service_id,
                 Agent.video_ai_service_id, Agent.media_embedding_service_id, Agent.silo_id,
-                Agent.sandbox_service_id, Agent.enable_code_interpreter,
+                Agent.sandbox_service_id, Agent.enable_code_interpreter, Agent.rag_rerank_enabled,
+                Agent.rag_rerank_service_id,
             )
             .select_from(Agent)
             .outerjoin(ocr, ocr.c.agent_id == Agent.agent_id)
@@ -214,6 +244,8 @@ class UsageAgentRow:
     silo_id: Optional[int]
     sandbox_service_id: Optional[int] = None
     enable_code_interpreter: bool = False
+    rag_rerank_enabled: bool = False
+    rag_rerank_service_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -281,7 +313,7 @@ class ServiceUsageQueries:
                 Agent.agent_id, Agent.name, Agent.app_id, App.name.label("app_name"), Agent.service_id,
                 ocr.c.vision_service_id, Agent.transcription_service_id, Agent.video_ai_service_id,
                 Agent.media_embedding_service_id, Agent.silo_id, Agent.sandbox_service_id,
-                Agent.enable_code_interpreter,
+                Agent.enable_code_interpreter, Agent.rag_rerank_enabled, Agent.rag_rerank_service_id,
             )
             .select_from(Agent)
             .join(App, App.app_id == Agent.app_id)
@@ -399,6 +431,49 @@ class ServiceUsageQueries:
         if app_id is not None:
             stmt = stmt.where(App.app_id == app_id)
         return [UsageAppRow(*r) for r in db.execute(stmt)]
+
+    # ---- Rerank service ----
+
+    @staticmethod
+    def rerank_is_platform_default(db: Session, service_id: int) -> bool:
+        """Whether the service carries the platform-default flag. One query."""
+        return bool(db.execute(
+            select(RerankService.is_platform_default).where(RerankService.service_id == service_id)
+        ).scalar_one_or_none())
+
+    @staticmethod
+    def rerank_apps(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageAppRow]:
+        """Apps whose ``default_rerank_service_id`` is this service (only ``app_id`` in app scope)."""
+        stmt = select(App.app_id, App.name).where(App.default_rerank_service_id == service_id).order_by(App.app_id)
+        if app_id is not None:
+            stmt = stmt.where(App.app_id == app_id)
+        return [UsageAppRow(*r) for r in db.execute(stmt)]
+
+    @staticmethod
+    def _rerank_agent_condition(service_id: int):
+        """Agents that point at the service, or have reranking on with no explicit service and inherit it:
+        through their app's default, or through the platform default when the app has none."""
+        app_default_ids = select(App.app_id).where(App.default_rerank_service_id == service_id)
+        apps_without_default = select(App.app_id).where(App.default_rerank_service_id.is_(None))
+        is_platform_default = (
+            select(RerankService.service_id)
+            .where(RerankService.service_id == service_id, RerankService.is_platform_default.is_(True))
+            .exists()
+        )
+        inherits = (
+            Agent.rag_rerank_enabled.is_(True)
+            & Agent.rag_rerank_service_id.is_(None)
+            & (Agent.app_id.in_(app_default_ids) | (is_platform_default & Agent.app_id.in_(apps_without_default)))
+        )
+        return or_(Agent.rag_rerank_service_id == service_id, inherits)
+
+    @staticmethod
+    def rerank_agents(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageAgentRow]:
+        return ServiceUsageQueries._agents(db, ServiceUsageQueries._rerank_agent_condition(service_id), app_id)
+
+    @staticmethod
+    def rerank_tasks(db: Session, service_id: int, app_id: Optional[int]) -> List[UsageTaskRow]:
+        return ServiceUsageQueries._tasks(db, ServiceUsageQueries._rerank_agent_condition(service_id), app_id)
 
     # ---- Sandbox service ----
 

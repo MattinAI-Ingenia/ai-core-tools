@@ -242,19 +242,45 @@ class TestKeyReuseOnHostChange:
 class TestDeleteGuard:
     def test_integrity_error_becomes_409(self, monkeypatch):
         db = SimpleNamespace(rollback=lambda: setattr(db, "rolled_back", True))
-        monkeypatch.setattr(mod.RerankServiceRepository, "get_by_id_and_app_id", lambda d, s, a: _row())
-        monkeypatch.setattr(mod.RerankServiceRepository, "get_by_id", lambda d, s: _row(app_id=None))
+        scope = {"app_id": 1}
+        monkeypatch.setattr(mod.RerankServiceRepository, "get_for_update", lambda d, s: _row(app_id=scope["app_id"]))
+        monkeypatch.setattr(mod.ServiceLifecycleService, "get_usage", staticmethod(lambda *a, **k: None))
 
         def boom(d, s):
             raise IntegrityError("x", {}, Exception("fk"))
 
         monkeypatch.setattr(mod.RerankServiceRepository, "delete", boom)
-        for call in (lambda: RerankServiceService.delete_rerank_service(db, 1, 7),
-                     lambda: RerankServiceService.delete_system_service(db, 7)):
+        for app_id, call in ((1, lambda: RerankServiceService.delete_rerank_service(db, 1, 7)),
+                             (None, lambda: RerankServiceService.delete_system_service(db, 7))):
+            scope["app_id"] = app_id
             with pytest.raises(RerankServiceError) as e:
                 call()
             assert e.value.status_code == 409 and e.value.message == "Rerank service is in use"
         assert db.rolled_back
+
+
+class TestInUseError:
+    def test_is_a_409_service_error_with_usage_detail(self):
+        from schemas.service_lifecycle_schemas import ServiceUsageSchema
+
+        usage = ServiceUsageSchema(service_id=1, service_name="s", kind="rerank", is_system=False,
+                                   lifecycle_status="active")
+        err = mod.RerankServiceInUseError(usage)
+        assert isinstance(err, RerankServiceError) and err.status_code == 409
+        assert err.detail()["usage"]["service_id"] == 1 and err.detail()["message"]
+
+    def test_integrity_error_on_delete_recomputes_usage(self, monkeypatch):
+        from schemas.service_lifecycle_schemas import ServiceUsageSchema
+
+        usage = ServiceUsageSchema(service_id=7, service_name="s", kind="rerank", is_system=False,
+                                   lifecycle_status="active")
+        db = SimpleNamespace(rollback=lambda: None)
+        monkeypatch.setattr(mod.RerankServiceRepository, "delete",
+                            lambda d, s: (_ for _ in ()).throw(IntegrityError("x", {}, Exception("fk"))))
+        monkeypatch.setattr(mod.ServiceLifecycleService, "get_usage", staticmethod(lambda *a, **k: usage))
+        with pytest.raises(mod.RerankServiceInUseError) as e:
+            mod.RerankServiceService._delete_row(db, _row())
+        assert e.value.detail()["usage"]["service_id"] == 7
 
 
 class TestEffectiveDefault:

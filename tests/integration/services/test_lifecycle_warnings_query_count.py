@@ -10,6 +10,7 @@ from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
 from models.middleware import AgentMiddleware, Middleware, MiddlewareType
 from models.ocr_agent import OCRAgent
+from models.rerank_service import RerankService
 from models.silo import Silo
 from services.agent_service import AgentService
 
@@ -38,7 +39,8 @@ def _make_agents(db, app_id, count, llm, silo, middleware):
         extra = {"vision_service_id": llm.service_id} if cls is OCRAgent else {}
         agent = cls(
             name=f"qc-agent-{count}-{i}", description="d", system_prompt="s", app_id=app_id,
-            service_id=llm.service_id, silo_id=silo.silo_id, temperature=0.5, **extra,
+            service_id=llm.service_id, silo_id=silo.silo_id, temperature=0.5,
+            rag_rerank_enabled=i % 2 == 1, **extra,
         )
         db.add(agent)
         db.flush()
@@ -54,8 +56,11 @@ class TestAgentListQueryCount:
         llm = AIService(name="qc-llm", provider="OpenAI", api_key="k", app_id=fake_app.app_id,  # pragma: allowlist secret
                         end_of_service_at=soon)
         emb = EmbeddingService(name="qc-emb", provider="OpenAI", app_id=fake_app.app_id, end_of_service_at=past)
-        db.add_all([llm, emb])
+        rr = RerankService(name="qc-rr", provider="CohereCompatible", model_name="m", endpoint="https://rr.example.com",
+                           app_id=fake_app.app_id, end_of_service_at=past)
+        db.add_all([llm, emb, rr])
         db.flush()
+        fake_app.default_rerank_service_id = rr.service_id
         silo = Silo(name="qc-silo", app_id=fake_app.app_id, embedding_service_id=emb.service_id)
         middleware = Middleware(
             name="qc-mw", middleware_type=MiddlewareType.SUMMARIZATION, app_id=fake_app.app_id,
@@ -78,3 +83,5 @@ class TestAgentListQueryCount:
             roles = {(w.role, w.lifecycle_status) for w in item.lifecycle_warnings}
             assert ("silo_embedding", "retired") in roles
             assert ("llm", "deprecated") in roles
+        # agents with reranking on and no explicit service report the retired app default (same query count)
+        assert any(("rerank", "retired") in {(w.role, w.lifecycle_status) for w in i.lifecycle_warnings} for i in big)

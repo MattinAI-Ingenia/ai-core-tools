@@ -18,6 +18,9 @@ from services.rerank_service_service import (
     RerankServiceError,
     RerankServiceService,
 )
+from schemas.service_lifecycle_schemas import ServiceUsageSchema
+from services.service_lifecycle_service import ServiceLifecycleService
+from utils.service_lifecycle import SERVICE_KIND_RERANK
 from utils.logger import get_logger
 
 from .auth_utils import get_current_user_oauth
@@ -28,7 +31,7 @@ rerank_services_router = APIRouter()
 
 
 def _http_error(exc: RerankServiceError) -> HTTPException:
-    return HTTPException(status_code=exc.status_code, detail=exc.message)
+    return HTTPException(status_code=exc.status_code, detail=exc.detail())
 
 
 @rerank_services_router.get(
@@ -87,6 +90,24 @@ async def test_rerank_service_connection_with_config(
 
 
 # ==================== DYNAMIC ROUTES ====================
+
+
+@rerank_services_router.get(
+    "/{service_id}/used-by", summary="List what depends on a rerank service", tags=["Rerank Services"],
+    response_model=ServiceUsageSchema,
+)
+async def get_rerank_service_used_by(
+    app_id: int,
+    service_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    auth_context: Annotated[AuthContext, Depends(get_current_user_oauth)],
+    role: Annotated[AppRole, Depends(require_min_role("viewer"))],
+):
+    """Agents, scheduled tasks and app defaults of this app using the rerank service."""
+    usage = await run_in_threadpool(ServiceLifecycleService.get_usage, db, SERVICE_KIND_RERANK, service_id, app_id)
+    if usage is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=RERANK_SERVICE_NOT_FOUND_MSG)
+    return usage
 
 
 @rerank_services_router.get(

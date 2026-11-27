@@ -61,6 +61,7 @@ class AppDetailSchema(BaseModel):
     is_frozen: bool = False
     default_sandbox_service_id: Optional[int] = None  # None = inherit system default
     default_embedding_service_id: Optional[int] = None  # None = Chat attachments are not indexed
+    default_rerank_service_id: Optional[int] = None  # None = agents inherit the platform default
     chat_code_interpreter_enabled: bool = False  # App Chat code interpreter opt-in
     image_updated_at: Optional[datetime] = None  # App image version; null = no image
     # Deprecated / retired services behind the App's defaults (GET only).
@@ -99,6 +100,8 @@ class UpdateAppSchema(BaseModel):
     # Omitted keeps the current value; an explicit null clears it (``model_fields_set``). Deliberately unlike
     # ``default_sandbox_service_id`` above, where omitting it resets it to the system default.
     default_embedding_service_id: Optional[int] = None
+    # Same semantics as default_embedding_service_id: omitted keeps, explicit null clears.
+    default_rerank_service_id: Optional[int] = None
     # Omitted keeps the current value. It is a boolean, not nullable: an explicit null is a 422.
     chat_code_interpreter_enabled: Optional[bool] = None
 

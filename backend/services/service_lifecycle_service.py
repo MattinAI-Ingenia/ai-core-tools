@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from models.ai_service import AIService
 from models.embedding_service import EmbeddingService
+from models.rerank_service import RerankService
 from models.sandbox_service import SandboxService
 from repositories.service_usage_repository import (
     AgentRefs,
@@ -37,6 +38,7 @@ from utils.logger import get_logger
 from utils.service_lifecycle import (
     SERVICE_KIND_AI,
     SERVICE_KIND_EMBEDDING,
+    SERVICE_KIND_RERANK,
     SERVICE_KIND_SANDBOX,
     LifecycleStatus,
     compute_lifecycle_status,
@@ -68,6 +70,8 @@ class LifecycleContext:
     agent_refs: Dict[int, AgentRefs] = field(default_factory=dict)
     app_default_sandbox_service_id: Optional[int] = None
     app_default_embedding_service_id: Optional[int] = None
+    app_default_rerank_service_id: Optional[int] = None
+    platform_default_rerank_service_id: Optional[int] = None
     # The App default sandbox service is in use (Chat switch on, or an agent inherits it).
     app_default_sandbox_in_use: bool = False
 
@@ -148,6 +152,8 @@ class ServiceLifecycleService:
             ids = sorted({i for i in (agent_ids or []) if i})
         needs_agents = all_agents or bool(ids)
         warning_days = ServiceLifecycleService.warning_days(db)
+        app_defaults = ServiceUsageRepository.app_defaults(db, app_id)
+        rerank_snapshots, platform_default_rerank_id = ServiceUsageRepository.rerank_service_snapshots(db, app_id)
         middlewares: Dict[int, Tuple[str, List[int]]] = {}
         for row in (ServiceUsageRepository.lifecycle_middlewares(db, app_id) if needs_agents else []):
             try:
@@ -162,9 +168,12 @@ class ServiceLifecycleService:
                 SERVICE_KIND_AI: ServiceUsageRepository.ai_service_snapshots(db, app_id),
                 SERVICE_KIND_EMBEDDING: ServiceUsageRepository.embedding_service_snapshots(db, app_id),
                 SERVICE_KIND_SANDBOX: ServiceUsageRepository.sandbox_service_snapshots(db, app_id),
+                SERVICE_KIND_RERANK: rerank_snapshots,
             },
-            app_default_sandbox_service_id=ServiceUsageRepository.app_default_sandbox_service_id(db, app_id),
-            app_default_embedding_service_id=ServiceUsageRepository.app_default_embedding_service_id(db, app_id),
+            app_default_rerank_service_id=app_defaults.rerank_service_id,
+            platform_default_rerank_service_id=platform_default_rerank_id,
+            app_default_sandbox_service_id=app_defaults.sandbox_service_id,
+            app_default_embedding_service_id=app_defaults.embedding_service_id,
             app_default_sandbox_in_use=ServiceUsageRepository.app_default_sandbox_in_use(db, app_id),
             silos=ServiceUsageRepository.silo_refs(db, app_id),
             middlewares=middlewares,
@@ -250,6 +259,16 @@ class ServiceLifecycleService:
             else:
                 entries.append(entry(
                     ctx, SERVICE_KIND_SANDBOX, ctx.app_default_sandbox_service_id, "sandbox", "app default"))
+        if getattr(agent_row, "rag_rerank_enabled", False):
+            explicit = getattr(agent_row, "rag_rerank_service_id", None)
+            if explicit is not None:
+                entries.append(entry(ctx, SERVICE_KIND_RERANK, explicit, "rerank"))
+            elif ctx.app_default_rerank_service_id is not None:
+                entries.append(entry(
+                    ctx, SERVICE_KIND_RERANK, ctx.app_default_rerank_service_id, "rerank", "app default"))
+            else:
+                entries.append(entry(
+                    ctx, SERVICE_KIND_RERANK, ctx.platform_default_rerank_service_id, "rerank", "platform default"))
         return ServiceLifecycleService._finish(entries)
 
     @staticmethod
@@ -259,7 +278,10 @@ class ServiceLifecycleService:
         entries = [
             ServiceLifecycleService._entry(
                 ctx, SERVICE_KIND_EMBEDDING, ctx.app_default_embedding_service_id, "embedding", "app default"
-            )
+            ),
+            ServiceLifecycleService._entry(
+                ctx, SERVICE_KIND_RERANK, ctx.app_default_rerank_service_id, "rerank", "app default"
+            ),
         ]
         if ctx.app_default_sandbox_in_use:
             entries.append(ServiceLifecycleService._entry(
@@ -291,12 +313,28 @@ class ServiceLifecycleService:
         SERVICE_KIND_AI: AIService,
         SERVICE_KIND_EMBEDDING: EmbeddingService,
         SERVICE_KIND_SANDBOX: SandboxService,
+        SERVICE_KIND_RERANK: RerankService,
     }
 
     @staticmethod
-    def agent_roles(row: Any, kind: str, service_id: int, embedding_silo_ids: Optional[set] = None) -> List[str]:
-        """Roles in which an agent row uses the service, in a stable order."""
+    def agent_roles(
+        row: Any, kind: str, service_id: int, embedding_silo_ids: Optional[set] = None,
+        default_app_ids: Optional[set] = None,
+    ) -> List[str]:
+        """Roles in which an agent row uses the service, in a stable order.
+
+        ``default_app_ids`` (rerank only): apps whose default rerank service is this one; an inheriting agent of
+        such an app has role ``rerank_app_default``, any other inheriting agent ``rerank_platform_default``.
+        """
         roles: List[str] = []
+        if kind == SERVICE_KIND_RERANK:
+            explicit = getattr(row, "rag_rerank_service_id", None)
+            if explicit == service_id:
+                roles.append("rerank")
+            elif explicit is None and getattr(row, "rag_rerank_enabled", False):
+                is_app_default = row.app_id in (default_app_ids or set())
+                roles.append("rerank_app_default" if is_app_default else "rerank_platform_default")
+            return roles
         if kind == SERVICE_KIND_SANDBOX:
             if getattr(row, "sandbox_service_id", None) == service_id:
                 roles.append("sandbox")
@@ -364,6 +402,14 @@ class ServiceLifecycleService:
                 ServiceUsageAppSchema(app_id=a.app_id, app_name=a.app_name)
                 for a in q.sandbox_apps(db, service_id, app_id)
             ]
+        elif kind == SERVICE_KIND_RERANK:
+            agents, silos, repos = q.rerank_agents(db, service_id, app_id), [], []
+            tasks = q.rerank_tasks(db, service_id, app_id)
+            embedding_silo_ids = set()
+            apps_default = [
+                ServiceUsageAppSchema(app_id=a.app_id, app_name=a.app_name)
+                for a in q.rerank_apps(db, service_id, app_id)
+            ]
         elif kind == SERVICE_KIND_AI:
             agents, silos = q.ai_agents(db, service_id, app_id), q.ai_silos(db, service_id, app_id)
             repos, tasks = q.ai_repositories(db, service_id, app_id), q.ai_tasks(db, service_id, app_id)
@@ -401,7 +447,9 @@ class ServiceLifecycleService:
 
         agent_items = []
         for row in agents:
-            roles = ServiceLifecycleService.agent_roles(row, kind, service_id, embedding_silo_ids)
+            roles = ServiceLifecycleService.agent_roles(
+                row, kind, service_id, embedding_silo_ids, {a.app_id for a in apps_default}
+            )
             if roles:
                 agent_items.append(ServiceUsageAgentSchema(
                     agent_id=row.agent_id, name=row.name, roles=roles, app_id=row.app_id, app_name=name_of(row)))
@@ -434,6 +482,9 @@ class ServiceLifecycleService:
                 for r in tasks
             ],
             apps_using_as_default=apps_default,
+            is_platform_default=(
+                kind == SERVICE_KIND_RERANK and q.rerank_is_platform_default(db, service_id)
+            ),
         )
 
     @staticmethod

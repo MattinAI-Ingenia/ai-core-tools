@@ -40,7 +40,7 @@ from services.rerank_service_service import (
 )
 from services.service_lifecycle_service import ServiceLifecycleService
 from services.system_settings_service import SystemSettingsService
-from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING
+from utils.service_lifecycle import SERVICE_KIND_AI, SERVICE_KIND_EMBEDDING, SERVICE_KIND_RERANK
 from services.user_service import UserService
 from utils.config import is_omniadmin
 from utils.logger import get_logger
@@ -1766,7 +1766,7 @@ async def test_system_embedding_service_connection_with_config(
 
 
 def _rerank_http_error(exc: RerankServiceError) -> HTTPException:
-    return HTTPException(status_code=exc.status_code, detail=exc.message)
+    return HTTPException(status_code=exc.status_code, detail=exc.detail())
 
 
 @router.get("/system-rerank-services", response_model=List[RerankServiceDetailSchema])
@@ -1828,6 +1828,19 @@ async def test_system_rerank_service_connection_with_config(
     except Exception as exc:
         logger.error("Error testing system rerank service connection: %s", type(exc).__name__, exc_info=True)
         raise HTTPException(status_code=500, detail="Test failed")
+
+
+@router.get("/system-rerank-services/{service_id}/used-by", response_model=ServiceUsageSchema)
+async def get_system_rerank_service_used_by(
+    service_id: int,
+    auth_context: Annotated[AuthContext, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """What depends on a platform-level rerank service, across all apps (platform admin only)."""
+    usage = await run_in_threadpool(ServiceLifecycleService.get_usage, db, SERVICE_KIND_RERANK, service_id, None)
+    if usage is None:
+        raise HTTPException(status_code=404, detail=RERANK_SERVICE_NOT_FOUND_MSG)
+    return usage
 
 
 @router.get("/system-rerank-services/{service_id}", response_model=RerankServiceDetailSchema)
