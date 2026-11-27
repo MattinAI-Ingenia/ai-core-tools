@@ -96,6 +96,7 @@ function CredentialsStep({
   else if (descriptor.value === 'Azure') baseUrlLabel = t('serviceWizard.credentialsStep.azureEndpoint');
   else if (descriptor.value === 'opensandbox') baseUrlLabel = t('serviceWizard.credentialsStep.openSandboxDomain');
   else if (descriptor.value === 'daytona') baseUrlLabel = t('serviceWizard.credentialsStep.daytonaApiUrl');
+  else if (kind === 'rerank') baseUrlLabel = t('serviceWizard.credentialsStep.rerankBaseUrl');
   const apiKeyHelpKey = API_KEY_HELP_KEYS[`${kind}:${descriptor.value}`] ?? 'default';
 
   return (
@@ -244,8 +245,8 @@ function CredentialsStep({
       {kind !== 'sandbox' && !descriptor.supportsModelListing && (
         <Alert
           type="info"
-          title={t('serviceWizard.credentialsStep.manualModelTitle')}
-          message={t('serviceWizard.credentialsStep.manualModelMessage')}
+          title={kind === 'rerank' ? t('serviceWizard.credentialsStep.rerankManualModelTitle') : t('serviceWizard.credentialsStep.manualModelTitle')}
+          message={kind === 'rerank' ? t('serviceWizard.credentialsStep.rerankManualModelMessage') : t('serviceWizard.credentialsStep.manualModelMessage')}
         />
       )}
     </div>
