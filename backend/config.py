@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 from dotenv import load_dotenv
@@ -57,14 +58,6 @@ CHROMA_PERSIST_DIR = os.getenv('CHROMA_PERSIST_DIR', './chroma_db')
 # Base URL for generating MCP endpoint URLs (e.g., https://your-domain.com)
 MCP_BASE_URL = os.getenv('MCP_BASE_URL', 'http://localhost:8000')
 
-# Cross-encoder reranker (backend/tools/retrieval/strategies/cross_encoder_rerank_strategy.py).
-# Local sentence-transformers model, no API key. Default is a ~100M-param MiniLM
-# fine-tuned on mMARCO (confirmed EN/ES coverage — see the mMARCO dataset card),
-# chosen for low latency in conversational chat. Override per deployment for other
-# language/quality-latency tradeoffs (e.g. BAAI/bge-reranker-v2-m3 for broader,
-# less-verified multilingual coverage at ~5x the parameter count and latency).
-CROSS_ENCODER_RERANK_MODEL = os.getenv('CROSS_ENCODER_RERANK_MODEL', 'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
-CROSS_ENCODER_RERANK_DEVICE = os.getenv('CROSS_ENCODER_RERANK_DEVICE', 'cpu')
 # ---------------------------------------------------------------------------
 # Sandbox provider configuration (IT-2)
 # ---------------------------------------------------------------------------
@@ -197,6 +190,47 @@ def _env_float(name: str, default: float, *, minimum: float, finite: bool = True
     if math.isnan(value) or value < minimum or (not inclusive and value == minimum):
         raise RuntimeError(f"Invalid {name}={raw!r}: expected a finite number {bound}")
     return value
+
+
+def _env_int_or_default(name: str, default: int, minimum: int = 1) -> int:
+    """Read an integer env var >= minimum; unparsable or too-small values fall back to the default with one WARNING."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == '':
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = minimum - 1
+    if value < minimum:
+        logging.getLogger(__name__).warning("Invalid %s (expected an integer >= %s); using default %s", name, minimum, default)
+        return default
+    return value
+
+
+def _env_float_or_default(name: str, default: float, maximum: float = float('inf')) -> float:
+    """Read a positive finite float env var <= maximum; unparsable, non-positive or too-large values fall back to the default with one WARNING."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == '':
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        value = float('nan')
+    if not math.isfinite(value) or value <= 0 or value > maximum:
+        logging.getLogger(__name__).warning(
+            "Invalid %s (expected a number in (0, %s]); using default %s", name, maximum, default)
+        return default
+    return value
+
+
+# Rerank services (backend/tools/rerank/). Invalid values fall back to the default with a WARNING (see _env_float_or_default).
+RERANK_CONNECT_TIMEOUT_SECONDS = _env_float_or_default('AICT_RERANK_CONNECT_TIMEOUT_SECONDS', 2.0, maximum=10.0)
+# Total budget for one rerank call; clamped to be >= the connect timeout.
+RERANK_TIMEOUT_SECONDS = max(_env_float_or_default('AICT_RERANK_TIMEOUT_SECONDS', 5.0, maximum=60.0), RERANK_CONNECT_TIMEOUT_SECONDS)
+# Maximum rerank response body (bytes); larger bodies are rejected while streaming.
+RERANK_MAX_RESPONSE_BYTES = _env_int_or_default('AICT_RERANK_MAX_RESPONSE_BYTES', 1024 * 1024)
+# App-scoped services may not target private/loopback endpoints unless this is true (system services are exempt).
+RERANK_ALLOW_PRIVATE_ENDPOINTS = os.getenv('AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 # Maximum number of file entries in an uploaded skill package.

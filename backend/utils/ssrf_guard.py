@@ -423,7 +423,13 @@ class _PinnedBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-def pinned_async_transport(*, connect_timeout_s: float = _MAX_CONNECT_TIMEOUT_S) -> httpx.AsyncHTTPTransport:
+def pinned_async_transport(
+    *,
+    connect_timeout_s: float = _MAX_CONNECT_TIMEOUT_S,
+    max_connections: int = 100,
+    max_keepalive_connections: int = 20,
+    keepalive_expiry: float = 5.0,
+) -> httpx.AsyncHTTPTransport:
     """An ``httpx`` transport whose connections go through :class:`_PinnedBackend`.
 
     For callers that need ``httpx`` (streamed request bodies, its exception
@@ -438,6 +444,9 @@ def pinned_async_transport(*, connect_timeout_s: float = _MAX_CONNECT_TIMEOUT_S)
     # private attribute across httpx upgrades.
     transport._pool = httpcore.AsyncConnectionPool(
         ssl_context=_SSL_CONTEXT,
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive_connections,
+        keepalive_expiry=keepalive_expiry,
         network_backend=_PinnedBackend(connect_timeout_s=connect_timeout_s),
     )
     return transport

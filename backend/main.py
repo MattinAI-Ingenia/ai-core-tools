@@ -255,6 +255,12 @@ async def lifespan(app: FastAPI):
             logger.warning("A2A runtime shutdown (close_runtime) failed: %s", exc, exc_info=True)
 
         try:
+            from tools.rerank.http_clients import close_rerank_clients
+            await close_rerank_clients()
+        except Exception as exc:
+            logger.warning("Rerank HTTP clients shutdown failed: %s", exc, exc_info=True)
+
+        try:
             from services.agent_cache_service import CheckpointerCacheService
             await CheckpointerCacheService.close_pool()
         except Exception as exc:
