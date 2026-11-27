@@ -305,7 +305,7 @@ class TestSearchSilo:
         )
         assert resp.status_code == 404
 
-    @patch("routers.public.v1.silos.SiloService.find_docs_in_collection")
+    @patch("routers.public.v1.silos.SiloService._search_docs")
     def test_search_forwards_real_db_session_and_score_threshold(
         self, mock_find, client, fake_app, fake_silo, fake_api_key, db
     ):
@@ -321,7 +321,9 @@ class TestSearchSilo:
         mock_doc.page_content = "Test content"
         mock_doc.metadata = {"source": "test", "_score": 0.87}
 
-        mock_find.return_value = [mock_doc]
+        # step_008 (rerank-services): the /search route calls the shared ``_search_docs`` (docs, rerank scores,
+        # plan) instead of ``find_docs_in_collection``; the argument binding it guards is the same.
+        mock_find.return_value = ([mock_doc], [None], None)
 
         resp = client.post(
             silos_url(fake_app.app_id, fake_silo.silo_id, "search"),
@@ -338,9 +340,12 @@ class TestSearchSilo:
         assert data["total_results"] == 1
         assert data["results"][0]["score"] == 0.87
 
-        _, kwargs = mock_find.call_args
-        assert kwargs["search_type"] == "similarity_score_threshold"
-        assert kwargs["score_threshold"] == 0.5
+        args, _ = mock_find.call_args
+        # (silo_id, query, filter_metadata, limit, search_type, score_threshold, fetch_k, lambda_mult,
+        #  min_content_length, max_content_length, db, ...)
+        assert args[4] == "similarity_score_threshold"
+        assert args[5] == 0.5
+        assert args[10] is not None  # the real db session, not the min_content_length slot (issue #217)
 
 
 # ---------------------------------------------------------------------------
