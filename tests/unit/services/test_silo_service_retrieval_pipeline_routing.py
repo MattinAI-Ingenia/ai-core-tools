@@ -152,25 +152,7 @@ def test_rerank_strategy_routes_through_pipeline():
     assert mock_build_pipeline.call_args.kwargs["use_async"] is False
 
 
-def test_dense_plus_rerank_builds_a_sync_mode_retriever():
-    """End-to-end regression (no mocking of _build_pipeline_retriever/DenseSearchMethod):
-    dense search_method + rerank strategy must produce a retriever built with
-    use_async=False, since find_docs_in_collection calls it via .invoke()."""
-    silo = _make_silo()
-    embedding_service = MagicMock(end_of_service_at=None)
-    vector_store = MagicMock()
-    vector_store.get_retriever.return_value = _FakeDenseRetriever()
-    db = MagicMock()
-
-    with patch("services.silo_service.SiloRepository.get_by_id", return_value=silo), \
-         patch("services.silo_service.SiloService.check_silo_collection_exists", return_value=True), \
-         patch("services.silo_service.SiloRepository.get_embedding_service_by_id", return_value=embedding_service), \
-         patch("services.silo_service._get_vector_store", return_value=vector_store), \
-         patch("tools.retrieval.strategies.rerank_strategy.get_embeddings_model", return_value=_FakeEmbeddings()):
-        SiloService.find_docs_in_collection(silo_id=7, query="invoice", strategy="rerank", db=db)
-
-    vector_store.get_retriever.assert_called_once()
-    assert vector_store.get_retriever.call_args.kwargs["use_async"] is False
+# The dense+rerank sync-mode regression test returns in step_008 with the new rerank wiring.
 
 
 def test_pipeline_path_forwards_filter_and_search_type():

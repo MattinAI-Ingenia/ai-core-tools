@@ -4,133 +4,70 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tools.retrieval.rerank_transformer import RerankPlan, RerankRetriever
 from tools.retrieval.retrieval_context import RetrievalContext
 from tools.retrieval.retrieval_pipeline import RetrievalPipeline
+
+_GET = "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method"
+
+
+def _method(retriever):
+    m = MagicMock()
+    m.build.return_value = retriever
+    return m
 
 
 class TestRetrievalPipeline:
 
     def test_raises_without_search_methods(self):
-        ctx = RetrievalContext()
         with pytest.raises(ValueError, match="at least one search method"):
-            RetrievalPipeline.build(ctx, search_method_names=[])
+            RetrievalPipeline.build(RetrievalContext(), search_method_names=[])
 
-    def test_single_search_method_no_transformer_returns_as_is(self):
+    def test_single_search_method_without_rerank_returns_as_is(self):
         ctx = RetrievalContext()
-        mock_retriever = MagicMock(name="dense_retriever")
-        mock_search_method = MagicMock()
-        mock_search_method.build.return_value = mock_retriever
-
-        with patch(
-            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
-            return_value=mock_search_method,
-        ) as mock_get_search_method:
-            result = RetrievalPipeline.build(ctx, search_method_names=["dense"])
-
-        mock_get_search_method.assert_called_once_with("dense")
-        mock_search_method.build.assert_called_once_with(ctx)
-        assert result is mock_retriever
-
-    def test_transformer_is_applied_to_search_method_retriever(self):
-        ctx = RetrievalContext()
-        base_retriever = MagicMock(name="base_retriever")
-        wrapped_retriever = MagicMock(name="wrapped_retriever")
-
-        mock_search_method = MagicMock()
-        mock_search_method.build.return_value = base_retriever
-
-        mock_transformer = MagicMock()
-        mock_transformer.apply.return_value = wrapped_retriever
-
-        with patch(
-            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
-            return_value=mock_search_method,
-        ), patch(
-            "tools.retrieval.retrieval_pipeline.StrategyFactory.get_strategy",
-            return_value=mock_transformer,
-        ) as mock_get_strategy:
-            result = RetrievalPipeline.build(
-                ctx, search_method_names=["dense"], transformer_names=["rerank"]
-            )
-
-        mock_get_strategy.assert_called_once_with("rerank")
-        mock_transformer.apply.assert_called_once_with([base_retriever], ctx)
-        assert result is wrapped_retriever
-
-    def test_multiple_search_methods_are_fused_before_transformers(self):
-        ctx = RetrievalContext()
-        dense_retriever = MagicMock(name="dense_retriever")
-        bm25_retriever = MagicMock(name="bm25_retriever")
-        fused_retriever = MagicMock(name="fused_retriever")
-
-        dense_method = MagicMock()
-        dense_method.build.return_value = dense_retriever
-        bm25_method = MagicMock()
-        bm25_method.build.return_value = bm25_retriever
-
-        mock_transformer = MagicMock()
-        mock_transformer.apply.return_value = MagicMock(name="reranked")
-
-        with patch(
-            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
-            side_effect=[dense_method, bm25_method],
-        ), patch(
-            "tools.retrieval.fusion.fuse_with_rrf", return_value=fused_retriever
-        ) as mock_fuse, patch(
-            "tools.retrieval.retrieval_pipeline.StrategyFactory.get_strategy",
-            return_value=mock_transformer,
-        ):
-            result = RetrievalPipeline.build(
-                ctx, search_method_names=["dense", "bm25"], transformer_names=["rerank"]
-            )
-
-        mock_fuse.assert_called_once_with([dense_retriever, bm25_retriever], weights=None)
-        # The transformer must run on the fused retriever, not on the raw dense one.
-        mock_transformer.apply.assert_called_once_with([fused_retriever], ctx)
-        assert result is mock_transformer.apply.return_value
+        retriever = MagicMock(name="dense_retriever")
+        method = _method(retriever)
+        with patch(_GET, return_value=method) as get:
+            result = RetrievalPipeline.build(ctx, ["dense"])
+        get.assert_called_once_with("dense")
+        method.build.assert_called_once_with(ctx)
+        assert result is retriever
 
     def test_single_search_method_never_calls_fusion(self):
-        ctx = RetrievalContext()
-        mock_retriever = MagicMock(name="dense_retriever")
-        mock_search_method = MagicMock()
-        mock_search_method.build.return_value = mock_retriever
+        retriever = MagicMock(name="dense_retriever")
+        with patch(_GET, return_value=_method(retriever)), patch("tools.retrieval.fusion.fuse_with_rrf") as fuse:
+            result = RetrievalPipeline.build(RetrievalContext(), ["dense"])
+        fuse.assert_not_called()
+        assert result is retriever
 
-        with patch(
-            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
-            return_value=mock_search_method,
-        ), patch("tools.retrieval.fusion.fuse_with_rrf") as mock_fuse:
-            result = RetrievalPipeline.build(ctx, search_method_names=["dense"])
+    def test_rerank_plan_wraps_search_method_retriever(self):
+        plan = RerankPlan(top_n=3, candidate_limit=10, skip_reason="not_configured")
+        ctx = RetrievalContext(rerank=plan)
+        base = MagicMock(name="base", spec=["invoke"])
+        with patch(_GET, return_value=_method(base)), \
+             patch("tools.retrieval.rerank_transformer.ServiceRerankTransformer.apply") as apply:
+            result = RetrievalPipeline.build(ctx, ["dense"])
+        apply.assert_called_once_with([base], ctx)
+        assert result is apply.return_value
 
-        mock_fuse.assert_not_called()
-        assert result is mock_retriever
+    def test_multiple_search_methods_are_fused_before_rerank(self):
+        dense, bm25, fused = MagicMock(), MagicMock(), MagicMock(name="fused")
+        ctx = RetrievalContext(rerank=RerankPlan(top_n=3, candidate_limit=None))
+        with patch(_GET, side_effect=[_method(dense), _method(bm25)]), \
+             patch("tools.retrieval.fusion.fuse_with_rrf", return_value=fused) as fuse, \
+             patch("tools.retrieval.rerank_transformer.ServiceRerankTransformer.apply") as apply:
+            result = RetrievalPipeline.build(ctx, ["dense", "bm25"])
+        fuse.assert_called_once_with([dense, bm25], weights=None)
+        apply.assert_called_once_with([fused], ctx)
+        assert result is apply.return_value
 
-    def test_multiple_transformers_applied_in_order(self):
-        ctx = RetrievalContext()
-        base_retriever = MagicMock(name="base_retriever")
-        after_first = MagicMock(name="after_first")
-        after_second = MagicMock(name="after_second")
+    def test_rerank_retriever_type_is_returned_for_real_transformer(self):
+        from langchain_core.retrievers import BaseRetriever
 
-        mock_search_method = MagicMock()
-        mock_search_method.build.return_value = base_retriever
+        class _R(BaseRetriever):
+            def _get_relevant_documents(self, query, *, run_manager):
+                return []
 
-        first_transformer = MagicMock()
-        first_transformer.apply.return_value = after_first
-        second_transformer = MagicMock()
-        second_transformer.apply.return_value = after_second
-
-        with patch(
-            "tools.retrieval.retrieval_pipeline.SearchMethodFactory.get_search_method",
-            return_value=mock_search_method,
-        ), patch(
-            "tools.retrieval.retrieval_pipeline.StrategyFactory.get_strategy",
-            side_effect=[first_transformer, second_transformer],
-        ):
-            result = RetrievalPipeline.build(
-                ctx,
-                search_method_names=["dense"],
-                transformer_names=["strategy_a", "strategy_b"],
-            )
-
-        first_transformer.apply.assert_called_once_with([base_retriever], ctx)
-        second_transformer.apply.assert_called_once_with([after_first], ctx)
-        assert result is after_second
+        ctx = RetrievalContext(rerank=RerankPlan(top_n=2, candidate_limit=None))
+        with patch(_GET, return_value=_method(_R())):
+            assert isinstance(RetrievalPipeline.build(ctx, ["dense"]), RerankRetriever)

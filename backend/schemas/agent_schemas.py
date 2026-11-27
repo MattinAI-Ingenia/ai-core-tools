@@ -233,26 +233,10 @@ class RagConfigFieldsMixin(BaseModel):
     @field_validator("rag_strategy")
     @classmethod
     def validate_rag_strategy(cls, v: Optional[List[str]]) -> Optional[List[str]]:
-        from tools.retrieval.strategies.strategy_factory import StrategyFactory
+        # Temporary (removed in step_007/008): the old strategies are gone.
         if not v:
             return None
-        deduped = list(dict.fromkeys(v))
-        unknown = [s for s in deduped if s not in StrategyFactory.IMPLEMENTED_STRATEGIES]
-        if unknown:
-            raise ValueError(
-                f"rag_strategy must only contain {sorted(StrategyFactory.IMPLEMENTED_STRATEGIES)}, "
-                f"got unknown value(s): {sorted(unknown)}"
-            )
-        # 'rerank' and 'cross_encoder_rerank' both re-score and truncate the same
-        # candidate set to top_n; chaining them would silently double-rerank with
-        # no way to control or observe the order, so only one may be selected.
-        rerank_strategies = {"rerank", "cross_encoder_rerank"}
-        selected_rerank = [s for s in deduped if s in rerank_strategies]
-        if len(selected_rerank) > 1:
-            raise ValueError(
-                f"rag_strategy must not combine {sorted(rerank_strategies)} — choose one reranker"
-            )
-        return deduped
+        raise ValueError("rag_strategy is no longer supported; use a rerank service")
 
     @field_validator("rag_rerank_top_n")
     @classmethod

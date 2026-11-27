@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import TYPE_CHECKING, Optional, List, Dict, Any
 import os
 import re
 from contextlib import ExitStack
@@ -89,6 +89,9 @@ CHUNK_OVERLAP = DEFAULT_CHUNK_OVERLAP
 
 logger = get_logger(__name__)
 
+if TYPE_CHECKING:
+    from tools.retrieval.rerank_transformer import RerankPlan
+
 def _resolve_vector_db_type(silo: Optional[Silo] = None, override: Optional[str] = None) -> str:
     """Determine the vector DB type for a silo, falling back to PGVECTOR."""
 
@@ -127,11 +130,12 @@ def _build_pipeline_retriever(
     embedding_service: Any,
     merged_search_kwargs: dict,
     use_async: bool = True,
+    rerank_plan: Optional["RerankPlan"] = None,
 ) -> BaseRetriever:
-    """Build a retriever via the RetrievalPipeline (dense/bm25 + optional rerank).
+    """Build a retriever via the RetrievalPipeline (dense/bm25 + optional rerank stage).
 
-    Pops ``search_type``, ``search_method``, ``strategy``, ``top_n`` and
-    ``similarity_threshold`` out of ``merged_search_kwargs`` — the remainder
+    Pops ``search_type`` and ``search_method`` (plus the legacy ``strategy`` /
+    ``top_n`` / ``similarity_threshold`` keys, discarded until step_008) out of ``merged_search_kwargs`` — the remainder
     (``k``, ``filter``, ``score_threshold``, ``fetch_k``, ``lambda_mult``, ...)
     is passed through as the search method's own ``search_kwargs``.
 
@@ -149,19 +153,17 @@ def _build_pipeline_retriever(
             raises "This method must be called without async_mode" when invoked
             synchronously.
 
+        rerank_plan: Optional ``RerankPlan`` placed on the retrieval context.
+
     Returns:
         The final composed retriever.
     """
     retriever_search_type = merged_search_kwargs.pop("search_type", "similarity")
     search_method_value = merged_search_kwargs.pop("search_method", None)
-    strategy_value = merged_search_kwargs.pop("strategy", None)
-
-    # Component-specific params (e.g. rerank's top_n/similarity_threshold) travel
-    # separately from the search-method's own search_kwargs (k/filter/...).
-    component_params = {}
-    for component_key in ("top_n", "similarity_threshold"):
-        if component_key in merged_search_kwargs:
-            component_params[component_key] = merged_search_kwargs.pop(component_key)
+    # Legacy keys: discarded so they never leak into the search method's search_kwargs.
+    dropped = [k for k in ("strategy", "top_n", "similarity_threshold") if merged_search_kwargs.pop(k, None) is not None]
+    if dropped:
+        logger.info("Dropping legacy rerank search keys %s (replaced by rerank services)", dropped)  # step_008 removes this
 
     from tools.retrieval.retrieval_context import RetrievalContext
     from tools.retrieval.retrieval_pipeline import RetrievalPipeline
@@ -172,13 +174,13 @@ def _build_pipeline_retriever(
         collection_name=collection_name,
         embedding_service=embedding_service,
         search_kwargs=merged_search_kwargs,
-        params={"search_type": retriever_search_type, "use_async": use_async, **component_params},
+        params={"search_type": retriever_search_type, "use_async": use_async},
+        rerank=rerank_plan,
     )
 
     search_method_names = _as_name_list(search_method_value) or [DEFAULT_SEARCH_METHOD]
-    transformer_names = _as_name_list(strategy_value)
 
-    return RetrievalPipeline.build(ctx, search_method_names, transformer_names)
+    return RetrievalPipeline.build(ctx, search_method_names)
 
 
 # Patterns produced by PDF loaders when they encounter fonts with non-standard
