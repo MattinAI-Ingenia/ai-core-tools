@@ -7,6 +7,7 @@ import ProviderStep from './steps/ProviderStep';
 import CredentialsStep, { type CredentialsState } from './steps/CredentialsStep';
 import ModelSelectionStep from './steps/ModelSelectionStep';
 import ConfirmStep from './steps/ConfirmStep';
+import RerankEgressNotice from '../RerankEgressNotice';
 import { getProviderDescriptor } from './providers';
 import ServiceLifecycleInputs from '../ServiceLifecycleInputs';
 import { isoFromDateInput } from '../../../utils/serviceLifecycle';
@@ -16,6 +17,7 @@ import type {
   ExistingSandboxService,
   ExistingService,
   ProviderModelInfo,
+  RerankServiceFormData,
   SandboxServiceFormData,
   ServiceFormData,
   ServiceKind,
@@ -199,7 +201,7 @@ function ServiceWizard({
     setCurrentStep((s) => Math.max(s - 1, 0));
   };
 
-  const buildPayload = (): ServiceFormData | SandboxServiceFormData => {
+  const buildPayload = (): ServiceFormData | SandboxServiceFormData | RerankServiceFormData => {
     if (kind === 'sandbox') {
       const sandboxPayload: SandboxServiceFormData = {
         name: serviceName.trim() || provider,
@@ -222,6 +224,22 @@ function ServiceWizard({
     const modelName = descriptor?.supportsModelListing
       ? selectedModel?.id || ''
       : manualModelName.trim();
+    if (kind === 'rerank') {
+      const rerankPayload: RerankServiceFormData = {
+        name: serviceName.trim() || `${provider} - ${modelName}`,
+        provider,
+        model_name: modelName,
+        api_key: credentials.api_key,
+        base_url: credentials.base_url,
+        ...(mode === 'create'
+          ? {
+              end_of_service_at: isoFromDateInput(endOfServiceDate),
+              deprecation_notice: deprecationNotice.trim() || null,
+            }
+          : {}),
+      };
+      return rerankPayload;
+    }
     return {
       name: serviceName.trim() || `${provider} - ${modelName}`,
       provider,
@@ -278,6 +296,7 @@ function ServiceWizard({
   let titleKey = 'serviceWizard.titles.addSandboxService';
   if (kind === 'ai') titleKey = 'serviceWizard.titles.addAIService';
   else if (kind === 'embedding') titleKey = 'serviceWizard.titles.addEmbeddingService';
+  else if (kind === 'rerank') titleKey = 'serviceWizard.titles.addRerankService';
   if (mode === 'edit-model') {
     titleKey = kind === 'sandbox'
       ? 'serviceWizard.titles.editSandboxService'
@@ -340,6 +359,9 @@ function ServiceWizard({
                 value={credentials}
                 onChange={setCredentials}
               />
+            )}
+            {steps[currentStep].id === 'credentials' && kind === 'rerank' && (
+              <RerankEgressNotice className="mt-4" />
             )}
             {steps[currentStep].id === 'model' && (
               <ModelSelectionStep

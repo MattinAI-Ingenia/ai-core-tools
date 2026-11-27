@@ -3,6 +3,7 @@ import type {
   ListProviderModelsRequest,
   ListProviderModelsResponse,
   SandboxServiceFormData,
+  RerankServiceFormData,
   ServiceFormData,
   ServiceKind,
   ServiceScope,
@@ -16,7 +17,7 @@ export interface TestConnectionResult {
 
 /** Strongly-typed view of the API surface needed by a single (kind, scope) combo. */
 export interface ServiceApiClient {
-  /** Sandbox services have no "list models" concept — omitted for `kind === 'sandbox'`. */
+  /** Sandbox and rerank services have no "list models" concept — omitted for those kinds. */
   listModels?(req: ListProviderModelsRequest): Promise<ListProviderModelsResponse>;
   /**
    * Test the connection with the provided payload. When ``serviceId`` is
@@ -25,7 +26,7 @@ export interface ServiceApiClient {
    * re-type the secret on every check.
    */
   testConnection(
-    payload: ServiceFormData | SandboxServiceFormData,
+    payload: ServiceFormData | SandboxServiceFormData | RerankServiceFormData,
     serviceId?: number,
   ): Promise<TestConnectionResult>;
 }
@@ -69,6 +70,15 @@ export function getServiceApiClient(
           ) as Promise<TestConnectionResult>,
       };
     }
+    if (kind === 'rerank') {
+      return {
+        testConnection: (payload, serviceId) =>
+          apiService.testSystemRerankServiceConnectionWithConfig(
+            payload as RerankServiceFormData,
+            serviceId,
+          ) as Promise<TestConnectionResult>,
+      };
+    }
     return {
       testConnection: (payload, serviceId) =>
         apiService.testSystemSandboxServiceConnectionWithConfig(
@@ -101,6 +111,16 @@ export function getServiceApiClient(
         apiService.testEmbeddingServiceConnectionWithConfig(
           id,
           payload,
+          serviceId,
+        ) as Promise<TestConnectionResult>,
+    };
+  }
+  if (kind === 'rerank') {
+    return {
+      testConnection: (payload, serviceId) =>
+        apiService.testRerankServiceConnectionWithConfig(
+          id,
+          payload as RerankServiceFormData,
           serviceId,
         ) as Promise<TestConnectionResult>,
     };

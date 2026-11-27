@@ -1,4 +1,5 @@
 {
+  "rerankEgressNotice": { "message": "Rerankerrak zure dokumentuen zatiak eta erabiltzailearen kontsulta jasotzen ditu. Kanpoko API batekin, datu horiek zure erakundearen azpiegituratik ateratzen dira; auto-ostatatutako reranker batek (adib. Infinity) barruan mantentzen ditu." },
   "save": "Gorde",
   "confirm": "Berretsi",
   "cancel": "Utzi",
@@ -1885,7 +1886,8 @@
     "serviceKinds": {
       "ai": "AA zerbitzua",
       "embedding": "embedding zerbitzua",
-      "sandbox": "sandbox zerbitzua"
+      "sandbox": "sandbox zerbitzua",
+      "rerank": "reranking zerbitzua"
     },
     "testing": "Konexioa probatzen: {{serviceKind}} {{serviceName}}...",
     "statusTitle": "Egoera: {{status}}",
@@ -1923,7 +1925,8 @@
     "noticeCounter": "{{used}}/{{max}}",
     "retireImmediately": "Data honekin gordetzean, zerbitzua berehala erretiratzen da.",
     "embeddingWarning": "Embedding zerbitzu hau erretiratzeak silo-a erabilezin bihurtzen du. Berrindexatu beste embedding zerbitzu batean {{date}} baino lehen.",
-    "aiWarning": "AA zerbitzu hau erabiltzen duten agenteek funtzionatzeari utziko diote {{date}}(e)an. Mugitu itzazu beste AA zerbitzu batera ordura arte."
+    "aiWarning": "AA zerbitzu hau erabiltzen duten agenteek funtzionatzeari utziko diote {{date}}(e)an. Mugitu itzazu beste AA zerbitzu batera ordura arte.",
+    "rerankWarning": "Reranker hau erabiltzen duten bilaketek {{date}}(e)an utziko diote berrordenatzeari eta bilaketa soilaren ordenara itzuliko dira. Aukeratu beste reranking zerbitzu bat data horren aurretik."
   },
   "serviceWarnings": {
     "titleRetired": "Erabiltzen ari diren zerbitzu erretiratuak",
@@ -1938,11 +1941,15 @@
       "media_embedding": "Multimedia embedding-a",
       "embedding": "Embedding-a",
       "sandbox": "Kode-interpretatzailearen sandbox-a",
-      "sandbox_app_default": "Kode-interpretatzailearen sandbox-a (aplikazioaren lehenetsia)"
+      "sandbox_app_default": "Kode-interpretatzailearen sandbox-a (aplikazioaren lehenetsia)",
+      "rerank": "Reranker-a",
+      "rerank_app_default": "Reranker-a (aplikazioaren lehenetsia)",
+      "rerank_platform_default": "Reranker-a (plataformaren lehenetsia)"
     },
     "siloEmbedding": "Embedding-a ({{via}} silo-aren bidez)",
     "middleware": "{{via}} middleware-a",
     "sandboxWarning": "Kode-interpretatzailea funtzionatzeari utziko dio {{date}}(e)an. Hautatu beste sandbox zerbitzu bat ordura arte.",
+    "rerankWarning": "Reranker hau erabiltzen duten bilaketek {{date}}(e)an utziko diote berrordenatzeari eta bilaketa soilaren ordenara itzuliko dira. Aukeratu beste reranking zerbitzu bat data horren aurretik.",
     "compactRetired_one": "{{count}} zerbitzu erretiratu",
     "compactRetired_other": "{{count}} zerbitzu erretiratu",
     "compactDeprecated_one": "{{count}} zerbitzu zaharkitu",
@@ -1961,6 +1968,7 @@
     "sections": {
       "agents": "Agenteak",
       "appsDefault": "Lehenetsi gisa erabiltzen duten aplikazioak",
+      "appsDefaultRerank": "Lehenetsitako reranker gisa erabiltzen duten aplikazioak",
       "silos": "Silo-ak",
       "repositories": "Biltegiak",
       "middlewares": "Middleware-ak",
@@ -1975,7 +1983,10 @@
       "media_embedding": "Multimedia embedding-a",
       "silo_embedding": "Silo-aren bidez",
       "sandbox": "Sandbox-a",
-      "sandbox_app_default": "Sandbox-a (aplikazioaren lehenetsia)"
+      "sandbox_app_default": "Sandbox-a (aplikazioaren lehenetsia)",
+      "rerank": "Reranker-a",
+      "rerank_app_default": "Reranker-a (aplikazioaren lehenetsia)",
+      "rerank_platform_default": "Reranker-a (plataformaren lehenetsia)"
     },
     "siloRoles": {
       "embedding": "Embedding-a",
@@ -2025,6 +2036,7 @@
     "moveSandboxSuccessApps_one": "sandbox lehenetsia aldatu da {{count}} aplikaziotan",
     "moveSandboxSuccessApps_other": "sandbox lehenetsia aldatu da {{count}} aplikaziotan",
     "conjunction": "eta",
+    "platformDefaultBadge": "Plataformaren lehenetsia",
     "moveSandboxNote": "Aplikazioaren lehenetsia heredatzen duten agenteek lehenetsi berria automatikoki jarraituko dute.",
     "deleteReview": "Berrikusi behean zerk erabiltzen duen zerbitzu hau. Elegibleak diren agenteak beste zerbitzu batera mugi ditzakezu ezabatu aurretik.",
     "deleteButton": "Ezabatu zerbitzua...",
@@ -2035,6 +2047,7 @@
       "addSandboxService": "Gehitu sandbox zerbitzua",
       "addAIService": "Gehitu AA zerbitzua",
       "addEmbeddingService": "Gehitu embedding zerbitzua",
+      "addRerankService": "Gehitu reranking zerbitzua",
       "editSandboxService": "Editatu sandbox zerbitzua",
       "changeModel": "Aldatu eredua"
     },
@@ -2049,6 +2062,7 @@
       "subtitleAi": "Hautatu erabili nahi duzun txat-, ikusmen- edo audio-eredua ostatatzen duen hornitzailea.",
       "subtitleEmbedding": "Hautatu zure datuak indexatuko dituen embedding ereduaren hornitzailea.",
       "subtitleSandbox": "Hautatu zure sandbox ingurunea ostatatuko duen hornitzailea.",
+      "subtitleRerank": "Aukeratu bilaketaren ondoren aplikatzen den berrordenatze-eredua zerbitzatzen duen API.",
       "manual": "Eskuzkoa"
     },
     "credentialsStep": {
@@ -2100,6 +2114,7 @@
         "openSandbox": "Aukerakoa. Zure OpenSandbox zerbitzari auto-ostatatuak autentifikazioa eskatzen badu soilik behar da.",
         "daytona": "Aurkitu zure API gakoa Daytona-ren panelean.",
         "e2b": "Aurkitu zure API gakoa e2b.dev/dashboard helbidean.",
+        "cohereCompatible": "Ostatatutako APIetarako edo babestutako auto-ostatatutako zerbitzari baterako bakarrik behar da.",
         "default": "Sartu hornitzaile honek eskatzen dituen kredentzialak."
       }
     },
@@ -2142,7 +2157,8 @@
         "default": "Sartu erabili nahi duzun ereduaren identifikatzailea.",
         "azure": "Sartu zure Azure OpenAI baliabidean konfiguratutako hedapenaren izena.",
         "googleCloud": "Sartu erabili nahi duzun Vertex AI ereduaren IDa.",
-        "googleCloudEmbedding": "Sartu erabili nahi duzun Vertex AI Gemini embedding ereduaren IDa."
+        "googleCloudEmbedding": "Sartu erabili nahi duzun Vertex AI Gemini embedding ereduaren IDa.",
+        "rerank": "Idatzi zure zerbitzariak espero duen reranker ereduaren identifikatzailea, adib. BAAI/bge-reranker-v2-m3 edo rerank-v3.5."
       },
       "deploymentName": "Hedapenaren izena",
       "modelId": "Ereduaren IDa",

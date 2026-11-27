@@ -90,6 +90,7 @@ export const SERVICE_LIFECYCLE_STRINGS = {
   get retireImmediately() { return i18n.t('serviceLifecycle.retireImmediately'); },
   embeddingWarning: (date: string) => i18n.t('serviceLifecycle.embeddingWarning', { date }),
   aiWarning: (date: string) => i18n.t('serviceLifecycle.aiWarning', { date }),
+  rerankWarning: (date: string) => i18n.t('serviceLifecycle.rerankWarning', { date }),
 } as const;
 
 export const SERVICE_WARNING_STRINGS = {
@@ -106,10 +107,14 @@ export const SERVICE_WARNING_STRINGS = {
     get embedding() { return i18n.t('serviceWarnings.roles.embedding'); },
     get sandbox() { return i18n.t('serviceWarnings.roles.sandbox'); },
     get sandbox_app_default() { return i18n.t('serviceWarnings.roles.sandbox_app_default'); },
+    get rerank() { return i18n.t('serviceWarnings.roles.rerank'); },
+    get rerank_app_default() { return i18n.t('serviceWarnings.roles.rerank_app_default'); },
+    get rerank_platform_default() { return i18n.t('serviceWarnings.roles.rerank_platform_default'); },
   },
   silo_embedding: (via: string) => i18n.t('serviceWarnings.siloEmbedding', { via }),
   middleware: (via: string) => i18n.t('serviceWarnings.middleware', { via }),
   sandboxWarning: (date: string) => i18n.t('serviceWarnings.sandboxWarning', { date }),
+  rerankWarning: (date: string) => i18n.t('serviceWarnings.rerankWarning', { date }),
   compactRetired: (count: number) => i18n.t('serviceWarnings.compactRetired', { count }),
   compactDeprecated: (count: number) => i18n.t('serviceWarnings.compactDeprecated', { count }),
   compactAria: (items: string) => i18n.t('serviceWarnings.compactAria', { items }),
@@ -127,6 +132,7 @@ export const SERVICE_USAGE_STRINGS = {
   sections: {
     get agents() { return i18n.t('serviceUsage.sections.agents'); },
     get appsDefault() { return i18n.t('serviceUsage.sections.appsDefault'); },
+    get appsDefaultRerank() { return i18n.t('serviceUsage.sections.appsDefaultRerank'); },
     get silos() { return i18n.t('serviceUsage.sections.silos'); },
     get repositories() { return i18n.t('serviceUsage.sections.repositories'); },
     get middlewares() { return i18n.t('serviceUsage.sections.middlewares'); },
@@ -142,12 +148,16 @@ export const SERVICE_USAGE_STRINGS = {
     get silo_embedding() { return i18n.t('serviceUsage.agentRoles.silo_embedding'); },
     get sandbox() { return i18n.t('serviceUsage.agentRoles.sandbox'); },
     get sandbox_app_default() { return i18n.t('serviceUsage.agentRoles.sandbox_app_default'); },
+    get rerank() { return i18n.t('serviceUsage.agentRoles.rerank'); },
+    get rerank_app_default() { return i18n.t('serviceUsage.agentRoles.rerank_app_default'); },
+    get rerank_platform_default() { return i18n.t('serviceUsage.agentRoles.rerank_platform_default'); },
   },
   siloRoles: {
     get embedding() { return i18n.t('serviceUsage.siloRoles.embedding'); },
     get transcription() { return i18n.t('serviceUsage.siloRoles.transcription'); },
     get video() { return i18n.t('serviceUsage.siloRoles.video'); },
   },
+  get platformDefaultBadge() { return i18n.t('serviceUsage.platformDefaultBadge'); },
   get reindexWarning() { return i18n.t('serviceUsage.reindexWarning'); },
   get moveTitle() { return i18n.t('serviceUsage.moveTitle'); },
   moveCount: (count: number) => i18n.t('serviceUsage.moveCount', { count }),

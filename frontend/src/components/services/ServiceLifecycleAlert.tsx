@@ -18,6 +18,8 @@ function roleLabel(w: ServiceLifecycleWarning): string {
   if (w.role === 'silo_embedding') return s.silo_embedding(w.via ?? '');
   if (w.role === 'middleware') return s.middleware(w.via ?? '');
   if (w.role === 'sandbox' && w.via === 'app default') return s.roles.sandbox_app_default;
+  if (w.role === 'rerank' && w.via === 'app default') return s.roles.rerank_app_default;
+  if (w.role === 'rerank' && w.via === 'platform default') return s.roles.rerank_platform_default;
   return s.roles[w.role];
 }
 
@@ -32,6 +34,7 @@ function hintText(w: ServiceLifecycleWarning): string | null {
   const date = formatEndOfServiceDate(w.end_of_service_at);
   if (w.kind === 'embedding') return SERVICE_LIFECYCLE_STRINGS.embeddingWarning(date);
   if (w.kind === 'sandbox') return SERVICE_WARNING_STRINGS.sandboxWarning(date);
+  if (w.kind === 'rerank') return SERVICE_WARNING_STRINGS.rerankWarning(date);
   return null;
 }
 

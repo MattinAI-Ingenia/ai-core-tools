@@ -54,7 +54,7 @@ export interface ListProviderModelsResponse {
   readonly requires_manual_input: boolean;
 }
 
-export type ServiceKind = 'ai' | 'embedding' | 'sandbox';
+export type ServiceKind = 'ai' | 'embedding' | 'sandbox' | 'rerank';
 export type ServiceScope = 'app' | 'system';
 export type ServiceWizardMode = 'create' | 'edit-model';
 
@@ -68,7 +68,7 @@ export interface ServiceLifecycleFields {
   readonly lifecycle_status: LifecycleStatus;
 }
 
-export type ServiceLifecycleWarningKind = 'ai' | 'embedding' | 'sandbox';
+export type ServiceLifecycleWarningKind = 'ai' | 'embedding' | 'sandbox' | 'rerank';
 export type ServiceLifecycleWarningRole =
   | 'llm'
   | 'ocr_vision'
@@ -78,7 +78,8 @@ export type ServiceLifecycleWarningRole =
   | 'silo_embedding'
   | 'middleware'
   | 'embedding'
-  | 'sandbox';
+  | 'sandbox'
+  | 'rerank';
 
 /** Mirrors `ServiceLifecycleWarningSchema` (backend/schemas/service_lifecycle_schemas.py). */
 export interface ServiceLifecycleWarning {
@@ -180,7 +181,10 @@ export type AgentUsageRole =
   | 'media_embedding'
   | 'silo_embedding'
   | 'sandbox'
-  | 'sandbox_app_default';
+  | 'sandbox_app_default'
+  | 'rerank'
+  | 'rerank_app_default'
+  | 'rerank_platform_default';
 export type SiloUsageRole = 'embedding' | 'transcription' | 'video';
 
 /** Mirrors `ServiceUsageSchema` (backend/schemas/service_lifecycle_schemas.py). `app_name` only in admin views. */
@@ -189,6 +193,8 @@ export interface ServiceUsage {
   readonly service_name: string;
   readonly kind: ServiceKind;
   readonly is_system: boolean;
+  /** Rerank system services only: the service is the platform default. */
+  readonly is_platform_default?: boolean;
   readonly lifecycle_status: LifecycleStatus;
   readonly end_of_service_at: string | null;
   readonly deprecation_notice: string | null;
@@ -228,7 +234,7 @@ export interface ServiceUsage {
     readonly app_id: number;
     readonly app_name?: string | null;
   }[];
-  /** Sandbox services only: apps that use the service as their default sandbox. */
+  /** Sandbox and rerank services: apps that use the service as their default. */
   readonly apps_using_as_default?: readonly { readonly app_id: number; readonly app_name: string }[];
 }
 
@@ -240,4 +246,57 @@ export interface MoveAgentsResult {
 export interface MoveSandboxServiceUsageResult {
   readonly moved_agent_ids: readonly number[];
   readonly updated_app_ids: readonly number[];
+}
+
+// ==================== Rerank services ====================
+
+/** Mirrors `RerankServiceListItemSchema` (backend/schemas/rerank_service_schemas.py). */
+export interface RerankServiceListItem extends Partial<ServiceLifecycleFields> {
+  readonly service_id: number;
+  readonly name: string;
+  readonly provider?: string | null;
+  readonly model_name: string;
+  readonly base_url: string;
+  readonly created_at?: string | null;
+  /** True only for the CHANGE_ME import placeholder (keys are otherwise optional). */
+  readonly needs_api_key?: boolean;
+  readonly is_system?: boolean;
+  readonly is_platform_default?: boolean;
+  readonly last_error?: string | null;
+  readonly last_error_at?: string | null;
+}
+
+/** Mirrors `RerankServiceDetailSchema`; the API key is always masked. */
+export interface RerankServiceDetail extends RerankServiceListItem {
+  readonly api_key: string;
+  readonly available_providers?: readonly Record<string, unknown>[];
+}
+
+/** Mirrors `RerankServiceOptionSchema` (selectors; retired services are flagged, not hidden). */
+export interface RerankServiceOption extends Partial<ServiceLifecycleFields> {
+  readonly service_id: number;
+  readonly name: string;
+  readonly provider?: string | null;
+  readonly model_name: string;
+  readonly is_system: boolean;
+  readonly is_platform_default: boolean;
+}
+
+/** Mirrors `RerankServiceOptionsSchema`. */
+export interface RerankServiceOptions {
+  readonly options: readonly RerankServiceOption[];
+  readonly app_default: RerankServiceOption | null;
+  readonly platform_default: RerankServiceOption | null;
+  readonly effective_default: RerankServiceOption | null;
+}
+
+/** Payload of create/update/test (mirrors `CreateUpdateRerankServiceSchema`). */
+export interface RerankServiceFormData {
+  name: string;
+  provider: string;
+  model_name: string;
+  api_key: string;
+  base_url: string;
+  end_of_service_at?: string | null;
+  deprecation_notice?: string | null;
 }

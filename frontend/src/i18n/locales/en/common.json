@@ -1,4 +1,5 @@
 {
+  "rerankEgressNotice": { "message": "The reranker receives your document chunks and the user's query. With an external API this data leaves your organisation's infrastructure; a self-hosted reranker (e.g. Infinity) keeps it inside." },
   "save": "Save",
   "confirm": "Confirm",
   "cancel": "Cancel",
@@ -1861,7 +1862,8 @@
     "serviceKinds": {
       "ai": "AI service",
       "embedding": "embedding service",
-      "sandbox": "sandbox service"
+      "sandbox": "sandbox service",
+      "rerank": "rerank service"
     },
     "testing": "Testing connection to {{serviceKind}} {{serviceName}}...",
     "statusTitle": "Status: {{status}}",
@@ -1899,7 +1901,8 @@
     "noticeCounter": "{{used}}/{{max}}",
     "retireImmediately": "Saving with this date retires the service immediately.",
     "embeddingWarning": "Retiring this embedding service makes the silo unusable. Re-index it into another embedding service before {{date}}.",
-    "aiWarning": "Agents using this AI service stop working on {{date}}. Move them to another AI service before then."
+    "aiWarning": "Agents using this AI service stop working on {{date}}. Move them to another AI service before then.",
+    "rerankWarning": "Searches using this reranker stop reranking on {{date}} and fall back to the plain search order. Select another rerank service before then."
   },
   "serviceWarnings": {
     "titleRetired": "Retired services in use",
@@ -1914,11 +1917,15 @@
       "media_embedding": "Media embedding",
       "embedding": "Embedding",
       "sandbox": "Code interpreter sandbox",
-      "sandbox_app_default": "Code interpreter sandbox (app default)"
+      "sandbox_app_default": "Code interpreter sandbox (app default)",
+      "rerank": "Reranker",
+      "rerank_app_default": "Reranker (app default)",
+      "rerank_platform_default": "Reranker (platform default)"
     },
     "siloEmbedding": "Embedding (via silo {{via}})",
     "middleware": "Middleware {{via}}",
     "sandboxWarning": "The code interpreter stops working on {{date}}. Select another sandbox service before then.",
+    "rerankWarning": "Searches using this reranker stop reranking on {{date}} and fall back to the plain search order. Select another rerank service before then.",
     "compactRetired_one": "{{count}} retired service",
     "compactRetired_other": "{{count}} retired services",
     "compactDeprecated_one": "{{count}} deprecated service",
@@ -1937,6 +1944,7 @@
     "sections": {
       "agents": "Agents",
       "appsDefault": "Apps using it as default",
+      "appsDefaultRerank": "Apps using it as their default reranker",
       "silos": "Silos",
       "repositories": "Repositories",
       "middlewares": "Middlewares",
@@ -1951,7 +1959,10 @@
       "media_embedding": "Media embedding",
       "silo_embedding": "Via silo",
       "sandbox": "Sandbox",
-      "sandbox_app_default": "Sandbox (app default)"
+      "sandbox_app_default": "Sandbox (app default)",
+      "rerank": "Reranker",
+      "rerank_app_default": "Reranker (app default)",
+      "rerank_platform_default": "Reranker (platform default)"
     },
     "siloRoles": {
       "embedding": "Embedding",
@@ -2001,6 +2012,7 @@
     "moveSandboxSuccessApps_one": "changed the default sandbox in {{count}} app",
     "moveSandboxSuccessApps_other": "changed the default sandbox in {{count}} apps",
     "conjunction": "and",
+    "platformDefaultBadge": "Platform default",
     "moveSandboxNote": "Agents inheriting the app default will follow the new default automatically.",
     "deleteReview": "Review what uses this service below. You can move eligible agents to another service before deleting it.",
     "deleteButton": "Delete service...",
@@ -2011,6 +2023,7 @@
       "addSandboxService": "Add Sandbox Service",
       "addAIService": "Add AI Service",
       "addEmbeddingService": "Add Embedding Service",
+      "addRerankService": "Add Rerank Service",
       "editSandboxService": "Edit sandbox service",
       "changeModel": "Change model"
     },
@@ -2025,6 +2038,7 @@
       "subtitleAi": "Pick the provider that hosts the chat, vision or audio model you want to use.",
       "subtitleEmbedding": "Pick the provider for the embedding model that will index your data.",
       "subtitleSandbox": "Pick the provider that will host your sandbox environment.",
+      "subtitleRerank": "Pick the API that serves the reranking model applied after the search.",
       "manual": "Manual"
     },
     "credentialsStep": {
@@ -2076,6 +2090,7 @@
         "openSandbox": "Optional. Only needed if your self-hosted OpenSandbox server requires authentication.",
         "daytona": "Find your API key in the Daytona dashboard.",
         "e2b": "Find your API key at e2b.dev/dashboard.",
+        "cohereCompatible": "Only needed for hosted APIs or a secured self-hosted server.",
         "default": "Enter the credentials required by this provider."
       }
     },
@@ -2118,7 +2133,8 @@
         "default": "Enter the model identifier you want to use.",
         "azure": "Enter the deployment name configured in your Azure OpenAI resource.",
         "googleCloud": "Enter the Vertex AI model id you want to use.",
-        "googleCloudEmbedding": "Enter the Vertex AI Gemini embedding model id you want to use."
+        "googleCloudEmbedding": "Enter the Vertex AI Gemini embedding model id you want to use.",
+        "rerank": "Enter the reranker model identifier your server expects, e.g. BAAI/bge-reranker-v2-m3 or rerank-v3.5."
       },
       "deploymentName": "Deployment name",
       "modelId": "Model ID",

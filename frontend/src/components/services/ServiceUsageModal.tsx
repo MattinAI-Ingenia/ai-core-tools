@@ -14,6 +14,7 @@ import {
   type ServiceOptionLike,
 } from '../../utils/serviceLifecycle';
 import CardApp from '../ui/CardApp';
+import { Badge } from '../ui/Badge';
 
 const PANEL_CARD =
   'rounded-xl border border-line dark:border-line-dark bg-surface dark:bg-surface-dark p-6 mt-2';
@@ -22,7 +23,7 @@ const PANEL_CARD_TITLE =
 
 export interface ServiceUsageModalProps {
   readonly onClose: () => void;
-  readonly kind: 'ai' | 'embedding' | 'sandbox';
+  readonly kind: 'ai' | 'embedding' | 'sandbox' | 'rerank';
   /** `app`: app-scoped endpoints. `system`: platform-admin cross-app endpoints (shows app names). */
   readonly scope: 'app' | 'system';
   /** Required when scope is `app`. */
@@ -146,12 +147,14 @@ function ServiceUsageModal({
     if (scope === 'system') {
       if (kind === 'ai') request = apiService.getSystemAIServiceUsedBy(serviceId);
       else if (kind === 'sandbox') request = apiService.getSystemSandboxServiceUsedBy(serviceId);
+      else if (kind === 'rerank') request = apiService.getSystemRerankServiceUsedBy(serviceId);
       else request = apiService.getSystemEmbeddingServiceUsedBy(serviceId);
     } else if (appId === undefined) {
       request = Promise.reject(new Error(S.loadError));
     } else {
       if (kind === 'ai') request = apiService.getAIServiceUsedBy(appId, serviceId);
       else if (kind === 'sandbox') request = apiService.getSandboxServiceUsedBy(appId, serviceId);
+      else if (kind === 'rerank') request = apiService.getRerankServiceUsedBy(appId, serviceId);
       else request = apiService.getEmbeddingServiceUsedBy(appId, serviceId);
     }
     request
@@ -406,6 +409,7 @@ function ServiceUsageModal({
 
   function renderBody(u: ServiceUsage) {
     const isSandbox = kind === 'sandbox';
+    const isRerank = kind === 'rerank';
     const defaultApps = u.apps_using_as_default ?? [];
     const total =
       u.agents.length +
@@ -423,6 +427,14 @@ function ServiceUsageModal({
               endOfServiceAt={u.end_of_service_at}
               deprecationNotice={u.deprecation_notice}
             />
+          )}
+          {isRerank && u.is_platform_default && (
+            <Badge label={S.platformDefaultBadge} variant="info" className="mt-2" />
+          )}
+          {isRerank && u.lifecycle_status !== 'active' && u.end_of_service_at && (
+            <p className="mt-2 text-sm text-orange-800 dark:text-orange-200">
+              {SERVICE_LIFECYCLE_STRINGS.rerankWarning(formatEndOfServiceDate(u.end_of_service_at))}
+            </p>
           )}
           {kind === 'embedding' && u.lifecycle_status !== 'active' && u.end_of_service_at && (
             <p className="mt-2 text-sm text-orange-800 dark:text-orange-200">
@@ -448,8 +460,8 @@ function ServiceUsageModal({
             />
           ))}
         </Section>
-        {isSandbox && (
-          <Section title={S.sections.appsDefault} count={defaultApps.length}>
+        {(isSandbox || isRerank) && (
+          <Section title={isRerank ? S.sections.appsDefaultRerank : S.sections.appsDefault} count={defaultApps.length}>
             {defaultApps.map((a) => (
               <Entry
                 key={a.app_id}
@@ -460,7 +472,7 @@ function ServiceUsageModal({
             ))}
           </Section>
         )}
-        {!isSandbox && (<>
+        {!isSandbox && !isRerank && (<>
         <Section title={S.sections.silos} count={u.silos.length}>
           {u.silos.map((s) => (
             <Entry

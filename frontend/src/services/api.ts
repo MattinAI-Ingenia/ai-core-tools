@@ -22,6 +22,10 @@ import type {
   MoveAgentsResult,
   MoveSandboxServiceUsageResult,
   ServiceLifecycleFields,
+  RerankServiceDetail,
+  RerankServiceFormData,
+  RerankServiceListItem,
+  RerankServiceOptions,
   ServiceLifecycleWarning,
   ServiceUsage,
 } from '../types/services';
@@ -1292,6 +1296,14 @@ class ApiService {
     return this.request(`/internal/admin/system-embedding-services/${serviceId}/used-by`);
   }
 
+  async getRerankServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/apps/${appId}/rerank-services/${serviceId}/used-by`);
+  }
+
+  async getSystemRerankServiceUsedBy(serviceId: number): Promise<ServiceUsage> {
+    return this.request(`/internal/admin/system-rerank-services/${serviceId}/used-by`);
+  }
+
   async getSandboxServiceUsedBy(appId: number, serviceId: number): Promise<ServiceUsage> {
     return this.request(`/internal/apps/${appId}/sandbox-services/${serviceId}/used-by`);
   }
@@ -1513,6 +1525,98 @@ class ApiService {
     const headers = this.buildAuthHeaders('POST', true);
 
     let url = `${this.baseURL}/internal/apps/${appId}/embedding-services/import?conflict_mode=${conflictMode}`;
+    if (newName) {
+      url += `&new_name=${encodeURIComponent(newName)}`;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.json();
+  }
+
+  // ==================== Rerank services ====================
+  // Errors are ApiError: a 409 on delete carries the blocking usage in `error.detail.usage`.
+
+  async getRerankServices(appId: number): Promise<RerankServiceListItem[]> {
+    return this.request(`/internal/apps/${appId}/rerank-services/`);
+  }
+
+  async getRerankService(appId: number, serviceId: number): Promise<RerankServiceDetail> {
+    return this.request(`/internal/apps/${appId}/rerank-services/${serviceId}`);
+  }
+
+  async createRerankService(appId: number, data: RerankServiceFormData): Promise<RerankServiceDetail> {
+    return this.request(`/internal/apps/${appId}/rerank-services/0`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateRerankService(appId: number, serviceId: number, data: RerankServiceFormData): Promise<RerankServiceDetail> {
+    return this.request(`/internal/apps/${appId}/rerank-services/${serviceId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteRerankService(appId: number, serviceId: number): Promise<void> {
+    return this.request(`/internal/apps/${appId}/rerank-services/${serviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getRerankServiceOptions(appId: number): Promise<RerankServiceOptions> {
+    return this.request(`/internal/apps/${appId}/rerank-services/options`);
+  }
+
+  async testRerankServiceConnectionWithConfig(appId: number, data: RerankServiceFormData, serviceId?: number): Promise<TestConnectionResult> {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/apps/${appId}/rerank-services/test-connection${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async exportRerankService(appId: number, serviceId: number): Promise<Blob> {
+    const headers = this.buildAuthHeaders('POST', false);
+
+    const response = await fetch(
+      `${this.baseURL}/internal/apps/${appId}/rerank-services/${serviceId}/export`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      }
+    );
+
+    if (!response.ok) {
+      await this.handleResponseError(response);
+    }
+
+    return response.blob();
+  }
+
+  async importRerankService(
+    appId: number,
+    file: File,
+    conflictMode: ConflictMode,
+    newName?: string
+  ): Promise<ImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers = this.buildAuthHeaders('POST', true);
+
+    let url = `${this.baseURL}/internal/apps/${appId}/rerank-services/import?conflict_mode=${conflictMode}`;
     if (newName) {
       url += `&new_name=${encodeURIComponent(newName)}`;
     }
@@ -3764,6 +3868,47 @@ class ApiService {
     return this.request(`/internal/admin/system-embedding-services/test-connection${qs}`, {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  async getSystemRerankServices(): Promise<RerankServiceDetail[]> {
+    return this.request('/internal/admin/system-rerank-services');
+  }
+
+  async createSystemRerankService(data: RerankServiceFormData): Promise<RerankServiceListItem> {
+    return this.request('/internal/admin/system-rerank-services', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSystemRerankService(serviceId: number, data: RerankServiceFormData): Promise<RerankServiceListItem> {
+    return this.request(`/internal/admin/system-rerank-services/${serviceId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** A 409 carries the blocking usage in `error.detail.usage`. */
+  async deleteSystemRerankService(serviceId: number): Promise<void> {
+    return this.request(`/internal/admin/system-rerank-services/${serviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testSystemRerankServiceConnectionWithConfig(data: RerankServiceFormData, serviceId?: number): Promise<TestConnectionResult> {
+    const qs = serviceId != null ? `?service_id=${serviceId}` : '';
+    return this.request(`/internal/admin/system-rerank-services/test-connection${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Marks a system rerank service as the platform default; `null` clears it. Returns the refreshed list. */
+  async setPlatformDefaultRerankService(serviceId: number | null): Promise<RerankServiceDetail[]> {
+    return this.request('/internal/admin/system-rerank-services/platform-default', {
+      method: 'PUT',
+      body: JSON.stringify({ service_id: serviceId }),
     });
   }
 

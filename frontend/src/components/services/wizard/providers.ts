@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react';
-import { Bot, Box, Cloud, Cpu, Globe, Server, Sparkles, Zap } from 'lucide-react';
+import { ArrowDownWideNarrow, Bot, Box, Cloud, Cpu, Globe, Server, Sparkles, Zap } from 'lucide-react';
 import type { ServiceKind } from '../../../types/services';
 
 export type ApiKeyMode = 'required' | 'optional' | 'none';
@@ -209,6 +209,21 @@ const ALL_PROVIDERS: readonly ProviderUIDescriptor[] = [
     apiKeyHelp: 'Your AWS Secret Access Key. Needs the bedrock:ListFoundationModels and bedrock:InvokeModel permissions.',
     apiKeyDocUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     supportedFor: ['ai', 'embedding'],
+  },
+  {
+    // Rerank services speak the Cohere /rerank wire shape (Cohere, Jina,
+    // Infinity, vLLM, LiteLLM). There is no model listing: the model id is typed.
+    value: 'CohereCompatible',
+    label: 'Cohere-compatible',
+    description: 'Any /rerank API with the Cohere shape: Cohere, Jina, Infinity, vLLM, LiteLLM.',
+    Icon: ArrowDownWideNarrow,
+    apiKey: 'optional',
+    needsBaseUrl: true,
+    baseUrlPlaceholder: 'http://reranker:7997 or https://api.cohere.com/v2',
+    supportsModelListing: false,
+    apiKeyPlaceholder: 'optional bearer token',
+    apiKeyHelp: 'Only needed for hosted APIs or a secured self-hosted server.',
+    supportedFor: ['rerank'],
   },
   {
     value: 'opensandbox',

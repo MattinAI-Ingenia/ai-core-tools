@@ -1,4 +1,5 @@
 {
+  "rerankEgressNotice": { "message": "El reranker recibe los fragmentos de tus documentos y la consulta del usuario. Con una API externa, estos datos salen de la infraestructura de tu organización; un reranker autoalojado (p. ej. Infinity) los mantiene dentro." },
   "save": "Guardar",
   "confirm": "Confirmar",
   "cancel": "Cancelar",
@@ -1861,7 +1862,8 @@
     "serviceKinds": {
       "ai": "servicio de IA",
       "embedding": "servicio de embeddings",
-      "sandbox": "servicio de entorno aislado"
+      "sandbox": "servicio de entorno aislado",
+      "rerank": "servicio de reranking"
     },
     "testing": "Probando la conexión con {{serviceKind}} {{serviceName}}...",
     "statusTitle": "Estado: {{status}}",
@@ -1899,7 +1901,8 @@
     "noticeCounter": "{{used}}/{{max}}",
     "retireImmediately": "Al guardar esta fecha, el servicio se retirará de inmediato.",
     "embeddingWarning": "Al retirar este servicio de embeddings, el silo dejará de funcionar. Vuelve a indexarlo con otro servicio de embeddings antes del {{date}}.",
-    "aiWarning": "Los agentes que usan este servicio de IA dejarán de funcionar el {{date}}. Cámbialos a otro servicio de IA antes de esa fecha."
+    "aiWarning": "Los agentes que usan este servicio de IA dejarán de funcionar el {{date}}. Cámbialos a otro servicio de IA antes de esa fecha.",
+    "rerankWarning": "Las búsquedas que usan este reranker dejan de reordenar el {{date}} y vuelven al orden de la búsqueda simple. Selecciona otro servicio de reranking antes de esa fecha."
   },
   "serviceWarnings": {
     "titleRetired": "Servicios retirados en uso",
@@ -1914,11 +1917,15 @@
       "media_embedding": "Embeddings multimedia",
       "embedding": "Embeddings",
       "sandbox": "Entorno de ejecución de código",
-      "sandbox_app_default": "Entorno de ejecución de código (predeterminado de la aplicación)"
+      "sandbox_app_default": "Entorno de ejecución de código (predeterminado de la aplicación)",
+      "rerank": "Reranker",
+      "rerank_app_default": "Reranker (predeterminado de la app)",
+      "rerank_platform_default": "Reranker (predeterminado de la plataforma)"
     },
     "siloEmbedding": "Embeddings (mediante el silo {{via}})",
     "middleware": "Middleware {{via}}",
     "sandboxWarning": "El entorno de ejecución de código dejará de funcionar el {{date}}. Selecciona otro entorno antes de esa fecha.",
+    "rerankWarning": "Las búsquedas que usan este reranker dejan de reordenar el {{date}} y vuelven al orden de la búsqueda simple. Selecciona otro servicio de reranking antes de esa fecha.",
     "compactRetired_one": "{{count}} servicio retirado",
     "compactRetired_other": "{{count}} servicios retirados",
     "compactDeprecated_one": "{{count}} servicio obsoleto",
@@ -1937,6 +1944,7 @@
     "sections": {
       "agents": "Agentes",
       "appsDefault": "Aplicaciones que lo usan como predeterminado",
+      "appsDefaultRerank": "Apps que lo usan como reranker predeterminado",
       "silos": "Silos",
       "repositories": "Repositorios",
       "middlewares": "Middlewares",
@@ -1951,7 +1959,10 @@
       "media_embedding": "Embeddings multimedia",
       "silo_embedding": "Mediante silo",
       "sandbox": "Entorno aislado",
-      "sandbox_app_default": "Entorno aislado (predeterminado de la aplicación)"
+      "sandbox_app_default": "Entorno aislado (predeterminado de la aplicación)",
+      "rerank": "Reranker",
+      "rerank_app_default": "Reranker (predeterminado de la app)",
+      "rerank_platform_default": "Reranker (predeterminado de la plataforma)"
     },
     "siloRoles": {
       "embedding": "Embeddings",
@@ -2001,6 +2012,7 @@
     "moveSandboxSuccessApps_one": "se cambió el entorno aislado predeterminado en {{count}} aplicación",
     "moveSandboxSuccessApps_other": "se cambió el entorno aislado predeterminado en {{count}} aplicaciones",
     "conjunction": "y",
+    "platformDefaultBadge": "Predeterminado de la plataforma",
     "moveSandboxNote": "Los agentes que heredan el valor predeterminado de la aplicación usarán automáticamente el nuevo valor.",
     "deleteReview": "Revisa abajo qué elementos usan este servicio. Puedes mover los agentes compatibles a otro servicio antes de eliminarlo.",
     "deleteButton": "Eliminar servicio...",
@@ -2011,6 +2023,7 @@
       "addSandboxService": "Añadir servicio de entorno aislado",
       "addAIService": "Añadir servicio de IA",
       "addEmbeddingService": "Añadir servicio de embeddings",
+      "addRerankService": "Añadir servicio de reranking",
       "editSandboxService": "Editar servicio de entorno aislado",
       "changeModel": "Cambiar modelo"
     },
@@ -2025,6 +2038,7 @@
       "subtitleAi": "Elige el proveedor que aloja el modelo de chat, visión o audio que quieres usar.",
       "subtitleEmbedding": "Elige el proveedor del modelo de embeddings que indexará tus datos.",
       "subtitleSandbox": "Elige el proveedor que alojará tu entorno aislado.",
+      "subtitleRerank": "Elige la API que sirve el modelo de reordenación aplicado tras la búsqueda.",
       "manual": "Manual"
     },
     "credentialsStep": {
@@ -2076,6 +2090,7 @@
         "openSandbox": "Opcional. Solo es necesaria si tu servidor de OpenSandbox autogestionado requiere autenticación.",
         "daytona": "Encuentra tu clave de API en el panel de Daytona.",
         "e2b": "Encuentra tu clave de API en e2b.dev/dashboard.",
+        "cohereCompatible": "Solo es necesaria para APIs alojadas o para un servidor autoalojado protegido.",
         "default": "Introduce las credenciales requeridas por este proveedor."
       }
     },
@@ -2118,7 +2133,8 @@
         "default": "Introduce el identificador del modelo que quieres usar.",
         "azure": "Introduce el nombre de implementación configurado en tu recurso de Azure OpenAI.",
         "googleCloud": "Introduce el ID del modelo de Vertex AI que quieres usar.",
-        "googleCloudEmbedding": "Introduce el ID del modelo de embeddings Gemini de Vertex AI que quieres usar."
+        "googleCloudEmbedding": "Introduce el ID del modelo de embeddings Gemini de Vertex AI que quieres usar.",
+        "rerank": "Introduce el identificador del modelo de reranking que espera tu servidor, p. ej. BAAI/bge-reranker-v2-m3 o rerank-v3.5."
       },
       "deploymentName": "Nombre de implementación",
       "modelId": "ID del modelo",
