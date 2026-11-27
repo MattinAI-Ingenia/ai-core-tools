@@ -204,6 +204,18 @@ LANGSMITH_PROJECT=mattin-ai-production
 
 See [App Chat](../ai/app-chat.md#attachment-indexing).
 
+### Rerank Services
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AICT_RERANK_CONNECT_TIMEOUT_SECONDS` | No | `2.0` | Connect timeout of a rerank call (max 10). Invalid value: warning and default |
+| `AICT_RERANK_TIMEOUT_SECONDS` | No | `5.0` | Total budget of one rerank call (max 60); never below the connect timeout. A timeout falls back to first-stage results |
+| `AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS` | No | `false` | Allow **app-owned** rerank services on private/loopback addresses (needed for a self-hosted reranker such as `http://reranker:7997`). System (platform) services are exempt from the endpoint guard |
+| `AICT_RERANK_MAX_RESPONSE_BYTES` | No | `1048576` | Maximum rerank response body; larger bodies are rejected |
+| `AICT_RERANK_MAX_CANDIDATES` | No | `100` | Upper bound on candidates sent in one call (1-200; above 200: warning and default) |
+
+The query and candidate chunks are sent to the rerank endpoint (data egress); see [RAG & Vector Stores](../ai/rag-vector-stores.md#two-stage-retrieval-and-reranking). The former `CROSS_ENCODER_RERANK_*` variables no longer exist.
+
 ### Agent and Chat Execution Limits
 
 | Variable | Required | Default | Description |

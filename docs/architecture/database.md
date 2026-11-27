@@ -50,6 +50,7 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 | `agent_cors_origins` | String(1000) | Allowed CORS origins |
 | `langsmith_api_key` | String(255) | LangSmith API key for tracing (only the owner can change it) |
 | `default_embedding_service_id` | Integer (FK → embedding_service, SET NULL) | Embedding service the App Chat indexes attachments with; NULL = attachments are sent whole (`ichat002`) |
+| `default_rerank_service_id` | Integer (FK → rerank_service, RESTRICT) | Default rerank service of the App's agents; NULL = inherit the platform default (`rerank001`/`rerank002`) |
 | `chat_code_interpreter_enabled` | Boolean (NOT NULL, default `false`) | App Chat code interpreter opt-in; when true the Chat runs code in a sandbox (App default sandbox service, else the system default). Changed by administrators and above (`ichat003`) |
 | `create_date` | DateTime | App creation timestamp |
 
@@ -101,6 +102,9 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 | `is_tool` | Boolean | Whether agent is a tool |
 | `service_id` | Integer (FK → AIService) | LLM service configuration |
 | `silo_id` | Integer (FK → Silo) | Default vector store for RAG |
+| `rag_rerank_enabled` | Boolean (NOT NULL, default `false`) | Post-retrieval rerank on/off |
+| `rag_rerank_service_id` | Integer (FK → rerank_service, nullable) | Explicit rerank service; NULL inherits app then platform default |
+| `rag_rerank_top_n` | Integer (nullable) | Documents kept after reranking (1-50); NULL = 30 |
 | `kind` | String(32) | `standard` (default) or `internal_chat`: the hidden per-App agent behind the [App Chat](../ai/app-chat.md), at most one per App, never exposed |
 | `request_count` | Integer | Number of requests served |
 | `create_date` | DateTime | Agent creation timestamp |
@@ -290,6 +294,34 @@ Mattin AI uses **PostgreSQL 16+** with the **pgvector extension** for vector sim
 **Relationships**:
 - `app` → Owning app
 - `silos` → List of silos using this service
+
+### RerankService
+
+**Table**: `rerank_service` (migration `rerank001`, down revision `lexfts001`). Uses the same lifecycle (end of service) and health columns as the other services.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `service_id` | Integer (PK) | Service identifier |
+| `name`, `description`, `endpoint`, `api_key` | | Base service fields (`endpoint` is the reranker base URL; key optional, masked in the API) |
+| `provider` | String(45) | `CohereCompatible` |
+| `model_name` | String(255) | Model sent in each request |
+| `app_id` | Integer (FK → App, nullable) | Owning app; NULL = system (platform) service |
+| `is_platform_default` | Boolean (NOT NULL, default false) | Platform default flag |
+
+**Constraints**: CHECK `ck_rerank_service_platform_default_is_system` (`NOT is_platform_default OR app_id IS NULL`: only a system service can be the default) and partial unique index `uq_rerank_service_platform_default` on `is_platform_default WHERE is_platform_default` (at most one platform default).
+
+**Related columns and FKs**:
+
+| Column | FK | On delete |
+|--------|----|-----------|
+| `App.default_rerank_service_id` | `App_default_rerank_service_id_fkey` → `rerank_service` | RESTRICT (set by `rerank002`; `rerank001` created it as SET NULL). NULL = agents inherit the platform default |
+| `Agent.rag_rerank_enabled` (Boolean NOT NULL, default false) | none | |
+| `Agent.rag_rerank_service_id` (nullable, indexed) | `Agent_rag_rerank_service_id_fkey` | NO ACTION on purpose: an explicit choice never silently becomes "inherit" |
+| `Agent.rag_rerank_top_n` (nullable) | none | 1..50; NULL = 30 at runtime |
+
+**`rerank001` data mapping**: `rag_rerank_enabled` = true for agents whose old `rag_strategy` contained `rerank` or `cross_encoder_rerank`; the service stays NULL (inherit). Then `Agent.rag_strategy` and `Agent.rag_rerank_similarity_threshold` are dropped (threshold values are lost). Migrated agents therefore skip reranking until a platform (or app) default exists.
+
+**Downgrade is lossy**: it re-adds `rag_strategy` (set to `["rerank"]` for enabled agents) and a NULL threshold, and drops the table, so rerank services, defaults, explicit choices and cross-encoder vs embeddings distinction are not recoverable. Stop old replicas before upgrading; run `alembic downgrade lexfts001` before reverting the image. `rerank002` only swaps the App FK to RESTRICT (no data change, exact downgrade).
 
 ### End-of-service columns
 

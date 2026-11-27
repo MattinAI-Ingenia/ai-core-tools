@@ -404,6 +404,45 @@ The LLM can then invoke the `knowledge_base` tool to retrieve relevant context o
 
 **Important**: `SiloService.get_silo_retriever` passes `search_type` as a top-level argument to LangChain's `as_retriever()`, not inside `search_kwargs`. This ensures MMR and threshold modes work correctly for production agents (a latent bug where `search_type` was silently ignored has been fixed).
 
+### Two-Stage Retrieval and Reranking
+
+Retrieval is a two-stage pipeline (`RetrievalPipeline`, `backend/tools/retrieval/`):
+
+1. **First stage**: dense (vector), BM25 or hybrid search returns up to `rag_k` candidates (the `search_method` agent setting).
+2. **Rerank stage (optional)**: an external rerank service re-scores the candidates against the query and the best **Top N** are kept.
+
+Reranking is configured per agent: `rag_rerank_enabled`, `rag_rerank_service_id` and `rag_rerank_top_n` (1-50; empty means **30**). Candidates sent to the reranker are `max(rag_k, top_n)`, capped by `AICT_RERANK_MAX_CANDIDATES`.
+
+**Service resolution order**: agent service (`rag_rerank_service_id`) > app default (`App.default_rerank_service_id`) > platform default (a system service with `is_platform_default`). An agent with no explicit service inherits the app default, then the platform default. If the explicit or app-level service is retired or unavailable, reranking is skipped for that search; it never silently falls back to a service nobody chose for that app.
+
+**Failure fallback**: a rerank failure (timeout, HTTP error, invalid response, busy, no service resolved) never fails a search or chat. The first-stage order is kept, cut to Top N. The playground reports the reason (`skipped_reason`).
+
+**Not applied everywhere**: silos that do not go through the retrieval pipeline (LightRAG-style graph silos) ignore reranking settings.
+
+> **Data egress.** When reranking is on, the query and the candidate chunks (document text) are sent to the rerank service endpoint. A hosted reranker therefore receives your content. For sensitive data, prefer a **self-hosted** reranker so nothing leaves your infrastructure.
+
+**Recommended: self-hosted.** Any Cohere-compatible `POST {base_url}/rerank` server works (Cohere, Jina, Infinity, vLLM, LiteLLM). Example with [Infinity](https://github.com/michaelfeil/infinity):
+
+| Field | Value |
+|---|---|
+| Provider | `CohereCompatible` |
+| Base URL | `http://reranker:7997` |
+| Model | `BAAI/bge-reranker-v2-m3` |
+| API key | optional (self-hosted) |
+
+App-owned services on private addresses require `AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS=true`; system (platform) services are exempt. See [Environment Variables](../reference/environment-variables.md#rerank-services).
+
+**Benchmark** (BEIR SciFact, 1,500 docs, bge-m3 embeddings, 300 queries, top-30 candidates reranked to top-10; English scientific corpus only, so measure on your own silo with the playground compare panels):
+
+| Configuration | nDCG@10 | Added latency |
+|---|---|---|
+| Dense | 0.753 | n/a |
+| Dense + bge-reranker-v2-m3 on GPU (Infinity) | 0.803 | p50 360 ms / p90 460 ms |
+| Hybrid | 0.791 | n/a |
+| Hybrid + bge-reranker-v2-m3 on GPU (Infinity) | 0.829 | as above |
+
+A served cross-encoder gives a large gain at acceptable latency. Earlier in-process approaches (embeddings-based rerank, local CPU cross-encoder) were removed: they brought no quality or were too slow.
+
 ## Silo Playground
 
 The **Silo Playground** (`/apps/:appId/silos/:siloId/playground`) is the primary surface for inspecting and tuning vector-store contents. It is backed by the `POST /internal/apps/{appId}/silos/{siloId}/search` endpoint and exposes all retriever parameters described above.
@@ -419,6 +458,7 @@ The **Silo Playground** (`/apps/:appId/silos/:siloId/playground`) is the primary
 | **Curator tools** | Multi-select bulk delete, delete-by-filter with dry-run count + silo-name confirmation guard, per-result reindex action |
 | **API snippets** | Live cURL/Python/JS/TS code snippets mirroring the current playground request (paste-ready with API key) |
 | **Observability** | Per-search latency badge (`X-Server-Time-Ms` header), query history (last 20 per silo), A/B compare mode with shared-chunk highlighting |
+| **Rerank** | Optional second stage with service selector and Top N; results show `rerank_score` and the outcome (applied or skipped reason). Sends the query and chunks to the rerank service (data egress) |
 | **Test against agent** | Shortcut to open the agent playground with the current query pre-filled |
 
 ### Source Attribution
@@ -462,5 +502,6 @@ The **"Show neighboring chunks"** action calls `GET /internal/apps/{appId}/silos
 
 - [LLM Integration](llm-integration.md) — Embedding services
 - [Agent System](agent-system.md) — How agents use RAG
+- [Rerank services API](../api/internal-api.md#rerank-services)
 - [Database Schema](../architecture/database.md) — Silo, Repository, Domain models
 - [File Processing](../reference/file-processing.md) — Document ingestion

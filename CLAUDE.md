@@ -128,6 +128,7 @@ docker compose down -v           # Parar y borrar volúmenes
 | **OCRAgent** | Agent subclass (STI via `type` column). Dual-LLM: vision model for scanned pages + text model for structuring output. |
 | **AIService** | LLM provider config (OpenAI, Anthropic, MistralAI, Azure, Google, Custom). |
 | **EmbeddingService** | Embedding model config for vector stores. Providers: OpenAI, MistralAI, Ollama, Custom/HuggingFace, Azure OpenAI, Google AI Studio, Google Cloud Vertex AI. |
+| **RerankService** | Optional second retrieval stage: Cohere-compatible `/rerank` endpoint (Infinity, Jina, Cohere, vLLM). App-owned (`app_id`) or system (`app_id` NULL). Resolution: agent `rag_rerank_service_id` > `App.default_rerank_service_id` > platform default (the single system service with `is_platform_default`). Sends query and chunks to the endpoint (data egress). |
 | **Skill** | Reusable markdown prompt block attached to agents (M:N). Injected into system prompt at execution time. App-scoped or system-wide (`app_id IS NULL`). |
 | **SkillFile** | One bundled package file (script, reference, template) for a Skill, text/bytes split with checksum. |
 | **OutputParser** | JSON-schema definition for structured LLM output. Dynamically generates a Pydantic model at runtime. |

@@ -433,9 +433,31 @@ Content-Type: application/json
 | PUT | `/{service_id}` | Update embedding service | editor |
 | DELETE | `/{service_id}` | Delete embedding service | editor |
 
+### Rerank Services
+
+**Base**: `/internal/apps/{app_id}/rerank-services` (app-owned) and `/internal/admin/system-rerank-services` (platform, OMNIADMIN). Provider: `CohereCompatible` (`POST {base_url}/rerank`); API key optional and always masked in responses.
+
+| Method | Endpoint | Purpose | Min Role |
+|--------|----------|---------|----------|
+| GET | `/` | List app rerank services | viewer |
+| GET | `/options` | Selector options plus `app_default`, `platform_default`, `effective_default` | viewer |
+| POST | `/test-connection` | Test a configuration (falls back to the stored key when masked/empty) | administrator |
+| POST | `/import` | Import a rerank service file | administrator |
+| GET | `/{service_id}` | Get details | viewer |
+| POST | `/{service_id}` | Create (`service_id` 0) or update | administrator |
+| DELETE | `/{service_id}` | Delete (blocked while in use) | administrator |
+| POST | `/{service_id}/export` | Export (key removed) | viewer |
+| GET | `/{service_id}/used-by` | Agents/apps depending on it | viewer |
+
+System routes under `/internal/admin` (all OMNIADMIN): `GET|POST /system-rerank-services`, `GET|PUT|DELETE /system-rerank-services/{service_id}`, `POST /system-rerank-services/test-connection`, `GET /system-rerank-services/{service_id}/used-by`, and `PUT /system-rerank-services/platform-default` with body `{"service_id": 3}` (or `null` to clear).
+
+The app default is set with `PUT /internal/apps/{id}` (`default_rerank_service_id`, administrator). Agents carry `rag_rerank_enabled`, `rag_rerank_service_id` (null inherits) and `rag_rerank_top_n` (1-50, null = 30).
+
+**Playground rerank** (`POST /internal/silos/{silo_id}/search`) accepts `rerank` (bool), `rerank_service_id` (null inherits app then platform default) and `rerank_top_n` (1-50, null = 30). With rerank on, `limit` only sizes the first stage (candidates = max(limit, top N), server-capped) and the response holds up to `rerank_top_n` results, each with `rerank_score`. The response adds a `rerank` object (applied, service, source, skipped reason, latency). Reranking sends the query and chunks to the service endpoint (data egress).
+
 ### Service End of Service
 
-AI, embedding and sandbox services carry an optional planned end of service (see [Service End of Service](../guides/chat-bot/kb-ai-services.md#service-end-of-service)).
+AI, embedding, rerank and sandbox services carry an optional planned end of service (see [Service End of Service](../guides/chat-bot/kb-ai-services.md#service-end-of-service)).
 
 **Fields** (returned by list/detail endpoints, accepted by create/update):
 

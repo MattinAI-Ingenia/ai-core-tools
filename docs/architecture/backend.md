@@ -53,6 +53,7 @@ Three distinct router groups handle different authentication and use cases:
 | **ocr** | `/internal/ocr` | OCR operations |
 | **output_parsers** | `/internal/output_parsers` | Output parser CRUD |
 | **repositories** | `/internal/repositories` | Repository CRUD, file operations |
+| **rerank_services** | `/internal/apps/{app_id}/rerank-services` | Rerank service CRUD (system services under `/internal/admin/system-rerank-services`) |
 | **silos** | `/internal/silos` | Silo (vector store) CRUD |
 | **skills** | `/internal/skills` | Skill management (legacy) |
 | **user** | `/internal/user` | User profile |
@@ -328,6 +329,20 @@ class AgentResponse(BaseModel):
 ```
 
 Schemas provide **validation**, **serialization**, and **API documentation** (via OpenAPI/Swagger).
+
+## Rerank Providers (`tools/rerank`)
+
+The optional second retrieval stage calls an external rerank service. `backend/tools/rerank/` holds:
+
+| Module | Role |
+|--------|------|
+| `providers.py` | `RerankAdapter` (build request / parse response) and the `_ADAPTERS` dispatch keyed by `RerankProvider` value; `get_adapter()` raises `UnknownRerankProviderError` |
+| `client.py` | `rerank_async` / `rerank_sync`: timeouts, response cap, SSRF endpoint guard (system services exempt unless `AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS`), no retries |
+| `endpoints.py`, `http_clients.py`, `errors.py`, `types.py` | URL normalisation, per-loop HTTP clients, error kinds, `RerankTarget`/`RerankResult` |
+
+Only `CohereCompatible` exists (`POST {base_url}/rerank`, body `model/query/documents/top_n`, response `results[{index, relevance_score}]`). The stage itself lives in `tools/retrieval/rerank_transformer.py` and falls back to first-stage order on any error; service choice is in `services/rerank_resolution_service.py` (agent > app default > platform default).
+
+**Adding a provider (e.g. Voyage, Bedrock)**: add a value to `RerankProvider` (`models/rerank_service.py`), implement a `RerankAdapter` subclass in `providers.py` and register it in `_ADAPTERS`, then expose it in the frontend provider list. `provider` is validated against the enum, so no migration is needed (the column is a string). Add adapter tests with a recorded response sample.
 
 ## Utilities
 

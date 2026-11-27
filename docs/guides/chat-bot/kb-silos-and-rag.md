@@ -66,6 +66,17 @@ When a user sends a message to an agent with a linked Silo:
 
 The agent can tell the user which document a piece of information came from if the system prompt instructs it to do so.
 
+## Reranking (optional)
+
+Retrieval has two stages: the first finds candidate chunks (dense, BM25 or hybrid, up to the agent's **K**), and an optional **rerank service** re-scores them and keeps the best **Top N** (default 30, range 1-50).
+
+- Enable it in the agent's RAG settings and optionally pick a rerank service. With no explicit choice the agent uses the **app default**, then the **platform default**. With no default configured, reranking is skipped and you get first-stage results.
+- If the rerank service fails or times out, the answer still works: results come from the first stage.
+- LightRAG-style silos ignore reranking.
+- App administrators manage rerank services (and the app default) in the app's rerank services page; platform admins manage system services and the platform default.
+
+**Data egress**: with reranking on, the user's query and the candidate chunks are sent to the rerank service endpoint. Prefer a self-hosted reranker for sensitive content, e.g. Infinity with base URL `http://reranker:7997` and model `BAAI/bge-reranker-v2-m3`. Details: [RAG & Vector Stores](../../ai/rag-vector-stores.md#two-stage-retrieval-and-reranking).
+
 ## Tips
 
 - **Keep documents clean**: Remove headers/footers, page numbers, and boilerplate before uploading for better retrieval quality.

@@ -22,13 +22,14 @@ This guide documents the internal API endpoints and the export file contents use
 
 - AI services (API keys removed)
 - Embedding services (API keys removed)
+- Rerank services (API keys removed)
 - Output parsers
 - MCP configs (secrets removed)
 - Silos
 - Repositories (structure only)
 - Domains (structure and URLs only)
 - Agents (configuration only, no conversations)
-- App metadata (name, rate limit, LangSmith enabled)
+- App metadata (name, rate limit, LangSmith enabled, default rerank service referenced by name)
 
 **Export excludes**:
 
@@ -136,6 +137,7 @@ file=@app-export.json
 
 - `ai_service`
 - `embedding_service`
+- `rerank_service`
 - `output_parser`
 - `mcp_config`
 - `silo`
@@ -154,6 +156,13 @@ file=@app-export.json
 component_selection_json={"ai_service":["GPT-4 Service"],"agent":["Support Bot"]}
 api_keys_json={"GPT-4 Service":"sk-..."}
 ```
+
+### Rerank services on import
+
+- Imported rerank services get the placeholder key `CHANGE_ME`; set the real key (if any) before use. They are never imported as platform default.
+- The app's default rerank service is exported by name (`default_rerank_service_name`, `default_rerank_service_is_system`) and remapped on import: an app-owned default maps to the imported service of that name; a system default maps to the target installation's system service with that name. If it does not exist, is retired, or was not imported, the default is left empty with a warning (agents then inherit the platform default). Old export files without these fields remain valid.
+- App-owned endpoints on private addresses need `AICT_RERANK_ALLOW_PRIVATE_ENDPOINTS=true`.
+- Single service: `POST /internal/apps/{app_id}/rerank-services/{service_id}/export` and `POST .../rerank-services/import`.
 
 ## Security and Data Handling Notes
 

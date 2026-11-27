@@ -382,6 +382,9 @@ function AgentList({ appId }) {
 | Remove a collaborator, or leave an App (not the owner) | unchanged (removal: `can_user_manage_app`; leaving: any accepted collaborator who is not the owner) | `DELETE /internal/collaboration/{user_id}?app_id={id}`, `POST /internal/apps/{id}/leave`. Deletes the member's App Chat data in that App (see below) |
 | Manage app settings (including the default embedding service) | administrator | `PUT /internal/apps/{id}` |
 | Change or clear the app's LangSmith API key | owner | `PUT /internal/apps/{id}` (403 for administrators; omitting the key keeps it) |
+| View rerank services, options, used-by; export one | viewer | `GET /internal/apps/{id}/rerank-services` (and `/options`, `/{sid}`, `/{sid}/used-by`), `POST .../{sid}/export` |
+| Create/update/delete, test connection or import a rerank service; set the app default | administrator | `POST` and `DELETE` on `/internal/apps/{id}/rerank-services/...`, `PUT /internal/apps/{id}` |
+| Manage system rerank services and the platform default | omniadmin | `/internal/admin/system-rerank-services...` |
 | Generate API key | owner | `POST /internal/api_keys` |
 | Delete app | owner | `DELETE /internal/apps/{id}` |
 | Admin operations | omniadmin | `GET /internal/admin/users` |
